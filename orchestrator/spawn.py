@@ -10,6 +10,8 @@ TOOLS = {
     "triage":    "Read,Grep,Glob,mcp__bus__bus_post_result",
     "review":    "Read,Grep,Glob,Bash(git *),mcp__bus__bus_post_result,mcp__bus__bus_read",
     "challenge": "Read,Grep,Glob,Bash(git *),Bash(rg *),mcp__bus__bus_post_result,mcp__bus__bus_read",
+    # Claude-as-executor (fallback only): may edit, scope-guard hook limits where; tests via the shared script
+    "execute":   "Read,Grep,Glob,Edit,Write,Bash(git *),Bash(rg *),Bash(npm *),Bash(npx *),Bash(uv *),Bash(pytest *),Bash(python3 *),Bash(bash skills/*),Bash(.claude/hooks/tests-green.sh*),mcp__bus__bus_post_result",
 }
 
 
@@ -121,13 +123,19 @@ def run_worker(task_id):
     elif role == "challenge":
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                         for k in ("claim", "evidence", "confidence")})
+    elif role == "execute":
+        prompt = render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"]) + \
+            "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
     else:
         prompt = render("scout", id=t["id"], title=t["title"], spec=t["spec"], acceptance=t["acceptance"],
                         turns=str(lim["max_turns"].get(role, 20)))
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
     r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                    lim["max_budget_usd"].get(role, 2.0), t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
-    if r["status"] == "done":
+    if r["status"] == "done" and role == "execute":
+        bus.post_result(task_id, {"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
+                                  "review": "other account, different model; label PR same-family-review"}, "done")
+    elif r["status"] == "done":
         result = extract_json(r["output"].get("result", ""))
         bus.post_result(task_id, {"summary": result.get("summary", ""), **result}, "done")
     elif r["status"] == "held":

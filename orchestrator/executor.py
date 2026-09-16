@@ -3,7 +3,8 @@
 import json, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
-from .pool import Pool, is_rate_limited, parse_reset_hint
+import threading
+from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
 
@@ -70,13 +71,26 @@ def start(task_id, prompt):
     """Fresh Codex thread for one atomic task, in its worktree. Held (not failed) when Codex is cooling or at max_parallel."""
     pool = Pool(); t = bus.get(task_id)
     if not pool.codex_available():
-        bus.update(task_id, status="held", hold_reason="codex unavailable (cooling / max_parallel / daily budget)")
-        return {"status": "held", "codex": pool.status()["codex"]}
+        return _exhausted(pool, t)
     from .spawn import ensure_worktree
     wt = Path(t.get("worktree") or ensure_worktree(task_id))
     bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0)
     pool.codex.day_tasks += 1; pool.save()
     return _run(pool, t, ["-m", pool.cfg["codex"].get("model", "gpt-6-astra"), prompt], wt, t["constraints"].get("timeout_s", 1800))
+
+
+def _exhausted(pool, t, run=None):
+    """§4.10: hold by default; with on_exhausted=fallback_claude dispatch to sonnet (<=5) / opus (6-8) on an account with headroom.
+    Complexity >=9 always holds for Astra. Review of a Claude-executed task must be another model on the other account."""
+    pol = pool.cfg["codex"]["on_exhausted"]
+    tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
+    if tier is None or pool.pick("execute") is None:
+        bus.update(t["id"], status="held", hold_reason=f"codex unavailable; policy={pol}; no Claude fallback for complexity {t['complexity']}")
+        return {"status": "held", "policy": pol, "codex": pool.status()["codex"]}
+    from .spawn import run_worker
+    bus.update(t["id"], tier=tier, fallback="claude", review_rule="same-family-review: other account, different model")
+    threading.Thread(target=run or run_worker, args=(t["id"],), daemon=True).start()
+    return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 
 def reply(task_id, delta):

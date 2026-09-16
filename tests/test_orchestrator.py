@@ -90,6 +90,22 @@ class Executor(unittest.TestCase):
         self.assertEqual(executor.reply(t["id"], "d")["reason"], "round budget exhausted")
 
 
+    def test_fallback_claude_when_codex_cooling(self):
+        pool = P.Pool(); pool.codex.cooldown_until = time.time() + 3600; pool.save()
+        ran = []
+        t5 = bus.create_task("small", "s", ["a"], ["x.py"], role="execute", complexity=5)
+        t7 = bus.create_task("mid", "s", ["a"], ["x.py"], role="execute", complexity=7)
+        t9 = bus.create_task("big", "s", ["a"], ["x.py"], role="execute", complexity=9)
+        r5 = executor._exhausted(pool, bus.get(t5["id"]), run=lambda tid: ran.append(tid))
+        r7 = executor._exhausted(pool, bus.get(t7["id"]), run=lambda tid: ran.append(tid))
+        r9 = executor._exhausted(pool, bus.get(t9["id"]), run=lambda tid: ran.append(tid))
+        self.assertEqual((r5["status"], r5["tier"], r7["tier"], r9["status"]), ("fallback", "sonnet", "opus", "held"))
+        self.assertEqual(bus.get(t5["id"])["tier"], "sonnet")
+        time.sleep(0.2); self.assertEqual(sorted(ran), sorted([t5["id"], t7["id"]]))
+        pool.codex.cooldown_until = 0; pool.save()
+        self.assertIn("tests_green", spawn.render("execute", spec="s", acceptance=["a"], scope=["x"]))
+
+
 class Render(unittest.TestCase):
     def test_templates_fill(self):
         s = spawn.render("scout", id="T-1", title="t", spec="q", acceptance=["a"], turns="20")
