@@ -154,6 +154,30 @@ class Hooks(unittest.TestCase):
         self.assertEqual(hook("tests-green.sh", {"cwd": str(r), "session_id": "tg"}, env={"PATH": "/usr/bin:/bin"}).returncode, 0)
 
 
+class Guardrails(unittest.TestCase):
+    def bash(self, cmd):
+        return hook("guardrails.sh", {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(TMP)}, cwd=REPO).returncode
+
+    def test_blocks_destructive_and_protected(self):
+        blocked = ["sudo rm -rf /var/db", "rm -rf ~/Documents/x", "rm -rf /", "cat ~/.ssh/id_ed25519", f"cat {os.path.expanduser('~')}/.codex/auth.json",
+                   "git push --force origin main", "git push origin main", "security find-generic-password -s x", "diskutil eraseDisk x y z",
+                   "launchctl bootout system/x", "cp foo ~/code/orchestrator/.claude/hooks/loop-guard.sh"]
+        for c in blocked:
+            self.assertEqual(self.bash(c), 2, c)
+
+    def test_allows_normal_work(self):
+        ok = ["git status", "rm -rf node_modules", f"rm -rf {TMP}/wt/T-0001", "npm test", "git push origin task/T-0001", "uv run pytest -q",
+              "ls ~/code", "rm -f a.txt", "sudoku --help", "echo security"]
+        for c in ok:
+            self.assertEqual(self.bash(c), 0, c)
+
+    def test_edit_protected_path(self):
+        home = os.path.expanduser("~")
+        self.assertEqual(hook("guardrails.sh", {"tool_name": "Write", "tool_input": {"file_path": f"{home}/.ssh/config"}}, cwd=REPO).returncode, 2)
+        self.assertEqual(hook("guardrails.sh", {"tool_name": "Edit", "tool_input": {"file_path": str(REPO / ".claude/settings.json")}}, cwd=REPO).returncode, 2)
+        self.assertEqual(hook("guardrails.sh", {"tool_name": "Edit", "tool_input": {"file_path": str(REPO / "orchestrator/cli.py")}}, cwd=REPO).returncode, 0)
+
+
 class MergeQueue(unittest.TestCase):
     def test_rebase_tests_ff_and_conflict(self):
         # scratch "project" repo: main with a passing unittest; tasks branch off it

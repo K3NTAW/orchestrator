@@ -37,7 +37,9 @@ def parse_events(lines):
 
 def _run(pool, task, args, cwd, timeout):
     cfg = pool.cfg["codex"]
-    cmd = ["codex", "exec", *args, "--json", "-C", str(cwd), "-s", "workspace-write"]
+    # dangerous_full_access (pool.toml): user decision 2026-09-16; otherwise workspace-write sandbox (container-safe default)
+    access = ["--dangerously-bypass-approvals-and-sandbox"] if cfg.get("dangerous_full_access") else ["-s", "workspace-write"]
+    cmd = ["codex", "exec", *args, "--json", "-C", str(cwd), *access]
     t0 = time.time(); pool.codex.running += 1; pool.save()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

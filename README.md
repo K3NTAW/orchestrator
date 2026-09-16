@@ -19,9 +19,22 @@ cp .mcp.planner.json .mcp.json         # Planner session config (already done)
 ```
 Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` to `$CODEX_HOME/config.toml` inside it only.
 
+## Run it
+`f orch [goal]` (from anywhere) launches the Planner on account A in this repo. `f orch status|cost|daemon|hold|resume|merge` is the CLI.
+`f orch survey` is the old cross-repo briefing session.
+
+## Access model (decided 2026-09-16)
+Full access, guardrails as a hard floor, human only at PR approval:
+- Planner and all Claude workers run with permissions bypassed. Read-only roles additionally get `--disallowedTools Edit,Write,NotebookEdit`.
+- Codex runs with approvals and sandbox bypassed (`dangerous_full_access = true` in `pool.toml`; set false for the sandbox).
+- `.claude/hooks/guardrails.sh` (PreToolUse on Bash/Edit/Write) blocks: paths in `.orchestrator/protected-paths.txt` (keys, credentials,
+  Keychain, system dirs, personal data, the hooks themselves), sudo/disk/launchctl/Keychain commands, force-push and direct push to main,
+  recursive rm outside `~/code` and temp dirs, sending mail. Hooks fire even in bypass mode. Codex is NOT covered by these hooks:
+  its floor is git (task branches only) plus your PR review.
+- `main` only moves through a PR you approve. The merge queue targets `goal/<parent>`.
+
 ## Phase 1 (manual loop)
-Start `claude` in this directory. Hooks are live: scope-guard, tests-green, loop-guard, require-acceptance, no-uncommitted,
-retrospect-written, bus-post. Hand one atomic task to the `codex` tool (orchestrator server wraps `codex exec`), iterate with `codex_reply` deltas, accept via
+Hooks live: guardrails, scope-guard, tests-green, loop-guard, require-acceptance, no-uncommitted, retrospect-written, bus-post. Hand one atomic task to the `codex` tool (orchestrator server wraps `codex exec`), iterate with `codex_reply` deltas, accept via
 `.claude/hooks/tests-green.sh wt/<id>`.
 
 ## CLI

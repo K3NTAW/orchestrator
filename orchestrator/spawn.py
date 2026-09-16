@@ -70,8 +70,12 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
            "ORCH_ROOT": str(ROOT), **secrets_for_role(task["role"])}
     # claude 2.1.273 has no turn-cap flag; --max-budget-usd + subprocess timeout are the hard stops (§6.5)
+    # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
+    # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.
     cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
-           "--permission-prompts", "none", "--allowedTools", tools]
+           "--dangerously-skip-permissions"]
+    if task["role"] != "execute":
+        cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     t0 = time.time()
     try:
         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
