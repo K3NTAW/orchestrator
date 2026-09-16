@@ -41,10 +41,11 @@ def render(name, **kw):
 
 
 def secrets_for_role(role):
-    """pool.toml [secrets.<role>]: ENV_NAME = "shell command printing the value". Values never touch disk or logs."""
+    """pool.toml [secrets.<role>]: ENV_NAME = "bash command printing the value" (e.g. sourcing f.sh for `f tok get X --reveal`).
+    Values never touch disk or logs."""
     out = {}
     for name, cmd in Pool().cfg.get("secrets", {}).get(role, {}).items():
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
             out[name] = r.stdout.strip()
     return out
