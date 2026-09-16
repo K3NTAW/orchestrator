@@ -11,7 +11,7 @@ for f in ("pool.toml",):
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")
 sys.path.insert(0, str(REPO))
-from orchestrator import bus, pool as P, spawn, merge  # noqa: E402
+from orchestrator import bus, pool as P, spawn, merge, executor  # noqa: E402
 
 HOOKS = REPO / ".claude" / "hooks"
 
@@ -60,8 +60,34 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(P.parse_reset_hint("try again in 30 minutes"), 1800)
         self.assertEqual(P.parse_reset_hint("retry-after: 900"), 900)
         self.assertEqual(P.parse_reset_hint("nothing useful", default=42), 42)
+        far = P.parse_reset_hint("You've hit your usage limit. Visit https://x to purchase more credits or try again at Sep 19th, 2099 2:00 PM.")
+        self.assertGreater(far, 365 * 24 * 3600)                     # absolute date parsed, not the 1800 default
+        self.assertEqual(P.parse_reset_hint("try again at Sep 19th, 2000 2:00 PM"), 60)  # past -> floor
         self.assertEqual([P.fallback_tier(c) for c in (3, 7, 9)], ["sonnet", "opus", None])
+        self.assertTrue(P.is_rate_limited("You're out of usage credits. Switch to another model"))
         self.assertFalse(P.is_rate_limited("all good"))
+
+    def test_trust_workspace(self):
+        cfg = TMP / "prof"; spawn.trust_workspace(str(cfg), TMP / "wt" / "T-0099")
+        self.assertTrue(json.loads((cfg / ".claude.json").read_text())["projects"][str(TMP / "wt" / "T-0099")]["hasTrustDialogAccepted"])
+
+
+class Executor(unittest.TestCase):
+    def test_parse_observed_stream(self):
+        lines = ['{"type":"thread.started","thread_id":"01a0ab11-77b3-7431-a9f1-1527ef937b5c"}', '{"type":"turn.started"}',
+                 '{"type":"error","message":"You\'ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage or try again at Sep 19th, 2026 2:00 PM."}',
+                 '{"type":"turn.failed","error":{"message":"You\'ve hit your usage limit."}}', "garbage line"]
+        ev = executor.parse_events(lines)
+        self.assertEqual(ev["thread_id"], "01a0ab11-77b3-7431-a9f1-1527ef937b5c"); self.assertTrue(P.is_rate_limited(ev["error"]))
+        ok = executor.parse_events(['{"type":"thread.started","thread_id":"t1"}', '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+                                    '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}'])
+        self.assertEqual((ok["message"], ok["usage"]["input_tokens"], ok["error"]), ("done", 10, None))
+
+    def test_reply_requires_thread_and_caps_rounds(self):
+        t = bus.create_task("exec", "s", ["a"], ["x.py"], role="execute")
+        self.assertEqual(executor.reply(t["id"], "d")["status"], "failed")
+        bus.update(t["id"], codex_thread="t1", worktree=str(TMP), rounds=executor.MAX_ROUNDS)
+        self.assertEqual(executor.reply(t["id"], "d")["reason"], "round budget exhausted")
 
 
 class Render(unittest.TestCase):

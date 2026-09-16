@@ -121,7 +121,7 @@ class Pool:
                           "on_exhausted": self.cfg["codex"]["on_exhausted"]}}
 
 
-RATE_LIMIT = re.compile(r"rate.?limit|usage.?limit|hit your limit|limit reached|too many requests|429", re.I)
+RATE_LIMIT = re.compile(r"rate.?limit|usage.?limit|hit your limit|limit reached|out of usage credits|too many requests|429", re.I)
 
 
 def is_rate_limited(text):
@@ -129,8 +129,18 @@ def is_rate_limited(text):
 
 
 def parse_reset_hint(text, default=1800):
-    """Best-effort: 'resets in 2h 15m', 'try again in 30 minutes', 'retry after 900'. Else default. Calibrate against real error text (§13)."""
+    """Best-effort. Observed: Codex 'try again at Sep 19th, 2026 2:00 PM' (local time). Also 'resets in 2h 15m',
+    'try again in 30 minutes', 'retry-after: 900'. Else default."""
     t = text or ""
+    m = re.search(r"(?:at|until)\s+([A-Z][a-z]{2,8} \d{1,2})(?:st|nd|rd|th)?,? (\d{4})[, ]+(\d{1,2}:\d{2}\s*[AP]M)", t)
+    if m:
+        from datetime import datetime
+        for fmt in ("%b %d %Y %I:%M %p", "%B %d %Y %I:%M %p"):
+            try:
+                when = datetime.strptime(f"{m.group(1)} {m.group(2)} {m.group(3).upper().replace(' ', '')}", fmt.replace(" %p", "%p"))
+                return max(60, int((when - datetime.now()).total_seconds()))
+            except ValueError:
+                pass
     m = re.search(r"(?:reset|try again|retry)[^\d]{0,30}(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?", t, re.I)
     if m and (m.group(1) or m.group(2)):
         return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60

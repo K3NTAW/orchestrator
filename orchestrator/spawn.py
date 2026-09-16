@@ -48,8 +48,20 @@ def secrets_for_role(role):
     return out
 
 
+def trust_workspace(config_dir, wt):
+    """Headless claude ignores project hooks/permissions in an untrusted workspace. Mark the worktree trusted in the
+    profile's .claude.json, as the CLI's own warning suggests. Fresh profiles never saw a trust dialog."""
+    cfg = Path(os.path.expanduser(config_dir)) / ".claude.json"
+    data = json.loads(cfg.read_text()) if cfg.exists() else {}
+    proj = data.setdefault("projects", {}).setdefault(str(wt), {})
+    if not proj.get("hasTrustDialogAccepted"):
+        proj["hasTrustDialogAccepted"] = True
+        cfg.parent.mkdir(parents=True, exist_ok=True); cfg.write_text(json.dumps(data, indent=2))
+
+
 def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     wt = Path(task.get("worktree") or ensure_worktree(task["id"]))
+    trust_workspace(acct.config_dir, wt)
     role_cfg = ROOT / f".mcp.{task['role']}.json"
     if role_cfg.exists():
         shutil.copy(role_cfg, wt / ".mcp.json")

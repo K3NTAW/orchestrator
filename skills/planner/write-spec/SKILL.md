@@ -8,5 +8,5 @@ A human reviews merges. The TaskCreated hook rejects any task without Acceptance
 - Acceptance: 2–5 externally checkable statements (test names, CLI output, observable behavior).
 - Scope: glob list; concurrent execute tasks must have disjoint scopes.
 - Constraints: read_only=false, timeout_s, budget_turns; no new dependencies unless named here.
-- Render `.orchestrator/prompts/execute.md` with these fields for the `codex` call.
+- Render `.orchestrator/prompts/execute.md` with these fields for the `codex(task_id, prompt)` call.
 Call `bus_create_task(role="execute", tier="astra", complexity=N, parent=GOAL_ID, ...)`.

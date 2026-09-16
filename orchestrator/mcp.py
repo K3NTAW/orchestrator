@@ -1,7 +1,7 @@
 """MCP server `orchestrator`: scheduler for the Planner. Spawns run in background threads; results land on the bus."""
 import threading
 from mcp.server.mcpserver import MCPServer
-from . import bus, merge as mq, spawn
+from . import bus, executor, merge as mq, spawn
 from .pool import Pool, fallback_tier
 
 srv = MCPServer("orchestrator")
@@ -28,6 +28,18 @@ def spawn_review(task_id: str) -> dict:
 def spawn_challenge(task_id: str) -> dict:
     """Try to refute a low-confidence finding on the other account. inputs[0] = {claim, evidence, confidence}."""
     return _bg(task_id)
+
+
+@srv.tool()
+def codex(task_id: str, prompt: str) -> dict:
+    """Executor: start a fresh GPT-6 Astra thread (`codex exec`) for one atomic execute task in its worktree. Returns thread id + final message; held if Codex is cooling."""
+    return executor.start(task_id, prompt)
+
+
+@srv.tool()
+def codex_reply(task_id: str, delta: str) -> dict:
+    """Fix-loop round on the task's existing thread (`codex exec resume`). Send deltas only: failing test names + assertion lines. Max 5 rounds."""
+    return executor.reply(task_id, delta)
 
 
 @srv.tool()
