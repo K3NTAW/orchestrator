@@ -5,11 +5,14 @@ from pathlib import Path
 from . import ROOT, STATE, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
+bus.ROLES.add("spec_review")  # bus.py owns ROLES (C-B's scope); added here until C-E moves it there
+
 TOOLS = {
     "scout":     "Read,Grep,Glob,Bash(git *),Bash(rg *),Bash(ls *),Bash(bash skills/*),mcp__bus__bus_post_result,mcp__bus__bus_read",
     "triage":    "Read,Grep,Glob,mcp__bus__bus_post_result",
     "review":    "Read,Grep,Glob,Bash(git *),mcp__bus__bus_post_result,mcp__bus__bus_read",
     "challenge": "Read,Grep,Glob,Bash(git *),Bash(rg *),mcp__bus__bus_post_result,mcp__bus__bus_read",
+    "spec_review": "Read,Grep,Glob,Bash(git *),mcp__bus__bus_post_result,mcp__bus__bus_read",
     # Claude-as-executor (fallback only): may edit, scope-guard hook limits where; tests via the shared script
     "execute":   "Read,Grep,Glob,Edit,Write,Bash(git *),Bash(rg *),Bash(npm *),Bash(npx *),Bash(uv *),Bash(pytest *),Bash(python3 *),Bash(bash skills/*),Bash(.claude/hooks/tests-green.sh*),mcp__bus__bus_post_result",
 }
@@ -48,7 +51,7 @@ def base_for(task):
             src_parent = src.get("parent")
             if src_parent and branch_exists(f"goal/{src_parent}"):
                 return f"goal/{src_parent}"
-    elif role in ("challenge", "execute") and parent and branch_exists(f"goal/{parent}"):
+    elif role in ("challenge", "execute", "spec_review") and parent and branch_exists(f"goal/{parent}"):
         return f"goal/{parent}"
     return "origin/main"
 
@@ -194,6 +197,10 @@ def run_worker(task_id):
     elif role == "challenge":
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                         for k in ("claim", "evidence", "confidence")})
+    elif role == "spec_review":
+        src = bus.get(t["inputs"][0])
+        prompt = render("spec-review", complexity=str(t["complexity"]), spec=src["spec"], acceptance=src["acceptance"],
+                        scope=src["scope"], code=code_excerpts(src["scope"], src.get("worktree") or ROOT))
     elif role == "execute":
         t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
         bus.update(task_id, executor=t["executor"])
@@ -212,11 +219,13 @@ def run_worker(task_id):
         elif r["status"] == "done":
             result = extract_json(r["output"].get("result", ""))
             bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
-            if role == "review" and result.get("verdict"):
-                bus.update(task_id, review_verdict=result["verdict"])
+            if role in ("review", "spec_review") and result.get("verdict"):
+                verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
+                    if role == "spec_review" else {"review_verdict": result["verdict"]}
+                bus.update(task_id, **verdict_fields)
                 if t.get("inputs") and isinstance(t["inputs"][0], str):
                     try:
-                        bus.update(t["inputs"][0], review_verdict=result["verdict"])
+                        bus.update(t["inputs"][0], **verdict_fields)
                     except KeyError:
                         pass
         elif r["status"] == "held":
@@ -228,6 +237,22 @@ def run_worker(task_id):
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
         bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     return r
+
+
+def code_excerpts(scope, base_dir, cap=12000):
+    """First 120 lines of each file matching a scope glob under base_dir (the reviewed task's base branch
+    worktree, or ROOT when none exists), joined and capped at `cap` chars total so a spec-review prompt stays
+    a fixed size regardless of scope breadth."""
+    out, total = [], 0
+    for pattern in scope:
+        for path in sorted(Path(base_dir).glob(pattern)):
+            if not path.is_file() or total >= cap:
+                continue
+            lines = "\n".join(path.read_text(errors="replace").splitlines()[:120])
+            chunk = f"--- {path.relative_to(base_dir)} ---\n{lines}\n"[:cap - total]
+            out.append(chunk)
+            total += len(chunk)
+    return "".join(out) or "(no matching files)"
 
 
 def scoped_diff(t):

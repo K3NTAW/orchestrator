@@ -31,6 +31,12 @@ def spawn_challenge(task_id: str) -> dict:
 
 
 @srv.tool()
+def spawn_spec_review(task_id: str) -> dict:
+    """Review an execute task's spec before any code is written. inputs[0] = the execute task whose spec is under review."""
+    return _bg(task_id)
+
+
+@srv.tool()
 def codex(task_id: str, prompt: str) -> dict:
     """Executor: start a fresh GPT-6 Astra thread (`codex exec`) for one atomic execute task in its worktree. Returns thread id + final message; held if Codex is cooling."""
     return executor.start(task_id, prompt)

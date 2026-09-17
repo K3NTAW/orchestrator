@@ -27,6 +27,43 @@ class ReviewVerdict(unittest.TestCase):
         self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "request_changes")
 
 
+class SpecReview(unittest.TestCase):
+    def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_spec_and_code_excerpt(self):
+        scratch_repo(TMP)
+        (TMP / "spec_review_target.py").write_text("def handler():\n    return 1\n")
+
+        execute = bus.create_task("feat-sr", "implement the thing precisely", ["it works"],
+                                   ["spec_review_target.py"], role="execute")
+        review = bus.create_task("spec review feat-sr", "s", ["a"], ["spec_review_target.py"],
+                                  role="spec_review", inputs=[execute["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        fake_result = json.dumps({"verdict": "request_changes",
+                                   "risks": [{"path": "spec_review_target.py", "issue": "no error handling", "severity": "med"}]})
+        fake_out = {"result": fake_result, "usage": {}}
+        captured = {}
+
+        def fake_run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
+            captured["prompt"] = prompt
+            return {"status": "done", "output": fake_out}
+
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = fake_run_claude
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+
+        self.assertEqual(bus.get(review["id"])["spec_review_verdict"], "request_changes")
+        self.assertEqual(bus.get(execute["id"])["spec_review_verdict"], "request_changes")
+        self.assertEqual(bus.get(execute["id"])["spec_review_risks"][0]["severity"], "med")
+        self.assertIn("implement the thing precisely", captured["prompt"])
+        self.assertIn("def handler():", captured["prompt"])
+
+
 class Render(unittest.TestCase):
     def test_templates_fill(self):
         s = spawn.render("scout", id="T-1", title="t", spec="q", acceptance=["a"], turns="20")
