@@ -228,6 +228,8 @@ def _supported_params(func):
 
 
 def fetch_html(url=URL, timeout=30):
+    """Identified, plain fetch: no TLS/JA3 impersonation, no synthetic browser headers or fake
+    referer (decision 2026-09-17). Returns (status_code, html)."""
     from scrapling.fetchers import Fetcher
 
     supported = _supported_params(Fetcher.get)
@@ -235,10 +237,18 @@ def fetch_html(url=URL, timeout=30):
     if "timeout" in supported:
         kwargs["timeout"] = timeout
     if "headers" in supported:
-        kwargs["headers"] = {"User-Agent": USER_AGENT}
+        kwargs["headers"] = {
+            "User-Agent": "orchestrator-bench/1 (+https://github.com/K3NTAW/orchestrator)",
+            "Accept": "text/html",
+        }
+    if "impersonate" in supported:
+        kwargs["impersonate"] = None
+    if "stealthy_headers" in supported:
+        kwargs.update(stealthy_headers=False)
     page = Fetcher.get(url, **kwargs)
     html = page.body if hasattr(page, "body") else page.html_content
-    return html.decode("utf-8", "replace") if isinstance(html, bytes) else str(html)
+    html = html.decode("utf-8", "replace") if isinstance(html, bytes) else str(html)
+    return page.status, html
 
 
 def load():
@@ -255,8 +265,11 @@ def fetch(force=False, by="orchestrator"):
 
     import scrapling
 
-    html = fetch_html()
+    status, html = fetch_html()
     records = parse_chunks(html)
+    if status != 200 or len(html) < 10 * 1024 or not records:
+        return {"error": f"fetch failed: status {status}, {len(html)} bytes, {len(records)} records"}
+
     matched = match(records, DEFAULT_HINTS)
     used_names = {(r.get("name") or "").lower() for r in matched.values() if r}
     seen, unmatched_names = set(), []
@@ -273,8 +286,9 @@ def fetch(force=False, by="orchestrator"):
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "fetched_by": by,
         "fetcher": f"scrapling {scrapling.__version__}",
-        "http_status": 200,
+        "http_status": status,
         "provenance": "web:artificialanalysis.ai (untrusted data)",
+        "request": {"user_agent": USER_AGENT, "impersonate": False, "stealth_headers": False},
         "models": {mid: rec for mid, rec in matched.items()},
         "unmatched_names": unmatched_names,
     }

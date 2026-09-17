@@ -1,5 +1,5 @@
 """One runnable check per non-trivial path: bus rules, pool selection, reset-hint parsing, merge on a scratch repo, and the hooks."""
-import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
+import contextlib, inspect, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -401,16 +401,40 @@ class Bench(unittest.TestCase):
         matched = bench.match(records, {"gpt-5.6-luna": "GPT 5.6 Luna"})
         self.assertEqual(matched["gpt-5.6-luna"]["display_name"], "GPT-5.6 Luna (max)")
 
+    # fetch()'s fail-closed guard rejects bodies under 10KB; the real fixture is much smaller,
+    # so pad it with an HTML comment (parse_chunks ignores it) to clear that floor in tests.
+    PADDED_FIXTURE = FIXTURE + ("<!-- " + "x" * 10240 + " -->")
+
     def test_fetch_force_writes_then_second_call_is_skipped(self):
         orig = bench.fetch_html
-        bench.fetch_html = lambda *a, **k: self.FIXTURE
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
         self.addCleanup(lambda: setattr(bench, "fetch_html", orig))
         result = bench.fetch(force=True, by="tester")
         self.assertEqual(result["provenance"], "web:artificialanalysis.ai (untrusted data)")
         self.assertEqual(result["fetched_by"], "tester")
         self.assertEqual(result["models"]["gpt-6-astra"]["name"], "GPT-6 Astra")
+        self.assertEqual(result["http_status"], 200)
+        self.assertEqual(result["request"]["impersonate"], False)
         self.assertTrue(bench.FILE.exists())
         self.assertIn("skipped", bench.fetch())          # within 20h, force not given
+
+    def test_fetch_failure_status_leaves_existing_file_untouched(self):
+        orig = bench.fetch_html
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        bench.fetch(force=True, by="tester")
+        before = bench.FILE.read_bytes()
+
+        bench.fetch_html = lambda *a, **k: (403, "<html>blocked</html>")
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig))
+        result = bench.fetch(force=True, by="tester")
+
+        self.assertIn("error", result)
+        self.assertEqual(bench.FILE.read_bytes(), before)
+
+    def test_fetch_html_source_disables_impersonation_and_stealth(self):
+        src = inspect.getsource(bench.fetch_html)
+        self.assertIn("stealthy_headers=False", src)
+        self.assertIn("orchestrator-bench", src)
 
     def test_set_model_marks_manual(self):
         rec = bench.set_model("gpt-6-astra", "tester", intelligence=99.0)
