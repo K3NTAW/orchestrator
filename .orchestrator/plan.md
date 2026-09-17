@@ -1,47 +1,12 @@
-# plan.md — Planner checkpoint (2026-09-18 01:00)
+# plan.md — Planner checkpoint
+(empty: no goal in progress. The Planner overwrites this after every fan-out and merge.)
 
-## Goal C — T-0043 parallel machine (complexity 7)
-User words: "do those" = split tests per module + shared harness; task dependencies + daemon-driven gate→review→merge→dispatch; pre-execution spec review at complexity ≥5. "In the end we have a parallel working machine."
-Branch goal/T-0043 off main 046a8f8 (PR 4 merged). First commit: daily budgets 30M/40M.
-Also asked: restart the orchestrator MCP server. It is a child of the Planner session (two stale process pairs seen: 39220/39221, 88704/88706). A Planner cannot restart its own MCP servers safely; the restart happens when the human starts a fresh `f orch` session. That new session resumes this goal from here (skill resume).
+## Last goal (closed 2026-09-18 03:00): T-0043 parallel machine
+goal/T-0043 = per-module tests + harness, depends_on, daemon stages (dispatch/gate/review/merge, stamps, lock, async, error holds, safe notify), spec_review role, shape-agnostic fit_result, budgets 30M/40M, docs. PR 5 → main.
 
-## Scouts (account B/A, sonnet, output cap 4,500 chars)
-- C1 tests: map the 16 classes in tests/test_orchestrator.py (lines), which module each covers, shared fixtures (TMP, REPO, hook(), FakeProc, env setup at import), import-order hazards (ORCH_ROOT must be set before importing orchestrator), and propose tests/_harness.py + per-module files; how tests-green.sh / unittest discover pick them up; which classes must stay together.
-- C2 daemon/bus: daemon.tick today (requeue dead pids, notifications), bus task schema (no depends_on), executor.start/spawn.run_worker entry points, merge.merge, spawn_review; propose the state machine for the daemon: queued(depends_on all merged? & spec_review approved?) → dispatch (codex()) → done → gate (tests-green wt) → review task (≥4) → approve → merge → dependents; failure/request_changes → held + notify. Where each hook lives; what must be idempotent; lock needs (merge.lock exists).
-- C3 spec review: prompts/review.md + spawn.run_worker review path; propose spec-review role (bus ROLES has no spec_review: add role or reuse review with inputs[0]={spec,...}); prompt template; where the hold lives (constraints or status held with hold_reason spec_review); test approach.
-Challenge <0.7 findings acted on. Synthesize → specs with DISJOINT scopes so C tasks run in parallel:
-- C-A tests split (tests/**) — must land FIRST (everything else adds tests to per-module files).
-- C-B depends_on in bus.create_task + bus_mcp (bus.py, bus_mcp.py, tests/test_bus.py).
-- C-C daemon advancement (daemon.py, tests/test_daemon.py) — depends on C-B.
-- C-D spec review role + prompt + spawn path + mcp tool (spawn.py, mcp.py, prompts/spec-review.md, tests/test_spawn.py).
-- C-E docs (README, CLAUDE.md orchestrate skill step 6/7 update).
-Review: sonnet other account for ≥4; daemon (C-C) gets adversarial + security checklist (it dispatches and merges autonomously).
-
-## Rollback
-Each task's commit names its revert; goal branch PR to main is the human gate.
-
-## Specs on the bus (01:20)
-T-0047 C-A tests split (4) → T-0048 C-B depends_on (3) ∥ T-0049 C-D spec_review (4) → T-0050 C-C daemon (7; opus fallback; review adversarial + security) → T-0051 C-E docs (2). Reviews: sonnet other account for ≥4; pre-create review worktrees off the task branch (server still old).
-Dispatched: T-0047 (wt/T-0047 off goal/T-0043).
-
-## Update 01:40
-- C-A T-0047 (104fce1) gate green, 67 tests across 9 files. Review T-0052 running (wt off task/T-0047).
-- C-B T-0048 and C-D T-0049 dispatched IN PARALLEL on worktrees off task/T-0047 (disjoint scopes). Merge order once T-0052 approves: merge(T-0047) → merge(T-0048) → merge(T-0049) (each rebases onto goal). If T-0052 requests changes, fix round first, then rebase risk on test_bus/test_spawn.
-- Then C-C T-0050 (worktree off goal after both; opus; review adversarial+security) → C-E T-0051.
-
-## Update 01:55
-- Merged into goal/T-0043: T-0047 split (0c4b3b3), T-0048 depends_on (b85b742). Pushed.
-- T-0049 spec_review (41df1ae) green; review T-0053 running (wt off task/T-0049).
-- T-0050 daemon dispatched (opus fallback) on wt/T-0050 off task/T-0049, told to rebase onto goal/T-0043 first (workers may rebase; the Planner may not).
-- Sync trick for the checked-out goal branch after merge(): `git restore --source=HEAD --staged --worktree -- <paths>` (removes files deleted in HEAD too).
-- Next: T-0053 verdict → merge(T-0049) → T-0050 result → gate → review task (adversarial + security; opus executed → sonnet reviewer) → merge → T-0051 docs (worktree off goal) → retrospective → PR goal/T-0043.
-
-## Update 02:10
-- T-0053 review of spec_review: request_changes (HIGH fit_result only trims findings; MED unnumbered excerpts). Fix round T-0055 running on wt/T-0055 off task/T-0049. Merge order: T-0055 (carries 41df1ae) → then T-0050 daemon (its worktree rebased onto goal by the worker at start; merge rebases again) → review T-0054 (pre-create wt off task/T-0050) → merge → T-0051 docs.
-
-## Update 02:35
-- Merged: T-0055 (e598cf2, spec_review + fit_result fix). T-0051 docs (e16d0d4) green, waiting behind the daemon.
-- T-0054 daemon review: request_changes (HIGH inline blocking dispatch; HIGH stamp-before-effect + no exception handling; LOW osascript injection in notify). Fix round T-0056 next (worktree off task/T-0050). Then: gate → merge(T-0056) (carries 93a1b64) → merge(T-0051) → retrospective → PR goal/T-0043 → main.
-
-## Next step
-spawn scouts C1–C3 → read → synthesize → write specs → dispatch C-A first (fallback sonnet), then C-B and C-D in parallel, C-C after C-B, C-E last → PR goal/T-0043.
+## Handover for the next session (read first)
+1. Start fresh with `f orch` so the orchestrator MCP servers load the new spawn/bus code (base_for, depends_on, spawn_spec_review). Two stale server pairs from this session die with it.
+2. After PR 5 merges: run `uv run orchestrator daemon` in a second terminal (or `daemon --once` from the Planner) — it dispatches ready tasks, gates, spawns reviews, merges on approve. The Planner then writes specs with depends_on and intervenes only on held tasks.
+3. Codex returns 2026-09-19 14:00: first goal = one complexity-3 execute task to observe luna/terra/sol routing and the real usage-limit scope (per account vs per model); update pool.toml quota_group semantics from what is observed.
+4. Stale worktrees wt/T-00xx (≈35) remain; removal is a deletion → ask the human once, then `git worktree remove` each merged one.
+5. Known small debts: challenge-web prompt template; pool_state.json last-writer-wins (lock like bus.lock); executor.md prompt references scripts/tests_green.sh which is not at the worktree root.
