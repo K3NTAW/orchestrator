@@ -9,7 +9,7 @@ in=$(cat)
 tool=$(jq -r '.tool_name // ""' <<<"$in")
 root=$(orch_root)
 deny() {
-  echo "planner-mode: BLOCKED — $1. The Planner never edits source or commits. Write a spec (skill write-spec), create the bus task, hand it to codex(); if status() says Codex is cooling, executor_fallback(complexity) names the Claude tier that executes. Writes allowed here: .orchestrator/** and temp dirs only." >&2
+  echo "planner-mode: BLOCKED — $1. The Planner never edits source. It may commit, branch and push; every commit message states what and why, and decisions.md gets a dated entry with the revert path. Write a spec (skill write-spec), create the bus task, hand it to codex(); if status() says Codex is cooling, executor_fallback(complexity) names the Claude tier that executes. Writes allowed here: .orchestrator/** and temp dirs only." >&2
   exit 2
 }
 allowed_path() {
@@ -25,8 +25,8 @@ if [ "$tool" != "Bash" ]; then
   exit 0
 fi
 cmd=$(jq -r '.tool_input.command // ""' <<<"$in")
-# 1) git history writes are the executor's and the merge queue's job. push is allowed (guardrails already blocks main/force).
-if grep -qE '(^|[;&|[:space:]])git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)?(commit|add|checkout[[:space:]]+-b|switch[[:space:]]+-c|merge|rebase|cherry-pick|apply|am|stash|reset[[:space:]]+--hard|restore)([[:space:]]|$)' <<<"$cmd"; then
+# 1) history rewriting is the merge queue's and the workers' job. commit/add/branch/push are allowed (guardrails.sh still blocks force-push and push to main).
+if grep -qE '(^|[;&|[:space:]])git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)?(merge|rebase|cherry-pick|apply|am|reset[[:space:]]+--hard|filter-branch)([[:space:]]|$)' <<<"$cmd"; then
   deny "git write command: $(head -c 100 <<<"$cmd")"
 fi
 # 2) file writes from bash: redirects (after dropping fd/devnull redirects), tee, sed -i, cp/mv/ln/touch/mkdir/chmod/rm, python writes
