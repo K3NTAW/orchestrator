@@ -1,0 +1,244 @@
+"""orchestrator.scorecard (build/scores/prior_weights) and orchestrator.bench (RSC chunk parsing, display-hint
+matching, the 20h fetch gate). Scorecard uses its own scratch root under TMP so counts are exact regardless of
+what other test files created; Bench never fetches over the network (fetch_html is monkeypatched)."""
+import inspect, json, sys, time, unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_scorecard.py` doesn't add this dir itself
+from _harness import REPO, TMP  # noqa: F401
+from orchestrator import STATE, bench, bus, executor, pool as P, scorecard
+
+
+class Scorecard(unittest.TestCase):
+    """build()/scores() on a synthesized scratch root, isolated from the tasks every other test file creates
+    under the shared TMP/.orchestrator, so counts are exact."""
+    def setUp(self):
+        self.root = TMP / "scorecard-src" / str(time.time())
+        (self.root / "tasks").mkdir(parents=True); (self.root / "runs").mkdir(parents=True)
+
+    def write_task(self, tid, **fields):
+        base = {"id": tid, "role": "execute", "tier": "sonnet", "complexity": 3, "status": "queued",
+                "acceptance": ["a"], "scope": ["x"], "spec": "s", "title": tid}
+        (self.root / "tasks" / f"{tid}.json").write_text(json.dumps({**base, **fields}))
+
+    def write_runs(self, *lines):
+        (self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl").write_text(
+            "\n".join(json.dumps(l) for l in lines) + "\n")
+
+    def test_build_counts_and_scores(self):
+        self.write_task("T-9001", executor="good", complexity=3, status="done", merged_into="goal/G", rounds=1)
+        self.write_task("T-9002", executor="bad", complexity=4, status="failed")
+        self.write_runs({"role": "execute", "executor": "bad", "outcome": "usage_limit", "duration_s": 1.0})
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["good"]["merged"], 1); self.assertEqual(card["good"]["rounds_avg"], 1.0)
+        self.assertEqual(card["good"]["by_complexity"]["1-3"]["merged"], 1)
+        self.assertEqual(card["bad"]["failed"], 1); self.assertEqual(card["bad"]["by_complexity"]["4-6"]["failed"], 1)
+        self.assertEqual(card["bad"]["held_usage_limit"], 1)
+        neutral = scorecard.scores(card)                       # default min_runs=5: too few resolved tasks
+        self.assertEqual((neutral["good"], neutral["bad"]), (1.0, 1.0))
+        tight = scorecard.scores(card, min_runs=1)
+        self.assertLess(tight["bad"], 1.0)                     # 0 merged / 1 failed -> success=0, score=0.5
+        self.assertGreater(tight["good"], 1.0)                 # 1 merged / 0 failed -> success=1, score=1.5
+
+    def test_review_verdict_rolls_up(self):
+        self.write_task("T-9003", executor="reviewed-by", status="done", review_verdict="request_changes")
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["reviewed-by"]["review_request_changes"], 1)
+
+    def test_review_task_does_not_double_count_verdict(self):
+        # review T-0031: a review task has no executor and used to bucket under claude:<tier>, double-counting
+        # the same request_changes verdict that spawn.run_worker already stamped on the reviewed execute task
+        self.write_task("T-9006", role="review", tier="sonnet", review_verdict="request_changes")
+        self.write_task("T-9007", tier="sonnet", review_verdict="request_changes")
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["claude:sonnet"]["review_request_changes"], 1)
+
+    def test_scout_run_does_not_create_executor_row(self):
+        self.write_runs({"role": "scout", "executor": "x", "outcome": "usage_limit", "duration_s": 1.0})
+        card = scorecard.build(root=self.root)
+        self.assertNotIn("x", card)
+
+    def test_by_tier_regroups(self):
+        self.write_task("T-9004", executor="astra", tier="astra", complexity=2, status="done", merged_into="goal/G")
+        card = scorecard.build(root=self.root, by="tier")
+        self.assertIn("astra", card); self.assertEqual(card["astra"]["merged"], 1)
+
+    def test_write_sets_generated_at(self):
+        self.write_task("T-9005", executor="x", status="done", merged_into="goal/G")
+        payload = scorecard.write(scorecard.build(root=self.root))
+        self.assertIn("generated_at", payload)
+        self.assertIn("generated_at", json.loads((STATE / "scorecard.json").read_text()))
+
+    def write_bench(self, models):
+        bench.STATE.mkdir(parents=True, exist_ok=True)
+        bench.FILE.write_text(json.dumps({"models": models}))
+        self.addCleanup(bench.FILE.unlink, True)
+
+    def test_prior_weights_scales_by_bench_coding_score(self):
+        # pool.toml's four codex executors (astra/luna/terra/sol); only two have bench numbers here.
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}, "gpt-5.6-luna": {"coding": 40.0}})
+        weights = scorecard.prior_weights(P.Pool().executors)
+        self.assertEqual(weights["astra"], 1.5)              # 0.5 + 80/80 (max among scored executors)
+        self.assertEqual(weights["luna"], 1.0)                # 0.5 + 40/80
+        self.assertEqual(weights["terra"], 1.0)                # no bench number -> neutral
+        self.assertEqual(weights["sol"], 1.0)
+
+    def test_prior_weights_missing_bench_file_is_neutral(self):
+        bench.FILE.unlink(missing_ok=True)
+        weights = scorecard.prior_weights(P.Pool().executors)
+        self.assertTrue(weights and all(v == 1.0 for v in weights.values()))
+
+    def test_scores_empty_card_returns_priors(self):
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}, "gpt-5.6-luna": {"coding": 40.0}})
+        weights = scorecard.scores({})
+        self.assertEqual(weights["astra"], 1.5)
+        self.assertEqual(weights["luna"], 1.0)
+
+    def test_scores_warm_failure_overrides_prior(self):
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}})    # astra's prior alone would be 1.5
+        card = {"astra": {"merged": 0, "failed": 1}}
+        weights = scorecard.scores(card, min_runs=1)
+        self.assertLess(weights["astra"], 1.0)                 # live 0/1 record wins over the bench prior
+
+    def test_start_forwards_scorecard_scores_to_pick_executor(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        t = bus.create_task("scored", "s", ["a"], ["x.py"], role="execute", complexity=3)
+        bus.update(t["id"], worktree=str(TMP))
+        seen = {}
+        orig_run = executor._run
+        executor._run = lambda pool, task, args, cwd, timeout, ex=None: seen.update(ex=ex) or {"status": "done"}
+        self.addCleanup(lambda: setattr(executor, "_run", orig_run))
+        orig_scores = scorecard.scores
+        scorecard.scores = lambda card, min_runs=5: {"terra": 3.0}
+        self.addCleanup(lambda: setattr(scorecard, "scores", orig_scores))
+        executor.start(t["id"], "do it")
+        self.assertEqual(seen["ex"].id, "terra")                # weight x score(3.0) beats every other row
+
+
+class Bench(unittest.TestCase):
+    """orchestrator.bench: RSC chunk parsing, display-hint matching, and bench.json's 20h fetch gate.
+    No network here -- fetch_html is monkeypatched to the fixture, so importing this module never fetches."""
+    FIXTURE = (REPO / "tests" / "fixtures" / "aa_models_sample.html").read_text()
+
+    def setUp(self):
+        bench.FILE.unlink(missing_ok=True)
+        self.addCleanup(bench.FILE.unlink, True)
+
+    def test_parse_chunks_skips_malformed(self):
+        records = bench.parse_chunks(self.FIXTURE)
+        self.assertEqual(len(records), 2)
+        astra = next(r for r in records if r["name"] == "GPT-6 Astra")
+        luna = next(r for r in records if r["name"] == "GPT-5.6 Luna")
+        self.assertEqual((astra["intelligence"], astra["speed_tps"]), (70.1, 120.0))
+        self.assertEqual((luna["intelligence"], luna["speed_tps"], luna["coding"]), (61.0, 200.0, 55.0))
+
+    def test_match_maps_to_model_ids(self):
+        records = bench.parse_chunks(self.FIXTURE)
+        hints = {"gpt-6-astra": "GPT-6 Astra", "gpt-5.6-luna": "GPT-5.6 Luna", "gpt-5.6-terra": "GPT-5.6 Terra"}
+        matched = bench.match(records, hints)
+        self.assertEqual(matched["gpt-6-astra"]["name"], "GPT-6 Astra")
+        self.assertEqual(matched["gpt-5.6-luna"]["name"], "GPT-5.6 Luna")
+        self.assertIsNone(matched["gpt-5.6-terra"])
+
+    def test_norm_strips_effort_suffix_and_punctuation(self):
+        self.assertEqual(bench.norm("GPT-6 Astra (max)"), "gpt-6 astra")
+        self.assertEqual(bench.norm("Claude Opus 5 (Adaptive Reasoning, Max Effort)"), "claude opus 5")
+        self.assertEqual(bench.norm("  Foo   Bar. "), "foo bar")
+
+    def test_match_handles_effort_suffixed_display_names(self):
+        records = [
+            {"name": "GPT-6 Astra (max)"},
+            {"name": "GPT-5.6 Luna (max)"},
+            {"name": "GPT-5.6 Terra (max)"},
+            {"name": "GPT-5.6 Sol (max)"},
+            {"name": "Claude Opus 5 (Adaptive Reasoning, Max Effort)"},
+            {"name": "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)"},
+            {"name": "GPT-5.5 Pro (xhigh)"},
+        ]
+        matched = bench.match(records, dict(bench.DEFAULT_HINTS, **{"gpt-5.5": "GPT-5.5"}))
+        for model_id in ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+                          "claude-opus-5", "claude-fable-5-1"):
+            self.assertIsNotNone(matched[model_id], model_id)
+            self.assertEqual(matched[model_id]["display_name"], records[
+                ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+                 "claude-opus-5", "claude-fable-5-1"].index(model_id)]["name"])
+        # "GPT-5.5 Pro (xhigh)" must not satisfy a "GPT-5.5" hint (prefix over-match guard).
+        self.assertIsNone(matched["gpt-5.5"])
+
+    def test_match_prefers_max_variant_over_high(self):
+        records = [{"name": "GPT-6 Astra (high)"}, {"name": "GPT-6 Astra (max)"}]
+        matched = bench.match(records, {"gpt-6-astra": "GPT-6 Astra"})
+        self.assertEqual(matched["gpt-6-astra"]["display_name"], "GPT-6 Astra (max)")
+        self.assertEqual(set(matched["gpt-6-astra"]["variants"]), {"GPT-6 Astra (high)", "GPT-6 Astra (max)"})
+
+    def test_match_token_fallback_normalizes_dash_and_space(self):
+        records = [{"name": "GPT-5.6 Luna (max)"}]
+        matched = bench.match(records, {"gpt-5.6-luna": "GPT 5.6 Luna"})
+        self.assertEqual(matched["gpt-5.6-luna"]["display_name"], "GPT-5.6 Luna (max)")
+
+    # fetch()'s fail-closed guard rejects bodies under 10KB; the real fixture is much smaller,
+    # so pad it with an HTML comment (parse_chunks ignores it) to clear that floor in tests.
+    PADDED_FIXTURE = FIXTURE + ("<!-- " + "x" * 10240 + " -->")
+
+    def test_fetch_force_writes_then_second_call_is_skipped(self):
+        orig = bench.fetch_html
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig))
+        result = bench.fetch(force=True, by="tester")
+        self.assertEqual(result["provenance"], "web:artificialanalysis.ai (untrusted data)")
+        self.assertEqual(result["fetched_by"], "tester")
+        self.assertEqual(result["models"]["gpt-6-astra"]["name"], "GPT-6 Astra")
+        self.assertEqual(result["http_status"], 200)
+        self.assertEqual(result["request"]["impersonate"], False)
+        self.assertTrue(bench.FILE.exists())
+        self.assertIn("skipped", bench.fetch())          # within 20h, force not given
+
+    def test_fetch_failure_status_leaves_existing_file_untouched(self):
+        orig = bench.fetch_html
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        bench.fetch(force=True, by="tester")
+        before = bench.FILE.read_bytes()
+
+        bench.fetch_html = lambda *a, **k: (403, "<html>blocked</html>")
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig))
+        result = bench.fetch(force=True, by="tester")
+
+        self.assertIn("error", result)
+        self.assertEqual(bench.FILE.read_bytes(), before)
+
+    def test_fetch_html_source_disables_impersonation_and_stealth(self):
+        src = inspect.getsource(bench.fetch_html)
+        self.assertIn("stealthy_headers=False", src)
+        self.assertIn("orchestrator-bench", src)
+
+    def test_fetch_html_raises_if_scrapling_drops_a_required_param(self):
+        orig = bench._supported_params
+        bench._supported_params = lambda func: {"headers", "impersonate", "timeout"}  # no stealthy_headers
+        self.addCleanup(lambda: setattr(bench, "_supported_params", orig))
+        with self.assertRaises(RuntimeError) as cm:
+            bench.fetch_html()
+        self.assertIn("stealthy_headers", str(cm.exception))
+
+    def test_fetch_returns_error_and_leaves_bench_json_untouched_if_param_missing(self):
+        orig_fetch_html, orig_supported = bench.fetch_html, bench._supported_params
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        bench.fetch(force=True, by="tester")
+        before = bench.FILE.read_bytes()
+
+        bench.fetch_html = orig_fetch_html
+        bench._supported_params = lambda func: {"headers", "impersonate", "timeout"}
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig_fetch_html))
+        self.addCleanup(lambda: setattr(bench, "_supported_params", orig_supported))
+
+        result = bench.fetch(force=True, by="tester")
+        self.assertIn("error", result)
+        self.assertIn("stealthy_headers", result["error"])
+        self.assertEqual(bench.FILE.read_bytes(), before)
+
+    def test_set_model_marks_manual(self):
+        rec = bench.set_model("gpt-6-astra", "tester", intelligence=99.0)
+        self.assertTrue(rec["manual"])
+        self.assertEqual(bench.load()["models"]["gpt-6-astra"]["intelligence"], 99.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

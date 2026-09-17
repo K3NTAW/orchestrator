@@ -7,9 +7,10 @@ srv = MCPServer("bus")
 
 @srv.tool()
 def bus_create_task(title: str, spec: str, acceptance: list[str], scope: list[str], role: str = "scout",
-                    tier: str = "sonnet", complexity: int = 3, parent: str | None = None, inputs: list | None = None) -> dict:
+                    tier: str = "sonnet", complexity: int = 3, parent: str | None = None, inputs: list | None = None,
+                    depends_on: list[str] | None = None, constraints: dict | None = None) -> dict:
     """Planner only. Create a task; rejected without acceptance criteria and scope paths."""
-    return bus.create_task(title, spec, acceptance, scope, role, tier, complexity, parent, inputs)
+    return bus.create_task(title, spec, acceptance, scope, role, tier, complexity, parent, inputs, constraints, depends_on)
 
 
 @srv.tool()

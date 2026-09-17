@@ -10,6 +10,7 @@ TOOLS = {
     "triage":    "Read,Grep,Glob,mcp__bus__bus_post_result",
     "review":    "Read,Grep,Glob,Bash(git *),mcp__bus__bus_post_result,mcp__bus__bus_read",
     "challenge": "Read,Grep,Glob,Bash(git *),Bash(rg *),mcp__bus__bus_post_result,mcp__bus__bus_read",
+    "spec_review": "Read,Grep,Glob,Bash(git *),mcp__bus__bus_post_result,mcp__bus__bus_read",
     # Claude-as-executor (fallback only): may edit, scope-guard hook limits where; tests via the shared script
     "execute":   "Read,Grep,Glob,Edit,Write,Bash(git *),Bash(rg *),Bash(npm *),Bash(npx *),Bash(uv *),Bash(pytest *),Bash(python3 *),Bash(bash skills/*),Bash(.claude/hooks/tests-green.sh*),mcp__bus__bus_post_result",
 }
@@ -48,7 +49,7 @@ def base_for(task):
             src_parent = src.get("parent")
             if src_parent and branch_exists(f"goal/{src_parent}"):
                 return f"goal/{src_parent}"
-    elif role in ("challenge", "execute") and parent and branch_exists(f"goal/{parent}"):
+    elif role in ("challenge", "execute", "spec_review") and parent and branch_exists(f"goal/{parent}"):
         return f"goal/{parent}"
     return "origin/main"
 
@@ -150,26 +151,32 @@ def extract_json(text):
 
 
 def fit_result(result, cap=bus.MAX_RESULT_CHARS):
-    """Shrink an oversize worker result (drop findings, truncate summary) so it fits under the bus cap.
-    Returns result unchanged when it already fits."""
+    """Shrink an oversize worker result so it fits under the bus cap: truncate summary to 1,500 chars, then
+    binary-search every list-valued top-level key (findings, risks, comments, ...) down to the longest prefix
+    that fits, largest list first. Returns result unchanged when it already fits."""
     original_chars = len(json.dumps(result))
     if original_chars <= cap:
         return result
     out = dict(result)
     if isinstance(out.get("summary"), str):
         out["summary"] = out["summary"][:1500]
-    out["truncated"] = {"reason": "over MAX_RESULT_CHARS", "original_chars": original_chars}
-    findings = out.get("findings")
-    if isinstance(findings, list):
-        lo, hi, best = 0, len(findings), 0
+    trimmed = {}
+    list_keys = sorted((k for k, v in out.items() if isinstance(v, list)),
+                        key=lambda k: len(json.dumps(out[k])), reverse=True)
+    for key in list_keys:
+        items = out[key]
+        lo, hi, best = 0, len(items), 0
         while lo <= hi:
             mid = (lo + hi) // 2
-            trial = {**out, "findings": findings[:mid]}
+            trial = {**out, key: items[:mid]}
             if len(json.dumps(trial)) <= cap - 200:
                 best, lo = mid, mid + 1
             else:
                 hi = mid - 1
-        out["findings"] = findings[:best]
+        out[key] = items[:best]
+        if best < len(items):
+            trimmed[key] = len(items) - best
+    out["truncated"] = {"reason": "over MAX_RESULT_CHARS", "original_chars": original_chars, "trimmed": trimmed}
     return out
 
 
@@ -194,6 +201,10 @@ def run_worker(task_id):
     elif role == "challenge":
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                         for k in ("claim", "evidence", "confidence")})
+    elif role == "spec_review":
+        src = bus.get(t["inputs"][0])
+        prompt = render("spec-review", complexity=str(t["complexity"]), spec=src["spec"], acceptance=src["acceptance"],
+                        scope=src["scope"], code=code_excerpts(src["scope"], src.get("worktree") or ROOT))
     elif role == "execute":
         t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
         bus.update(task_id, executor=t["executor"])
@@ -212,11 +223,13 @@ def run_worker(task_id):
         elif r["status"] == "done":
             result = extract_json(r["output"].get("result", ""))
             bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
-            if role == "review" and result.get("verdict"):
-                bus.update(task_id, review_verdict=result["verdict"])
+            if role in ("review", "spec_review") and result.get("verdict"):
+                verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
+                    if role == "spec_review" else {"review_verdict": result["verdict"]}
+                bus.update(task_id, **verdict_fields)
                 if t.get("inputs") and isinstance(t["inputs"][0], str):
                     try:
-                        bus.update(t["inputs"][0], review_verdict=result["verdict"])
+                        bus.update(t["inputs"][0], **verdict_fields)
                     except KeyError:
                         pass
         elif r["status"] == "held":
@@ -228,6 +241,24 @@ def run_worker(task_id):
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
         bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     return r
+
+
+def code_excerpts(scope, base_dir, cap=12000):
+    """First 120 lines of each file matching a scope glob under base_dir (the reviewed task's base branch
+    worktree, or ROOT when none exists), joined and capped at `cap` chars total so a spec-review prompt stays
+    a fixed size regardless of scope breadth. Lines are prefixed with their 1-based line number so a reviewer
+    can cite path:line."""
+    out, total = [], 0
+    for pattern in scope:
+        for path in sorted(Path(base_dir).glob(pattern)):
+            if not path.is_file() or total >= cap:
+                continue
+            lines = "\n".join(f"{i:>4}| {line}" for i, line in
+                               enumerate(path.read_text(errors="replace").splitlines()[:120], 1))
+            chunk = f"--- {path.relative_to(base_dir)} ---\n{lines}\n"[:cap - total]
+            out.append(chunk)
+            total += len(chunk)
+    return "".join(out) or "(no matching files)"
 
 
 def scoped_diff(t):

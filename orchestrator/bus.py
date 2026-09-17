@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import json, sqlite3, subprocess, time
+import contextlib, fcntl, json, sqlite3, subprocess, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -7,8 +7,35 @@ from . import ROOT, STATE
 TASKS = STATE / "tasks"
 RUNS = STATE / "runs"
 MAX_RESULT_CHARS = 6000  # ~1,500 tokens
-ROLES = {"scout", "triage", "execute", "review", "challenge"}
+ROLES = {"scout", "triage", "execute", "review", "challenge", "spec_review"}
 STATUSES = {"queued", "held", "running", "done", "failed"}
+
+
+LOCK = STATE / "bus.lock"
+_held = threading.local()
+
+
+@contextlib.contextmanager
+def locked():
+    """Serialize bus writes across the daemon, its worker threads and the Planner: an flock on .orchestrator/bus.lock,
+    the same pattern as merge.lock. Reentrant per thread — flock keys on the open file description, so update() ->
+    _save() opening the lock a second time would block on itself without the depth counter."""
+    depth = getattr(_held, "depth", 0)
+    if depth:
+        _held.depth = depth + 1
+        try:
+            yield
+        finally:
+            _held.depth = depth
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(LOCK, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        _held.depth = 1
+        try:
+            yield
+        finally:
+            _held.depth = 0
 
 
 def db():
@@ -20,10 +47,11 @@ def db():
 
 
 def _save(t):
-    TASKS.mkdir(parents=True, exist_ok=True)
-    (TASKS / f"{t['id']}.json").write_text(json.dumps(t, indent=2) + "\n")
-    db().execute("insert or replace into tasks values(?,?,?,?,?,?)",
-                 (t["id"], t["status"], t["role"], t["tier"], t.get("assigned_to"), time.time()))
+    with locked():
+        TASKS.mkdir(parents=True, exist_ok=True)
+        (TASKS / f"{t['id']}.json").write_text(json.dumps(t, indent=2) + "\n")
+        db().execute("insert or replace into tasks values(?,?,?,?,?,?)",
+                     (t["id"], t["status"], t["role"], t["tier"], t.get("assigned_to"), time.time()))
 
 
 def _event(tid, kind, data=None):
@@ -43,14 +71,24 @@ def next_id():
 
 
 def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", complexity=3,
-                parent=None, inputs=None, constraints=None):
+                parent=None, inputs=None, constraints=None, depends_on=None):
     """Planner-only. Mirrors the require-acceptance hook: no acceptance or scope -> rejected."""
     if role not in ROLES:
         raise ValueError(f"role must be one of {sorted(ROLES)}")
     if not acceptance or not scope:
         raise ValueError("acceptance and scope must be non-empty lists")
-    t = {"id": next_id(), "parent": parent, "role": role, "tier": tier, "complexity": complexity,
+    tid = next_id()
+    deps = list(depends_on or [])
+    for dep in deps:
+        if dep == tid:
+            raise ValueError(f"task cannot depend on itself: {dep}")
+        try:
+            get(dep)
+        except KeyError:
+            raise ValueError(f"depends_on references unknown task: {dep}")
+    t = {"id": tid, "parent": parent, "role": role, "tier": tier, "complexity": complexity,
          "title": title, "spec": spec, "inputs": inputs or [], "acceptance": list(acceptance), "scope": list(scope),
+         "depends_on": deps,
          "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
          "status": "queued", "assigned_to": None, "worktree": None, "codex_thread": None, "result": None, "events": []}
     _save(t); _event(t["id"], "created")
@@ -60,14 +98,33 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
 def update(tid, **fields):
     """Non-Planner fields only: status, assigned_to, worktree, codex_thread, executor, pid, resume_hint.
     executor is the routed model id ("astra", "luna", ...) or "claude:<tier>" for a Claude fallback run."""
-    t = get(tid)
-    for k, v in fields.items():
-        if k in {"spec", "acceptance", "scope", "complexity"}:
-            raise PermissionError(f"only the Planner may set {k}; create a new task instead")
-        t[k] = v
-    t["events"].append({"ts": time.time(), **fields})
-    _save(t); _event(tid, "update", fields)
+    with locked():   # read-modify-write: without the lock a concurrent update drops the other's fields
+        t = get(tid)
+        for k, v in fields.items():
+            if k in {"spec", "acceptance", "scope", "complexity", "depends_on"}:
+                raise PermissionError(f"only the Planner may set {k}; create a new task instead")
+            t[k] = v
+        t["events"].append({"ts": time.time(), **fields})
+        _save(t); _event(tid, "update", fields)
     return t
+
+
+def ready(task_or_id):
+    """True iff every depends_on task is merged (merged_into set), or done for non-execute roles."""
+    t = task_or_id if isinstance(task_or_id, dict) else get(task_or_id)
+    for dep_id in t.get("depends_on", []):
+        dep = get(dep_id)
+        if dep.get("merged_into"):
+            continue
+        if dep["role"] != "execute" and dep["status"] == "done":
+            continue
+        return False
+    return True
+
+
+def dependents(tid):
+    """Tasks that declare tid in their depends_on."""
+    return [t for t in read() if tid in t.get("depends_on", [])]
 
 
 def claim(tid, assigned_to, worktree=None):
