@@ -146,6 +146,19 @@ class Executors(unittest.TestCase):
         self.assertEqual([e.model for e in old.executors.values()], [cfg["codex"]["model"]])
         self.assertTrue(old.codex_available())
 
+    def test_codex_available_respects_complexity(self):
+        self.p.executors["astra"].day_tasks = self.p.executors["astra"].daily_budget_tasks
+        self.assertFalse(self.p.codex_available(8))   # only astra reaches band 8, and it's over budget
+        self.assertTrue(self.p.codex_available(3))     # luna/terra/sol still have headroom at band 3
+
+    def test_legacy_running_syncs_down_not_just_up(self):
+        self.p.codex.running = 2; self.p.save()
+        fresh = P.Pool()
+        self.assertEqual(fresh.executors["astra"].running, 2)
+        fresh.codex.running = 0; fresh.save()
+        fresher = P.Pool()
+        self.assertEqual(fresher.executors["astra"].running, 0)  # regression: used to ratchet up only
+
 
 class Render(unittest.TestCase):
     def test_templates_fill(self):

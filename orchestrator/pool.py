@@ -195,22 +195,28 @@ class Pool:
 
     def _sync_legacy_codex(self):
         """Bridge until executor.py routes through executors (B2): it still writes self.codex, so fold that
-        state into the row it belongs to. max(), never assign, so executor state is not clobbered."""
+        state into the row it belongs to. running is mirrored, not maxed, because executor.py builds a fresh
+        Pool() per call and its decrements must be able to bring the row back down. day_tasks stays a max
+        (monotonic within a day) and only applies when the legacy day matches today. This whole method goes
+        away once B2 routes executor.py through the executors table directly."""
         ex = self._legacy_executor()
         if ex is None:
             return
         if self.codex.cooldown_until > ex.cooldown_until:
             self._cool_group(ex, self.codex.cooldown_until, "codex usage limit")
-        ex.running = max(ex.running, self.codex.running)
+        ex.running = self.codex.running
         if self.codex.day == date.today().isoformat():
             ex.roll_day(); ex.day_tasks = max(ex.day_tasks, self.codex.day_tasks)
 
-    def codex_available(self):
+    def codex_available(self, complexity: int = 1) -> bool:
+        """True iff some enabled executor can take an "execute" task at this complexity right now. Default
+        complexity=1 keeps pre-B2 callers (mcp.status, cli, executor.start) working; B2 must pass the task's
+        real complexity so a busy/exhausted high-complexity executor doesn't get masked by idle low-band ones."""
         c = self.codex
         if c.day != date.today().isoformat():
             c.day_tasks, c.day = 0, date.today().isoformat()
         self._sync_legacy_codex()
-        ex = self.pick_executor("execute", 1)
+        ex = self.pick_executor("execute", complexity)
         return bool(ex and ex.provider == "codex")
 
     def both_cooling_minutes(self):
