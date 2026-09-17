@@ -19,7 +19,7 @@ def cost(by):
 
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator"); sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status")
+    st = sub.add_parser("status"); st.add_argument("--plain", action="store_true")
     c = sub.add_parser("cost"); c.add_argument("--by", default="role", choices=["role", "tier", "account", "task"])
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
     sub.add_parser("resume").add_argument("account")
@@ -28,7 +28,14 @@ def main():
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     a = ap.parse_args()
     if a.cmd == "status":
-        print(json.dumps({**Pool().status(), "queue": {s: len(bus.read(status=s)) for s in ("queued", "held", "running")}}, indent=1))
+        if a.plain:
+            s = Pool().status()
+            for acc in s["accounts"]:
+                print(f"{acc['id']}\tutil={acc['utilization']:.3f}\tcooling={acc['cooling_s']}s\treason={acc['reason'] or '-'}")
+            c = s["codex"]
+            print(f"codex\tavailable={c['available']}\trunning={c['running']}\tday_tasks={c['day_tasks']}\tcooling={c['cooling_s']}s")
+        else:
+            print(json.dumps({**Pool().status(), "queue": {s: len(bus.read(status=s)) for s in ("queued", "held", "running")}}, indent=1))
     elif a.cmd == "cost":
         print(json.dumps(cost(a.by), indent=1))
     elif a.cmd == "hold":
