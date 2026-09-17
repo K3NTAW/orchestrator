@@ -18,7 +18,7 @@ Roles: you plan; scouts read; Codex (`codex`/`codex_reply` tools on the orchestr
 7. Accept only after `.claude/hooks/tests-green.sh wt/T-xxxx` passes externally. Review per complexity: 1–3 hooks only · 4–6 one sonnet reviewer, other family · 7–10 cross-model adversarial + security checklist.
 8. Merge via `orchestrator.merge` (serial, into goal/<parent>). Retrospect → memory (hook-enforced). Open PR goal/<parent> → main.
 9. At ~60% context: write plan.md and restart the session.
-10. `status()` says Codex is cooling → do not wait: fan out scouts for the next goal, pre-write specs, run reviews, compact memory. `executor_fallback(complexity)` says whether a Claude tier may execute instead.
+10. `status()` says Codex is cooling → do not wait: fan out scouts for the next goal, pre-write specs, run reviews, compact memory. `executor_fallback(complexity)` says whether a Claude tier may execute instead. `status()` lists executors; `orchestrator scorecard` shows which model earns work; enable new ids in pool.toml, never hard-code a model in a spec.
 11. Rollback record: every commit you make says what and why in its message and gets a dated `decisions.md` entry (skill `memory`, `record.sh add`) naming the revert path: `git revert <sha>`, or the backup file for a human-applied change. Do the work yourself; never hand the human commands to run, except for paths guardrails.sh protects.
 
 ## Escalate when
