@@ -294,6 +294,37 @@ class Scorecard(unittest.TestCase):
         self.assertIn("generated_at", payload)
         self.assertIn("generated_at", json.loads((STATE / "scorecard.json").read_text()))
 
+    def write_bench(self, models):
+        bench.STATE.mkdir(parents=True, exist_ok=True)
+        bench.FILE.write_text(json.dumps({"models": models}))
+        self.addCleanup(bench.FILE.unlink, True)
+
+    def test_prior_weights_scales_by_bench_coding_score(self):
+        # pool.toml's four codex executors (astra/luna/terra/sol); only two have bench numbers here.
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}, "gpt-5.6-luna": {"coding": 40.0}})
+        weights = scorecard.prior_weights(P.Pool().executors)
+        self.assertEqual(weights["astra"], 1.5)              # 0.5 + 80/80 (max among scored executors)
+        self.assertEqual(weights["luna"], 1.0)                # 0.5 + 40/80
+        self.assertEqual(weights["terra"], 1.0)                # no bench number -> neutral
+        self.assertEqual(weights["sol"], 1.0)
+
+    def test_prior_weights_missing_bench_file_is_neutral(self):
+        bench.FILE.unlink(missing_ok=True)
+        weights = scorecard.prior_weights(P.Pool().executors)
+        self.assertTrue(weights and all(v == 1.0 for v in weights.values()))
+
+    def test_scores_empty_card_returns_priors(self):
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}, "gpt-5.6-luna": {"coding": 40.0}})
+        weights = scorecard.scores({})
+        self.assertEqual(weights["astra"], 1.5)
+        self.assertEqual(weights["luna"], 1.0)
+
+    def test_scores_warm_failure_overrides_prior(self):
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}})    # astra's prior alone would be 1.5
+        card = {"astra": {"merged": 0, "failed": 1}}
+        weights = scorecard.scores(card, min_runs=1)
+        self.assertLess(weights["astra"], 1.0)                 # live 0/1 record wins over the bench prior
+
     def test_start_forwards_scorecard_scores_to_pick_executor(self):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
         t = bus.create_task("scored", "s", ["a"], ["x.py"], role="execute", complexity=3)
