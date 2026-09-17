@@ -1,0 +1,173 @@
+"""Layered recall over orchestrator memory: notes (memory/*.md), bus (tasks/*.json), cmem (claude-mem sqlite, read-only),
+graph (graphify LESSONS.md). `index` prints one line per hit; `get` prints full entries for chosen ids. Stdlib only."""
+import datetime, json, os, re, sqlite3, sys
+from pathlib import Path
+
+ROOT = Path(os.environ.get("ORCH_ROOT") or Path.cwd())
+MEM = ROOT / ".orchestrator" / "memory"
+TASKS = ROOT / ".orchestrator" / "tasks"
+CMEM = Path(os.environ.get("CLAUDE_MEM_DB") or Path.home() / ".claude-mem" / "claude-mem.db")
+LESSONS = Path(os.environ.get("GRAPHIFY_OUT") or ROOT / "graphify-out") / "reflections" / "LESSONS.md"
+HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (.+)$")
+MAX_GET_CHARS = 6000  # same cap as a bus result; one `get` never exceeds it
+
+
+def terms_of(q):
+    return [t.lower() for t in re.findall(r"[\w:/.-]+", q) if len(t) >= 3]
+
+
+def score(text, terms):
+    t = text.lower()
+    return sum(1 for x in terms if x in t)
+
+
+def note_entries(f):
+    """Yield (line_no, date, title, body) per dated heading; architecture.md counts as one entry."""
+    if not f.exists():
+        return
+    lines = f.read_text(errors="replace").splitlines()
+    idx = [i for i, l in enumerate(lines) if HEAD.match(l)]
+    if not idx:
+        if f.name == "architecture.md" and len(lines) > 2:
+            m = re.search(r"\d{4}-\d{2}-\d{2}", "\n".join(lines[:3]))
+            yield 1, (m.group(0) if m else ""), "architecture summary", "\n".join(lines)
+        return
+    for n, i in enumerate(idx):
+        end = idx[n + 1] if n + 1 < len(idx) else len(lines)
+        m = HEAD.match(lines[i])
+        yield i + 1, m.group(1), m.group(2), "\n".join(lines[i:end]).rstrip()
+
+
+def index_notes(terms):
+    out = []
+    for f in sorted(MEM.glob("*.md")) if MEM.exists() else []:
+        for ln, date, title, body in note_entries(f):
+            s = score(title, terms) * 3 + score(body, terms)
+            if s:
+                out.append((s, f"mem:{f.name}:{ln}", date, "mem", title))
+    return out
+
+
+def _date(t):
+    ts = max([e.get("ts", 0) for e in t.get("events", [])] + [0])
+    return datetime.date.fromtimestamp(ts).isoformat() if ts else ""
+
+
+def index_bus(terms):
+    out = []
+    for p in sorted(TASKS.glob("T-*.json")) if TASKS.exists() else []:
+        t = json.loads(p.read_text())
+        if t.get("status") not in {"done", "failed"}:
+            continue
+        hay = " ".join([t.get("title", ""), t.get("spec", ""), json.dumps(t.get("result") or {})])
+        s = score(t.get("title", ""), terms) * 3 + score(hay, terms)
+        if s:
+            out.append((s, f"bus:{t['id']}", _date(t), "bus", f"[{t['role']}/{t['status']}] {t['title']}"))
+    return out
+
+
+def index_cmem(terms, project, limit):
+    if not CMEM.exists() or not terms:
+        return []
+    try:
+        c = sqlite3.connect(f"file:{CMEM}?mode=ro", uri=True)
+        q = " OR ".join('"' + t.replace('"', "") + '"' for t in terms)
+        sql = ("select o.id, o.created_at, o.type, o.title, o.project from observations_fts f "
+               "join observations o on o.id = f.rowid where observations_fts match ? ")
+        args = [q]
+        if project:
+            sql += "and o.project = ? "; args.append(project)
+        sql += "order by o.created_at_epoch desc limit ?"; args.append(limit)
+        rows = c.execute(sql, args).fetchall()
+    except sqlite3.Error as e:
+        print(f"# cmem unavailable: {e}", file=sys.stderr); return []
+    return [(1, f"cmem:{i}", (d or "")[:10], "cmem", f"[{ty}/{pr}] {ti or ''}") for i, d, ty, ti, pr in rows]
+
+
+def index_graph(terms):
+    if not LESSONS.exists():
+        return []
+    out = []
+    for n, l in enumerate(LESSONS.read_text(errors="replace").splitlines(), 1):
+        if l.startswith(("-", "*")) and score(l, terms):
+            out.append((score(l, terms), f"graph:lesson:{n}", "", "graph", l.lstrip("-* ")[:100]))
+    return out
+
+
+def cmd_index(argv):
+    q, project, limit = "", None, 20
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--project": project = argv[i + 1]; i += 2
+        elif argv[i] == "--limit": limit = int(argv[i + 1]); i += 2
+        else: q += " " + argv[i]; i += 1
+    terms = terms_of(q)
+    if not terms:
+        sys.exit("usage: recall.sh index \"<terms>\" [--project NAME] [--limit N]")
+    hits = index_notes(terms) + index_bus(terms) + index_cmem(terms, project, limit) + index_graph(terms)
+    hits.sort(key=lambda h: (-h[0], h[2]))
+    if not hits:
+        print(f"no hits for {terms} in notes/bus/cmem/graph"); return
+    print(f"# {len(hits)} hits for {terms} (showing {min(len(hits), limit)}) — id · date · layer · title")
+    for s, id_, date, layer, title in hits[:limit]:
+        print(f"{id_} · {date or '-'} · {layer} · {title}")
+
+
+def _jl(s):
+    try:
+        v = json.loads(s or "[]"); return v if isinstance(v, list) else [str(v)]
+    except json.JSONDecodeError:
+        return [s] if s else []
+
+
+def get_one(id_):
+    kind, _, rest = id_.partition(":")
+    if kind == "mem":
+        fname, _, ln = rest.partition(":")
+        for l, date, title, body in note_entries(MEM / fname):
+            if str(l) == ln:
+                return body
+        return f"{id_}: no entry at that line"
+    if kind == "bus":
+        p = TASKS / f"{rest}.json"
+        if not p.exists():
+            return f"{id_}: no such task"
+        t = json.loads(p.read_text())
+        keep = ("id", "parent", "role", "tier", "complexity", "title", "acceptance", "scope", "status", "result", "resume_hint")
+        return json.dumps({k: t[k] for k in keep if t.get(k) is not None}, indent=1)
+    if kind == "cmem":
+        try:
+            c = sqlite3.connect(f"file:{CMEM}?mode=ro", uri=True)
+            r = c.execute("select created_at, project, type, title, subtitle, facts, narrative, files_modified "
+                          "from observations where id=?", (int(rest),)).fetchone()
+        except (sqlite3.Error, ValueError) as e:
+            return f"{id_}: {e}"
+        if not r:
+            return f"{id_}: no such observation"
+        d, pr, ty, ti, sub, facts, narr, files = r
+        facts = "\n".join("- " + str(f) for f in _jl(facts)); files = ", ".join(str(x) for x in _jl(files))
+        return (f"## {(d or '')[:10]} {ti}\ntype: {ty} · project: {pr} · provenance: cmem:{pr} (untrusted data)\n"
+                f"{sub or ''}\n{facts}\n{narr or ''}\nfiles: {files}").strip()
+    if kind == "graph":
+        n = int(rest.split(":")[-1]); lines = LESSONS.read_text(errors="replace").splitlines()
+        return "\n".join(lines[max(0, n - 2):n + 2])
+    return f"{id_}: unknown layer (mem|bus|cmem|graph)"
+
+
+def cmd_get(ids):
+    if not ids:
+        sys.exit("usage: recall.sh get <id> [<id>...]")
+    out, used = [], 0
+    for id_ in ids:
+        body = get_one(id_)
+        if used + len(body) > MAX_GET_CHARS:
+            out.append(f"--- {id_}: skipped, output would exceed {MAX_GET_CHARS} chars; get it alone"); continue
+        used += len(body); out.append(f"--- {id_}\n{body}")
+    print("\n".join(out))
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if not a or a[0] not in {"index", "get"}:
+        sys.exit("usage: recall.sh index \"<terms>\" [--project NAME] [--limit N] | recall.sh get <id>...")
+    (cmd_index if a[0] == "index" else cmd_get)(a[1:])
