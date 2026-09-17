@@ -23,6 +23,19 @@ Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` t
 `f orch [goal]` (from anywhere) launches the Planner on account A in this repo. `f orch status|cost|daemon|hold|resume|merge` is the CLI.
 `f orch survey` is the old cross-repo briefing session.
 
+## Pipeline
+State machine per execute task: `queued` → (depends_on merged, complexity ≥5 → `spec_review` first) → dispatched to
+an executor → `done` → gated (`tests-green.sh`) → complexity ≤3 merges straight away, else a `review` task spawns →
+`review` approve merges, `request_changes` holds it for the Planner to re-spec.
+`daemon.tick()` drives every stage: `dispatch()` (spec review or executor), `gate()` (tests-green, then merge or
+review), `merge_reviewed()` (merge on approve). Each stage stamps `pipeline.<stage>_at` on the task json under the
+bus lock before acting, so a crash-and-retry never re-runs a stage.
+Run it: `orchestrator daemon` (loops every 30s) or `orchestrator daemon --once` for a single pass.
+Holds (`status="held"`) mean the daemon stopped and a human/Planner must act: `spec_review request_changes`, `review
+request_changes`, or `gate_red` (tests failed at the gate). The `hold_reason` field and `resume_hint` on the task say
+which. The Planner clears a hold by writing a new spec with `depends_on=[held_task_id]`, never by editing the held
+task directly.
+
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),
 `roles`, `complexity_min`/`max`, `max_parallel`, `daily_budget_tasks`, `quota_group`, `weight`, `enabled`.

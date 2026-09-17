@@ -7,7 +7,7 @@ from . import ROOT, STATE
 TASKS = STATE / "tasks"
 RUNS = STATE / "runs"
 MAX_RESULT_CHARS = 6000  # ~1,500 tokens
-ROLES = {"scout", "triage", "execute", "review", "challenge"}
+ROLES = {"scout", "triage", "execute", "review", "challenge", "spec_review"}
 STATUSES = {"queued", "held", "running", "done", "failed"}
 
 

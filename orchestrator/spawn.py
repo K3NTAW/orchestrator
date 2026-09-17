@@ -5,8 +5,6 @@ from pathlib import Path
 from . import ROOT, STATE, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
-bus.ROLES.add("spec_review")  # bus.py owns ROLES (C-B's scope); added here until C-E moves it there
-
 TOOLS = {
     "scout":     "Read,Grep,Glob,Bash(git *),Bash(rg *),Bash(ls *),Bash(bash skills/*),mcp__bus__bus_post_result,mcp__bus__bus_read",
     "triage":    "Read,Grep,Glob,mcp__bus__bus_post_result",
