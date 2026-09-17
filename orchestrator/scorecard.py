@@ -47,6 +47,8 @@ def build(root=STATE, by="executor"):
             if not line.strip():
                 continue
             e = json.loads(line)
+            if by != "tier" and e.get("role") != "execute":
+                continue  # scout/review/challenge runs don't have a per-executor identity to score
             eid = key_of(e)
             if not eid:
                 continue
@@ -64,6 +66,8 @@ def build(root=STATE, by="executor"):
     tasks_dir = root / "tasks"
     for p in sorted(tasks_dir.glob("T-*.json")) if tasks_dir.exists() else []:
         t = json.loads(p.read_text())
+        if t.get("role") != "execute":
+            continue  # review/scout/challenge verdicts already landed on the reviewed execute task
         eid = key_of(t)
         if not eid:
             continue

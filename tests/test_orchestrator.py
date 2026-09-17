@@ -253,7 +253,7 @@ class Scorecard(unittest.TestCase):
     def test_build_counts_and_scores(self):
         self.write_task("T-9001", executor="good", complexity=3, status="done", merged_into="goal/G", rounds=1)
         self.write_task("T-9002", executor="bad", complexity=4, status="failed")
-        self.write_runs({"executor": "bad", "outcome": "usage_limit", "duration_s": 1.0})
+        self.write_runs({"role": "execute", "executor": "bad", "outcome": "usage_limit", "duration_s": 1.0})
         card = scorecard.build(root=self.root)
         self.assertEqual(card["good"]["merged"], 1); self.assertEqual(card["good"]["rounds_avg"], 1.0)
         self.assertEqual(card["good"]["by_complexity"]["1-3"]["merged"], 1)
@@ -269,6 +269,19 @@ class Scorecard(unittest.TestCase):
         self.write_task("T-9003", executor="reviewed-by", status="done", review_verdict="request_changes")
         card = scorecard.build(root=self.root)
         self.assertEqual(card["reviewed-by"]["review_request_changes"], 1)
+
+    def test_review_task_does_not_double_count_verdict(self):
+        # review T-0031: a review task has no executor and used to bucket under claude:<tier>, double-counting
+        # the same request_changes verdict that spawn.run_worker already stamped on the reviewed execute task
+        self.write_task("T-9006", role="review", tier="sonnet", review_verdict="request_changes")
+        self.write_task("T-9007", tier="sonnet", review_verdict="request_changes")
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["claude:sonnet"]["review_request_changes"], 1)
+
+    def test_scout_run_does_not_create_executor_row(self):
+        self.write_runs({"role": "scout", "executor": "x", "outcome": "usage_limit", "duration_s": 1.0})
+        card = scorecard.build(root=self.root)
+        self.assertNotIn("x", card)
 
     def test_by_tier_regroups(self):
         self.write_task("T-9004", executor="astra", tier="astra", complexity=2, status="done", merged_into="goal/G")
