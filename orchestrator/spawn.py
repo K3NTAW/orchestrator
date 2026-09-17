@@ -27,13 +27,16 @@ def branch_exists(name):
 
 
 def base_for(task):
-    """Pick the base branch for a new worktree. review/challenge tasks whose inputs[0] is a task id: base on
-    that task's own branch so the reviewer sees the code under review, not a worktree cut from origin/main before
-    the reviewed task (or its dependency, B1-style) ever landed (review T-0026). Fall back to the reviewed task's
-    goal branch, then origin/main. execute tasks with a parent whose goal branch already exists stack on it, so
-    the Planner no longer has to pre-create worktrees for stacked tasks."""
+    """Pick the base branch for a new worktree. review tasks whose inputs[0] is a task id: base on that task's
+    own branch so the reviewer sees the code under review, not a worktree cut from origin/main before the
+    reviewed task (or its dependency, B1-style) ever landed (review T-0026). Fall back to the reviewed task's
+    goal branch, then origin/main. challenge tasks have inputs[0] = {claim, evidence, confidence} (a dict, or
+    absent), never a task id, so they always base on the goal branch (falling back to origin/main) rather than
+    the review path's isinstance(str) check, which never fires for them (review T-0030). execute tasks with a
+    parent whose goal branch already exists stack on it, so the Planner no longer has to pre-create worktrees
+    for stacked tasks."""
     role, parent = task["role"], task.get("parent")
-    if role in ("review", "challenge") and task.get("inputs") and isinstance(task["inputs"][0], str):
+    if role == "review" and task.get("inputs") and isinstance(task["inputs"][0], str):
         try:
             src = bus.get(task["inputs"][0])
         except KeyError:
@@ -45,7 +48,7 @@ def base_for(task):
             src_parent = src.get("parent")
             if src_parent and branch_exists(f"goal/{src_parent}"):
                 return f"goal/{src_parent}"
-    elif role == "execute" and parent and branch_exists(f"goal/{parent}"):
+    elif role in ("challenge", "execute") and parent and branch_exists(f"goal/{parent}"):
         return f"goal/{parent}"
     return "origin/main"
 

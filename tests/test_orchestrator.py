@@ -228,6 +228,11 @@ class Executors(unittest.TestCase):
         fresher = P.Pool()
         self.assertEqual(fresher.executors["astra"].running, 0)  # regression: used to ratchet up only
 
+    def test_every_executor_row_has_a_quota_group(self):
+        # enabling a disabled placeholder later must not silently drop it out of its cooldown group (review T-0030)
+        for row in P.config()["executors"]:
+            self.assertTrue(row.get("quota_group"), row["id"])
+
 
 class Render(unittest.TestCase):
     def test_templates_fill(self):
@@ -370,6 +375,14 @@ class SpawnBase(unittest.TestCase):
         self.assertEqual(spawn.base_for(t), "goal/G")
         t2 = bus.create_task("no goal yet", "s", ["a"], ["more.py"], role="execute", parent="ghost")
         self.assertEqual(spawn.base_for(t2), "origin/main")
+
+    def test_challenge_bases_on_goal_branch(self):
+        challenge = bus.create_task("challenge x", "s", ["a"], ["x.py"], role="challenge", parent="G",
+                                     inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
+        self.assertEqual(spawn.base_for(challenge), "goal/G")
+        challenge2 = bus.create_task("challenge y", "s", ["a"], ["y.py"], role="challenge", parent="ghost",
+                                      inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
+        self.assertEqual(spawn.base_for(challenge2), "origin/main")
 
     def test_ensure_worktree_resolves_base_when_none_given(self):
         t = bus.create_task("stacked-exec", "s", ["a"], ["stacked.py"], role="execute", parent="G")
