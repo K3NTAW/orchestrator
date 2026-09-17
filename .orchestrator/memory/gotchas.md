@@ -61,3 +61,9 @@ type: gotcha · goal: T-0005 · tasks: T-0007,T-0014,T-0036 · provenance: repo
 - live fetch 2026-09-17 16:17 UTC (bench.json unmatched_names): GPT-6 Astra (max), GPT-5.6 Luna (max), GPT-5.6 Terra (max), GPT-5.6 Sol (max), Claude Opus 5 (Adaptive Reasoning, Max Effort), Claude Fable 5.1 (...), GPT-5.5 Pro (xhigh)
 - display names carry a parenthetical effort suffix; bench.match compared whole strings, so 0 of 8 hints matched
 outcome: B4c fix: match on the name with parentheticals stripped, prefer the (max) variant; lesson: a 0.6 negative web finding plus a repo-only challenge is not evidence, fetch and look
+
+## 2026-09-17 Planner committed a config knob change without running the suite
+type: gotcha · goal: T-0005 · provenance: repo
+- .orchestrator/pool.toml window_cap_tokens 2M to 10M (b680ef5) broke PoolSel.test_affinity_reserve_cooldown_budget, whose token fractions were hard-coded for a 2M cap; the Planner ran tomllib parse and status --plain but not the tests
+- the T-0040 worker refused to commit on a red suite and reported the regression with the cause; that behaviour is what we want
+outcome: rule: any Planner commit that touches .orchestrator/pool.toml or another file the tests read runs the gate first; tests must derive thresholds from Pool().cap, not literals (T-0042)
