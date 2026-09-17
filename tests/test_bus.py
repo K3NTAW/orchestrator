@@ -21,9 +21,22 @@ class Bus(unittest.TestCase):
             bus.post_result(t["id"], {"summary": "x" * 7000})    # oversize rejected
         bus.post_result(t["id"], {"summary": "ok", "findings": []})
         done = bus.read(t["id"]); self.assertEqual(done["status"], "done"); self.assertIn("provenance", done["result"])
-        ev = bus.events(0); self.assertEqual(ev[0]["kind"], "created"); self.assertEqual([e["kind"] for e in ev], ["created", "update", "update"])
+        ev = [e for e in bus.events(0) if e["task"] == t["id"]]
+        self.assertEqual([e["kind"] for e in ev], ["created", "update", "update"])
         self.assertEqual(t["id"], n0)
         self.assertEqual(bus.next_id(), f"T-{int(n0.split('-')[1]) + 1:04d}")
+
+    def test_depends_on(self):
+        a = bus.create_task("A", "spec a", ["ok"], ["src/**"])
+        b = bus.create_task("B", "spec b", ["ok"], ["src/**"], depends_on=[a["id"]])
+        self.assertFalse(bus.ready(b))
+        bus.update(a["id"], merged_into="goal/x", sha="abc")
+        self.assertTrue(bus.ready(b))
+        with self.assertRaises(ValueError):
+            bus.create_task("C", "spec c", ["ok"], ["src/**"], depends_on=["T-9999"])
+        with self.assertRaises(PermissionError):
+            bus.update(b["id"], depends_on=[])
+        self.assertEqual(bus.dependents(a["id"]), [b])
 
 
 if __name__ == "__main__":

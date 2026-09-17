@@ -43,14 +43,24 @@ def next_id():
 
 
 def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", complexity=3,
-                parent=None, inputs=None, constraints=None):
+                parent=None, inputs=None, constraints=None, depends_on=None):
     """Planner-only. Mirrors the require-acceptance hook: no acceptance or scope -> rejected."""
     if role not in ROLES:
         raise ValueError(f"role must be one of {sorted(ROLES)}")
     if not acceptance or not scope:
         raise ValueError("acceptance and scope must be non-empty lists")
-    t = {"id": next_id(), "parent": parent, "role": role, "tier": tier, "complexity": complexity,
+    tid = next_id()
+    deps = list(depends_on or [])
+    for dep in deps:
+        if dep == tid:
+            raise ValueError(f"task cannot depend on itself: {dep}")
+        try:
+            get(dep)
+        except KeyError:
+            raise ValueError(f"depends_on references unknown task: {dep}")
+    t = {"id": tid, "parent": parent, "role": role, "tier": tier, "complexity": complexity,
          "title": title, "spec": spec, "inputs": inputs or [], "acceptance": list(acceptance), "scope": list(scope),
+         "depends_on": deps,
          "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
          "status": "queued", "assigned_to": None, "worktree": None, "codex_thread": None, "result": None, "events": []}
     _save(t); _event(t["id"], "created")
@@ -62,12 +72,30 @@ def update(tid, **fields):
     executor is the routed model id ("astra", "luna", ...) or "claude:<tier>" for a Claude fallback run."""
     t = get(tid)
     for k, v in fields.items():
-        if k in {"spec", "acceptance", "scope", "complexity"}:
+        if k in {"spec", "acceptance", "scope", "complexity", "depends_on"}:
             raise PermissionError(f"only the Planner may set {k}; create a new task instead")
         t[k] = v
     t["events"].append({"ts": time.time(), **fields})
     _save(t); _event(tid, "update", fields)
     return t
+
+
+def ready(task_or_id):
+    """True iff every depends_on task is merged (merged_into set), or done for non-execute roles."""
+    t = task_or_id if isinstance(task_or_id, dict) else get(task_or_id)
+    for dep_id in t.get("depends_on", []):
+        dep = get(dep_id)
+        if dep.get("merged_into"):
+            continue
+        if dep["role"] != "execute" and dep["status"] == "done":
+            continue
+        return False
+    return True
+
+
+def dependents(tid):
+    """Tasks that declare tid in their depends_on."""
+    return [t for t in read() if tid in t.get("depends_on", [])]
 
 
 def claim(tid, assigned_to, worktree=None):
