@@ -4,4 +4,5 @@ Acceptance: {{acceptance}}
 Scope: {{scope}}
 Current code excerpts: {{code}}
 Look for: wrong or missing insertion points, hidden coupling with files outside scope, acceptance criteria that cannot be verified, design choices that a reviewer would reject (state that never decreases, double counting, unguarded external calls, silent fallbacks), missing rollback.
-Return ONLY JSON: {"verdict":"approve|request_changes","risks":[{"path":"","issue":"","severity":"low|med|high"}],"suggested_spec_changes":[""]}
+Each excerpt line is prefixed "N| "; line = the numbered line in the excerpt, 0 if none.
+Return ONLY JSON: {"verdict":"approve|request_changes","risks":[{"path":"","issue":"","severity":"low|med|high","line":0}],"suggested_spec_changes":[""]}

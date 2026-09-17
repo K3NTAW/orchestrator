@@ -62,6 +62,7 @@ class SpecReview(unittest.TestCase):
         self.assertEqual(bus.get(execute["id"])["spec_review_risks"][0]["severity"], "med")
         self.assertIn("implement the thing precisely", captured["prompt"])
         self.assertIn("def handler():", captured["prompt"])
+        self.assertRegex(captured["prompt"], r"(?m)^\s*\d+\| ")
 
 
 class Render(unittest.TestCase):
@@ -84,6 +85,12 @@ class Render(unittest.TestCase):
         fitted = spawn.fit_result(small)
         self.assertEqual(fitted, small)
         self.assertNotIn("truncated", fitted)
+
+    def test_fit_result_trims_risks_when_no_findings(self):
+        big = {"summary": "ok", "risks": [{"issue": "r" * 300, "severity": "low"} for _ in range(60)]}
+        fitted = spawn.fit_result(big)
+        self.assertLessEqual(len(json.dumps(fitted)), bus.MAX_RESULT_CHARS)
+        self.assertGreater(fitted["truncated"]["trimmed"]["risks"], 0)
 
 
 class SpawnBase(unittest.TestCase):

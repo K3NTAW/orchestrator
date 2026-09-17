@@ -153,26 +153,32 @@ def extract_json(text):
 
 
 def fit_result(result, cap=bus.MAX_RESULT_CHARS):
-    """Shrink an oversize worker result (drop findings, truncate summary) so it fits under the bus cap.
-    Returns result unchanged when it already fits."""
+    """Shrink an oversize worker result so it fits under the bus cap: truncate summary to 1,500 chars, then
+    binary-search every list-valued top-level key (findings, risks, comments, ...) down to the longest prefix
+    that fits, largest list first. Returns result unchanged when it already fits."""
     original_chars = len(json.dumps(result))
     if original_chars <= cap:
         return result
     out = dict(result)
     if isinstance(out.get("summary"), str):
         out["summary"] = out["summary"][:1500]
-    out["truncated"] = {"reason": "over MAX_RESULT_CHARS", "original_chars": original_chars}
-    findings = out.get("findings")
-    if isinstance(findings, list):
-        lo, hi, best = 0, len(findings), 0
+    trimmed = {}
+    list_keys = sorted((k for k, v in out.items() if isinstance(v, list)),
+                        key=lambda k: len(json.dumps(out[k])), reverse=True)
+    for key in list_keys:
+        items = out[key]
+        lo, hi, best = 0, len(items), 0
         while lo <= hi:
             mid = (lo + hi) // 2
-            trial = {**out, "findings": findings[:mid]}
+            trial = {**out, key: items[:mid]}
             if len(json.dumps(trial)) <= cap - 200:
                 best, lo = mid, mid + 1
             else:
                 hi = mid - 1
-        out["findings"] = findings[:best]
+        out[key] = items[:best]
+        if best < len(items):
+            trimmed[key] = len(items) - best
+    out["truncated"] = {"reason": "over MAX_RESULT_CHARS", "original_chars": original_chars, "trimmed": trimmed}
     return out
 
 
@@ -242,13 +248,15 @@ def run_worker(task_id):
 def code_excerpts(scope, base_dir, cap=12000):
     """First 120 lines of each file matching a scope glob under base_dir (the reviewed task's base branch
     worktree, or ROOT when none exists), joined and capped at `cap` chars total so a spec-review prompt stays
-    a fixed size regardless of scope breadth."""
+    a fixed size regardless of scope breadth. Lines are prefixed with their 1-based line number so a reviewer
+    can cite path:line."""
     out, total = [], 0
     for pattern in scope:
         for path in sorted(Path(base_dir).glob(pattern)):
             if not path.is_file() or total >= cap:
                 continue
-            lines = "\n".join(path.read_text(errors="replace").splitlines()[:120])
+            lines = "\n".join(f"{i:>4}| {line}" for i, line in
+                               enumerate(path.read_text(errors="replace").splitlines()[:120], 1))
             chunk = f"--- {path.relative_to(base_dir)} ---\n{lines}\n"[:cap - total]
             out.append(chunk)
             total += len(chunk)
