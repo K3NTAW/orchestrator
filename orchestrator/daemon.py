@@ -3,13 +3,14 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import os, subprocess, sys, threading, time
+import fcntl, os, subprocess, sys, threading, time
 from pathlib import Path
-from . import bus, executor, merge, spawn
+from . import STATE, bus, executor, merge, spawn
 from .pool import Pool
 
 SPEC_REVIEW_MIN = 5   # complexity at which a spec must be reviewed before an executor sees it
 DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
+LOCK_PATH = STATE / "daemon.lock"
 
 
 def notify(msg):
@@ -40,6 +41,19 @@ def stamp(tid, stage, **fields):
         pipeline[stage] = time.time()
         bus.update(tid, pipeline=pipeline, **fields)
     return True
+
+
+def stale(t):
+    """True for a task the daemon must not act on: one whose parent goal task exists and is already done (the goal
+    closed and dispatching or merging into it would just redo a re-merge or a notify nobody asked for), or a
+    parentless task that is not itself a queued execute task (top-level goals are containers, never work items)."""
+    parent = t.get("parent")
+    if parent:
+        try:
+            return bus.get(parent).get("status") == "done"
+        except KeyError:
+            return False
+    return not (t["role"] == "execute" and t["status"] == "queued")
 
 
 def free_slots(pool):
@@ -81,7 +95,7 @@ def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
     for t in bus.read(status="queued", role="execute"):
-        if not bus.ready(t):
+        if stale(t) or not bus.ready(t):
             continue
         verdict = t.get("spec_review_verdict")
         if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
@@ -109,7 +123,7 @@ def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
     open a review task (everything else)."""
     for t in bus.read(status="done", role="execute"):
-        if t.get("merged_into") or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
+        if stale(t) or t.get("merged_into") or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
             continue
         if not Path(t["worktree"]).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
@@ -146,7 +160,7 @@ def merge_reviewed(pool):
     """done review tasks: approve -> serial merge of the reviewed task; request_changes -> hold it for the Planner,
     which writes the fix-round spec (a daemon must not invent a spec)."""
     for r in bus.read(status="done", role="review"):
-        if not (r.get("inputs") and isinstance(r["inputs"][0], str)):
+        if stale(r) or not (r.get("inputs") and isinstance(r["inputs"][0], str)):
             continue
         try:
             src = bus.get(r["inputs"][0])
@@ -188,17 +202,85 @@ def tick(pool=None):
         notify("Executor (Codex) cooling; execute tasks held, refill the pipeline")
 
 
-def main(interval=30, once=False):
+def acquire_lock():
+    """Non-blocking single-instance lock on STATE/daemon.lock. Returns the open file handle (keep it referenced
+    for the daemon's lifetime; closing it or letting it get garbage-collected releases the flock), or None when
+    another daemon already holds it."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    fh = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
+
+
+def _loop(interval, stop_event):
     """A fresh Pool() per tick: cooldowns and running counts are written by the spawned workers, so a long-lived
-    Pool would dispatch against minutes-old state."""
+    Pool would dispatch against minutes-old state. stop_event.wait as the sleep so a caller can interrupt it
+    instead of blocking for a full interval."""
     while True:
         try:
             tick(Pool())
         except Exception as e:
             print(f"[daemon] tick failed: {e}", file=sys.stderr)
-        if once:
+        if stop_event.wait(interval):
             return
-        time.sleep(interval)
+
+
+def start_background(cfg, env=os.environ):
+    """Called once from the orchestrator MCP server. None (no thread started) when [daemon].autostart is false,
+    ORCH_DAEMON=0 overrides it, or another daemon (CLI or a previous autostart) already holds the lock; otherwise
+    a live daemon Thread that keeps the lock until stop_background() (tests) or process exit."""
+    if not (cfg.get("daemon") or {}).get("autostart", False):
+        return None
+    if env.get("ORCH_DAEMON") == "0":
+        return None
+    lock = acquire_lock()
+    if lock is None:
+        return None
+    interval = (cfg.get("daemon") or {}).get("interval_s", 30)
+    stop_event = threading.Event()
+
+    def run():
+        try:
+            _loop(interval, stop_event)
+        finally:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            finally:
+                lock.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.stop_event = stop_event
+    thread.start()
+    print(f"[daemon] autostarted (pid {os.getpid()})", file=sys.stderr)
+    return thread
+
+
+def stop_background(thread, timeout=5):
+    """Test helper: signal a thread started by start_background() to stop and wait for it, which releases the
+    lock so a later start_background() call in the same process can take it again."""
+    if thread is None:
+        return
+    thread.stop_event.set()
+    thread.join(timeout)
+
+
+def main(interval=30, once=False):
+    if once:
+        tick(Pool())
+        return
+    lock = acquire_lock()
+    if lock is None:
+        print("[daemon] another instance already holds the lock; exiting", file=sys.stderr)
+        sys.exit(1)
+    try:
+        _loop(interval, threading.Event())
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
 
 
 if __name__ == "__main__":

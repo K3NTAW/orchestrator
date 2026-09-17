@@ -30,7 +30,9 @@ an executor → `done` → gated (`tests-green.sh`) → complexity ≤3 merges s
 `daemon.tick()` drives every stage: `dispatch()` (spec review or executor), `gate()` (tests-green, then merge or
 review), `merge_reviewed()` (merge on approve). Each stage stamps `pipeline.<stage>_at` on the task json under the
 bus lock before acting, so a crash-and-retry never re-runs a stage.
-Run it: `orchestrator daemon` (loops every 30s) or `orchestrator daemon --once` for a single pass.
+Run it: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart` in `pool.toml` (`ORCH_DAEMON=0`
+or `autostart = false` disables it), and `uv run orchestrator daemon` takes the same single-instance lock so two loops
+never run at once; `orchestrator daemon --once` runs a single pass without the lock.
 Holds (`status="held"`) mean the daemon stopped and a human/Planner must act: `spec_review request_changes`, `review
 request_changes`, or `gate_red` (tests failed at the gate). The `hold_reason` field and `resume_hint` on the task say
 which. The Planner clears a hold by writing a new spec with `depends_on=[held_task_id]`, never by editing the held

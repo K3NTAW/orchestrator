@@ -1,10 +1,19 @@
 """MCP server `orchestrator`: scheduler for the Planner. Spawns run in background threads; results land on the bus."""
-import threading
+import sys, threading
 from mcp.server.mcpserver import MCPServer
-from . import bus, executor, merge as mq, spawn
+from . import bus, daemon, executor, merge as mq, spawn
 from .pool import Pool, fallback_tier
 
 srv = MCPServer("orchestrator")
+
+# The pipeline daemon (dispatch/gate/review/merge) used to need a second terminal running `orchestrator daemon`
+# by hand; it now starts and dies with this MCP server instead. A failure here must never take the server down
+# with it — the Planner still needs `f orch` to come up even if the daemon can't get the lock.
+daemon_thread = None
+try:
+    daemon_thread = daemon.start_background(Pool().cfg)
+except Exception as e:
+    print(f"[daemon] autostart failed: {e}", file=sys.stderr)
 
 
 def _bg(task_id):

@@ -162,6 +162,18 @@ class Daemon(unittest.TestCase):
         held = bus.get(t)
         self.assertEqual((held["status"], held["hold_reason"]), ("held", "worktree missing"))
 
+    def test_tick_skips_execute_task_of_closed_goal(self):
+        closed_goal = bus.create_task("goal closed", "s", ["ok"], ["x.py"], role="scout")["id"]
+        bus.update(closed_goal, status="done")
+        open_goal = bus.create_task("goal open", "s", ["ok"], ["x.py"], role="scout")["id"]
+        stale_child = bus.create_task("stale child", "spec", ["works"], ["x.py"], role="execute",
+                                      complexity=2, parent=closed_goal)["id"]
+        fresh_child = bus.create_task("fresh child", "spec", ["works"], ["x.py"], role="execute",
+                                      complexity=2, parent=open_goal)["id"]
+        daemon.tick()
+        self.assertEqual(self.settle_started(1), [fresh_child])   # stale_child's goal is done; never touched
+        self.assertFalse(bus.get(stale_child).get("pipeline"))
+
     def test_notify_argv_safe(self):
         calls = []
         self.swap(daemon.subprocess, "run", lambda *a, **k: calls.append(a[0]) or FakeProc("", 0))
@@ -188,6 +200,35 @@ class BusLock(unittest.TestCase):
         self.assertGreater(len(taken), n)                         # update -> its own lock, reentrant into _save
         self.assertTrue(bus.LOCK.exists())
         self.assertEqual(bus.LOCK.name, "bus.lock")
+
+
+class Background(unittest.TestCase):
+    """daemon.start_background(): the autostart the orchestrator MCP server calls on import. Uses the real
+    STATE/daemon.lock (not the per-test bus sandbox above — the lock is process-wide by design), so every test
+    that gets a Thread back must release it via stop_background in cleanup or the next test finds the lock held."""
+
+    def test_autostart_false_returns_none(self):
+        self.assertIsNone(daemon.start_background({"daemon": {"autostart": False}}))
+
+    def test_no_daemon_section_returns_none(self):
+        self.assertIsNone(daemon.start_background({}))
+
+    def test_env_override_returns_none(self):
+        thread = daemon.start_background({"daemon": {"autostart": True}}, env={"ORCH_DAEMON": "0"})
+        self.assertIsNone(thread)
+
+    def test_autostart_true_starts_thread_and_holds_the_lock(self):
+        t1 = daemon.start_background({"daemon": {"autostart": True, "interval_s": 60}})
+        self.addCleanup(daemon.stop_background, t1)
+        self.assertIsNotNone(t1)
+        self.assertTrue(t1.is_alive())
+        t2 = daemon.start_background({"daemon": {"autostart": True, "interval_s": 60}})
+        self.assertIsNone(t2)                                      # lock already held by t1
+        daemon.stop_background(t1)
+        self.assertFalse(t1.is_alive())
+        t3 = daemon.start_background({"daemon": {"autostart": True, "interval_s": 60}})
+        self.addCleanup(daemon.stop_background, t3)
+        self.assertIsNotNone(t3)                                   # lock released, a fresh start_background works
 
 
 if __name__ == "__main__":
