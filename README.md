@@ -37,6 +37,12 @@ Full access, guardrails as a hard floor, human only at PR approval:
 Hooks live: guardrails, scope-guard, tests-green, loop-guard, require-acceptance, no-uncommitted, retrospect-written, bus-post. Hand one atomic task to the `codex` tool (orchestrator server wraps `codex exec`), iterate with `codex_reply` deltas, accept via
 `.claude/hooks/tests-green.sh wt/<id>`.
 
+## Memory (skill `memory`)
+Layered, cheapest first: notes (`.orchestrator/memory/*.md`, dated `## YYYY-MM-DD title` entries) · bus results · claude-mem
+observations (read-only FTS over `~/.claude-mem/claude-mem.db`; the plugin is on `~/.claude`, not the worker accounts) · graphify code
+graph (`graphify-out/`, gitignored, AST only, no LLM). `recall.sh index "<terms>"` then `recall.sh get <id>...`; `record.sh draft <GOAL>` /
+`add` / `set architecture` at retrospective; `graph.sh update|query|affected|explain|summary` after merges and for scouts.
+
 ## CLI
 ```
 uv run orchestrator status | cost --by role|tier|account|task | hold A --minutes 30 | resume A | daemon | merge T-0001 | post T-0001 --summary ...
