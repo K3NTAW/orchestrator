@@ -87,3 +87,8 @@ outcome: fix round passes the text as an argv item to an 'on run argv' handler; 
 type: gotcha · goal: T-0043 · tasks: T-0050,T-0057,T-0063 · provenance: repo
 - merge(fix_round) sets merged_into only on the fix-round task; the original (e.g. T-0016, T-0018) stays done with merged_into unset; the first daemon --once created six stale review tasks T-0057..T-0062 and its threads died with the process
 outcome: T-0063: tick() skips tasks of closed goals and treats a task as merged when its branch is an ancestor of goal/<parent>; stale tasks marked failed/superseded
+
+## 2026-09-18 A worker test leaked a task into the live bus
+type: gotcha · goal: T-0043 · tasks: T-0027 · provenance: repo
+- T-0027 (title x, spec s, scope f.py, worktree /tmp) appeared on the real bus on 2026-09-17 ~18:50 while a fallback executor ran its tests; the harness sets ORCH_ROOT at import, but a test that imported orchestrator before the harness, or a worker running a test with the inherited ORCH_ROOT=ROOT env, writes to the live tasks dir
+outcome: closed as superseded; follow-up: the executor worker env should point ORCH_ROOT at the worktree for test runs, or tests must assert bus.TASKS is under TMP at import (add to the harness)
