@@ -1,5 +1,5 @@
 """One runnable check per non-trivial path: bus rules, pool selection, reset-hint parsing, merge on a scratch repo, and the hooks."""
-import contextlib, io, json, os, subprocess, sys, tempfile, time, unittest
+import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -390,6 +390,16 @@ class Hooks(unittest.TestCase):
         (r / "tests" / "test_a.py").write_text("import unittest\nclass T(unittest.TestCase):\n def test_x(self): pass\n")
         self.assertEqual(hook("tests-green.sh", {"cwd": str(r), "session_id": "tg"}, env={"PATH": "/usr/bin:/bin"}).returncode, 0)
 
+    def test_tests_green_picks_uv_runner_when_available(self):
+        r = TMP / "pyproj-uv"; (r / "tests").mkdir(parents=True); (r / "pyproject.toml").write_text("[project]\nname='x'\n")
+        (r / "tests" / "test_a.py").write_text("import unittest\nclass T(unittest.TestCase):\n def test_x(self): pass\n")
+        no_uv = hook("tests-green.sh", {"cwd": str(r)}, env={"PATH": "/usr/bin:/bin", "TESTS_GREEN_DRY": "1"})
+        self.assertEqual(no_uv.returncode, 0); self.assertIn("python3 -m unittest", no_uv.stdout)
+        uv_path = shutil.which("uv")
+        if not uv_path: self.skipTest("uv not on PATH")
+        with_uv = hook("tests-green.sh", {"cwd": str(r)}, env={"PATH": f"{os.path.dirname(uv_path)}:/usr/bin:/bin", "TESTS_GREEN_DRY": "1"})
+        self.assertEqual(with_uv.returncode, 0); self.assertIn("uv run --project .", with_uv.stdout)
+
 
 class Guardrails(unittest.TestCase):
     def bash(self, cmd):
@@ -424,7 +434,7 @@ class MergeQueue(unittest.TestCase):
         g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
         (TMP / "tests" / "test_ok.py").parent.mkdir(exist_ok=True)
         (TMP / "tests" / "test_ok.py").write_text("import unittest\nclass T(unittest.TestCase):\n def test_x(self): pass\n")
-        (TMP / "pyproject.toml").write_text("[project]\nname='x'\n"); (TMP / ".gitignore").write_text(".orchestrator/\nwt/\n.claude\n")
+        (TMP / "pyproject.toml").write_text("[project]\nname='x'\nversion='0.1.0'\n"); (TMP / ".gitignore").write_text(".orchestrator/\nwt/\n.claude\n")
         g("add", "-A"); g("commit", "-qm", "init")
         t = bus.create_task("feat", "s", ["a"], ["feature.py"], role="execute")
         wt = spawn.ensure_worktree(t["id"], base="HEAD"); bus.update(t["id"], worktree=str(wt))
