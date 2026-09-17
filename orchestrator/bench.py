@@ -227,12 +227,26 @@ def _supported_params(func):
     return set(getattr(td, "__annotations__", {}))
 
 
+REQUIRED_PARAMS = {"impersonate", "stealthy_headers", "headers"}
+
+
 def fetch_html(url=URL, timeout=30):
     """Identified, plain fetch: no TLS/JA3 impersonation, no synthetic browser headers or fake
-    referer (decision 2026-09-17). Returns (status_code, html)."""
+    referer (decision 2026-09-17). Returns (status_code, html).
+
+    Raises RuntimeError instead of silently falling back to scrapling defaults if a scrapling
+    upgrade renames or drops any of REQUIRED_PARAMS from Fetcher.get -- a silent fallback could
+    re-enable browser impersonation against that decision."""
     from scrapling.fetchers import Fetcher
 
     supported = _supported_params(Fetcher.get)
+    missing = REQUIRED_PARAMS - supported
+    if missing:
+        raise RuntimeError(
+            f"scrapling Fetcher.get no longer exposes {', '.join(sorted(missing))}; refusing to "
+            "fetch without an identified, non-impersonating request -- pin scrapling or update "
+            "bench.fetch_html"
+        )
     kwargs = {}
     if "timeout" in supported:
         kwargs["timeout"] = timeout
@@ -265,7 +279,10 @@ def fetch(force=False, by="orchestrator"):
 
     import scrapling
 
-    status, html = fetch_html()
+    try:
+        status, html = fetch_html()
+    except RuntimeError as e:
+        return {"error": str(e)}
     records = parse_chunks(html)
     if status != 200 or len(html) < 10 * 1024 or not records:
         return {"error": f"fetch failed: status {status}, {len(html)} bytes, {len(records)} records"}

@@ -46,7 +46,9 @@ class PoolSel(unittest.TestCase):
     def test_affinity_reserve_cooldown_budget(self):
         self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
         A, B = self.p.get("A"), self.p.get("B")
-        self.p.record(A, int(self.p.cap * 0.7))                     # A above 1-reserve(0.35)=0.65 -> scouts go to B
+        A.window_tokens = int(self.p.cap * 0.7); self.p.save()       # above 1-reserve(0.35)=0.65 -> scouts go to B;
+                                                                      # day_tokens left at 0 so A's daily budget (below
+                                                                      # the reserve ceiling at this cap) doesn't also exclude it
         self.assertEqual(self.p.pick("scout").id, "B")
         self.assertEqual(self.p.pick("planner").id, "A")            # planner ceiling is 1.0
         self.p.cooldown(B, 600); self.assertIsNone(self.p.pick("review"))  # held, not failed
@@ -435,6 +437,30 @@ class Bench(unittest.TestCase):
         src = inspect.getsource(bench.fetch_html)
         self.assertIn("stealthy_headers=False", src)
         self.assertIn("orchestrator-bench", src)
+
+    def test_fetch_html_raises_if_scrapling_drops_a_required_param(self):
+        orig = bench._supported_params
+        bench._supported_params = lambda func: {"headers", "impersonate", "timeout"}  # no stealthy_headers
+        self.addCleanup(lambda: setattr(bench, "_supported_params", orig))
+        with self.assertRaises(RuntimeError) as cm:
+            bench.fetch_html()
+        self.assertIn("stealthy_headers", str(cm.exception))
+
+    def test_fetch_returns_error_and_leaves_bench_json_untouched_if_param_missing(self):
+        orig_fetch_html, orig_supported = bench.fetch_html, bench._supported_params
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        bench.fetch(force=True, by="tester")
+        before = bench.FILE.read_bytes()
+
+        bench.fetch_html = orig_fetch_html
+        bench._supported_params = lambda func: {"headers", "impersonate", "timeout"}
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig_fetch_html))
+        self.addCleanup(lambda: setattr(bench, "_supported_params", orig_supported))
+
+        result = bench.fetch(force=True, by="tester")
+        self.assertIn("error", result)
+        self.assertIn("stealthy_headers", result["error"])
+        self.assertEqual(bench.FILE.read_bytes(), before)
 
     def test_set_model_marks_manual(self):
         rec = bench.set_model("gpt-6-astra", "tester", intelligence=99.0)
