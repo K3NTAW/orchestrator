@@ -1,5 +1,5 @@
 """One runnable check per non-trivial path: bus rules, pool selection, reset-hint parsing, merge on a scratch repo, and the hooks."""
-import json, os, subprocess, sys, tempfile, time, unittest
+import contextlib, io, json, os, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -11,7 +11,7 @@ for f in ("pool.toml",):
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")
 sys.path.insert(0, str(REPO))
-from orchestrator import bus, pool as P, spawn, merge, executor  # noqa: E402
+from orchestrator import bus, pool as P, spawn, merge, executor, cli  # noqa: E402
 
 HOOKS = REPO / ".claude" / "hooks"
 
@@ -205,6 +205,25 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(bus.get(t2["id"])["resume_hint"]["conflicts"], ["feature.py"])
         self.assertTrue(bus.commit_state())                          # orchestrator-state branch got the task JSON
         self.assertIn("tasks/T-0001.json", g("ls-tree", "-r", "--name-only", "orchestrator-state").stdout)
+
+
+class Cli(unittest.TestCase):
+    def test_status_plain_and_json(self):
+        sys.argv = ["orchestrator", "status", "--plain"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("A\tutil="))
+        self.assertTrue(lines[2].startswith("codex\tavailable="))
+
+        sys.argv = ["orchestrator", "status"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        parsed = json.loads(out.getvalue())
+        self.assertEqual(set(parsed.keys()), {"accounts", "codex", "queue"})
 
 
 if __name__ == "__main__":
