@@ -24,5 +24,17 @@ Each task's commit names its revert; goal branch PR to main is the human gate.
 T-0047 C-A tests split (4) → T-0048 C-B depends_on (3) ∥ T-0049 C-D spec_review (4) → T-0050 C-C daemon (7; opus fallback; review adversarial + security) → T-0051 C-E docs (2). Reviews: sonnet other account for ≥4; pre-create review worktrees off the task branch (server still old).
 Dispatched: T-0047 (wt/T-0047 off goal/T-0043).
 
+## Update 01:40
+- C-A T-0047 (104fce1) gate green, 67 tests across 9 files. Review T-0052 running (wt off task/T-0047).
+- C-B T-0048 and C-D T-0049 dispatched IN PARALLEL on worktrees off task/T-0047 (disjoint scopes). Merge order once T-0052 approves: merge(T-0047) → merge(T-0048) → merge(T-0049) (each rebases onto goal). If T-0052 requests changes, fix round first, then rebase risk on test_bus/test_spawn.
+- Then C-C T-0050 (worktree off goal after both; opus; review adversarial+security) → C-E T-0051.
+
+## Update 01:55
+- Merged into goal/T-0043: T-0047 split (0c4b3b3), T-0048 depends_on (b85b742). Pushed.
+- T-0049 spec_review (41df1ae) green; review T-0053 running (wt off task/T-0049).
+- T-0050 daemon dispatched (opus fallback) on wt/T-0050 off task/T-0049, told to rebase onto goal/T-0043 first (workers may rebase; the Planner may not).
+- Sync trick for the checked-out goal branch after merge(): `git restore --source=HEAD --staged --worktree -- <paths>` (removes files deleted in HEAD too).
+- Next: T-0053 verdict → merge(T-0049) → T-0050 result → gate → review task (adversarial + security; opus executed → sonnet reviewer) → merge → T-0051 docs (worktree off goal) → retrospective → PR goal/T-0043.
+
 ## Next step
 spawn scouts C1–C3 → read → synthesize → write specs → dispatch C-A first (fallback sonnet), then C-B and C-D in parallel, C-C after C-B, C-E last → PR goal/T-0043.
