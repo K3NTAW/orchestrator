@@ -56,6 +56,31 @@ def stale(t):
     return not (t["role"] == "execute" and t["status"] == "queued")
 
 
+def already_merged(t):
+    """True when a done execute task's work already landed in its goal branch even though merged_into is unset.
+    merge.merge() only stamps merged_into on whichever task_id it is called with, so a fix-round merge leaves the
+    original task done with merged_into unset while its commit is already an ancestor of goal/<parent> (the first
+    smoke run created T-0057..T-0062 this way). Detected here by ancestry so the gate and review stages do not
+    redo already-merged work; never raises, since a missing git binary or branch just means "not merged"."""
+    if t.get("merged_into"):
+        return True
+    parent = t.get("parent")
+    if not parent:
+        return False
+    branch = f"task/{t['id']}"
+    target = f"goal/{parent}"
+    try:
+        if not spawn.branch_exists(branch):
+            return False
+        r = spawn.git("merge-base", "--is-ancestor", branch, target, check=False)
+    except Exception:
+        return False
+    if r.returncode == 0:
+        bus.update(t["id"], merged_into=target, merged_via="ancestor")
+        return True
+    return False
+
+
 def free_slots(pool):
     """How many execute dispatches this tick may make: the executor pool's idle parallelism. Bounds tick()'s work
     so a queue of forty ready tasks does not fork forty subprocesses at once."""
@@ -123,7 +148,7 @@ def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
     open a review task (everything else)."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or t.get("merged_into") or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
+        if stale(t) or already_merged(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
             continue
         if not Path(t["worktree"]).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
@@ -166,7 +191,7 @@ def merge_reviewed(pool):
             src = bus.get(r["inputs"][0])
         except KeyError:
             continue
-        if src.get("merged_into"):
+        if already_merged(src):
             continue
         verdict = src.get("review_verdict") or r.get("review_verdict")
         if verdict == "approve":

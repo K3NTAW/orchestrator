@@ -7,8 +7,10 @@ these ticks would pick up every execute task any other test file left queued in 
 import sys, tempfile, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
-from _harness import REPO, TMP, FakeProc  # noqa: F401
+from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
 from orchestrator import bus, daemon, executor, merge, pool as P, spawn
+
+REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
 
 
 def raiser(exc):
@@ -37,8 +39,18 @@ class Daemon(unittest.TestCase):
         self.addCleanup(setattr, mod, name, orig)
 
     def gate_green(self, green):
-        """daemon.subprocess.run covers both the tests-green gate and notify()'s osascript; neither needs a real run."""
-        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0 if green else 1))
+        """daemon.subprocess.run covers the tests-green gate, notify()'s osascript, and already_merged()'s git
+        ancestry check (daemon.subprocess IS the stdlib subprocess module, shared with spawn.git); the first two
+        never need a real run, but the git check does, so only those two are faked and everything else -- git
+        calls -- passes through to the real subprocess.run."""
+        def fake(*a, **k):
+            argv = a[0]
+            if argv[:1] == [str(merge.TESTS_GREEN)]:
+                return FakeProc("", 0 if green else 1)
+            if argv[:1] == ["osascript"]:
+                return FakeProc("", 0)
+            return REAL_RUN(*a, **k)
+        self.swap(daemon.subprocess, "run", fake)
 
     def task(self, title, complexity=2, role="execute", **fields):
         t = bus.create_task(title, "spec", ["works"], ["x.py"], role=role, complexity=complexity,
@@ -161,6 +173,63 @@ class Daemon(unittest.TestCase):
         daemon.tick()
         held = bus.get(t)
         self.assertEqual((held["status"], held["hold_reason"]), ("held", "worktree missing"))
+
+    def test_ancestor_merged_task_skips_gate_and_review(self):
+        """A fix-round merge stamps merged_into only on the fix-round task; the original stays done with
+        merged_into unset even though its commit already landed in goal/G. The gate must detect that by
+        ancestry and never re-gate or re-review it, while a task whose branch truly hasn't landed still is."""
+        # TMP is a module-wide sandbox shared with every other test in this file, but bus task ids restart at
+        # T-0001 per test (fresh sandbox in setUp), so the task/T-000N branches created here must be deleted
+        # again in cleanup -- otherwise a later test's identically-numbered task would find them still on disk
+        # and see itself as already merged. setUp()'s gate_green(True) passes git calls through to the real
+        # subprocess.run (see gate_green's docstring), so the checkout/commit/merge below run for real.
+        scratch_repo(TMP)
+        self.addCleanup(lambda: (TMP / "landed.txt").unlink(missing_ok=True))
+        self.addCleanup(lambda: (TMP / "pending.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "checkout", "main")
+        self.addCleanup(g, "branch", "-D", "goal/G")
+
+        merged_id = self.task("already landed", complexity=5)
+        bus.update(merged_id, status="done", worktree=str(TMP), parent="G")
+        self.addCleanup(g, "branch", "-D", f"task/{merged_id}")
+        g("checkout", "-b", "goal/G")
+        g("checkout", "-b", f"task/{merged_id}")
+        (TMP / "landed.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "task work")
+        g("checkout", "goal/G")
+        g("merge", "--ff-only", f"task/{merged_id}")
+        g("checkout", "main")
+
+        pending_id = self.task("not landed yet", complexity=2)
+        bus.update(pending_id, status="done", worktree=str(TMP), parent="G")
+        self.addCleanup(g, "branch", "-D", f"task/{pending_id}")
+        g("checkout", "-b", f"task/{pending_id}")
+        (TMP / "pending.txt").write_text("y")
+        g("add", "-A")
+        g("commit", "-qm", "unrelated work")
+        g("checkout", "main")
+
+        tests_green_calls = []
+        already_faked = daemon.subprocess.run          # gate_green(True)'s fake, installed in setUp
+        def counting_run(*a, **k):
+            if a[0][:1] == [str(merge.TESTS_GREEN)]:
+                tests_green_calls.append(a)
+            return already_faked(*a, **k)
+        self.swap(daemon.subprocess, "run", counting_run)
+
+        daemon.tick()
+
+        merged = bus.get(merged_id)
+        self.assertEqual(merged["merged_into"], "goal/G")
+        self.assertEqual(merged["merged_via"], "ancestor")
+        self.assertFalse((merged.get("pipeline") or {}).get("gated_at"))
+        self.assertEqual(self.workers, [])                 # no review spawned for either task
+        self.assertEqual(len(tests_green_calls), 1)         # tests-green ran once, for pending_id only
+
+        pending = bus.get(pending_id)
+        self.assertEqual(self.merged, [pending_id])         # non-ancestor task still gated and merged as before
+        self.assertTrue(pending["pipeline"]["gated_at"])
 
     def test_tick_skips_execute_task_of_closed_goal(self):
         closed_goal = bus.create_task("goal closed", "s", ["ok"], ["x.py"], role="scout")["id"]
