@@ -31,6 +31,36 @@ SPEED_RE = re.compile(r"outputspeed", re.I)
 PRICE_IN_RE = re.compile(r"price.*in", re.I)
 PRICE_OUT_RE = re.compile(r"price.*out", re.I)
 
+# Display names on the site carry an effort suffix, e.g. "GPT-6 Astra (max)" or
+# "Claude Opus 5 (Adaptive Reasoning, Max Effort)". These words are the only ones norm()
+# tolerates as leftovers outside the stripped parenthetical when comparing a name to a hint.
+EFFORT_WORDS = {"max", "high", "xhigh", "low", "medium", "effort"}
+# Preference order when several effort variants of the same model match one hint.
+VARIANT_PREFERENCE = ["(max)", "max effort", "(xhigh)", "(high)"]
+
+
+def _strip_first_paren(s):
+    start = s.find("(")
+    if start == -1:
+        return s
+    depth = 0
+    for i in range(start, len(s)):
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return s[:start] + s[i + 1:]
+    return s[:start]  # unmatched "(": drop the rest, nothing sane to keep
+
+
+def norm(name):
+    """Lowercase, drop the first (...) span and collapse whitespace, so display-name effort
+    suffixes ("(max)", "(xhigh)") don't break equality with a plain model hint."""
+    s = _strip_first_paren(str(name or "").lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.rstrip(".,;:!?-")
+
 
 def _find_objects(text):
     """Spans of every balanced {...} substring in text, respecting quoted strings. Innermost spans close first."""
@@ -120,19 +150,68 @@ def parse_chunks(html):
     return records
 
 
+def _prefer_variant(raw_names):
+    for pat in VARIANT_PREFERENCE:
+        for name in raw_names:
+            if pat in name.lower():
+                return name
+    return raw_names[0]
+
+
+def _startswith_candidate(name_norm, hint_norm):
+    """name_norm's only extra content past hint_norm is effort words (an un-parenthesized
+    suffix survives norm() only if it wasn't wrapped in "(...)"; guard so "gpt-5.5 pro" never
+    matches hint "gpt-5.5" -- "pro" isn't an effort word)."""
+    if not hint_norm or not name_norm.startswith(hint_norm + " "):
+        return False
+    remainder = name_norm[len(hint_norm) + 1:].split()
+    return bool(remainder) and all(w in EFFORT_WORDS for w in remainder)
+
+
+def _token_candidate(name_norm, hint_tokens):
+    """Looser fallback: dash/space-insensitive token containment, e.g. hint "gpt 5.6 luna"
+    against name "gpt-5.6 luna". Extra tokens beyond the hint must all be effort words or
+    non-alphabetic, else a longer name ("gpt-5.5 pro") would wrongly satisfy a shorter hint."""
+    if not hint_tokens:
+        return False
+    name_tokens = name_norm.replace("-", " ").split()
+    if not all(t in name_tokens for t in hint_tokens):
+        return False
+    extra = [t for t in name_tokens if t not in hint_tokens]
+    return all((not t.isalpha()) or t in EFFORT_WORDS for t in extra)
+
+
 def match(records, executors_models):
-    """Case-insensitive exact match of a display hint against a record's name/slug. Unmatched -> None."""
+    """Match a display hint against record names, tolerant of effort suffixes such as
+    "(max)" or "(xhigh)". For each hint: exact match on norm(name), else norm(name) with only
+    effort words trailing the hint, else (if nothing matched yet) a dash/space-insensitive
+    token-containment fallback. When several raw names satisfy a hint, prefer the "(max)"
+    variant, then "max effort", then "(xhigh)", then "(high)", else the first found. The
+    chosen record is annotated with "display_name" (its raw name) and "variants" (every raw
+    name that matched). Unmatched -> None."""
     out = {}
     for model_id, hint in executors_models.items():
-        hint_l = (hint or "").strip().lower()
-        found = None
+        hint_norm = norm(hint)
+        hint_tokens = hint_norm.replace("-", " ").split()
+        candidates = []
         for rec in records:
-            name_l = (rec.get("name") or "").strip().lower()
-            slug_l = (rec.get("slug") or "").strip().lower()
-            if hint_l and hint_l in (name_l, slug_l):
-                found = rec
-                break
-        out[model_id] = found
+            name_norm = norm(rec.get("name"))
+            if name_norm == hint_norm or _startswith_candidate(name_norm, hint_norm):
+                candidates.append(rec)
+        if not candidates:
+            for rec in records:
+                if _token_candidate(norm(rec.get("name")), hint_tokens):
+                    candidates.append(rec)
+        if not candidates:
+            out[model_id] = None
+            continue
+        raw_names = [rec.get("name") or "" for rec in candidates]
+        chosen_name = _prefer_variant(raw_names)
+        chosen = next(rec for rec in candidates if (rec.get("name") or "") == chosen_name)
+        result = dict(chosen)
+        result["display_name"] = chosen_name
+        result["variants"] = raw_names
+        out[model_id] = result
     return out
 
 

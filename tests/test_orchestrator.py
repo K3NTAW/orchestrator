@@ -334,6 +334,42 @@ class Bench(unittest.TestCase):
         self.assertEqual(matched["gpt-5.6-luna"]["name"], "GPT-5.6 Luna")
         self.assertIsNone(matched["gpt-5.6-terra"])
 
+    def test_norm_strips_effort_suffix_and_punctuation(self):
+        self.assertEqual(bench.norm("GPT-6 Astra (max)"), "gpt-6 astra")
+        self.assertEqual(bench.norm("Claude Opus 5 (Adaptive Reasoning, Max Effort)"), "claude opus 5")
+        self.assertEqual(bench.norm("  Foo   Bar. "), "foo bar")
+
+    def test_match_handles_effort_suffixed_display_names(self):
+        records = [
+            {"name": "GPT-6 Astra (max)"},
+            {"name": "GPT-5.6 Luna (max)"},
+            {"name": "GPT-5.6 Terra (max)"},
+            {"name": "GPT-5.6 Sol (max)"},
+            {"name": "Claude Opus 5 (Adaptive Reasoning, Max Effort)"},
+            {"name": "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)"},
+            {"name": "GPT-5.5 Pro (xhigh)"},
+        ]
+        matched = bench.match(records, dict(bench.DEFAULT_HINTS, **{"gpt-5.5": "GPT-5.5"}))
+        for model_id in ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+                          "claude-opus-5", "claude-fable-5-1"):
+            self.assertIsNotNone(matched[model_id], model_id)
+            self.assertEqual(matched[model_id]["display_name"], records[
+                ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+                 "claude-opus-5", "claude-fable-5-1"].index(model_id)]["name"])
+        # "GPT-5.5 Pro (xhigh)" must not satisfy a "GPT-5.5" hint (prefix over-match guard).
+        self.assertIsNone(matched["gpt-5.5"])
+
+    def test_match_prefers_max_variant_over_high(self):
+        records = [{"name": "GPT-6 Astra (high)"}, {"name": "GPT-6 Astra (max)"}]
+        matched = bench.match(records, {"gpt-6-astra": "GPT-6 Astra"})
+        self.assertEqual(matched["gpt-6-astra"]["display_name"], "GPT-6 Astra (max)")
+        self.assertEqual(set(matched["gpt-6-astra"]["variants"]), {"GPT-6 Astra (high)", "GPT-6 Astra (max)"})
+
+    def test_match_token_fallback_normalizes_dash_and_space(self):
+        records = [{"name": "GPT-5.6 Luna (max)"}]
+        matched = bench.match(records, {"gpt-5.6-luna": "GPT 5.6 Luna"})
+        self.assertEqual(matched["gpt-5.6-luna"]["display_name"], "GPT-5.6 Luna (max)")
+
     def test_fetch_force_writes_then_second_call_is_skipped(self):
         orig = bench.fetch_html
         bench.fetch_html = lambda *a, **k: self.FIXTURE
