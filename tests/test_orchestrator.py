@@ -11,7 +11,7 @@ for f in ("pool.toml",):
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")
 sys.path.insert(0, str(REPO))
-from orchestrator import bus, pool as P, spawn, merge, executor, cli, scorecard, STATE  # noqa: E402
+from orchestrator import bus, pool as P, spawn, merge, executor, cli, scorecard, bench, STATE  # noqa: E402
 
 HOOKS = REPO / ".claude" / "hooks"
 
@@ -307,6 +307,48 @@ class Scorecard(unittest.TestCase):
         self.addCleanup(lambda: setattr(scorecard, "scores", orig_scores))
         executor.start(t["id"], "do it")
         self.assertEqual(seen["ex"].id, "terra")                # weight x score(3.0) beats every other row
+
+
+class Bench(unittest.TestCase):
+    """orchestrator.bench: RSC chunk parsing, display-hint matching, and bench.json's 20h fetch gate.
+    No network here -- fetch_html is monkeypatched to the fixture, so importing this module never fetches."""
+    FIXTURE = (REPO / "tests" / "fixtures" / "aa_models_sample.html").read_text()
+
+    def setUp(self):
+        bench.FILE.unlink(missing_ok=True)
+        self.addCleanup(bench.FILE.unlink, True)
+
+    def test_parse_chunks_skips_malformed(self):
+        records = bench.parse_chunks(self.FIXTURE)
+        self.assertEqual(len(records), 2)
+        astra = next(r for r in records if r["name"] == "GPT-6 Astra")
+        luna = next(r for r in records if r["name"] == "GPT-5.6 Luna")
+        self.assertEqual((astra["intelligence"], astra["speed_tps"]), (70.1, 120.0))
+        self.assertEqual((luna["intelligence"], luna["speed_tps"], luna["coding"]), (61.0, 200.0, 55.0))
+
+    def test_match_maps_to_model_ids(self):
+        records = bench.parse_chunks(self.FIXTURE)
+        hints = {"gpt-6-astra": "GPT-6 Astra", "gpt-5.6-luna": "GPT-5.6 Luna", "gpt-5.6-terra": "GPT-5.6 Terra"}
+        matched = bench.match(records, hints)
+        self.assertEqual(matched["gpt-6-astra"]["name"], "GPT-6 Astra")
+        self.assertEqual(matched["gpt-5.6-luna"]["name"], "GPT-5.6 Luna")
+        self.assertIsNone(matched["gpt-5.6-terra"])
+
+    def test_fetch_force_writes_then_second_call_is_skipped(self):
+        orig = bench.fetch_html
+        bench.fetch_html = lambda *a, **k: self.FIXTURE
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig))
+        result = bench.fetch(force=True, by="tester")
+        self.assertEqual(result["provenance"], "web:artificialanalysis.ai (untrusted data)")
+        self.assertEqual(result["fetched_by"], "tester")
+        self.assertEqual(result["models"]["gpt-6-astra"]["name"], "GPT-6 Astra")
+        self.assertTrue(bench.FILE.exists())
+        self.assertIn("skipped", bench.fetch())          # within 20h, force not given
+
+    def test_set_model_marks_manual(self):
+        rec = bench.set_model("gpt-6-astra", "tester", intelligence=99.0)
+        self.assertTrue(rec["manual"])
+        self.assertEqual(bench.load()["models"]["gpt-6-astra"]["intelligence"], 99.0)
 
 
 class ReviewVerdict(unittest.TestCase):

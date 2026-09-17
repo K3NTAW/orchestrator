@@ -28,6 +28,10 @@ def main():
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard"); sc.add_argument("--by", default="executor", choices=["executor", "tier"])
     sc.add_argument("--json", action="store_true")
+    bn = sub.add_parser("bench"); bsub = bn.add_subparsers(dest="bench_cmd", required=True)
+    bf = bsub.add_parser("fetch"); bf.add_argument("--force", action="store_true"); bf.add_argument("--by", default="orchestrator")
+    bsub.add_parser("show")
+    bs = bsub.add_parser("set"); bs.add_argument("model_id"); bs.add_argument("--by", required=True); bs.add_argument("metrics", nargs="+", metavar="key=value")
     a = ap.parse_args()
     if a.cmd == "status":
         if a.plain:
@@ -60,6 +64,35 @@ def main():
             for eid, r in sorted(card.items()):
                 print(f"{eid}\t{r['merged']}\t{r['failed']}\t{r['rounds_avg']}\t{round(r['wall_s'])}\t"
                       f"{round(r['usd'], 2)}\t{r['held_usage_limit']}\t{round(sc.get(eid, 1.0), 3)}")
+    elif a.cmd == "bench":
+        from . import bench
+        if a.bench_cmd == "fetch":
+            result = bench.fetch(force=a.force, by=a.by)
+            if "skipped" in result:
+                print(result["skipped"])
+            else:
+                matched = sum(1 for v in result["models"].values() if v)
+                print(f"matched {matched}/{len(result['models'])}; unmatched sample: {result['unmatched_names'][:5]}")
+                print(bench.FILE)
+        elif a.bench_cmd == "show":
+            data = bench.load()
+            print("model_id\tname\tintelligence\tcoding\tspeed\tprice_in\tprice_out\tfetched_at/manual")
+            for mid, rec in sorted((data.get("models") or {}).items()):
+                if not rec:
+                    print(f"{mid}\t-\t-\t-\t-\t-\t-\tunmatched"); continue
+                stamp = "manual" if rec.get("manual") else data.get("fetched_at", "-")
+                print(f"{mid}\t{rec.get('name', '-')}\t{rec.get('intelligence', '-')}\t{rec.get('coding', '-')}\t"
+                      f"{rec.get('speed_tps', '-')}\t{rec.get('price_in', '-')}\t{rec.get('price_out', '-')}\t{stamp}")
+        elif a.bench_cmd == "set":
+            metrics = {}
+            for kv in a.metrics:
+                k, _, v = kv.partition("=")
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+                metrics[k] = v
+            print(json.dumps(bench.set_model(a.model_id, a.by, **metrics), indent=1))
 
 
 if __name__ == "__main__":
