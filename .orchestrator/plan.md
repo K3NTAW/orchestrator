@@ -20,5 +20,9 @@ Review: sonnet other account for ≥4; daemon (C-C) gets adversarial + security 
 ## Rollback
 Each task's commit names its revert; goal branch PR to main is the human gate.
 
+## Specs on the bus (01:20)
+T-0047 C-A tests split (4) → T-0048 C-B depends_on (3) ∥ T-0049 C-D spec_review (4) → T-0050 C-C daemon (7; opus fallback; review adversarial + security) → T-0051 C-E docs (2). Reviews: sonnet other account for ≥4; pre-create review worktrees off the task branch (server still old).
+Dispatched: T-0047 (wt/T-0047 off goal/T-0043).
+
 ## Next step
 spawn scouts C1–C3 → read → synthesize → write specs → dispatch C-A first (fallback sonnet), then C-B and C-D in parallel, C-C after C-B, C-E last → PR goal/T-0043.
