@@ -4,6 +4,7 @@ without the Planner in the loop. Timeouts are enforced by the spawner itself (su
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
 import os, subprocess, sys, threading, time
+from pathlib import Path
 from . import bus, executor, merge, spawn
 from .pool import Pool
 
@@ -14,7 +15,11 @@ DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review 
 def notify(msg):
     print(f"[notify] {msg}", file=sys.stderr)
     if sys.platform == "darwin":
-        subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "orchestrator"'], check=False)
+        # msg is untrusted (merge stderr, task titles): passed as an argv item, never interpolated into the
+        # AppleScript source, so a quote in it cannot break out and run arbitrary local commands.
+        subprocess.run(["osascript", "-e", "on run argv", "-e",
+                        'display notification (item 1 of argv) with title "orchestrator"', "-e", "end run",
+                        "--", msg[:200]], check=False)
 
 
 def alive(pid):
@@ -44,8 +49,32 @@ def free_slots(pool):
                if ex.enabled and "execute" in ex.roles and not ex.cooling())
 
 
-def spawn_async(task_id):
-    threading.Thread(target=spawn.run_worker, args=(task_id,), daemon=True).start()
+def spawn_async(fn, *args):
+    """Fire a side-effecting call (executor.start, spawn.run_worker) in a background thread so tick() never
+    blocks on a slow subprocess."""
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def hold_failed(tid, error_key, stage_label, exc):
+    """A stage's side effect raised: hold the task with a short reason and an error stamp instead of leaving it
+    wedged at a stamped-but-never-acted-on stage."""
+    with bus.locked():
+        t = bus.get(tid)
+        pipeline = dict(t.get("pipeline") or {})
+        pipeline[error_key] = str(exc)[:300]
+        bus.update(tid, status="held", hold_reason=f"{stage_label} failed: {type(exc).__name__}", pipeline=pipeline)
+    notify(f"{tid}: {stage_label} failed: {exc}")
+
+
+def _dispatch_worker(task_id, prompt):
+    try:
+        executor.start(task_id, prompt)
+    except Exception as e:
+        with bus.locked():
+            t = bus.get(task_id)
+            pipeline = dict(t.get("pipeline") or {})
+            pipeline["dispatch_error"] = str(e)[:300]
+            bus.update(task_id, pipeline=pipeline)
 
 
 def dispatch(pool):
@@ -61,16 +90,19 @@ def dispatch(pool):
             if stamp(t["id"], "dispatched_at"):
                 slots -= 1
                 prompt = spawn.render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"])
-                executor.start(t["id"], prompt)
+                spawn_async(_dispatch_worker, t["id"], prompt)
         elif verdict == "request_changes":
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
         elif not any(r["inputs"][:1] == [t["id"]] for r in bus.read(role="spec_review")):
             if stamp(t["id"], "spec_review_at"):
-                sr = bus.create_task(f"spec review: {t['title']}", t["spec"], t["acceptance"], t["scope"],
-                                     role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
-                                     complexity=t["complexity"])
-                spawn_async(sr["id"])
+                try:
+                    sr = bus.create_task(f"spec review: {t['title']}", t["spec"], t["acceptance"], t["scope"],
+                                         role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
+                                         complexity=t["complexity"])
+                    spawn_async(spawn.run_worker, sr["id"])
+                except Exception as e:
+                    hold_failed(t["id"], "spec_review_error", "spec_review", e)
 
 
 def gate(pool):
@@ -78,6 +110,10 @@ def gate(pool):
     open a review task (everything else)."""
     for t in bus.read(status="done", role="execute"):
         if t.get("merged_into") or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
+            continue
+        if not Path(t["worktree"]).exists():
+            if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
+                notify(f"{t['id']}: worktree missing; held")
             continue
         tg = subprocess.run([str(merge.TESTS_GREEN), t["worktree"]], capture_output=True, text=True, input="{}")
         if tg.returncode:
@@ -87,12 +123,15 @@ def gate(pool):
             continue
         if not stamp(t["id"], "gated_at"):
             continue
-        if t["complexity"] <= DIRECT_MERGE_MAX:
-            report_merge(t["id"], merge.merge(t["id"]))
-        else:
-            r = bus.create_task(f"review: {t['title']}", t["spec"], t["acceptance"], t["scope"], role="review",
-                                inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"])
-            spawn_async(r["id"])
+        try:
+            if t["complexity"] <= DIRECT_MERGE_MAX:
+                report_merge(t["id"], merge.merge(t["id"]))
+            else:
+                r = bus.create_task(f"review: {t['title']}", t["spec"], t["acceptance"], t["scope"], role="review",
+                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"])
+                spawn_async(spawn.run_worker, r["id"])
+        except Exception as e:
+            hold_failed(t["id"], "gated_error", "gate", e)
 
 
 def report_merge(task_id, r):
@@ -120,7 +159,10 @@ def merge_reviewed(pool):
             # stamped before the merge, not after: a conflict leaves merged_into unset, and retrying it every tick
             # would just rebuild the same conflict
             if stamp(r["id"], "merged_at"):
-                report_merge(src["id"], merge.merge(src["id"]))
+                try:
+                    report_merge(src["id"], merge.merge(src["id"]))
+                except Exception as e:
+                    hold_failed(src["id"], "merged_error", "merge", e)
         elif verdict == "request_changes":
             if stamp(src["id"], "review_held_at", status="held", hold_reason="review request_changes"):
                 notify(f"{src['id']}: review asked for changes; Planner writes the fix round")
@@ -131,9 +173,11 @@ def tick(pool=None):
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             bus.update(t["id"], status="queued", pid=None, reason="process died; requeued")
-    dispatch(pool)
-    gate(pool)
-    merge_reviewed(pool)
+    for stage in (dispatch, gate, merge_reviewed):
+        try:
+            stage(pool)
+        except Exception as e:
+            print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
     m = pool.both_cooling_minutes()
     if m > 30:
         notify(f"both Claude accounts cooling for {m:.0f} more min")
@@ -148,7 +192,10 @@ def main(interval=30, once=False):
     """A fresh Pool() per tick: cooldowns and running counts are written by the spawned workers, so a long-lived
     Pool would dispatch against minutes-old state."""
     while True:
-        tick(Pool())
+        try:
+            tick(Pool())
+        except Exception as e:
+            print(f"[daemon] tick failed: {e}", file=sys.stderr)
         if once:
             return
         time.sleep(interval)

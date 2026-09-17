@@ -11,6 +11,12 @@ from _harness import REPO, TMP, FakeProc  # noqa: F401
 from orchestrator import bus, daemon, executor, merge, pool as P, spawn
 
 
+def raiser(exc):
+    def f(*a, **k):
+        raise exc
+    return f
+
+
 class Daemon(unittest.TestCase):
     def setUp(self):
         sandbox = Path(tempfile.mkdtemp(prefix="orch-daemon-"))
@@ -46,14 +52,21 @@ class Daemon(unittest.TestCase):
             time.sleep(0.01)
         return self.workers
 
+    def settle_started(self, want, seconds=5):
+        """dispatch() now runs executor.start on a background thread too; wait for it the same way."""
+        deadline = time.time() + seconds
+        while len(self.started) < want and time.time() < deadline:
+            time.sleep(0.01)
+        return self.started
+
     def test_depends_on_gates_dispatch(self):
         a = self.task("A")
         b = self.task("B", depends_on=[a])
         daemon.tick()
-        self.assertEqual(self.started, [a])                       # B's dependency has not merged
+        self.assertEqual(self.settle_started(1), [a])              # B's dependency has not merged
         bus.update(a, merged_into="goal/G", sha="deadbee")
         daemon.tick()
-        self.assertEqual(self.started, [a, b])                    # A is not dispatched twice: dispatched_at is stamped
+        self.assertEqual(self.settle_started(2), [a, b])           # A is not dispatched twice: dispatched_at is stamped
 
     def test_high_complexity_waits_for_spec_review(self):
         c = self.task("C", complexity=6)
@@ -67,7 +80,7 @@ class Daemon(unittest.TestCase):
         self.assertTrue(bus.get(c)["pipeline"]["spec_review_at"])
         bus.update(c, spec_review_verdict="approve")
         daemon.tick()
-        self.assertEqual(self.started, [c])
+        self.assertEqual(self.settle_started(1), [c])
 
     def test_spec_review_request_changes_holds(self):
         c = self.task("C", complexity=7)
@@ -118,6 +131,45 @@ class Daemon(unittest.TestCase):
         t = self.task(title, complexity=5)
         bus.update(t, status="done", worktree=str(TMP), pipeline={"gated_at": time.time()})
         return t
+
+    def test_dispatch_does_not_block(self):
+        a = self.task("A")
+        self.swap(executor, "start", lambda tid, prompt: (time.sleep(2), self.started.append(tid)))
+        t0 = time.time()
+        daemon.tick()
+        self.assertLess(time.time() - t0, 0.5)                     # tick() returned before the sleep(2) finished
+        stamp1 = bus.get(a)["pipeline"]["dispatched_at"]
+        daemon.tick()
+        self.assertLess(time.time() - t0, 1.0)
+        stamp2 = bus.get(a)["pipeline"]["dispatched_at"]
+        self.assertEqual(stamp1, stamp2)                           # not dispatched a second time
+        self.assertEqual(self.settle_started(1), [a])
+
+    def test_gate_side_effect_failure_holds(self):
+        t = self.task("cheap", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP))
+        self.swap(merge, "merge", raiser(RuntimeError("merge blew up")))
+        daemon.tick()                                              # must return normally, not raise
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertTrue(held["hold_reason"].startswith("gate failed"), held["hold_reason"])
+        self.assertIn("merge blew up", held["pipeline"]["gated_error"])
+
+    def test_gate_missing_worktree_holds(self):
+        t = self.task("nowt", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP / "does-not-exist"))
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "worktree missing"))
+
+    def test_notify_argv_safe(self):
+        calls = []
+        self.swap(daemon.subprocess, "run", lambda *a, **k: calls.append(a[0]) or FakeProc("", 0))
+        msg = 'hi" & do shell script "echo pwned'
+        daemon.notify(msg)
+        cmd = calls[-1]
+        self.assertEqual(cmd[-1], msg[:200])                       # untrusted text only ever lands in argv
+        self.assertTrue(all(msg not in part for part in cmd[:-1]))
 
 
 class BusLock(unittest.TestCase):
