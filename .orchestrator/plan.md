@@ -39,5 +39,9 @@ Dispatched: T-0047 (wt/T-0047 off goal/T-0043).
 ## Update 02:10
 - T-0053 review of spec_review: request_changes (HIGH fit_result only trims findings; MED unnumbered excerpts). Fix round T-0055 running on wt/T-0055 off task/T-0049. Merge order: T-0055 (carries 41df1ae) → then T-0050 daemon (its worktree rebased onto goal by the worker at start; merge rebases again) → review T-0054 (pre-create wt off task/T-0050) → merge → T-0051 docs.
 
+## Update 02:35
+- Merged: T-0055 (e598cf2, spec_review + fit_result fix). T-0051 docs (e16d0d4) green, waiting behind the daemon.
+- T-0054 daemon review: request_changes (HIGH inline blocking dispatch; HIGH stamp-before-effect + no exception handling; LOW osascript injection in notify). Fix round T-0056 next (worktree off task/T-0050). Then: gate → merge(T-0056) (carries 93a1b64) → merge(T-0051) → retrospective → PR goal/T-0043 → main.
+
 ## Next step
 spawn scouts C1–C3 → read → synthesize → write specs → dispatch C-A first (fallback sonnet), then C-B and C-D in parallel, C-C after C-B, C-E last → PR goal/T-0043.

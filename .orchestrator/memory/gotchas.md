@@ -77,3 +77,8 @@ outcome: in review specs, label the reviewer's acceptance explicitly: 'Acceptanc
 type: gotcha · goal: T-0043 · tasks: T-0015,T-0049,T-0055 · provenance: repo
 - orchestrator/spawn.py fit_result (cd5048a) binary-searched result['findings'] only; review comments and spec_review risks were unprotected
 outcome: T-0055 generalizes to every list-valued key; lesson: cap enforcement must be shape-agnostic
+
+## 2026-09-17 daemon.notify built an osascript literal from untrusted text
+type: gotcha · goal: T-0043 · tasks: T-0050,T-0054 · provenance: repo
+- orchestrator/daemon.py notify() (pre-existing) f-string-interpolated the message into osascript -e; the daemon now feeds it merge stderr and task titles, so a quote in worker or git output could execute local commands
+outcome: fix round passes the text as an argv item to an 'on run argv' handler; lesson: any shell or script literal fed from worker output is an injection path — reviewers with the security checklist catch these; keep the checklist mandatory for autonomous stages
