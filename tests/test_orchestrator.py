@@ -174,7 +174,9 @@ class Guardrails(unittest.TestCase):
     def test_edit_protected_path(self):
         home = os.path.expanduser("~")
         self.assertEqual(hook("guardrails.sh", {"tool_name": "Write", "tool_input": {"file_path": f"{home}/.ssh/config"}}, cwd=REPO).returncode, 2)
-        self.assertEqual(hook("guardrails.sh", {"tool_name": "Edit", "tool_input": {"file_path": str(REPO / ".claude/settings.json")}}, cwd=REPO).returncode, 2)
+        # not REPO-relative: a worktree's .claude/ is not protected; the list names the main checkout
+        protected = [l.strip() for l in (REPO / ".orchestrator" / "protected-paths.txt").read_text().splitlines() if l.strip().endswith(".claude/settings.json")][0]
+        self.assertEqual(hook("guardrails.sh", {"tool_name": "Edit", "tool_input": {"file_path": os.path.expanduser(protected)}}, cwd=REPO).returncode, 2)
         self.assertEqual(hook("guardrails.sh", {"tool_name": "Edit", "tool_input": {"file_path": str(REPO / "orchestrator/cli.py")}}, cwd=REPO).returncode, 0)
 
 
@@ -252,3 +254,43 @@ class MemorySkill(unittest.TestCase):
         self.assertEqual(self.run_s("recall.sh", "index", "zzqx-nothing-matches").stdout.strip()[:7], "no hits")
         # the retrospect-written hook accepts what record.sh wrote
         self.assertEqual(hook("retrospect-written.sh", {"task_input": {"subject": "GOAL: memory"}}, cwd=TMP).returncode, 0)
+
+
+@unittest.skipUnless((HOOKS / "planner-mode.sh").exists(), "planner-mode hooks not installed (see scratchpad apply.sh)")
+class PlannerMode(unittest.TestCase):
+    """Planner session = no ORCH_TASK_ID and a cwd whose basename is not T-xxxx. Workers are scope-guard's job."""
+    P = {"ORCH_TASK_ID": ""}
+
+    def pm(self, tool, inp, env=None):
+        return hook("planner-mode.sh", {"tool_name": tool, "tool_input": inp, "cwd": str(TMP)}, cwd=TMP, env={**self.P, **(env or {})}).returncode
+
+    def test_writes(self):
+        src = str(REPO / "orchestrator" / "x.py")  # TMP is under /var/folders, a temp dir to the hook
+        self.assertEqual(self.pm("Write", {"file_path": src}), 2)
+        self.assertEqual(self.pm("Edit", {"file_path": str(REPO / "skills" / "planner" / "orchestrate" / "SKILL.md")}), 2)
+        self.assertEqual(self.pm("Write", {"file_path": str(TMP / ".orchestrator" / "plan.md")}), 0)
+        self.assertEqual(self.pm("Write", {"file_path": "/private/tmp/scratch/pr-body.md"}), 0)
+        self.assertEqual(self.pm("Write", {"file_path": src}, {"ORCH_TASK_ID": "T-0007"}), 0)
+        self.assertEqual(self.pm("Write", {"file_path": src}, {"ORCH_PLANNER_MODE": "0"}), 0)
+
+    def test_bash(self):
+        blocked = ["cat > skills/x/SKILL.md <<'EOF'\nhi\nEOF", "echo x >> README.md", "sed -i '' 's/a/b/' orchestrator/bus.py",
+                   "ln -s ../../skills/x .claude/skills/x", "python3 - <<'EOF'\nfrom pathlib import Path\nPath('README.md').write_text('x')\nEOF",
+                   "git rebase main", "git reset --hard HEAD~1", "git merge task/T-0001", "git -C ~/dotfiles cherry-pick abc123"]
+        allowed = ["git push -u origin goal/T-0001", "gh pr create --base main --body-file /private/tmp/x/body.md",
+                   "uv run python -m unittest tests/test_orchestrator.py 2>&1 | tail -5", "git status --short && git log --oneline -3",
+                   "bash skills/planner/memory/scripts/record.sh add --file decisions --type decision --title x --goal T-1 --fact y",
+                   "cat > .orchestrator/plan.md <<'EOF'\ngoal\nEOF", "bash skills/planner/memory/scripts/graph.sh update",
+                   "grep -rn memory orchestrator/ > /dev/null; ls", "mkdir -p /private/tmp/s && echo hi > /private/tmp/s/a.md",
+                   "git commit -m x", "git add -A && git commit -q -F - <<'EOF'\nmsg\nEOF", "git checkout -b memory-skill"]
+        for c in blocked:
+            self.assertEqual(self.pm("Bash", {"command": c}), 2, c)
+        for c in allowed:
+            self.assertEqual(self.pm("Bash", {"command": c}), 0, c)
+        self.assertEqual(self.pm("Bash", {"command": "git commit -m x"}, {"ORCH_TASK_ID": "T-0007"}), 0)
+
+    def test_prompt_hook(self):
+        r = hook("planner-prompt.sh", {"prompt": "add a flag"}, cwd=TMP, env=self.P)
+        self.assertEqual(r.returncode, 0); self.assertIn("Skill(orchestrate)", r.stdout)
+        self.assertEqual(hook("planner-prompt.sh", {"prompt": "/orchestrate x"}, cwd=TMP, env=self.P).stdout, "")
+        self.assertEqual(hook("planner-prompt.sh", {"prompt": "x"}, cwd=TMP, env={"ORCH_TASK_ID": "T-0001"}).stdout, "")

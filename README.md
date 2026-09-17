@@ -32,6 +32,7 @@ Full access, guardrails as a hard floor, human only at PR approval:
   recursive rm outside `~/code` and temp dirs, sending mail. Hooks fire even in bypass mode. Codex is NOT covered by these hooks:
   its floor is git (task branches only) plus your PR review.
 - `main` only moves through a PR you approve. The merge queue targets `goal/<parent>`.
+- The Planner may commit, branch and push but never edits source (`planner-mode.sh`, PreToolUse). Every change carries a rollback path in `decisions.md`.
 
 ## Phase 1 (manual loop)
 Hooks live: guardrails, scope-guard, tests-green, loop-guard, require-acceptance, no-uncommitted, retrospect-written, bus-post. Hand one atomic task to the `codex` tool (orchestrator server wraps `codex exec`), iterate with `codex_reply` deltas, accept via
