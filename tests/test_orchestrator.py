@@ -106,6 +106,47 @@ class Executor(unittest.TestCase):
         self.assertIn("tests_green", spawn.render("execute", spec="s", acceptance=["a"], scope=["x"]))
 
 
+class Executors(unittest.TestCase):
+    """[[executors]] routing: complexity bands, disabled placeholders, quota-group cooldowns, scored ranking."""
+    LIVE = {"astra", "luna", "terra", "sol"}
+
+    def setUp(self):
+        P.PERSIST.unlink(missing_ok=True); self.p = P.Pool()
+
+    def test_bands_and_enabled(self):
+        self.assertIn(self.p.pick_executor("execute", 3).id, self.LIVE)
+        self.assertEqual(self.p.pick_executor("execute", 8).id, "astra")   # only astra reaches complexity 8
+        self.assertIsNone(self.p.pick_executor("review", 3))               # no executor takes that role
+        self.assertEqual({e.id for e in self.p.executors.values() if e.enabled}, self.LIVE)
+        for eid in ("luna6", "terra6", "sol6"):
+            self.p.executors[eid].weight = 99.0                            # disabled wins nothing, whatever its weight
+        self.assertIn(self.p.pick_executor("execute", 3).id, self.LIVE)
+
+    def test_quota_group_cooldown_and_roundtrip(self):
+        self.p.cooldown_executor("luna", 600, "usage limit")
+        self.assertTrue(all(self.p.executors[i].cooling() for i in self.LIVE))  # one member cools the group
+        self.assertIsNone(self.p.pick_executor("execute", 8))
+        self.assertIsNone(self.p.pick_executor("execute", 3))
+        fresh = P.Pool()                                                   # state survives an MCP restart
+        self.assertTrue(fresh.executors["astra"].cooling())
+        self.assertFalse(fresh.codex_available())
+
+    def test_scores_and_limits(self):
+        self.assertEqual(self.p.pick_executor("execute", 3, {"terra": 3.0}).id, "terra")
+        self.p.executors["terra"].running = self.p.executors["terra"].max_parallel
+        self.assertNotEqual(self.p.pick_executor("execute", 3, {"terra": 3.0}).id, "terra")
+        self.p.executors["astra"].day_tasks = self.p.executors["astra"].daily_budget_tasks
+        self.assertIn(self.p.pick_executor("execute", 3).id, {"luna", "sol"})
+        st = self.p.status()
+        self.assertEqual((len(st["executors"]), sum(e["enabled"] for e in st["executors"])), (7, 4))
+
+    def test_missing_table_synthesizes_legacy_row(self):
+        cfg = {k: v for k, v in P.config().items() if k != "executors"}
+        old = P.Pool(cfg)
+        self.assertEqual([e.model for e in old.executors.values()], [cfg["codex"]["model"]])
+        self.assertTrue(old.codex_available())
+
+
 class Render(unittest.TestCase):
     def test_templates_fill(self):
         s = spawn.render("scout", id="T-1", title="t", spec="q", acceptance=["a"], turns="20")
@@ -237,7 +278,8 @@ class Cli(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             cli.main()
         parsed = json.loads(out.getvalue())
-        self.assertEqual(set(parsed.keys()), {"accounts", "codex", "queue"})
+        self.assertEqual(set(parsed.keys()), {"accounts", "executors", "codex", "queue"})
+        self.assertEqual((len(parsed["executors"]), sum(e["enabled"] for e in parsed["executors"])), (7, 4))
 
 
 if __name__ == "__main__":
