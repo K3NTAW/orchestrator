@@ -36,5 +36,8 @@ Dispatched: T-0047 (wt/T-0047 off goal/T-0043).
 - Sync trick for the checked-out goal branch after merge(): `git restore --source=HEAD --staged --worktree -- <paths>` (removes files deleted in HEAD too).
 - Next: T-0053 verdict → merge(T-0049) → T-0050 result → gate → review task (adversarial + security; opus executed → sonnet reviewer) → merge → T-0051 docs (worktree off goal) → retrospective → PR goal/T-0043.
 
+## Update 02:10
+- T-0053 review of spec_review: request_changes (HIGH fit_result only trims findings; MED unnumbered excerpts). Fix round T-0055 running on wt/T-0055 off task/T-0049. Merge order: T-0055 (carries 41df1ae) → then T-0050 daemon (its worktree rebased onto goal by the worker at start; merge rebases again) → review T-0054 (pre-create wt off task/T-0050) → merge → T-0051 docs.
+
 ## Next step
 spawn scouts C1–C3 → read → synthesize → write specs → dispatch C-A first (fallback sonnet), then C-B and C-D in parallel, C-C after C-B, C-E last → PR goal/T-0043.
