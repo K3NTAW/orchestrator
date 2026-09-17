@@ -1,5 +1,5 @@
 """One runnable check per non-trivial path: bus rules, pool selection, reset-hint parsing, merge on a scratch repo, and the hooks."""
-import contextlib, io, json, os, subprocess, sys, tempfile, time, unittest
+import contextlib, inspect, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -11,7 +11,7 @@ for f in ("pool.toml",):
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")
 sys.path.insert(0, str(REPO))
-from orchestrator import bus, pool as P, spawn, merge, executor, cli  # noqa: E402
+from orchestrator import bus, pool as P, spawn, merge, executor, cli, scorecard, bench, STATE  # noqa: E402
 
 HOOKS = REPO / ".claude" / "hooks"
 
@@ -44,15 +44,23 @@ class PoolSel(unittest.TestCase):
         P.PERSIST.unlink(missing_ok=True); self.p = P.Pool()
 
     def test_affinity_reserve_cooldown_budget(self):
-        self.assertEqual(self.p.pick("review").id, "B")            # A has no review affinity
+        self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
         A, B = self.p.get("A"), self.p.get("B")
-        self.p.record(A, int(self.p.cap * 0.7))                     # A above 1-reserve(0.35)=0.65 -> scouts go to B
+        A.window_tokens = int(self.p.cap * 0.7); self.p.save()       # above 1-reserve(0.35)=0.65 -> scouts go to B;
+                                                                      # day_tokens left at 0 so A's daily budget (below
+                                                                      # the reserve ceiling at this cap) doesn't also exclude it
         self.assertEqual(self.p.pick("scout").id, "B")
         self.assertEqual(self.p.pick("planner").id, "A")            # planner ceiling is 1.0
         self.p.cooldown(B, 600); self.assertIsNone(self.p.pick("review"))  # held, not failed
         self.p.resume("B"); self.assertEqual(self.p.pick("review").id, "B")
         B.day_tokens = B.daily_budget; self.assertIsNone(self.p.pick("review"))
         self.assertEqual(P.Pool().get("A").window_tokens, A.window_tokens)  # persisted across restarts
+
+    def test_pick_review_avoids_executing_account(self):
+        self.assertEqual(self.p.pick("review", avoid="B").id, "A")   # B executed it; A has headroom
+        self.assertEqual(self.p.pick("review", avoid="A").id, "B")
+        self.p.cooldown(self.p.get("A"), 600)
+        self.assertEqual(self.p.pick("review", avoid="B").id, "B")   # only B has headroom -> avoid is ignored
 
     def test_rate_limit_parsing_and_fallback(self):
         self.assertTrue(P.is_rate_limited("Error: You've hit your usage limit. Resets in 2h 15m"))
@@ -72,7 +80,32 @@ class PoolSel(unittest.TestCase):
         self.assertTrue(json.loads((cfg / ".claude.json").read_text())["projects"][str(TMP / "wt" / "T-0099")]["hasTrustDialogAccepted"])
 
 
+class FakeProc:
+    """Stand-in for subprocess.run's CompletedProcess: executor._run only reads stdout/stderr/returncode."""
+    def __init__(self, stdout, returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, "", returncode
+
+
+def codex_stream(*events):
+    return "\n".join(json.dumps(e) for e in events)
+
+
 class Executor(unittest.TestCase):
+    LIVE = {"astra", "luna", "terra", "sol"}
+
+    def exec_task(self, complexity=3, title="exec"):
+        """An execute task with a worktree already set, so start() never has to create one."""
+        t = bus.create_task(title, "s", ["a"], ["x.py"], role="execute", complexity=complexity)
+        bus.update(t["id"], worktree=str(TMP))
+        return t["id"]
+
+    def fake_codex(self, stdout, returncode=0):
+        P.PERSIST.unlink(missing_ok=True)
+        orig = executor.subprocess.run
+        executor.subprocess.run = lambda *a, **k: FakeProc(stdout, returncode)
+        self.addCleanup(lambda: setattr(executor.subprocess, "run", orig))
+        self.addCleanup(P.PERSIST.unlink, True)
+
     def test_parse_observed_stream(self):
         lines = ['{"type":"thread.started","thread_id":"01a0ab11-77b3-7431-a9f1-1527ef937b5c"}', '{"type":"turn.started"}',
                  '{"type":"error","message":"You\'ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage or try again at Sep 19th, 2026 2:00 PM."}',
@@ -105,6 +138,355 @@ class Executor(unittest.TestCase):
         pool.codex.cooldown_until = 0; pool.save()
         self.assertIn("tests_green", spawn.render("execute", spec="s", acceptance=["a"], scope=["x"]))
 
+    def test_start_routes_through_pick_executor(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(complexity=3, title="route")
+        seen = {}
+        orig = executor._run
+        executor._run = lambda pool, task, args, cwd, timeout, ex=None: seen.update(args=args, ex=ex) or {"status": "done"}
+        self.addCleanup(lambda: setattr(executor, "_run", orig))
+        executor.start(tid, "do it")
+        models = {e.model for e in P.Pool().executors.values() if e.id in self.LIVE}
+        self.assertIn(seen["args"][seen["args"].index("-m") + 1], models)     # the picked row's model, not [codex].model
+        t = bus.get(tid)
+        self.assertIn(t["executor"], self.LIVE); self.assertEqual(t["tier"], t["executor"])
+        self.assertEqual(seen["ex"].id, t["executor"])
+        self.assertEqual(P.Pool().executors[t["executor"]].day_tasks, 1)
+
+    def test_usage_limit_cools_the_whole_quota_group(self):
+        self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "th-limit"},
+                                     {"type": "error", "message": "You've hit your usage limit. Try again in 30 minutes."}), 1)
+        tid = self.exec_task(complexity=3, title="limit")
+        r = executor.start(tid, "do it")
+        self.assertEqual((r["status"], r["resets_in_s"]), ("held", 1800))
+        fresh = P.Pool()                                                     # cooldown survives the MCP restart
+        self.assertTrue(all(fresh.executors[i].cooling() for i in self.LIVE))
+        self.assertFalse(fresh.codex_available()); self.assertFalse(fresh.codex_available(3))
+        self.assertEqual(bus.get(tid)["status"], "held")
+
+    def test_run_log_carries_executor_and_complexity(self):
+        self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "th-log"},
+                                     {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+                                     {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 1,
+                                                                          "cached_input_tokens": 7}}))
+        tid = self.exec_task(complexity=4, title="log")
+        self.assertEqual(executor.start(tid, "do it")["status"], "done")
+        line = json.loads((bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((line["task"], line["complexity"], line["outcome"]), (tid, 4, "done"))
+        self.assertIn(line["executor"], self.LIVE); self.assertEqual(line["tier"], line["executor"])
+        self.assertEqual((line["cache_read_input_tokens"], line["cached_input_tokens"]), (7, 7))  # normalized + legacy key
+
+
+class Executors(unittest.TestCase):
+    """[[executors]] routing: complexity bands, disabled placeholders, quota-group cooldowns, scored ranking."""
+    LIVE = {"astra", "luna", "terra", "sol"}
+
+    def setUp(self):
+        P.PERSIST.unlink(missing_ok=True); self.p = P.Pool()
+
+    def test_bands_and_enabled(self):
+        self.assertIn(self.p.pick_executor("execute", 3).id, self.LIVE)
+        self.assertEqual(self.p.pick_executor("execute", 8).id, "astra")   # only astra reaches complexity 8
+        self.assertIsNone(self.p.pick_executor("review", 3))               # no executor takes that role
+        self.assertEqual({e.id for e in self.p.executors.values() if e.enabled}, self.LIVE)
+        for eid in ("luna6", "terra6", "sol6"):
+            self.p.executors[eid].weight = 99.0                            # disabled wins nothing, whatever its weight
+        self.assertIn(self.p.pick_executor("execute", 3).id, self.LIVE)
+
+    def test_quota_group_cooldown_and_roundtrip(self):
+        self.p.cooldown_executor("luna", 600, "usage limit")
+        self.assertTrue(all(self.p.executors[i].cooling() for i in self.LIVE))  # one member cools the group
+        self.assertIsNone(self.p.pick_executor("execute", 8))
+        self.assertIsNone(self.p.pick_executor("execute", 3))
+        fresh = P.Pool()                                                   # state survives an MCP restart
+        self.assertTrue(fresh.executors["astra"].cooling())
+        self.assertFalse(fresh.codex_available())
+
+    def test_scores_and_limits(self):
+        self.assertEqual(self.p.pick_executor("execute", 3, {"terra": 3.0}).id, "terra")
+        self.p.executors["terra"].running = self.p.executors["terra"].max_parallel
+        self.assertNotEqual(self.p.pick_executor("execute", 3, {"terra": 3.0}).id, "terra")
+        self.p.executors["astra"].day_tasks = self.p.executors["astra"].daily_budget_tasks
+        self.assertIn(self.p.pick_executor("execute", 3).id, {"luna", "sol"})
+        st = self.p.status()
+        self.assertEqual((len(st["executors"]), sum(e["enabled"] for e in st["executors"])), (7, 4))
+
+    def test_missing_table_synthesizes_legacy_row(self):
+        cfg = {k: v for k, v in P.config().items() if k != "executors"}
+        old = P.Pool(cfg)
+        self.assertEqual([e.model for e in old.executors.values()], [cfg["codex"]["model"]])
+        self.assertTrue(old.codex_available())
+
+    def test_codex_available_respects_complexity(self):
+        self.p.executors["astra"].day_tasks = self.p.executors["astra"].daily_budget_tasks
+        self.assertFalse(self.p.codex_available(8))   # only astra reaches band 8, and it's over budget
+        self.assertTrue(self.p.codex_available(3))     # luna/terra/sol still have headroom at band 3
+
+    def test_legacy_running_syncs_down_not_just_up(self):
+        self.p.codex.running = 2; self.p.save()
+        fresh = P.Pool()
+        self.assertEqual(fresh.executors["astra"].running, 2)
+        fresh.codex.running = 0; fresh.save()
+        fresher = P.Pool()
+        self.assertEqual(fresher.executors["astra"].running, 0)  # regression: used to ratchet up only
+
+    def test_every_executor_row_has_a_quota_group(self):
+        # enabling a disabled placeholder later must not silently drop it out of its cooldown group (review T-0030)
+        for row in P.config()["executors"]:
+            self.assertTrue(row.get("quota_group"), row["id"])
+
+
+class Scorecard(unittest.TestCase):
+    """build()/scores() on a synthesized scratch root, isolated from the tasks every other test class creates
+    under the shared TMP/.orchestrator, so counts are exact."""
+    def setUp(self):
+        self.root = TMP / "scorecard-src" / str(time.time())
+        (self.root / "tasks").mkdir(parents=True); (self.root / "runs").mkdir(parents=True)
+
+    def write_task(self, tid, **fields):
+        base = {"id": tid, "role": "execute", "tier": "sonnet", "complexity": 3, "status": "queued",
+                "acceptance": ["a"], "scope": ["x"], "spec": "s", "title": tid}
+        (self.root / "tasks" / f"{tid}.json").write_text(json.dumps({**base, **fields}))
+
+    def write_runs(self, *lines):
+        (self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl").write_text(
+            "\n".join(json.dumps(l) for l in lines) + "\n")
+
+    def test_build_counts_and_scores(self):
+        self.write_task("T-9001", executor="good", complexity=3, status="done", merged_into="goal/G", rounds=1)
+        self.write_task("T-9002", executor="bad", complexity=4, status="failed")
+        self.write_runs({"role": "execute", "executor": "bad", "outcome": "usage_limit", "duration_s": 1.0})
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["good"]["merged"], 1); self.assertEqual(card["good"]["rounds_avg"], 1.0)
+        self.assertEqual(card["good"]["by_complexity"]["1-3"]["merged"], 1)
+        self.assertEqual(card["bad"]["failed"], 1); self.assertEqual(card["bad"]["by_complexity"]["4-6"]["failed"], 1)
+        self.assertEqual(card["bad"]["held_usage_limit"], 1)
+        neutral = scorecard.scores(card)                       # default min_runs=5: too few resolved tasks
+        self.assertEqual((neutral["good"], neutral["bad"]), (1.0, 1.0))
+        tight = scorecard.scores(card, min_runs=1)
+        self.assertLess(tight["bad"], 1.0)                     # 0 merged / 1 failed -> success=0, score=0.5
+        self.assertGreater(tight["good"], 1.0)                 # 1 merged / 0 failed -> success=1, score=1.5
+
+    def test_review_verdict_rolls_up(self):
+        self.write_task("T-9003", executor="reviewed-by", status="done", review_verdict="request_changes")
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["reviewed-by"]["review_request_changes"], 1)
+
+    def test_review_task_does_not_double_count_verdict(self):
+        # review T-0031: a review task has no executor and used to bucket under claude:<tier>, double-counting
+        # the same request_changes verdict that spawn.run_worker already stamped on the reviewed execute task
+        self.write_task("T-9006", role="review", tier="sonnet", review_verdict="request_changes")
+        self.write_task("T-9007", tier="sonnet", review_verdict="request_changes")
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["claude:sonnet"]["review_request_changes"], 1)
+
+    def test_scout_run_does_not_create_executor_row(self):
+        self.write_runs({"role": "scout", "executor": "x", "outcome": "usage_limit", "duration_s": 1.0})
+        card = scorecard.build(root=self.root)
+        self.assertNotIn("x", card)
+
+    def test_by_tier_regroups(self):
+        self.write_task("T-9004", executor="astra", tier="astra", complexity=2, status="done", merged_into="goal/G")
+        card = scorecard.build(root=self.root, by="tier")
+        self.assertIn("astra", card); self.assertEqual(card["astra"]["merged"], 1)
+
+    def test_write_sets_generated_at(self):
+        self.write_task("T-9005", executor="x", status="done", merged_into="goal/G")
+        payload = scorecard.write(scorecard.build(root=self.root))
+        self.assertIn("generated_at", payload)
+        self.assertIn("generated_at", json.loads((STATE / "scorecard.json").read_text()))
+
+    def write_bench(self, models):
+        bench.STATE.mkdir(parents=True, exist_ok=True)
+        bench.FILE.write_text(json.dumps({"models": models}))
+        self.addCleanup(bench.FILE.unlink, True)
+
+    def test_prior_weights_scales_by_bench_coding_score(self):
+        # pool.toml's four codex executors (astra/luna/terra/sol); only two have bench numbers here.
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}, "gpt-5.6-luna": {"coding": 40.0}})
+        weights = scorecard.prior_weights(P.Pool().executors)
+        self.assertEqual(weights["astra"], 1.5)              # 0.5 + 80/80 (max among scored executors)
+        self.assertEqual(weights["luna"], 1.0)                # 0.5 + 40/80
+        self.assertEqual(weights["terra"], 1.0)                # no bench number -> neutral
+        self.assertEqual(weights["sol"], 1.0)
+
+    def test_prior_weights_missing_bench_file_is_neutral(self):
+        bench.FILE.unlink(missing_ok=True)
+        weights = scorecard.prior_weights(P.Pool().executors)
+        self.assertTrue(weights and all(v == 1.0 for v in weights.values()))
+
+    def test_scores_empty_card_returns_priors(self):
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}, "gpt-5.6-luna": {"coding": 40.0}})
+        weights = scorecard.scores({})
+        self.assertEqual(weights["astra"], 1.5)
+        self.assertEqual(weights["luna"], 1.0)
+
+    def test_scores_warm_failure_overrides_prior(self):
+        self.write_bench({"gpt-6-astra": {"coding": 80.0}})    # astra's prior alone would be 1.5
+        card = {"astra": {"merged": 0, "failed": 1}}
+        weights = scorecard.scores(card, min_runs=1)
+        self.assertLess(weights["astra"], 1.0)                 # live 0/1 record wins over the bench prior
+
+    def test_start_forwards_scorecard_scores_to_pick_executor(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        t = bus.create_task("scored", "s", ["a"], ["x.py"], role="execute", complexity=3)
+        bus.update(t["id"], worktree=str(TMP))
+        seen = {}
+        orig_run = executor._run
+        executor._run = lambda pool, task, args, cwd, timeout, ex=None: seen.update(ex=ex) or {"status": "done"}
+        self.addCleanup(lambda: setattr(executor, "_run", orig_run))
+        orig_scores = scorecard.scores
+        scorecard.scores = lambda card, min_runs=5: {"terra": 3.0}
+        self.addCleanup(lambda: setattr(scorecard, "scores", orig_scores))
+        executor.start(t["id"], "do it")
+        self.assertEqual(seen["ex"].id, "terra")                # weight x score(3.0) beats every other row
+
+
+class Bench(unittest.TestCase):
+    """orchestrator.bench: RSC chunk parsing, display-hint matching, and bench.json's 20h fetch gate.
+    No network here -- fetch_html is monkeypatched to the fixture, so importing this module never fetches."""
+    FIXTURE = (REPO / "tests" / "fixtures" / "aa_models_sample.html").read_text()
+
+    def setUp(self):
+        bench.FILE.unlink(missing_ok=True)
+        self.addCleanup(bench.FILE.unlink, True)
+
+    def test_parse_chunks_skips_malformed(self):
+        records = bench.parse_chunks(self.FIXTURE)
+        self.assertEqual(len(records), 2)
+        astra = next(r for r in records if r["name"] == "GPT-6 Astra")
+        luna = next(r for r in records if r["name"] == "GPT-5.6 Luna")
+        self.assertEqual((astra["intelligence"], astra["speed_tps"]), (70.1, 120.0))
+        self.assertEqual((luna["intelligence"], luna["speed_tps"], luna["coding"]), (61.0, 200.0, 55.0))
+
+    def test_match_maps_to_model_ids(self):
+        records = bench.parse_chunks(self.FIXTURE)
+        hints = {"gpt-6-astra": "GPT-6 Astra", "gpt-5.6-luna": "GPT-5.6 Luna", "gpt-5.6-terra": "GPT-5.6 Terra"}
+        matched = bench.match(records, hints)
+        self.assertEqual(matched["gpt-6-astra"]["name"], "GPT-6 Astra")
+        self.assertEqual(matched["gpt-5.6-luna"]["name"], "GPT-5.6 Luna")
+        self.assertIsNone(matched["gpt-5.6-terra"])
+
+    def test_norm_strips_effort_suffix_and_punctuation(self):
+        self.assertEqual(bench.norm("GPT-6 Astra (max)"), "gpt-6 astra")
+        self.assertEqual(bench.norm("Claude Opus 5 (Adaptive Reasoning, Max Effort)"), "claude opus 5")
+        self.assertEqual(bench.norm("  Foo   Bar. "), "foo bar")
+
+    def test_match_handles_effort_suffixed_display_names(self):
+        records = [
+            {"name": "GPT-6 Astra (max)"},
+            {"name": "GPT-5.6 Luna (max)"},
+            {"name": "GPT-5.6 Terra (max)"},
+            {"name": "GPT-5.6 Sol (max)"},
+            {"name": "Claude Opus 5 (Adaptive Reasoning, Max Effort)"},
+            {"name": "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)"},
+            {"name": "GPT-5.5 Pro (xhigh)"},
+        ]
+        matched = bench.match(records, dict(bench.DEFAULT_HINTS, **{"gpt-5.5": "GPT-5.5"}))
+        for model_id in ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+                          "claude-opus-5", "claude-fable-5-1"):
+            self.assertIsNotNone(matched[model_id], model_id)
+            self.assertEqual(matched[model_id]["display_name"], records[
+                ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+                 "claude-opus-5", "claude-fable-5-1"].index(model_id)]["name"])
+        # "GPT-5.5 Pro (xhigh)" must not satisfy a "GPT-5.5" hint (prefix over-match guard).
+        self.assertIsNone(matched["gpt-5.5"])
+
+    def test_match_prefers_max_variant_over_high(self):
+        records = [{"name": "GPT-6 Astra (high)"}, {"name": "GPT-6 Astra (max)"}]
+        matched = bench.match(records, {"gpt-6-astra": "GPT-6 Astra"})
+        self.assertEqual(matched["gpt-6-astra"]["display_name"], "GPT-6 Astra (max)")
+        self.assertEqual(set(matched["gpt-6-astra"]["variants"]), {"GPT-6 Astra (high)", "GPT-6 Astra (max)"})
+
+    def test_match_token_fallback_normalizes_dash_and_space(self):
+        records = [{"name": "GPT-5.6 Luna (max)"}]
+        matched = bench.match(records, {"gpt-5.6-luna": "GPT 5.6 Luna"})
+        self.assertEqual(matched["gpt-5.6-luna"]["display_name"], "GPT-5.6 Luna (max)")
+
+    # fetch()'s fail-closed guard rejects bodies under 10KB; the real fixture is much smaller,
+    # so pad it with an HTML comment (parse_chunks ignores it) to clear that floor in tests.
+    PADDED_FIXTURE = FIXTURE + ("<!-- " + "x" * 10240 + " -->")
+
+    def test_fetch_force_writes_then_second_call_is_skipped(self):
+        orig = bench.fetch_html
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig))
+        result = bench.fetch(force=True, by="tester")
+        self.assertEqual(result["provenance"], "web:artificialanalysis.ai (untrusted data)")
+        self.assertEqual(result["fetched_by"], "tester")
+        self.assertEqual(result["models"]["gpt-6-astra"]["name"], "GPT-6 Astra")
+        self.assertEqual(result["http_status"], 200)
+        self.assertEqual(result["request"]["impersonate"], False)
+        self.assertTrue(bench.FILE.exists())
+        self.assertIn("skipped", bench.fetch())          # within 20h, force not given
+
+    def test_fetch_failure_status_leaves_existing_file_untouched(self):
+        orig = bench.fetch_html
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        bench.fetch(force=True, by="tester")
+        before = bench.FILE.read_bytes()
+
+        bench.fetch_html = lambda *a, **k: (403, "<html>blocked</html>")
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig))
+        result = bench.fetch(force=True, by="tester")
+
+        self.assertIn("error", result)
+        self.assertEqual(bench.FILE.read_bytes(), before)
+
+    def test_fetch_html_source_disables_impersonation_and_stealth(self):
+        src = inspect.getsource(bench.fetch_html)
+        self.assertIn("stealthy_headers=False", src)
+        self.assertIn("orchestrator-bench", src)
+
+    def test_fetch_html_raises_if_scrapling_drops_a_required_param(self):
+        orig = bench._supported_params
+        bench._supported_params = lambda func: {"headers", "impersonate", "timeout"}  # no stealthy_headers
+        self.addCleanup(lambda: setattr(bench, "_supported_params", orig))
+        with self.assertRaises(RuntimeError) as cm:
+            bench.fetch_html()
+        self.assertIn("stealthy_headers", str(cm.exception))
+
+    def test_fetch_returns_error_and_leaves_bench_json_untouched_if_param_missing(self):
+        orig_fetch_html, orig_supported = bench.fetch_html, bench._supported_params
+        bench.fetch_html = lambda *a, **k: (200, self.PADDED_FIXTURE)
+        bench.fetch(force=True, by="tester")
+        before = bench.FILE.read_bytes()
+
+        bench.fetch_html = orig_fetch_html
+        bench._supported_params = lambda func: {"headers", "impersonate", "timeout"}
+        self.addCleanup(lambda: setattr(bench, "fetch_html", orig_fetch_html))
+        self.addCleanup(lambda: setattr(bench, "_supported_params", orig_supported))
+
+        result = bench.fetch(force=True, by="tester")
+        self.assertIn("error", result)
+        self.assertIn("stealthy_headers", result["error"])
+        self.assertEqual(bench.FILE.read_bytes(), before)
+
+    def test_set_model_marks_manual(self):
+        rec = bench.set_model("gpt-6-astra", "tester", intelligence=99.0)
+        self.assertTrue(rec["manual"])
+        self.assertEqual(bench.load()["models"]["gpt-6-astra"]["intelligence"], 99.0)
+
+
+class ReviewVerdict(unittest.TestCase):
+    def test_run_worker_captures_verdict_on_review_and_reviewed_task(self):
+        reviewed = bus.create_task("feat-rv", "s", ["a"], ["rv.py"], role="execute")
+        review = bus.create_task("review feat-rv", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        fake_out = {"result": json.dumps({"verdict": "request_changes", "comments": []}), "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+        self.assertEqual(bus.get(review["id"])["review_verdict"], "request_changes")
+        self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "request_changes")
+
 
 class Render(unittest.TestCase):
     def test_templates_fill(self):
@@ -112,6 +494,20 @@ class Render(unittest.TestCase):
         self.assertIn("T-1", s); self.assertNotIn("{{", s)
         self.assertEqual(spawn.extract_json('here: {"summary":"x"} bye')["summary"], "x")
         self.assertTrue(spawn.extract_json("no json")["summary"])
+
+    def test_fit_result_shrinks_oversize(self):
+        big = {"summary": "s" * 3000, "findings": [{"claim": "c" * 380, "confidence": 0.5} for _ in range(40)]}
+        fitted = spawn.fit_result(big)
+        self.assertLess(len(json.dumps(fitted)), bus.MAX_RESULT_CHARS)
+        self.assertEqual(fitted["truncated"]["reason"], "over MAX_RESULT_CHARS")
+        self.assertGreater(fitted["truncated"]["original_chars"], bus.MAX_RESULT_CHARS)
+        self.assertGreaterEqual(len(fitted["findings"]), 1)
+
+    def test_fit_result_leaves_small_result_unchanged(self):
+        small = {"summary": "ok", "findings": [{"claim": "x", "confidence": 0.9}]}
+        fitted = spawn.fit_result(small)
+        self.assertEqual(fitted, small)
+        self.assertNotIn("truncated", fitted)
 
 
 class Hooks(unittest.TestCase):
@@ -153,6 +549,16 @@ class Hooks(unittest.TestCase):
         (r / "tests" / "test_a.py").write_text("import unittest\nclass T(unittest.TestCase):\n def test_x(self): pass\n")
         self.assertEqual(hook("tests-green.sh", {"cwd": str(r), "session_id": "tg"}, env={"PATH": "/usr/bin:/bin"}).returncode, 0)
 
+    def test_tests_green_picks_uv_runner_when_available(self):
+        r = TMP / "pyproj-uv"; (r / "tests").mkdir(parents=True); (r / "pyproject.toml").write_text("[project]\nname='x'\n")
+        (r / "tests" / "test_a.py").write_text("import unittest\nclass T(unittest.TestCase):\n def test_x(self): pass\n")
+        no_uv = hook("tests-green.sh", {"cwd": str(r)}, env={"PATH": "/usr/bin:/bin", "TESTS_GREEN_DRY": "1"})
+        self.assertEqual(no_uv.returncode, 0); self.assertIn("python3 -m unittest", no_uv.stdout)
+        uv_path = shutil.which("uv")
+        if not uv_path: self.skipTest("uv not on PATH")
+        with_uv = hook("tests-green.sh", {"cwd": str(r)}, env={"PATH": f"{os.path.dirname(uv_path)}:/usr/bin:/bin", "TESTS_GREEN_DRY": "1"})
+        self.assertEqual(with_uv.returncode, 0); self.assertIn("uv run --project .", with_uv.stdout)
+
 
 class Guardrails(unittest.TestCase):
     def bash(self, cmd):
@@ -187,7 +593,7 @@ class MergeQueue(unittest.TestCase):
         g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
         (TMP / "tests" / "test_ok.py").parent.mkdir(exist_ok=True)
         (TMP / "tests" / "test_ok.py").write_text("import unittest\nclass T(unittest.TestCase):\n def test_x(self): pass\n")
-        (TMP / "pyproject.toml").write_text("[project]\nname='x'\n"); (TMP / ".gitignore").write_text(".orchestrator/\nwt/\n.claude\n")
+        (TMP / "pyproject.toml").write_text("[project]\nname='x'\nversion='0.1.0'\n"); (TMP / ".gitignore").write_text(".orchestrator/\nwt/\n.claude\n")
         g("add", "-A"); g("commit", "-qm", "init")
         t = bus.create_task("feat", "s", ["a"], ["feature.py"], role="execute")
         wt = spawn.ensure_worktree(t["id"], base="HEAD"); bus.update(t["id"], worktree=str(wt))
@@ -196,6 +602,9 @@ class MergeQueue(unittest.TestCase):
         r = merge.merge(t["id"], target="goal/G")
         self.assertEqual(r["status"], "merged", r)
         self.assertEqual(g("rev-parse", "goal/G").stdout, g("rev-parse", "HEAD", cwd=wt).stdout)
+        card_path = STATE / "scorecard.json"
+        self.assertTrue(card_path.exists())
+        self.assertIn("generated_at", json.loads(card_path.read_text()))
         # second task conflicting on the same file -> conflict hunks back, task failed with resume_hint
         t2 = bus.create_task("feat2", "s", ["a"], ["feature.py"], role="execute")
         wt2 = spawn.ensure_worktree(t2["id"], base="main"); bus.update(t2["id"], worktree=str(wt2))
@@ -205,6 +614,64 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(bus.get(t2["id"])["resume_hint"]["conflicts"], ["feature.py"])
         self.assertTrue(bus.commit_state())                          # orchestrator-state branch got the task JSON
         self.assertIn("tasks/T-0001.json", g("ls-tree", "-r", "--name-only", "orchestrator-state").stdout)
+
+
+class SpawnBase(unittest.TestCase):
+    """base_for/scoped_diff (review T-0026). Runs after MergeQueue has turned TMP into a git repo with a
+    goal/G branch, so class name is alphabetically after MergeQueue (test order = dir(module) order)."""
+    def g(self, *a, cwd=TMP, **k):
+        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, **k)
+
+    def test_review_bases_on_reviewed_task_branch(self):
+        reviewed = bus.create_task("feat3", "s", ["a"], ["feat3.py"], role="execute")
+        wt = spawn.ensure_worktree(reviewed["id"], base="HEAD")
+        bus.update(reviewed["id"], worktree=str(wt))
+        review = bus.create_task("review feat3", "s", ["a"], ["feat3.py"], role="review", inputs=[reviewed["id"]])
+        self.assertEqual(spawn.base_for(review), f"task/{reviewed['id']}")
+
+    def test_review_falls_back_to_goal_branch_then_origin_main(self):
+        no_wt = bus.create_task("no wt yet", "s", ["a"], ["x.py"], role="execute", parent="G")
+        review = bus.create_task("review no wt", "s", ["a"], ["x.py"], role="review", inputs=[no_wt["id"]])
+        self.assertEqual(spawn.base_for(review), "goal/G")            # task/<id> doesn't exist, parent's goal does
+        no_parent = bus.create_task("no wt no goal", "s", ["a"], ["x.py"], role="execute")
+        review2 = bus.create_task("review no parent", "s", ["a"], ["x.py"], role="review", inputs=[no_parent["id"]])
+        self.assertEqual(spawn.base_for(review2), "origin/main")      # neither branch exists
+
+    def test_execute_stacks_on_existing_goal_branch(self):
+        t = bus.create_task("stack", "s", ["a"], ["more.py"], role="execute", parent="G")
+        self.assertEqual(spawn.base_for(t), "goal/G")
+        t2 = bus.create_task("no goal yet", "s", ["a"], ["more.py"], role="execute", parent="ghost")
+        self.assertEqual(spawn.base_for(t2), "origin/main")
+
+    def test_challenge_bases_on_goal_branch(self):
+        challenge = bus.create_task("challenge x", "s", ["a"], ["x.py"], role="challenge", parent="G",
+                                     inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
+        self.assertEqual(spawn.base_for(challenge), "goal/G")
+        challenge2 = bus.create_task("challenge y", "s", ["a"], ["y.py"], role="challenge", parent="ghost",
+                                      inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
+        self.assertEqual(spawn.base_for(challenge2), "origin/main")
+
+    def test_ensure_worktree_resolves_base_when_none_given(self):
+        t = bus.create_task("stacked-exec", "s", ["a"], ["stacked.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(t["id"])
+        self.assertEqual(self.g("merge-base", "--is-ancestor", "goal/G", f"task/{t['id']}").returncode, 0)
+
+    def test_scoped_diff_excludes_predecessor_hunks(self):
+        wt_goal = TMP / "wt" / "_goal_seed"
+        self.g("worktree", "add", str(wt_goal), "goal/G")
+        (wt_goal / "shared.py").write_text("A = 1\n")
+        self.g("add", "-A", cwd=wt_goal); self.g("commit", "-qm", "predecessor shared.py", cwd=wt_goal)
+        self.g("worktree", "remove", str(wt_goal), "--force")
+
+        t = bus.create_task("stack2", "s", ["a"], ["shared.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(t["id"]); bus.update(t["id"], worktree=str(wt))
+        (wt / "shared.py").write_text("A = 1\nB = 1\n")
+        self.g("add", "-A", cwd=wt); self.g("commit", "-qm", "stack2 add B", cwd=wt)
+
+        review = bus.create_task("review stack2", "s", ["a"], ["shared.py"], role="review", inputs=[t["id"]])
+        diff = spawn.scoped_diff(review)
+        self.assertIn("+B = 1", diff)
+        self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
 
 
 class Cli(unittest.TestCase):
@@ -223,7 +690,25 @@ class Cli(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             cli.main()
         parsed = json.loads(out.getvalue())
-        self.assertEqual(set(parsed.keys()), {"accounts", "codex", "queue"})
+        self.assertEqual(set(parsed.keys()), {"accounts", "executors", "codex", "queue"})
+        self.assertEqual((len(parsed["executors"]), sum(e["enabled"] for e in parsed["executors"])), (7, 4))
+
+    def test_scorecard_table_and_json(self):
+        bus.create_task("cli-scored", "s", ["a"], ["x.py"], role="execute", complexity=3)  # ensures >=1 row exists
+        bus.post_result(bus.read(role="execute")[-1]["id"], {"summary": "ok"})
+        sys.argv = ["orchestrator", "scorecard"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore"))
+        self.assertGreaterEqual(len(lines), 1)
+
+        sys.argv = ["orchestrator", "scorecard", "--json"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        json.loads(out.getvalue())  # valid JSON
 
 
 if __name__ == "__main__":

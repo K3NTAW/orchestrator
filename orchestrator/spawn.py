@@ -22,11 +22,44 @@ def git(*a, cwd=ROOT, check=True):
     return r
 
 
-def ensure_worktree(task_id, base="origin/main"):
+def branch_exists(name):
+    return git("rev-parse", "--verify", name, check=False).returncode == 0
+
+
+def base_for(task):
+    """Pick the base branch for a new worktree. review tasks whose inputs[0] is a task id: base on that task's
+    own branch so the reviewer sees the code under review, not a worktree cut from origin/main before the
+    reviewed task (or its dependency, B1-style) ever landed (review T-0026). Fall back to the reviewed task's
+    goal branch, then origin/main. challenge tasks have inputs[0] = {claim, evidence, confidence} (a dict, or
+    absent), never a task id, so they always base on the goal branch (falling back to origin/main) rather than
+    the review path's isinstance(str) check, which never fires for them (review T-0030). execute tasks with a
+    parent whose goal branch already exists stack on it, so the Planner no longer has to pre-create worktrees
+    for stacked tasks."""
+    role, parent = task["role"], task.get("parent")
+    if role == "review" and task.get("inputs") and isinstance(task["inputs"][0], str):
+        try:
+            src = bus.get(task["inputs"][0])
+        except KeyError:
+            src = None
+        if src is not None:
+            branch = f"task/{task['inputs'][0]}"
+            if branch_exists(branch):
+                return branch
+            src_parent = src.get("parent")
+            if src_parent and branch_exists(f"goal/{src_parent}"):
+                return f"goal/{src_parent}"
+    elif role in ("challenge", "execute") and parent and branch_exists(f"goal/{parent}"):
+        return f"goal/{parent}"
+    return "origin/main"
+
+
+def ensure_worktree(task_id, base=None):
     wt = ROOT / "wt" / task_id
     if not wt.exists():
         wt.parent.mkdir(exist_ok=True)
         git("fetch", "origin", check=False)
+        if base is None:
+            base = base_for(bus.get(task_id))
         if git("rev-parse", "--verify", base, check=False).returncode:
             base = "HEAD"  # no remote yet
         git("worktree", "add", str(wt), "-b", f"task/{task_id}", base)
@@ -77,6 +110,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
            "--dangerously-skip-permissions"]
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
+    log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
     t0 = time.time()
     try:
         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -89,7 +123,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     if p.returncode != 0 and is_rate_limited(text):
         secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
         pool.cooldown(acct, secs)
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit", cooldown_s=secs)
+        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
+                    cooldown_s=secs, **log)
         return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
     try:
         out = json.loads(stdout)
@@ -99,8 +134,9 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
     bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
-                outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), **{k: used.get(k, 0) for k in
-                ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
+                outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), **log,
+                **{k: used.get(k, 0) for k in
+                   ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
     return {"status": "done" if p.returncode == 0 else "failed", "output": out}
 
 
@@ -113,10 +149,40 @@ def extract_json(text):
         return {"summary": text[:2000], "parse_error": True}
 
 
+def fit_result(result, cap=bus.MAX_RESULT_CHARS):
+    """Shrink an oversize worker result (drop findings, truncate summary) so it fits under the bus cap.
+    Returns result unchanged when it already fits."""
+    original_chars = len(json.dumps(result))
+    if original_chars <= cap:
+        return result
+    out = dict(result)
+    if isinstance(out.get("summary"), str):
+        out["summary"] = out["summary"][:1500]
+    out["truncated"] = {"reason": "over MAX_RESULT_CHARS", "original_chars": original_chars}
+    findings = out.get("findings")
+    if isinstance(findings, list):
+        lo, hi, best = 0, len(findings), 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            trial = {**out, "findings": findings[:mid]}
+            if len(json.dumps(trial)) <= cap - 200:
+                best, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        out["findings"] = findings[:best]
+    return out
+
+
 def run_worker(task_id):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
-    acct = pool.pick(role)
+    avoid = None
+    if role == "review" and t.get("inputs") and isinstance(t["inputs"][0], str):
+        try:
+            avoid = bus.get(t["inputs"][0]).get("account")
+        except KeyError:
+            avoid = None
+    acct = pool.pick(role, avoid=avoid)
     if acct is None:
         bus.update(task_id, status="held", hold_reason="no account with headroom")
         return {"status": "held"}
@@ -129,6 +195,8 @@ def run_worker(task_id):
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                         for k in ("claim", "evidence", "confidence")})
     elif role == "execute":
+        t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
+        bus.update(task_id, executor=t["executor"])
         prompt = render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"]) + \
             "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
     else:
@@ -137,22 +205,38 @@ def run_worker(task_id):
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
     r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                    lim["max_budget_usd"].get(role, 2.0), t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
-    if r["status"] == "done" and role == "execute":
-        bus.post_result(task_id, {"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
-                                  "review": "other account, different model; label PR same-family-review"}, "done")
-    elif r["status"] == "done":
-        result = extract_json(r["output"].get("result", ""))
-        bus.post_result(task_id, {"summary": result.get("summary", ""), **result}, "done")
-    elif r["status"] == "held":
-        bus.update(task_id, status="held", hold_reason=r["reason"])
-    else:
-        bus.update(task_id, status="failed", reason=r["reason"])
+    try:
+        if r["status"] == "done" and role == "execute":
+            bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
+                                      "review": "other account, different model; label PR same-family-review"}), "done")
+        elif r["status"] == "done":
+            result = extract_json(r["output"].get("result", ""))
+            bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+            if role == "review" and result.get("verdict"):
+                bus.update(task_id, review_verdict=result["verdict"])
+                if t.get("inputs") and isinstance(t["inputs"][0], str):
+                    try:
+                        bus.update(t["inputs"][0], review_verdict=result["verdict"])
+                    except KeyError:
+                        pass
+        elif r["status"] == "held":
+            bus.update(task_id, status="held", hold_reason=r["reason"])
+        else:
+            bus.update(task_id, status="failed", reason=r["reason"])
+    except Exception as e:
+        bus.log_run(task=task_id, role=role, outcome="post_failed",
+                    executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
+        bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     return r
 
 
 def scoped_diff(t):
-    """Reviewers see -U3 hunks for the scoped paths of the task under review, never the repo."""
+    """Reviewers see -U3 hunks for the scoped paths of the task under review, never the repo. Diffs against the
+    reviewed task's goal branch (when it exists) instead of origin/main, so a stacked task's review doesn't
+    include its predecessor's already-merged hunks."""
     src = bus.get(t["inputs"][0]) if t.get("inputs") else t
     wt = src.get("worktree") or ROOT
-    r = git("diff", "-U3", "origin/main...HEAD", "--", *src["scope"], cwd=wt, check=False)
+    parent = src.get("parent")
+    base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
+    r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"

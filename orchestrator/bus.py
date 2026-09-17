@@ -58,7 +58,8 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
 
 
 def update(tid, **fields):
-    """Non-Planner fields only: status, assigned_to, worktree, codex_thread, pid, resume_hint."""
+    """Non-Planner fields only: status, assigned_to, worktree, codex_thread, executor, pid, resume_hint.
+    executor is the routed model id ("astra", "luna", ...) or "claude:<tier>" for a Claude fallback run."""
     t = get(tid)
     for k, v in fields.items():
         if k in {"spec", "acceptance", "scope", "complexity"}:
@@ -98,7 +99,8 @@ def events(since=0, limit=200):
 
 
 def log_run(**fields):
-    """Append one line per event to runs/<date>.jsonl: tokens, role, tier, account, duration, outcome."""
+    """Append one line per event to runs/<date>.jsonl: tokens, role, tier, account, executor, complexity, duration,
+    outcome. Callers normalize cached tokens to cache_read_input_tokens so cli.cost sums one key across providers."""
     RUNS.mkdir(exist_ok=True)
     with open(RUNS / f"{date.today().isoformat()}.jsonl", "a") as f:
         f.write(json.dumps({"ts": time.time(), **fields}) + "\n")

@@ -13,7 +13,13 @@ elif [ -f package.json ]; then
   [ -f tsconfig.json ] && run npx tsc --noEmit
   jq -e '.scripts.lint' package.json >/dev/null 2>&1 && run npm run lint --silent
 elif [ -f pyproject.toml ] || ls tests/test_*.py >/dev/null 2>&1; then
-  if command -v pytest >/dev/null 2>&1; then run pytest -q -x --no-header -p no:cacheprovider; else run python3 -m unittest discover -q tests; fi
+  if command -v uv >/dev/null 2>&1 && [ -f pyproject.toml ]; then
+    if uv run --project . python -c "import pytest" >/dev/null 2>&1; then cmd=(uv run --project . pytest -q -x --no-header -p no:cacheprovider)
+    else cmd=(uv run --project . python -m unittest discover -q tests); fi
+  elif command -v pytest >/dev/null 2>&1; then cmd=(pytest -q -x --no-header -p no:cacheprovider)
+  else cmd=(python3 -m unittest discover -q tests); fi
+  if [ "${TESTS_GREEN_DRY:-}" = "1" ]; then rm -f "$out"; echo "${cmd[*]}"; exit 0; fi
+  run "${cmd[@]}"
 else echo "tests-green: no test runner detected in $PWD" >&2; exit 0; fi
 [ $rc -eq 0 ] && { rm -f "$out"; exit 0; }
 fail=$(grep -E 'FAIL|ERROR|Error|error TS|✗|✕|AssertionError|assert |Traceback' "$out" | grep -v '^## ' | head -40)
