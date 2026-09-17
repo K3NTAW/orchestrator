@@ -82,3 +82,8 @@ outcome: T-0055 generalizes to every list-valued key; lesson: cap enforcement mu
 type: gotcha · goal: T-0043 · tasks: T-0050,T-0054 · provenance: repo
 - orchestrator/daemon.py notify() (pre-existing) f-string-interpolated the message into osascript -e; the daemon now feeds it merge stderr and task titles, so a quote in worker or git output could execute local commands
 outcome: fix round passes the text as an argv item to an 'on run argv' handler; lesson: any shell or script literal fed from worker output is an injection path — reviewers with the security checklist catch these; keep the checklist mandatory for autonomous stages
+
+## 2026-09-17 Fix rounds leave the original task without merged_into, so the daemon re-reviews merged work
+type: gotcha · goal: T-0043 · tasks: T-0050,T-0057,T-0063 · provenance: repo
+- merge(fix_round) sets merged_into only on the fix-round task; the original (e.g. T-0016, T-0018) stays done with merged_into unset; the first daemon --once created six stale review tasks T-0057..T-0062 and its threads died with the process
+outcome: T-0063: tick() skips tasks of closed goals and treats a task as merged when its branch is an ancestor of goal/<parent>; stale tasks marked failed/superseded

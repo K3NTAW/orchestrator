@@ -68,3 +68,9 @@ type: decision · goal: T-0043 · tasks: T-0047,T-0048,T-0049,T-0055,T-0050,T-00
 - orchestrator/daemon.py tick stages dispatch/gate/review/merge with pipeline stamps claimed under the lock, async dispatch, per-stage error holds, argv-safe notify (93a1b64, 9cb2114); 
 - spec_review role + prompts/spec-review.md with numbered excerpts + spawn_spec_review; fit_result trims any list field (41df1ae, 70c0aa5)
 outcome: Reviews requested changes 3 times (fit_result shape; daemon blocking dispatch + stamp-before-effect + notify injection); all fixed same branch. Daemon is opt-in until started. Rollback: close PR or revert in reverse order. Next: fresh Planner session so MCP servers load new code, then run the daemon alongside the Planner
+
+## 2026-09-17 Pipeline daemon autostarts inside the orchestrator MCP server
+type: decision · goal: T-0043 · tasks: T-0063,T-0064 · provenance: repo
+- .orchestrator/pool.toml [daemon] autostart=true, interval_s=30; orchestrator/mcp.py calls daemon.start_background at boot inside try/except (34e9e5d)
+- orchestrator/daemon.py acquire_lock on .orchestrator/daemon.lock keeps one instance across the autostart and the CLI; ORCH_DAEMON=0 opts out; stale() skips tasks of closed goals; already_merged() marks ancestor-merged fix-round originals (901306a)
+outcome: Chosen over a launcher change in dotfiles (protected path, and a separate process to babysit): the daemon lives exactly as long as the Planner session. Rollback: autostart=false or revert the two commits
