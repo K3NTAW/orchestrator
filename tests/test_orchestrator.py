@@ -44,7 +44,7 @@ class PoolSel(unittest.TestCase):
         P.PERSIST.unlink(missing_ok=True); self.p = P.Pool()
 
     def test_affinity_reserve_cooldown_budget(self):
-        self.assertEqual(self.p.pick("review").id, "B")            # A has no review affinity
+        self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
         A, B = self.p.get("A"), self.p.get("B")
         self.p.record(A, int(self.p.cap * 0.7))                     # A above 1-reserve(0.35)=0.65 -> scouts go to B
         self.assertEqual(self.p.pick("scout").id, "B")
@@ -53,6 +53,12 @@ class PoolSel(unittest.TestCase):
         self.p.resume("B"); self.assertEqual(self.p.pick("review").id, "B")
         B.day_tokens = B.daily_budget; self.assertIsNone(self.p.pick("review"))
         self.assertEqual(P.Pool().get("A").window_tokens, A.window_tokens)  # persisted across restarts
+
+    def test_pick_review_avoids_executing_account(self):
+        self.assertEqual(self.p.pick("review", avoid="B").id, "A")   # B executed it; A has headroom
+        self.assertEqual(self.p.pick("review", avoid="A").id, "B")
+        self.p.cooldown(self.p.get("A"), 600)
+        self.assertEqual(self.p.pick("review", avoid="B").id, "B")   # only B has headroom -> avoid is ignored
 
     def test_rate_limit_parsing_and_fallback(self):
         self.assertTrue(P.is_rate_limited("Error: You've hit your usage limit. Resets in 2h 15m"))
@@ -336,6 +342,56 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(bus.get(t2["id"])["resume_hint"]["conflicts"], ["feature.py"])
         self.assertTrue(bus.commit_state())                          # orchestrator-state branch got the task JSON
         self.assertIn("tasks/T-0001.json", g("ls-tree", "-r", "--name-only", "orchestrator-state").stdout)
+
+
+class SpawnBase(unittest.TestCase):
+    """base_for/scoped_diff (review T-0026). Runs after MergeQueue has turned TMP into a git repo with a
+    goal/G branch, so class name is alphabetically after MergeQueue (test order = dir(module) order)."""
+    def g(self, *a, cwd=TMP, **k):
+        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, **k)
+
+    def test_review_bases_on_reviewed_task_branch(self):
+        reviewed = bus.create_task("feat3", "s", ["a"], ["feat3.py"], role="execute")
+        wt = spawn.ensure_worktree(reviewed["id"], base="HEAD")
+        bus.update(reviewed["id"], worktree=str(wt))
+        review = bus.create_task("review feat3", "s", ["a"], ["feat3.py"], role="review", inputs=[reviewed["id"]])
+        self.assertEqual(spawn.base_for(review), f"task/{reviewed['id']}")
+
+    def test_review_falls_back_to_goal_branch_then_origin_main(self):
+        no_wt = bus.create_task("no wt yet", "s", ["a"], ["x.py"], role="execute", parent="G")
+        review = bus.create_task("review no wt", "s", ["a"], ["x.py"], role="review", inputs=[no_wt["id"]])
+        self.assertEqual(spawn.base_for(review), "goal/G")            # task/<id> doesn't exist, parent's goal does
+        no_parent = bus.create_task("no wt no goal", "s", ["a"], ["x.py"], role="execute")
+        review2 = bus.create_task("review no parent", "s", ["a"], ["x.py"], role="review", inputs=[no_parent["id"]])
+        self.assertEqual(spawn.base_for(review2), "origin/main")      # neither branch exists
+
+    def test_execute_stacks_on_existing_goal_branch(self):
+        t = bus.create_task("stack", "s", ["a"], ["more.py"], role="execute", parent="G")
+        self.assertEqual(spawn.base_for(t), "goal/G")
+        t2 = bus.create_task("no goal yet", "s", ["a"], ["more.py"], role="execute", parent="ghost")
+        self.assertEqual(spawn.base_for(t2), "origin/main")
+
+    def test_ensure_worktree_resolves_base_when_none_given(self):
+        t = bus.create_task("stacked-exec", "s", ["a"], ["stacked.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(t["id"])
+        self.assertEqual(self.g("merge-base", "--is-ancestor", "goal/G", f"task/{t['id']}").returncode, 0)
+
+    def test_scoped_diff_excludes_predecessor_hunks(self):
+        wt_goal = TMP / "wt" / "_goal_seed"
+        self.g("worktree", "add", str(wt_goal), "goal/G")
+        (wt_goal / "shared.py").write_text("A = 1\n")
+        self.g("add", "-A", cwd=wt_goal); self.g("commit", "-qm", "predecessor shared.py", cwd=wt_goal)
+        self.g("worktree", "remove", str(wt_goal), "--force")
+
+        t = bus.create_task("stack2", "s", ["a"], ["shared.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(t["id"]); bus.update(t["id"], worktree=str(wt))
+        (wt / "shared.py").write_text("A = 1\nB = 1\n")
+        self.g("add", "-A", cwd=wt); self.g("commit", "-qm", "stack2 add B", cwd=wt)
+
+        review = bus.create_task("review stack2", "s", ["a"], ["shared.py"], role="review", inputs=[t["id"]])
+        diff = spawn.scoped_diff(review)
+        self.assertIn("+B = 1", diff)
+        self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
 
 
 class Cli(unittest.TestCase):

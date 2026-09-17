@@ -127,8 +127,10 @@ class Pool:
                                                      for eid, ex in self.executors.items()}}, indent=1))
 
     # selection ---------------------------------------------------------------------------------
-    def pick(self, role):
-        """least-loaded-with-headroom. None -> caller must HOLD the task, never fail it."""
+    def pick(self, role, avoid=None):
+        """least-loaded-with-headroom. avoid: for role="review", the account id that executed the task under
+        review; skipped so a fallback execution doesn't get reviewed on the same account, unless it's the only
+        one with headroom. None -> caller must HOLD the task, never fail it."""
         ok = []
         for a in self.accounts:
             if role not in a.affinity or a.cooling():
@@ -139,6 +141,10 @@ class Pool:
             ceiling = 1.0 if role == "planner" else 1.0 - a.reserve
             if u < ceiling:
                 ok.append(a)
+        if role == "review" and avoid:
+            without_avoid = [a for a in ok if a.id != avoid]
+            if without_avoid:
+                ok = without_avoid
         return min(ok, key=lambda a: a.utilization(self.cap)) if ok else None
 
     def record(self, acct, tokens):

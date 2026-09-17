@@ -33,6 +33,7 @@ Full access, guardrails as a hard floor, human only at PR approval:
   its floor is git (task branches only) plus your PR review.
 - `main` only moves through a PR you approve. The merge queue targets `goal/<parent>`.
 - The Planner may commit, branch and push but never edits source (`planner-mode.sh`, PreToolUse). Every change carries a rollback path in `decisions.md`.
+- Review and challenge worktrees are based on the reviewed task's own branch (falling back to its goal branch, then `origin/main`), never a stale checkout of `origin/main` predating the work under review; reviews also prefer the account that didn't execute the task, landing on the same account only when it's the only one with headroom.
 
 ## Phase 1 (manual loop)
 Hooks live: guardrails, scope-guard, tests-green, loop-guard, require-acceptance, no-uncommitted, retrospect-written, bus-post. Hand one atomic task to the `codex` tool (orchestrator server wraps `codex exec`), iterate with `codex_reply` deltas, accept via

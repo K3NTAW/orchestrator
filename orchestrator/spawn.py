@@ -22,11 +22,41 @@ def git(*a, cwd=ROOT, check=True):
     return r
 
 
-def ensure_worktree(task_id, base="origin/main"):
+def branch_exists(name):
+    return git("rev-parse", "--verify", name, check=False).returncode == 0
+
+
+def base_for(task):
+    """Pick the base branch for a new worktree. review/challenge tasks whose inputs[0] is a task id: base on
+    that task's own branch so the reviewer sees the code under review, not a worktree cut from origin/main before
+    the reviewed task (or its dependency, B1-style) ever landed (review T-0026). Fall back to the reviewed task's
+    goal branch, then origin/main. execute tasks with a parent whose goal branch already exists stack on it, so
+    the Planner no longer has to pre-create worktrees for stacked tasks."""
+    role, parent = task["role"], task.get("parent")
+    if role in ("review", "challenge") and task.get("inputs") and isinstance(task["inputs"][0], str):
+        try:
+            src = bus.get(task["inputs"][0])
+        except KeyError:
+            src = None
+        if src is not None:
+            branch = f"task/{task['inputs'][0]}"
+            if branch_exists(branch):
+                return branch
+            src_parent = src.get("parent")
+            if src_parent and branch_exists(f"goal/{src_parent}"):
+                return f"goal/{src_parent}"
+    elif role == "execute" and parent and branch_exists(f"goal/{parent}"):
+        return f"goal/{parent}"
+    return "origin/main"
+
+
+def ensure_worktree(task_id, base=None):
     wt = ROOT / "wt" / task_id
     if not wt.exists():
         wt.parent.mkdir(exist_ok=True)
         git("fetch", "origin", check=False)
+        if base is None:
+            base = base_for(bus.get(task_id))
         if git("rev-parse", "--verify", base, check=False).returncode:
             base = "HEAD"  # no remote yet
         git("worktree", "add", str(wt), "-b", f"task/{task_id}", base)
@@ -143,7 +173,13 @@ def fit_result(result, cap=bus.MAX_RESULT_CHARS):
 def run_worker(task_id):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
-    acct = pool.pick(role)
+    avoid = None
+    if role == "review" and t.get("inputs") and isinstance(t["inputs"][0], str):
+        try:
+            avoid = bus.get(t["inputs"][0]).get("account")
+        except KeyError:
+            avoid = None
+    acct = pool.pick(role, avoid=avoid)
     if acct is None:
         bus.update(task_id, status="held", hold_reason="no account with headroom")
         return {"status": "held"}
@@ -185,8 +221,12 @@ def run_worker(task_id):
 
 
 def scoped_diff(t):
-    """Reviewers see -U3 hunks for the scoped paths of the task under review, never the repo."""
+    """Reviewers see -U3 hunks for the scoped paths of the task under review, never the repo. Diffs against the
+    reviewed task's goal branch (when it exists) instead of origin/main, so a stacked task's review doesn't
+    include its predecessor's already-merged hunks."""
     src = bus.get(t["inputs"][0]) if t.get("inputs") else t
     wt = src.get("worktree") or ROOT
-    r = git("diff", "-U3", "origin/main...HEAD", "--", *src["scope"], cwd=wt, check=False)
+    parent = src.get("parent")
+    base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
+    r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"
