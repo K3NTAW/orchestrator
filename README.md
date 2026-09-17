@@ -35,12 +35,18 @@ so the whole group is treated as cooling either way.
 `orchestrator scorecard`: a live success rate (merged / (merged + failed)) once an executor has enough resolved
 tasks, halved if its quota group hit a usage limit 3+ times today. Below that sample size it falls back to a
 cold-start prior built from `orchestrator bench show` numbers — an executor's model coding (or intelligence) score,
-scaled 0.5-1.5 against the pool's best. That benchmark snapshot is manual by design: `artificialanalysis.ai`'s Terms
-of Use restrict automated access, so `bench fetch` is opt-in and rate-limited (at most once per 20h); `bench set`
-hand-entering numbers is the normal path.
+scaled 0.5-1.5 against the pool's best. That prior comes from `orchestrator bench fetch`, which pulls
+https://artificialanalysis.ai/models with Scrapling's plain HTTP Fetcher as an identified client (User-Agent
+`orchestrator-bench/1`, no TLS impersonation, no stealth headers), at most once per 20h unless `--force`, parses the
+page's React Server Component chunks, and matches display names (effort suffixes tolerated, the max variant
+preferred) to our model ids. It writes `.orchestrator/bench.json` with provenance (`fetched_at`, `http_status`,
+`request`); a non-200 or empty result never overwrites the file. Page content is untrusted data. The site's Terms
+of Use restrict automated access; the user decided on 2026-09-17 to proceed under these limits. `bench set
+<model_id> --by <name> key=value` remains for manual overrides (marked `manual: true`).
 
 CLI: `orchestrator scorecard [--by executor|tier] [--json]` · `orchestrator bench show` ·
-`orchestrator bench set <model_id> --by <name> key=value...` · `orchestrator status --plain`.
+`orchestrator bench fetch [--force] [--by NAME]` · `orchestrator bench set <model_id> --by <name> key=value...` ·
+`orchestrator status --plain`.
 
 ## Access model (decided 2026-09-16)
 Full access, guardrails as a hard floor, human only at PR approval:
@@ -78,4 +84,6 @@ uv run orchestrator status | cost --by role|tier|account|task | hold A --minutes
 - Rate-limit error text from `claude -p` → `pool.parse_reset_hint` (best-effort). Codex: `codex mcp-server` is gone in 0.154.0, so the Executor wraps `codex exec --json` / `codex exec resume`; usage-limit text and reset format observed 2026-09-16 ("try again at Sep 19th, 2026 2:00 PM"), thread ids arrive in `thread.started`. `turn.completed` usage shape and thread survival across a limit hit: UNCONFIRMED until the window resets.
 - `task_input` payload fields on TaskCreated/TaskCompleted (hooks also accept `task.*` and top-level fields).
 - Remote connectors under `~/.claude-b` headless. `CLAUDE_CONFIG_DIR` is undocumented but present in the 2.1.273 binary.
-- `window_cap_tokens` in `pool.toml` is a calibration knob: set it from observed 5h-window resets.
+- `window_cap_tokens` in `pool.toml` is a calibration knob: set it from observed 5h-window resets. Raised from 2M to
+  10M on 2026-09-17 after 2M was reached in 2.2h with zero real rate limits; real limits still cool an account via
+  the reset-hint parser.
