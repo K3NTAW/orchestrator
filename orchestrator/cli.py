@@ -1,7 +1,7 @@
 """orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | daemon | merge T-0001 | post T-0001 --summary ..."""
 import argparse, json
 from collections import defaultdict
-from . import bus
+from . import bus, scorecard
 from .bus import RUNS
 from .pool import Pool
 
@@ -26,6 +26,8 @@ def main():
     sub.add_parser("daemon")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
+    sc = sub.add_parser("scorecard"); sc.add_argument("--by", default="executor", choices=["executor", "tier"])
+    sc.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "status":
         if a.plain:
@@ -48,6 +50,16 @@ def main():
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
+    elif a.cmd == "scorecard":
+        card = scorecard.build(by=a.by)
+        sc = scorecard.scores(card)
+        if a.json:
+            print(json.dumps(card, indent=1))
+        else:
+            print("id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore")
+            for eid, r in sorted(card.items()):
+                print(f"{eid}\t{r['merged']}\t{r['failed']}\t{r['rounds_avg']}\t{round(r['wall_s'])}\t"
+                      f"{round(r['usd'], 2)}\t{r['held_usage_limit']}\t{round(sc.get(eid, 1.0), 3)}")
 
 
 if __name__ == "__main__":

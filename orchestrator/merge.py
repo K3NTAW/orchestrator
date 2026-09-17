@@ -1,7 +1,7 @@
 """Serial merge queue: one at a time, rebase onto target -> tests-green -> fast-forward the target branch.
 Target defaults to goal/<parent> (or 'integration'); main only ever moves via a human-approved PR."""
 import fcntl, subprocess
-from . import ROOT, bus
+from . import ROOT, bus, scorecard
 from .spawn import git
 
 TESTS_GREEN = ROOT / ".claude" / "hooks" / "tests-green.sh"
@@ -34,4 +34,8 @@ def merge(task_id, target=None):
             return {"status": "failed", "reason": ff.stderr}
         bus.update(task_id, status="done", merged_into=target, sha=sha)
         bus.commit_state()
+        try:
+            scorecard.write(scorecard.build())
+        except Exception:
+            pass
         return {"status": "merged", "target": target, "sha": sha}

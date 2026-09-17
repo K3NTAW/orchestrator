@@ -4,6 +4,7 @@ import json, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
+from . import scorecard
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
@@ -91,7 +92,11 @@ def start(task_id, prompt):
     Held (not failed) when every executor in the task's complexity band is cooling, busy or over its daily budget.
     scores() is B3's ranking input; absent, every executor scores 1.0."""
     pool = Pool(); t = bus.get(task_id)
-    ex = pool.pick_executor("execute", t["complexity"], scores=getattr(pool, "scores", dict)())
+    try:
+        scores = scorecard.scores(scorecard.build())
+    except Exception:
+        scores = {}
+    ex = pool.pick_executor("execute", t["complexity"], scores=scores)
     if ex is None or ex.provider != "codex":
         return _exhausted(pool, t)
     from .spawn import ensure_worktree

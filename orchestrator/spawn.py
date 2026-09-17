@@ -212,6 +212,13 @@ def run_worker(task_id):
         elif r["status"] == "done":
             result = extract_json(r["output"].get("result", ""))
             bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+            if role == "review" and result.get("verdict"):
+                bus.update(task_id, review_verdict=result["verdict"])
+                if t.get("inputs") and isinstance(t["inputs"][0], str):
+                    try:
+                        bus.update(t["inputs"][0], review_verdict=result["verdict"])
+                    except KeyError:
+                        pass
         elif r["status"] == "held":
             bus.update(task_id, status="held", hold_reason=r["reason"])
         else:

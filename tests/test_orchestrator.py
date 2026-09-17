@@ -11,7 +11,7 @@ for f in ("pool.toml",):
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")
 sys.path.insert(0, str(REPO))
-from orchestrator import bus, pool as P, spawn, merge, executor, cli  # noqa: E402
+from orchestrator import bus, pool as P, spawn, merge, executor, cli, scorecard, STATE  # noqa: E402
 
 HOOKS = REPO / ".claude" / "hooks"
 
@@ -234,6 +234,88 @@ class Executors(unittest.TestCase):
             self.assertTrue(row.get("quota_group"), row["id"])
 
 
+class Scorecard(unittest.TestCase):
+    """build()/scores() on a synthesized scratch root, isolated from the tasks every other test class creates
+    under the shared TMP/.orchestrator, so counts are exact."""
+    def setUp(self):
+        self.root = TMP / "scorecard-src" / str(time.time())
+        (self.root / "tasks").mkdir(parents=True); (self.root / "runs").mkdir(parents=True)
+
+    def write_task(self, tid, **fields):
+        base = {"id": tid, "role": "execute", "tier": "sonnet", "complexity": 3, "status": "queued",
+                "acceptance": ["a"], "scope": ["x"], "spec": "s", "title": tid}
+        (self.root / "tasks" / f"{tid}.json").write_text(json.dumps({**base, **fields}))
+
+    def write_runs(self, *lines):
+        (self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl").write_text(
+            "\n".join(json.dumps(l) for l in lines) + "\n")
+
+    def test_build_counts_and_scores(self):
+        self.write_task("T-9001", executor="good", complexity=3, status="done", merged_into="goal/G", rounds=1)
+        self.write_task("T-9002", executor="bad", complexity=4, status="failed")
+        self.write_runs({"executor": "bad", "outcome": "usage_limit", "duration_s": 1.0})
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["good"]["merged"], 1); self.assertEqual(card["good"]["rounds_avg"], 1.0)
+        self.assertEqual(card["good"]["by_complexity"]["1-3"]["merged"], 1)
+        self.assertEqual(card["bad"]["failed"], 1); self.assertEqual(card["bad"]["by_complexity"]["4-6"]["failed"], 1)
+        self.assertEqual(card["bad"]["held_usage_limit"], 1)
+        neutral = scorecard.scores(card)                       # default min_runs=5: too few resolved tasks
+        self.assertEqual((neutral["good"], neutral["bad"]), (1.0, 1.0))
+        tight = scorecard.scores(card, min_runs=1)
+        self.assertLess(tight["bad"], 1.0)                     # 0 merged / 1 failed -> success=0, score=0.5
+        self.assertGreater(tight["good"], 1.0)                 # 1 merged / 0 failed -> success=1, score=1.5
+
+    def test_review_verdict_rolls_up(self):
+        self.write_task("T-9003", executor="reviewed-by", status="done", review_verdict="request_changes")
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["reviewed-by"]["review_request_changes"], 1)
+
+    def test_by_tier_regroups(self):
+        self.write_task("T-9004", executor="astra", tier="astra", complexity=2, status="done", merged_into="goal/G")
+        card = scorecard.build(root=self.root, by="tier")
+        self.assertIn("astra", card); self.assertEqual(card["astra"]["merged"], 1)
+
+    def test_write_sets_generated_at(self):
+        self.write_task("T-9005", executor="x", status="done", merged_into="goal/G")
+        payload = scorecard.write(scorecard.build(root=self.root))
+        self.assertIn("generated_at", payload)
+        self.assertIn("generated_at", json.loads((STATE / "scorecard.json").read_text()))
+
+    def test_start_forwards_scorecard_scores_to_pick_executor(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        t = bus.create_task("scored", "s", ["a"], ["x.py"], role="execute", complexity=3)
+        bus.update(t["id"], worktree=str(TMP))
+        seen = {}
+        orig_run = executor._run
+        executor._run = lambda pool, task, args, cwd, timeout, ex=None: seen.update(ex=ex) or {"status": "done"}
+        self.addCleanup(lambda: setattr(executor, "_run", orig_run))
+        orig_scores = scorecard.scores
+        scorecard.scores = lambda card, min_runs=5: {"terra": 3.0}
+        self.addCleanup(lambda: setattr(scorecard, "scores", orig_scores))
+        executor.start(t["id"], "do it")
+        self.assertEqual(seen["ex"].id, "terra")                # weight x score(3.0) beats every other row
+
+
+class ReviewVerdict(unittest.TestCase):
+    def test_run_worker_captures_verdict_on_review_and_reviewed_task(self):
+        reviewed = bus.create_task("feat-rv", "s", ["a"], ["rv.py"], role="execute")
+        review = bus.create_task("review feat-rv", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        fake_out = {"result": json.dumps({"verdict": "request_changes", "comments": []}), "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+        self.assertEqual(bus.get(review["id"])["review_verdict"], "request_changes")
+        self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "request_changes")
+
+
 class Render(unittest.TestCase):
     def test_templates_fill(self):
         s = spawn.render("scout", id="T-1", title="t", spec="q", acceptance=["a"], turns="20")
@@ -338,6 +420,9 @@ class MergeQueue(unittest.TestCase):
         r = merge.merge(t["id"], target="goal/G")
         self.assertEqual(r["status"], "merged", r)
         self.assertEqual(g("rev-parse", "goal/G").stdout, g("rev-parse", "HEAD", cwd=wt).stdout)
+        card_path = STATE / "scorecard.json"
+        self.assertTrue(card_path.exists())
+        self.assertIn("generated_at", json.loads(card_path.read_text()))
         # second task conflicting on the same file -> conflict hunks back, task failed with resume_hint
         t2 = bus.create_task("feat2", "s", ["a"], ["feature.py"], role="execute")
         wt2 = spawn.ensure_worktree(t2["id"], base="main"); bus.update(t2["id"], worktree=str(wt2))
@@ -425,6 +510,23 @@ class Cli(unittest.TestCase):
         parsed = json.loads(out.getvalue())
         self.assertEqual(set(parsed.keys()), {"accounts", "executors", "codex", "queue"})
         self.assertEqual((len(parsed["executors"]), sum(e["enabled"] for e in parsed["executors"])), (7, 4))
+
+    def test_scorecard_table_and_json(self):
+        bus.create_task("cli-scored", "s", ["a"], ["x.py"], role="execute", complexity=3)  # ensures >=1 row exists
+        bus.post_result(bus.read(role="execute")[-1]["id"], {"summary": "ok"})
+        sys.argv = ["orchestrator", "scorecard"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore"))
+        self.assertGreaterEqual(len(lines), 1)
+
+        sys.argv = ["orchestrator", "scorecard", "--json"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        json.loads(out.getvalue())  # valid JSON
 
 
 if __name__ == "__main__":
