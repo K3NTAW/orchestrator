@@ -77,6 +77,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
            "--dangerously-skip-permissions"]
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
+    log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
     t0 = time.time()
     try:
         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -89,7 +90,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     if p.returncode != 0 and is_rate_limited(text):
         secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
         pool.cooldown(acct, secs)
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit", cooldown_s=secs)
+        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
+                    cooldown_s=secs, **log)
         return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
     try:
         out = json.loads(stdout)
@@ -99,8 +101,9 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
     bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
-                outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), **{k: used.get(k, 0) for k in
-                ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
+                outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), **log,
+                **{k: used.get(k, 0) for k in
+                   ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
     return {"status": "done" if p.returncode == 0 else "failed", "output": out}
 
 
@@ -153,6 +156,8 @@ def run_worker(task_id):
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                         for k in ("claim", "evidence", "confidence")})
     elif role == "execute":
+        t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
+        bus.update(task_id, executor=t["executor"])
         prompt = render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"]) + \
             "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
     else:
@@ -173,7 +178,8 @@ def run_worker(task_id):
         else:
             bus.update(task_id, status="failed", reason=r["reason"])
     except Exception as e:
-        bus.log_run(task=task_id, role=role, outcome="post_failed")
+        bus.log_run(task=task_id, role=role, outcome="post_failed",
+                    executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
         bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     return r
 

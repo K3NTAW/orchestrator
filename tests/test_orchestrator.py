@@ -72,7 +72,32 @@ class PoolSel(unittest.TestCase):
         self.assertTrue(json.loads((cfg / ".claude.json").read_text())["projects"][str(TMP / "wt" / "T-0099")]["hasTrustDialogAccepted"])
 
 
+class FakeProc:
+    """Stand-in for subprocess.run's CompletedProcess: executor._run only reads stdout/stderr/returncode."""
+    def __init__(self, stdout, returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, "", returncode
+
+
+def codex_stream(*events):
+    return "\n".join(json.dumps(e) for e in events)
+
+
 class Executor(unittest.TestCase):
+    LIVE = {"astra", "luna", "terra", "sol"}
+
+    def exec_task(self, complexity=3, title="exec"):
+        """An execute task with a worktree already set, so start() never has to create one."""
+        t = bus.create_task(title, "s", ["a"], ["x.py"], role="execute", complexity=complexity)
+        bus.update(t["id"], worktree=str(TMP))
+        return t["id"]
+
+    def fake_codex(self, stdout, returncode=0):
+        P.PERSIST.unlink(missing_ok=True)
+        orig = executor.subprocess.run
+        executor.subprocess.run = lambda *a, **k: FakeProc(stdout, returncode)
+        self.addCleanup(lambda: setattr(executor.subprocess, "run", orig))
+        self.addCleanup(P.PERSIST.unlink, True)
+
     def test_parse_observed_stream(self):
         lines = ['{"type":"thread.started","thread_id":"01a0ab11-77b3-7431-a9f1-1527ef937b5c"}', '{"type":"turn.started"}',
                  '{"type":"error","message":"You\'ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage or try again at Sep 19th, 2026 2:00 PM."}',
@@ -104,6 +129,44 @@ class Executor(unittest.TestCase):
         time.sleep(0.2); self.assertEqual(sorted(ran), sorted([t5["id"], t7["id"]]))
         pool.codex.cooldown_until = 0; pool.save()
         self.assertIn("tests_green", spawn.render("execute", spec="s", acceptance=["a"], scope=["x"]))
+
+    def test_start_routes_through_pick_executor(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(complexity=3, title="route")
+        seen = {}
+        orig = executor._run
+        executor._run = lambda pool, task, args, cwd, timeout, ex=None: seen.update(args=args, ex=ex) or {"status": "done"}
+        self.addCleanup(lambda: setattr(executor, "_run", orig))
+        executor.start(tid, "do it")
+        models = {e.model for e in P.Pool().executors.values() if e.id in self.LIVE}
+        self.assertIn(seen["args"][seen["args"].index("-m") + 1], models)     # the picked row's model, not [codex].model
+        t = bus.get(tid)
+        self.assertIn(t["executor"], self.LIVE); self.assertEqual(t["tier"], t["executor"])
+        self.assertEqual(seen["ex"].id, t["executor"])
+        self.assertEqual(P.Pool().executors[t["executor"]].day_tasks, 1)
+
+    def test_usage_limit_cools_the_whole_quota_group(self):
+        self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "th-limit"},
+                                     {"type": "error", "message": "You've hit your usage limit. Try again in 30 minutes."}), 1)
+        tid = self.exec_task(complexity=3, title="limit")
+        r = executor.start(tid, "do it")
+        self.assertEqual((r["status"], r["resets_in_s"]), ("held", 1800))
+        fresh = P.Pool()                                                     # cooldown survives the MCP restart
+        self.assertTrue(all(fresh.executors[i].cooling() for i in self.LIVE))
+        self.assertFalse(fresh.codex_available()); self.assertFalse(fresh.codex_available(3))
+        self.assertEqual(bus.get(tid)["status"], "held")
+
+    def test_run_log_carries_executor_and_complexity(self):
+        self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "th-log"},
+                                     {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+                                     {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 1,
+                                                                          "cached_input_tokens": 7}}))
+        tid = self.exec_task(complexity=4, title="log")
+        self.assertEqual(executor.start(tid, "do it")["status"], "done")
+        line = json.loads((bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((line["task"], line["complexity"], line["outcome"]), (tid, 4, "done"))
+        self.assertIn(line["executor"], self.LIVE); self.assertEqual(line["tier"], line["executor"])
+        self.assertEqual((line["cache_read_input_tokens"], line["cached_input_tokens"]), (7, 7))  # normalized + legacy key
 
 
 class Executors(unittest.TestCase):
