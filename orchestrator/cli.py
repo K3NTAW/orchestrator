@@ -1,4 +1,4 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | daemon | merge T-0001 | post T-0001 --summary ..."""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | daemon [--once] | merge T-0001 | post T-0001 --summary ..."""
 import argparse, json
 from collections import defaultdict
 from . import bus, scorecard
@@ -23,7 +23,7 @@ def main():
     c = sub.add_parser("cost"); c.add_argument("--by", default="role", choices=["role", "tier", "account", "task"])
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
     sub.add_parser("resume").add_argument("account")
-    sub.add_parser("daemon")
+    dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard"); sc.add_argument("--by", default="executor", choices=["executor", "tier"])
@@ -49,7 +49,7 @@ def main():
     elif a.cmd == "resume":
         pl = Pool(); pl.resume(a.account); print(json.dumps(pl.status(), indent=1))
     elif a.cmd == "daemon":
-        from .daemon import main as d; d()
+        from .daemon import main as d; d(once=a.once)
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
     elif a.cmd == "post":

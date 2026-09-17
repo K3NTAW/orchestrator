@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import json, sqlite3, subprocess, time
+import contextlib, fcntl, json, sqlite3, subprocess, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -11,6 +11,33 @@ ROLES = {"scout", "triage", "execute", "review", "challenge"}
 STATUSES = {"queued", "held", "running", "done", "failed"}
 
 
+LOCK = STATE / "bus.lock"
+_held = threading.local()
+
+
+@contextlib.contextmanager
+def locked():
+    """Serialize bus writes across the daemon, its worker threads and the Planner: an flock on .orchestrator/bus.lock,
+    the same pattern as merge.lock. Reentrant per thread — flock keys on the open file description, so update() ->
+    _save() opening the lock a second time would block on itself without the depth counter."""
+    depth = getattr(_held, "depth", 0)
+    if depth:
+        _held.depth = depth + 1
+        try:
+            yield
+        finally:
+            _held.depth = depth
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(LOCK, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        _held.depth = 1
+        try:
+            yield
+        finally:
+            _held.depth = 0
+
+
 def db():
     STATE.mkdir(exist_ok=True); TASKS.mkdir(exist_ok=True)
     c = sqlite3.connect(STATE / "bus.sqlite", isolation_level=None)
@@ -20,10 +47,11 @@ def db():
 
 
 def _save(t):
-    TASKS.mkdir(parents=True, exist_ok=True)
-    (TASKS / f"{t['id']}.json").write_text(json.dumps(t, indent=2) + "\n")
-    db().execute("insert or replace into tasks values(?,?,?,?,?,?)",
-                 (t["id"], t["status"], t["role"], t["tier"], t.get("assigned_to"), time.time()))
+    with locked():
+        TASKS.mkdir(parents=True, exist_ok=True)
+        (TASKS / f"{t['id']}.json").write_text(json.dumps(t, indent=2) + "\n")
+        db().execute("insert or replace into tasks values(?,?,?,?,?,?)",
+                     (t["id"], t["status"], t["role"], t["tier"], t.get("assigned_to"), time.time()))
 
 
 def _event(tid, kind, data=None):
@@ -70,13 +98,14 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
 def update(tid, **fields):
     """Non-Planner fields only: status, assigned_to, worktree, codex_thread, executor, pid, resume_hint.
     executor is the routed model id ("astra", "luna", ...) or "claude:<tier>" for a Claude fallback run."""
-    t = get(tid)
-    for k, v in fields.items():
-        if k in {"spec", "acceptance", "scope", "complexity", "depends_on"}:
-            raise PermissionError(f"only the Planner may set {k}; create a new task instead")
-        t[k] = v
-    t["events"].append({"ts": time.time(), **fields})
-    _save(t); _event(tid, "update", fields)
+    with locked():   # read-modify-write: without the lock a concurrent update drops the other's fields
+        t = get(tid)
+        for k, v in fields.items():
+            if k in {"spec", "acceptance", "scope", "complexity", "depends_on"}:
+                raise PermissionError(f"only the Planner may set {k}; create a new task instead")
+            t[k] = v
+        t["events"].append({"ts": time.time(), **fields})
+        _save(t); _event(tid, "update", fields)
     return t
 
 

@@ -1,0 +1,142 @@
+"""orchestrator.daemon pipeline: dependency-gated dispatch, spec review for complexity >=5, the tests-green gate,
+review routing and the serial merge — all driven by `tick()` with the four side-effecting calls (executor.start,
+spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead of act.
+
+Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
+these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
+import sys, tempfile, time, unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
+from _harness import REPO, TMP, FakeProc  # noqa: F401
+from orchestrator import bus, daemon, executor, merge, pool as P, spawn
+
+
+class Daemon(unittest.TestCase):
+    def setUp(self):
+        sandbox = Path(tempfile.mkdtemp(prefix="orch-daemon-"))
+        for name, value in (("STATE", sandbox), ("TASKS", sandbox / "tasks"), ("RUNS", sandbox / "runs")):
+            self.swap(bus, name, value)
+        P.PERSIST.unlink(missing_ok=True)                 # a cooldown another test persisted would zero free_slots
+        self.addCleanup(P.PERSIST.unlink, True)
+        self.started, self.workers, self.merged = [], [], []
+        self.swap(executor, "start", lambda tid, prompt: self.started.append(tid))
+        self.swap(spawn, "run_worker", lambda tid: self.workers.append(tid))
+        self.swap(merge, "merge", lambda tid, target=None: (self.merged.append(tid),
+                                                            {"status": "merged", "target": "goal/G", "sha": "abc12345"})[1])
+        self.gate_green(True)
+
+    def swap(self, mod, name, value):
+        orig = getattr(mod, name)
+        setattr(mod, name, value)
+        self.addCleanup(setattr, mod, name, orig)
+
+    def gate_green(self, green):
+        """daemon.subprocess.run covers both the tests-green gate and notify()'s osascript; neither needs a real run."""
+        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0 if green else 1))
+
+    def task(self, title, complexity=2, role="execute", **fields):
+        t = bus.create_task(title, "spec", ["works"], ["x.py"], role=role, complexity=complexity,
+                            parent="T-0043", **fields)
+        return t["id"]
+
+    def settle(self, want, seconds=5):
+        """spawn_async hands the worker to a thread; wait for the recorder rather than assume it already ran."""
+        deadline = time.time() + seconds
+        while len(self.workers) < want and time.time() < deadline:
+            time.sleep(0.01)
+        return self.workers
+
+    def test_depends_on_gates_dispatch(self):
+        a = self.task("A")
+        b = self.task("B", depends_on=[a])
+        daemon.tick()
+        self.assertEqual(self.started, [a])                       # B's dependency has not merged
+        bus.update(a, merged_into="goal/G", sha="deadbee")
+        daemon.tick()
+        self.assertEqual(self.started, [a, b])                    # A is not dispatched twice: dispatched_at is stamped
+
+    def test_high_complexity_waits_for_spec_review(self):
+        c = self.task("C", complexity=6)
+        daemon.tick()
+        daemon.tick()
+        self.assertEqual(self.started, [])
+        reviews = bus.read(role="spec_review")
+        self.assertEqual(len(reviews), 1)                         # created once across two ticks
+        self.assertEqual(reviews[0]["inputs"], [c])
+        self.assertEqual(self.settle(1), [reviews[0]["id"]])
+        self.assertTrue(bus.get(c)["pipeline"]["spec_review_at"])
+        bus.update(c, spec_review_verdict="approve")
+        daemon.tick()
+        self.assertEqual(self.started, [c])
+
+    def test_spec_review_request_changes_holds(self):
+        c = self.task("C", complexity=7)
+        bus.update(c, spec_review_verdict="request_changes")
+        daemon.tick()
+        self.assertEqual(self.started, [])
+        held = bus.get(c)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "spec_review request_changes"))
+
+    def test_green_gate_merges_cheap_task_and_reviews_the_rest(self):
+        cheap = self.task("cheap", complexity=2)
+        bus.update(cheap, status="done", worktree=str(TMP))
+        big = self.task("big", complexity=5)
+        bus.update(big, status="done", worktree=str(TMP))
+        daemon.tick()
+        daemon.tick()
+        self.assertEqual(self.merged, [cheap])                    # complexity <=3: hooks are the whole review
+        reviews = bus.read(role="review")
+        self.assertEqual([(r["inputs"], r["complexity"]) for r in reviews], [([big], 5)])  # created once, not twice
+        self.assertEqual(self.settle(1), [reviews[0]["id"]])
+        self.assertTrue(bus.get(big)["pipeline"]["gated_at"])
+
+    def test_red_gate_holds_without_review(self):
+        t = self.task("red", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP))
+        self.gate_green(False)
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "gate_red"))
+        self.assertEqual(bus.read(role="review"), [])
+        self.assertEqual(self.merged, [])
+
+    def test_review_verdict_drives_merge_or_hold(self):
+        ok = self.gated_execute("approved")
+        r_ok = self.task("review ok", complexity=5, role="review", inputs=[ok])
+        bus.update(ok, review_verdict="approve"); bus.update(r_ok, status="done", review_verdict="approve")
+        bad = self.gated_execute("rejected")
+        r_bad = self.task("review bad", complexity=5, role="review", inputs=[bad])
+        bus.update(bad, review_verdict="request_changes"); bus.update(r_bad, status="done", review_verdict="request_changes")
+        daemon.tick()
+        daemon.tick()
+        self.assertEqual(self.merged, [ok])                       # merged once, not once per tick
+        held = bus.get(bad)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "review request_changes"))
+
+    def gated_execute(self, title):
+        """A done execute task that already cleared the gate, so gate() leaves it to merge_reviewed()."""
+        t = self.task(title, complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), pipeline={"gated_at": time.time()})
+        return t
+
+
+class BusLock(unittest.TestCase):
+    def test_writes_take_the_flock(self):
+        taken = []
+        orig = bus.locked
+        def counting():
+            taken.append(1)
+            return orig()
+        bus.locked = counting
+        self.addCleanup(setattr, bus, "locked", orig)
+        t = bus.create_task("locked", "s", ["a"], ["x.py"])
+        n = len(taken)
+        self.assertGreaterEqual(n, 1)                             # create_task -> _save
+        bus.update(t["id"], status="held")
+        self.assertGreater(len(taken), n)                         # update -> its own lock, reentrant into _save
+        self.assertTrue(bus.LOCK.exists())
+        self.assertEqual(bus.LOCK.name, "bus.lock")
+
+
+if __name__ == "__main__":
+    unittest.main()
