@@ -113,6 +113,20 @@ class Render(unittest.TestCase):
         self.assertEqual(spawn.extract_json('here: {"summary":"x"} bye')["summary"], "x")
         self.assertTrue(spawn.extract_json("no json")["summary"])
 
+    def test_fit_result_shrinks_oversize(self):
+        big = {"summary": "s" * 3000, "findings": [{"claim": "c" * 380, "confidence": 0.5} for _ in range(40)]}
+        fitted = spawn.fit_result(big)
+        self.assertLess(len(json.dumps(fitted)), bus.MAX_RESULT_CHARS)
+        self.assertEqual(fitted["truncated"]["reason"], "over MAX_RESULT_CHARS")
+        self.assertGreater(fitted["truncated"]["original_chars"], bus.MAX_RESULT_CHARS)
+        self.assertGreaterEqual(len(fitted["findings"]), 1)
+
+    def test_fit_result_leaves_small_result_unchanged(self):
+        small = {"summary": "ok", "findings": [{"claim": "x", "confidence": 0.9}]}
+        fitted = spawn.fit_result(small)
+        self.assertEqual(fitted, small)
+        self.assertNotIn("truncated", fitted)
+
 
 class Hooks(unittest.TestCase):
     def test_require_acceptance(self):

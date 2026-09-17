@@ -113,6 +113,30 @@ def extract_json(text):
         return {"summary": text[:2000], "parse_error": True}
 
 
+def fit_result(result, cap=bus.MAX_RESULT_CHARS):
+    """Shrink an oversize worker result (drop findings, truncate summary) so it fits under the bus cap.
+    Returns result unchanged when it already fits."""
+    original_chars = len(json.dumps(result))
+    if original_chars <= cap:
+        return result
+    out = dict(result)
+    if isinstance(out.get("summary"), str):
+        out["summary"] = out["summary"][:1500]
+    out["truncated"] = {"reason": "over MAX_RESULT_CHARS", "original_chars": original_chars}
+    findings = out.get("findings")
+    if isinstance(findings, list):
+        lo, hi, best = 0, len(findings), 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            trial = {**out, "findings": findings[:mid]}
+            if len(json.dumps(trial)) <= cap - 200:
+                best, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        out["findings"] = findings[:best]
+    return out
+
+
 def run_worker(task_id):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
@@ -137,16 +161,20 @@ def run_worker(task_id):
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
     r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                    lim["max_budget_usd"].get(role, 2.0), t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
-    if r["status"] == "done" and role == "execute":
-        bus.post_result(task_id, {"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
-                                  "review": "other account, different model; label PR same-family-review"}, "done")
-    elif r["status"] == "done":
-        result = extract_json(r["output"].get("result", ""))
-        bus.post_result(task_id, {"summary": result.get("summary", ""), **result}, "done")
-    elif r["status"] == "held":
-        bus.update(task_id, status="held", hold_reason=r["reason"])
-    else:
-        bus.update(task_id, status="failed", reason=r["reason"])
+    try:
+        if r["status"] == "done" and role == "execute":
+            bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
+                                      "review": "other account, different model; label PR same-family-review"}), "done")
+        elif r["status"] == "done":
+            result = extract_json(r["output"].get("result", ""))
+            bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+        elif r["status"] == "held":
+            bus.update(task_id, status="held", hold_reason=r["reason"])
+        else:
+            bus.update(task_id, status="failed", reason=r["reason"])
+    except Exception as e:
+        bus.log_run(task=task_id, role=role, outcome="post_failed")
+        bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     return r
 
 
