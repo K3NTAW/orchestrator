@@ -1,0 +1,56 @@
+"""skills/planner/memory/scripts: record.sh (draft/add/set) and recall.sh (index/get) over the orchestrator's
+memory files, plus the retrospect-written hook accepting what record.sh writes."""
+import os, subprocess, sys, time, unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_memory_skill.py` doesn't add this dir itself
+from _harness import HOOKS, REPO, TMP, hook  # noqa: F401
+from orchestrator import bus
+
+
+class MemorySkill(unittest.TestCase):
+    S = REPO / "skills" / "planner" / "memory" / "scripts"
+
+    def run_s(self, name, *args, stdin=None):
+        env = {**os.environ, "CLAUDE_MEM_DB": str(TMP / "no.db"), "GRAPHIFY_OUT": str(TMP / "no-graph")}
+        return subprocess.run(["bash", str(self.S / name), *args], input=stdin, capture_output=True, text=True, cwd=REPO, env=env)
+
+    def test_record_then_recall(self):
+        today = time.strftime("%Y-%m-%d")
+        goal = bus.create_task("GOAL: memory skill", "spec", ["works"], ["skills/**"])
+        kid = bus.create_task("Map memory", "where", ["cites"], ["skills/**"], parent=goal["id"])
+        bus.post_result(kid["id"], {"summary": "memory lives in .orchestrator/memory",
+                                    "findings": [{"claim": "four files", "evidence": ["CLAUDE.md:11"], "confidence": 0.9}]})
+        d = self.run_s("record.sh", "draft", goal["id"])
+        self.assertEqual(d.returncode, 0, d.stderr); self.assertIn(kid["id"], d.stdout); self.assertIn("CLAUDE.md:11", d.stdout)
+        a = self.run_s("record.sh", "add", "--file", "decisions", "--type", "decision", "--title", "Layered memory skill",
+                       "--goal", goal["id"], "--fact", "skills/planner/memory/SKILL.md:1 — three layers", "--outcome", "shipped")
+        self.assertEqual(a.returncode, 0, a.stderr)
+        txt = (TMP / ".orchestrator" / "memory" / "decisions.md").read_text()
+        self.assertIn(f"## {today} Layered memory skill", txt); self.assertNotIn("(empty", txt)
+        for i in range(2):  # same gotcha title twice -> one entry, latest body
+            self.run_s("record.sh", "add", "--file", "gotchas", "--type", "gotcha", "--title", "shebang trips guardrails",
+                       "--goal", goal["id"], "--fact", f"fact {i}")
+        g = (TMP / ".orchestrator" / "memory" / "gotchas.md").read_text()
+        self.assertEqual(g.count("shebang trips guardrails"), 1); self.assertIn("fact 1", g); self.assertNotIn("fact 0", g)
+        s = self.run_s("record.sh", "add", "--file", "decisions", "--type", "decision", "--title", "x", "--goal", goal["id"],
+                       "--fact", "token ghp_" + "a" * 30)
+        self.assertEqual(s.returncode, 1); self.assertIn("secret", s.stderr)
+        bad = self.run_s("record.sh", "add", "--file", "architecture", "--type", "decision", "--title", "x", "--goal", goal["id"])
+        self.assertEqual(bad.returncode, 1)
+        self.run_s("record.sh", "set", "architecture", stdin="entry: orchestrator/cli.py")
+        self.run_s("record.sh", "set", "architecture", stdin="entry: orchestrator/mcp.py")
+        arch = (TMP / ".orchestrator" / "memory" / "architecture.md").read_text()
+        self.assertIn("mcp.py", arch); self.assertNotIn("cli.py", arch); self.assertIn(f"updated {today}", arch)
+        ix = self.run_s("recall.sh", "index", "layered memory skill")
+        self.assertEqual(ix.returncode, 0, ix.stderr)
+        self.assertIn("mem:decisions.md:", ix.stdout); self.assertIn(f"bus:{kid['id']}", ix.stdout); self.assertNotIn("cmem:", ix.stdout)
+        mem_id = next(l.split(" · ")[0] for l in ix.stdout.splitlines() if l.startswith("mem:decisions"))
+        got = self.run_s("recall.sh", "get", mem_id, f"bus:{kid['id']}", "mem:decisions.md:999")
+        self.assertIn("three layers", got.stdout); self.assertIn("four files", got.stdout); self.assertIn("no entry", got.stdout)
+        self.assertEqual(self.run_s("recall.sh", "index", "zzqx-nothing-matches").stdout.strip()[:7], "no hits")
+        # the retrospect-written hook accepts what record.sh wrote
+        self.assertEqual(hook("retrospect-written.sh", {"task_input": {"subject": "GOAL: memory"}}, cwd=TMP).returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

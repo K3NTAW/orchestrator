@@ -14,7 +14,7 @@ CLAUDE_CONFIG_DIR=~/.claude-a claude   # /login account A, /model -> confirm ids
 CLAUDE_CONFIG_DIR=~/.claude-b claude   # /login account B
 codex login                            # ChatGPT 20x (install: curl -fsSL https://chatgpt.com/codex/install.sh | sh)
 uv sync                                # python deps (mcp)
-uv run python -m unittest -v           # 9 tests: bus rules, pool selection, hooks, merge queue
+uv run python -m unittest discover -q tests  # per-module tests under tests/, shared harness in tests/_harness.py
 cp .mcp.planner.json .mcp.json         # Planner session config (already done)
 ```
 Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` to `$CODEX_HOME/config.toml` inside it only.
