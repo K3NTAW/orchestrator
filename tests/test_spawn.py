@@ -42,6 +42,30 @@ class ReviewVerdict(unittest.TestCase):
         self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "request_changes")
 
 
+class ReviewAvoidsAccount(unittest.TestCase):
+    def test_review_avoids_executing_account_from_assigned_to(self):
+        reviewed = bus.create_task("feat-avoid", "s", ["a"], ["rv.py"], role="execute")
+        bus.update(reviewed["id"], assigned_to="claude:B")   # no explicit "account" field on the reviewed task
+        review = bus.create_task("review feat-avoid", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        captured = {}
+        orig_pick = P.Pool.pick
+        def fake_pick(self, role, avoid=None):
+            captured["avoid"] = avoid
+            return self.get("A")
+        P.Pool.pick = fake_pick
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        fake_out = {"result": json.dumps({"verdict": "approve", "comments": []}), "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+        self.assertEqual(captured["avoid"], "B")
+
+
 class SpecReview(unittest.TestCase):
     def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_spec_and_code_excerpt(self):
         scratch_repo(TMP)

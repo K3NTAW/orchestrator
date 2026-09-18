@@ -193,15 +193,27 @@ def fit_result(result, cap=bus.MAX_RESULT_CHARS):
     return out
 
 
+def _account_from_assigned_to(assigned_to):
+    """"claude:<acct id>" -> "<acct id>"; anything else (None, "codex", ...) -> None."""
+    if assigned_to and assigned_to.startswith("claude:"):
+        return assigned_to[len("claude:"):]
+    return None
+
+
 def run_worker(task_id):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
     avoid = None
     if role == "review" and t.get("inputs") and isinstance(t["inputs"][0], str):
         try:
-            avoid = bus.get(t["inputs"][0]).get("account")
+            reviewed = bus.get(t["inputs"][0])
         except KeyError:
-            avoid = None
+            reviewed = None
+        if reviewed is not None:
+            # Older/in-flight tasks may not have an explicit "account" field yet; fall back to parsing the
+            # account id out of assigned_to ("claude:<acct id>") so a fallback execution is never reviewed on
+            # the same account it ran on.
+            avoid = reviewed.get("account") or _account_from_assigned_to(reviewed.get("assigned_to"))
     acct = pool.pick(role, avoid=avoid)
     if acct is None:
         bus.update(task_id, status="held", hold_reason="no account with headroom")
@@ -227,6 +239,7 @@ def run_worker(task_id):
         prompt = render("scout", id=t["id"], title=t["title"], spec=t["spec"], acceptance=t["acceptance"],
                         turns=str(lim["max_turns"].get(role, 20)))
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
+    bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                    lim["max_budget_usd"].get(role, 2.0), t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
     try:

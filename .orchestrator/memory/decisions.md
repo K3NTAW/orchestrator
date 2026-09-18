@@ -95,3 +95,10 @@ type: decision · goal: T-0109 · provenance: repo
 - specs D1-D5 (T-0120..T-0124) on goal/T-0109: review policy in pool.toml [review], scout budget, planner_runs decision points with [planner] autonomous=false default, session rules, scorecard by task and goal
 - C-O3 goal runner needed three spec-review rounds (T-0081, T-0096/T-0097, T-0104) before v4 T-0115; the fourth round was waived by Planner decision
 outcome: revert path: git revert the D commits on goal/T-0109 individually; policy text lives in CLAUDE.md and the orchestrate skill
+
+## 2026-09-18 Restored daemon.py, spawn.py and their tests to 35bf7e2 after the handover commit 3130d61 reverted the C-O6/C-O6b fixes from a stale checkout
+type: decision · goal: T-0073 · tasks: T-0083,T-0102,T-0115,T-0127 · provenance: repo
+- orchestrator.merge fast-forwards goal/T-0073 from worktrees while the main checkout has that branch checked out; its index and working tree stay at the older commit, so a Planner commit from the main checkout that stages source paths commits the stale content as a revert (3130d61: daemon.py, spawn.py, tests/test_daemon.py, tests/test_spawn.py went back to 4a14ba7)
+- symptom 2026-09-18 14:55: the fresh MCP server ran the reverted daemon, gated T-0115 and spawned review T-0127 on sonnet for a sonnet-executed task; free_slots also back to the version that never fires the Claude fallback
+- restore: the four files taken from 35bf7e2 via git (no hand edits), suite 116 OK, committed from the main checkout; T-0127 marked failed, opus review spawned by hand
+outcome: Revert path: revert the restore commit (that re-applies the accidental revert; not wanted). Rule for Planner commits from the main checkout: inspect status first and stage nothing outside .orchestrator/; if tracked source shows as modified without anyone editing it, the checkout is stale and must be brought back to HEAD before committing. Fix candidate for merge.py: after fast-forwarding a branch that the main worktree has checked out, sync that worktree when it is clean, else warn

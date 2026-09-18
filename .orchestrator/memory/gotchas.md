@@ -117,3 +117,10 @@ outcome: fixed 2026-09-18 17:55 in both pool.toml files (orchestrator and kgpt):
 type: gotcha · goal: T-0073 · tasks: T-0078,T-0087,T-0090 · provenance: repo
 - merge.py rebases the fix-round branch onto the goal branch, so the original task branch (task/T-0078 at b4b1b1e) is no longer an ancestor of goal/T-0073 even though its rebased copy (c2aa847) is; daemon.already_merged (daemon.py:59-83) uses git merge-base --is-ancestor and returns False, and the original stays held with merged_into unset, blocking dependents via bus.ready
 outcome: worked around 2026-09-18 by bus.update(T-0078, status=done, merged_into=goal/T-0073); fix candidate: compare by patch id (git patch-id) or by the fix_round_for constraint, and mark the original merged when its fix round merges
+
+## 2026-09-18 A Planner restart orphans running fallback executors: the claude child finishes and commits, but nobody posts its result
+type: gotcha · goal: T-0073 · tasks: T-0115 · provenance: repo
+- mcp.py:20 runs spawn.run_worker in a daemon thread of the MCP server; the claude -p child (spawn.py:130 Popen with PIPE) outlives the server when the Planner session restarts, finishes its work in the worktree and exits, but the thread that would parse its output and post the bus result is gone
+- the daemon then sees a dead pid and requeues the task as 'process died', which would re-run finished work on top of the executor's commit (T-0115: abc3f56 sat in wt/T-0115 with the task queued)
+- manual remedy 2026-09-18 14:50: bus_claim the task before the daemon redispatches, run .claude/hooks/tests-green.sh on the worktree, verify acceptance by hand, bus_post_result done with the commit sha; the daemon then gates and reviews as usual
+outcome: fix candidate for Phase D session rules (D4): before a handover, either wait for running executes or have the daemon's requeue path check the worktree for a commit ahead of the base and re-gate instead of redispatching; the handover command (C-O7b) should refuse while an execute is running

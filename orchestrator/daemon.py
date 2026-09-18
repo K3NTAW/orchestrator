@@ -6,7 +6,7 @@ stage runs at most once no matter how often tick() runs."""
 import fcntl, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, bus, executor, merge, spawn
-from .pool import Pool
+from .pool import Pool, fallback_tier
 
 SPEC_REVIEW_MIN = 5   # complexity at which a spec must be reviewed before an executor sees it
 DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
@@ -91,11 +91,43 @@ def already_merged(t):
     return False
 
 
+def _codex_available(pool):
+    """True iff some enabled execute-role executor is not cooling right now. A row that is merely saturated
+    (running == max_parallel) still counts as available -- only a cooldown takes it out of the pool -- so a
+    queue of ready tasks against four busy-but-healthy rows waits for the next tick instead of spilling into
+    the Claude fallback branch below."""
+    return any(ex.enabled and "execute" in ex.roles and not ex.cooling() for ex in pool.executors.values())
+
+
+def _fallback_mode(pool):
+    """True iff no execute executor is available at all (every one cooling) and the pool is configured to
+    dispatch to a Claude tier instead of holding. pool.cfg is read with .get and the current defaults so a
+    pool.toml without a [codex] table can't raise here."""
+    return not _codex_available(pool) and pool.cfg.get("codex", {}).get("on_exhausted", "hold") == "fallback_claude"
+
+
 def free_slots(pool):
     """How many execute dispatches this tick may make: the executor pool's idle parallelism. Bounds tick()'s work
-    so a queue of forty ready tasks does not fork forty subprocesses at once."""
-    return sum(max(0, ex.max_parallel - ex.running) for ex in pool.executors.values()
-               if ex.enabled and "execute" in ex.roles and not ex.cooling())
+    so a queue of forty ready tasks does not fork forty subprocesses at once.
+
+    Only when every enabled execute executor is cooling (never merely saturated) and codex.on_exhausted ==
+    "fallback_claude" does executor.start()'s _exhausted() path (executor.py:110) route tasks to a Claude
+    fallback tier instead of holding them -- so the real ceiling then is limits.max_parallel_claude_workers, less
+    every in-flight Claude worker of any role (running, assigned_to or executor starting "claude:") and every
+    execute task already dispatched this tick but not yet claimed (gotchas.md 2026-09-18: T-0070 needed a hand
+    dispatch without this; a later review round found the saturated-vs-cooling conflation fixed above)."""
+    codex_slots = sum(max(0, ex.max_parallel - ex.running) for ex in pool.executors.values()
+                      if ex.enabled and "execute" in ex.roles and not ex.cooling())
+    if not _fallback_mode(pool):
+        return codex_slots
+    running_claude = sum(1 for t in bus.read(status="running")
+                         if (t.get("assigned_to") or "").startswith("claude:")
+                         or (t.get("executor") or "").startswith("claude:"))
+    inflight_dispatches = sum(1 for t in bus.read(status="queued", role="execute")
+                              if (t.get("pipeline") or {}).get("dispatched_at")
+                              and not (t.get("pipeline") or {}).get("gated_at"))
+    max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
+    return max(0, max_workers - running_claude - inflight_dispatches)
 
 
 def spawn_async(fn, *args):
@@ -129,11 +161,14 @@ def _dispatch_worker(task_id, prompt):
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
+    fallback = _fallback_mode(pool)
     for t in bus.read(status="queued", role="execute"):
         if stale(t) or not bus.ready(t):
             continue
         verdict = t.get("spec_review_verdict")
         if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
+            if fallback and fallback_tier(t["complexity"]) is None:
+                continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if slots <= 0:
                 break
             if stamp(t["id"], "dispatched_at"):
@@ -152,6 +187,19 @@ def dispatch(pool):
                     spawn_async(spawn.run_worker, sr["id"])
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
+
+
+def review_tier(t):
+    """Never let a model review its own output (CLAUDE.md rule): a task the daemon fell back to a Claude tier for
+    (executor.py's _exhausted(), executor field "claude:<tier>") must be reviewed by the other Claude tier, not
+    the reviewer's usual sonnet default (gotchas.md 2026-09-18: T-0071 was sonnet-executed and sonnet-reviewed).
+    Codex-executed tasks keep the default tier."""
+    ex = t.get("executor") or ""
+    if ex.startswith("claude:sonnet"):
+        return "opus"
+    if ex.startswith("claude:opus"):
+        return "sonnet"
+    return "sonnet"
 
 
 def gate(pool):
@@ -177,7 +225,8 @@ def gate(pool):
                 report_merge(t["id"], merge.merge(t["id"]))
             else:
                 r = bus.create_task(f"review: {t['title']}", t["spec"], t["acceptance"], t["scope"], role="review",
-                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"])
+                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
+                                    tier=review_tier(t))
                 spawn_async(spawn.run_worker, r["id"])
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
