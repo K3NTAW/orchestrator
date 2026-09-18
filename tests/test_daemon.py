@@ -127,6 +127,48 @@ class Daemon(unittest.TestCase):
         daemon.tick(pool)
         self.assertTrue(bus.get(a)["pipeline"].get("dispatched_at"))
 
+    def test_saturated_codex_returns_zero_not_fallback(self):
+        """§T-0102 acceptance: with the committed pool.toml, four healthy Codex rows at running == max_parallel
+        (saturated, never cooling) must return 0 -- not fall into the Claude fallback branch, which is for a
+        pool where every row is cooling, not merely busy."""
+        pool = P.Pool()
+        for ex in pool.executors.values():
+            if ex.enabled and "execute" in ex.roles:
+                ex.running = ex.max_parallel
+        self.assertEqual(daemon.free_slots(pool), 0)
+
+    def test_fallback_counts_running_claude_roles_and_inflight_dispatches(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)                       # cools the whole "chatgpt" quota group
+        scout = self.task("scout running", role="scout", complexity=2)
+        bus.update(scout, status="running", assigned_to="claude:A")
+        dispatched = self.task("dispatched not claimed", complexity=3)
+        bus.update(dispatched, pipeline={"dispatched_at": time.time()})   # spawn_async window before bus.claim
+        want = pool.cfg["limits"]["max_parallel_claude_workers"] - 2
+        self.assertEqual(daemon.free_slots(pool), want)
+
+    def test_fallback_skips_complexity_without_tier(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        c = self.task("complexity9", complexity=9)
+        bus.update(c, spec_review_verdict="approve")
+        daemon.tick(pool)
+        t = bus.get(c)
+        self.assertEqual(t["status"], "queued")
+        self.assertFalse((t.get("pipeline") or {}).get("dispatched_at"))
+
+    def test_free_slots_survives_missing_cfg_tables(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)                       # no executor available
+        cfg_no_codex = {k: v for k, v in pool.cfg.items() if k != "codex"}
+        pool.cfg = cfg_no_codex
+        self.assertEqual(daemon.free_slots(pool), 0)                # missing [codex] defaults on_exhausted to "hold"
+
+        cfg_fallback_no_limits = {k: v for k, v in cfg_no_codex.items() if k != "limits"}
+        cfg_fallback_no_limits["codex"] = {"on_exhausted": "fallback_claude"}
+        pool.cfg = cfg_fallback_no_limits
+        self.assertEqual(daemon.free_slots(pool), 4)                # missing [limits] defaults max_parallel_claude_workers to 4
+
     def test_high_complexity_waits_for_spec_review(self):
         c = self.task("C", complexity=6)
         daemon.tick()
