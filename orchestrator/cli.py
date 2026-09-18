@@ -149,20 +149,17 @@ def main():
             if a.json:
                 print(json.dumps(card, indent=1))
             else:
-                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tplanner%\tplanner_tokens")
+                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs")
                 total_usd = 0.0
-                footnote = False
                 for gid, r in sorted(card.items(), key=lambda kv: kv[1]["total_usd"], reverse=True):
                     pct = scorecard.goal_percentages(r)
-                    planner_pct, planner_tok = scorecard.format_planner_cell(r)
-                    footnote = footnote or planner_pct.endswith("%*")
+                    runs_cell = scorecard.format_planner_runs_cell(r)
                     print(f"{gid}\t{round(r['total_usd'], 2)}\t{round(pct['execute'], 1)}%\t"
                           f"{round(pct['review'], 1)}%\t{round(pct['spec_review'], 1)}%\t{round(pct['scout'], 1)}%\t"
-                          f"{planner_pct}\t{planner_tok}")
+                          f"{round(pct['other'], 1)}%\t{runs_cell}")
                     total_usd += r["total_usd"]
                 print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-")
-                if footnote:
-                    print("* planner percent is share of tokens, not usd (transcripts carry no cost)")
+                print(scorecard.planner_footer())
     elif a.cmd == "bench":
         from . import bench
         if a.bench_cmd == "fetch":
