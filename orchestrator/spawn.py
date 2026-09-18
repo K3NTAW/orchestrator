@@ -74,24 +74,29 @@ def render(name, **kw):
     return t
 
 
-def secrets_for_role(role):
-    """pool.toml [secrets.<role>]: ENV_NAME = "bash command printing the value" (e.g. sourcing f.sh for `f tok get X --reveal`),
+def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:
+    """mapping: ENV_NAME -> "bash command printing the value" (e.g. sourcing f.sh for `f tok get X --reveal`),
     or ENV_NAME = "env:OTHER_NAME" to read OTHER_NAME straight from this process's environment (headless hosts: no
     Keychain, no `f tok get`). Values never touch disk or logs."""
     out = {}
-    for name, cmd in Pool().cfg.get("secrets", {}).get(role, {}).items():
+    for name, cmd in mapping.items():
         if cmd.startswith("env:"):
             var = cmd[len("env:"):]
             val = os.environ.get(var)
             if val:
                 out[name] = val
             else:
-                print(f"secrets_for_role: env var {var} is not set, skipping {name}", file=sys.stderr)
+                print(f"resolve_secrets: env var {var} is not set, skipping {name}", file=sys.stderr)
             continue
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
             out[name] = r.stdout.strip()
     return out
+
+
+def secrets_for_role(role):
+    """pool.toml [secrets.<role>]. See resolve_secrets for the value-form rules."""
+    return resolve_secrets(Pool().cfg.get("secrets", {}).get(role, {}))
 
 
 def trust_workspace(config_dir, wt):

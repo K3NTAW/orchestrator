@@ -29,6 +29,13 @@ def main():
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard"); sc.add_argument("--by", default="executor", choices=["executor", "tier"])
     sc.add_argument("--json", action="store_true")
+    g = sub.add_parser("goal"); gsub = g.add_subparsers(dest="goal_cmd", required=True)
+    gs = gsub.add_parser("start"); gs.add_argument("repo"); gs.add_argument("text")
+    gs.add_argument("--account", default="A"); gs.add_argument("--reinstall", action="store_true")
+    gst = gsub.add_parser("status"); gst.add_argument("repo"); gst.add_argument("id", nargs="?")
+    gst.add_argument("--json", action="store_true")
+    gl = gsub.add_parser("list"); gl.add_argument("repo")
+    gsp = gsub.add_parser("stop"); gsp.add_argument("repo"); gsp.add_argument("id")
     bn = sub.add_parser("bench"); bsub = bn.add_subparsers(dest="bench_cmd", required=True)
     bf = bsub.add_parser("fetch"); bf.add_argument("--force", action="store_true"); bf.add_argument("--by", default="orchestrator")
     bsub.add_parser("show")
@@ -57,8 +64,26 @@ def main():
         from .install import install
         for line in install(a.target):
             print(line)
-        print("Next: commit the scaffold in the target repo, then start the Planner there with "
-              f"ORCH_ROOT={a.target}.")
+        print(f'Next: orchestrator goal start {a.target} "<goal>"')
+    elif a.cmd == "goal":
+        from . import goals
+        if a.goal_cmd == "start":
+            r = goals.start(a.repo, a.text, account_id=a.account, reinstall=a.reinstall)
+            if not r.get("launched"):
+                print(r.get("reason", "not launched"))
+                raise SystemExit(2)
+            for k, v in r.items():
+                print(f"{k}: {v}")
+            if r.get("commit"):
+                print(f"revert: git revert {r['commit']}")
+        elif a.goal_cmd == "status":
+            for e in goals.status(a.repo, a.id):
+                print(json.dumps(e, indent=1))
+        elif a.goal_cmd == "list":
+            entries = goals.list_goals(a.repo)
+            print("no goals" if not entries else "\n".join(json.dumps(e, indent=1) for e in entries))
+        elif a.goal_cmd == "stop":
+            print(json.dumps(goals.stop(a.repo, a.id), indent=1))
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
