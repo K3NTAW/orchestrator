@@ -57,6 +57,15 @@ def _git_in(worktree, *args):
     return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
 
 
+def _requeue(tid, pipeline):
+    """Put a task back in the queue for dispatch() to retry. Clearing pipeline.dispatched_at is what actually
+    makes that retry happen: dispatch()'s stamp() no-ops when the stage is already stamped, so a requeue that
+    left dispatched_at in place would leave the task queued forever without a live worker."""
+    clean = {k: v for k, v in (pipeline or {}).items() if k != "dispatched_at"}
+    bus.update(tid, status="queued", pid=None, reason="process died; requeued", pipeline=clean)
+    return "requeued"
+
+
 def reconcile_dead(t):
     """A running task whose worker died >60s ago: the `claude -p` child (spawn.py Popen) can outlive the daemon
     thread that would have posted its result, finish and commit in its worktree, and leave the task stuck
@@ -68,8 +77,7 @@ def reconcile_dead(t):
     before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
     tid, worktree = t["id"], t.get("worktree")
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
-        bus.update(tid, status="queued", pid=None, reason="process died; requeued")
-        return "requeued"
+        return _requeue(tid, t.get("pipeline"))
 
     base = None
     parent = t.get("parent")
@@ -77,20 +85,26 @@ def reconcile_dead(t):
         r = _git_in(worktree, "merge-base", "HEAD", f"goal/{parent}")
         if r.returncode == 0:
             base = r.stdout.strip()
+    # No goal/<parent> branch to merge-base against (parentless task, or the first execute task of a goal that
+    # hasn't cut its goal branch yet): fall back to the trunk the worktree was actually cut from.
     if base is None:
-        r = _git_in(worktree, "rev-parse", f"task/{tid}@{{upstream}}")
+        r = _git_in(worktree, "merge-base", "HEAD", "origin/main")
         if r.returncode == 0:
             base = r.stdout.strip()
     if base is None:
-        bus.update(tid, status="queued", pid=None, reason="process died; requeued")
-        return "requeued"
+        r = _git_in(worktree, "merge-base", "HEAD", "main")
+        if r.returncode == 0:
+            base = r.stdout.strip()
+    if base is None:
+        return _requeue(tid, t.get("pipeline"))
 
     r = _git_in(worktree, "rev-list", "--count", f"{base}..HEAD")
     ahead = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else 0
     if ahead == 0:
-        bus.update(tid, status="queued", pid=None, reason="process died; requeued")
-        return "requeued"
+        return _requeue(tid, t.get("pipeline"))
 
+    # --porcelain lists untracked files too, not just modified ones; they count as dirty here as well since
+    # holding the task for the Planner is the safe direction when the daemon can't tell what they are.
     status = _git_in(worktree, "status", "--porcelain")
     sha = _git_in(worktree, "rev-parse", "HEAD").stdout.strip()
     if status.stdout.strip():
@@ -279,11 +293,19 @@ def gate(pool):
             continue
         if not stamp(t["id"], "gated_at"):
             continue
+        orphaned = bool((t.get("result") or {}).get("orphaned"))
         try:
-            if t["complexity"] <= DIRECT_MERGE_MAX:
+            if not orphaned and t["complexity"] <= DIRECT_MERGE_MAX:
                 report_merge(t["id"], merge.merge(t["id"]))
             else:
-                r = bus.create_task(f"review: {t['title']}", t["spec"], t["acceptance"], t["scope"], role="review",
+                spec = t["spec"]
+                if orphaned:
+                    # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
+                    # not from an executor that actually finished: never let complexity alone route it straight
+                    # to merge, whatever the task's normal tier would be.
+                    spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
+                            f"have died mid-task\n\n{spec}")
+                r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
                                     tier=review_tier(t))
                 spawn_async(spawn.run_worker, r["id"])
@@ -329,7 +351,11 @@ def tick(pool=None):
     pool = pool or Pool()
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
-            reconcile_dead(t)
+            try:
+                reconcile_dead(t)
+            except Exception as e:
+                print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
+                continue
     for stage in (dispatch, gate, merge_reviewed):
         try:
             stage(pool)

@@ -214,6 +214,22 @@ class Daemon(unittest.TestCase):
         self.assertEqual(bus.read(role="review"), [])
         self.assertEqual(self.merged, [])
 
+    def test_gate_never_merges_orphaned_result_even_when_cheap(self):
+        """A result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit, not from
+        an executor that actually finished. gate() must never route it straight to merge.merge just because the
+        task's complexity is at or below DIRECT_MERGE_MAX -- it must always go to review instead, with the
+        orphaned warning leading the review task's spec."""
+        t = self.task("orphaned cheap", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP), result={"orphaned": True, "commit": "deadbee"})
+        daemon.tick()
+        self.assertEqual(self.merged, [])
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["inputs"], [t])
+        self.assertEqual(reviews[0]["tier"], "sonnet")
+        self.assertTrue(reviews[0]["spec"].startswith(
+            "orphaned executor: verify the acceptance criteria are fully met, the worker may have died mid-task"))
+
     def test_gate_review_tier_opus_for_sonnet_executor(self):
         t = self.task("big", complexity=5)
         bus.update(t, status="done", worktree=str(TMP), executor="claude:sonnet")
@@ -393,20 +409,51 @@ class Daemon(unittest.TestCase):
         self.assertEqual((task["status"], task["hold_reason"]), ("held", "orphaned_dirty_worktree"))
         self.assertEqual(task["resume_hint"]["commit"], sha)
 
-    def test_reconcile_dead_requeues_when_no_commits_ahead(self):
+    def test_reconcile_dead_regates_using_main_when_no_goal_branch(self):
+        """No goal/<parent> branch exists to merge-base against (a parentless task, or the first execute task of
+        a goal that hasn't cut its branch yet): reconcile_dead must fall back to merge-base against origin/main,
+        then main, instead of requeuing a worktree that actually has finished work sitting in it."""
+        scratch_repo(TMP)
+        t = bus.create_task("no goal branch", "spec", ["works"], ["x.py"], role="execute", complexity=2)["id"]
+        self.addCleanup(lambda: (TMP / "no_goal.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", f"task/{t}")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", f"task/{t}")
+        (TMP / "no_goal.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "finished work")
+        sha = g("rev-parse", "HEAD").stdout.strip()
+
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61,
+                   worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual(task["status"], "done")
+        self.assertTrue(task["result"]["orphaned"])
+        self.assertEqual(task["result"]["commit"], sha)
+
+    def test_reconcile_dead_requeues_and_retriggers_dispatch_when_no_commits_ahead(self):
         """The worker died before committing anything: no ahead commits, so tick() must fall back to the plain
-        requeue instead of treating an unchanged worktree as orphaned work."""
+        requeue instead of treating an unchanged worktree as orphaned work. The requeue must also drop
+        pipeline.dispatched_at so the very next tick dispatches the task again -- otherwise dispatch()'s stamp()
+        sees the stale stamp, thinks a worker is already out, and leaves the task queued forever."""
         scratch_repo(TMP)
         self.addCleanup(g, "branch", "-D", "goal/T-0043")
         self.addCleanup(g, "checkout", "main")
         g("checkout", "-b", "goal/T-0043")   # HEAD == base: nothing ahead
 
         t = self.task("orphan none")
-        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
-        daemon.tick()
+        old_stamp = time.time() - 120
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61,
+                   worktree=str(TMP), pipeline={"dispatched_at": old_stamp})
+        daemon.tick()   # reconcile_dead requeues it, then dispatch() -- later in this same tick -- sees it
+                        # queued again with dispatched_at cleared and dispatches it right away
 
+        self.assertEqual(self.settle_started(1), [t])
         task = bus.get(t)
-        self.assertEqual((task["status"], task["reason"]), ("queued", "process died; requeued"))
+        self.assertEqual(task["reason"], "process died; requeued")
+        self.assertGreater(task["pipeline"]["dispatched_at"], old_stamp)
 
     def test_reconcile_dead_requeues_non_execute_role_unchanged(self):
         """A scout task's worker died: this is the pre-existing path and must be untouched by the orphaned-work
@@ -452,6 +499,19 @@ class Daemon(unittest.TestCase):
         t4 = self.task("rv scout", role="scout", complexity=2)
         task4 = bus.get(t4)
         self.assertEqual(daemon.reconcile_dead(task4), "requeued")
+
+    def test_tick_survives_reconcile_dead_exception(self):
+        """A vanished worktree or a git call inside reconcile_dead that raises for one dead task must not abort
+        tick()'s stage loop: dispatch/gate/merge_reviewed must still run for every other task this tick."""
+        dead = self.task("dead git", complexity=2)
+        bus.update(dead, status="running", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        self.swap(daemon, "_git_in", raiser(RuntimeError("git blew up")))
+        other = self.task("other queued", complexity=3)
+
+        daemon.tick()
+
+        self.assertEqual(self.settle_started(1), [other])   # dispatch() still ran despite the reconcile blow-up
+        self.assertEqual(bus.get(dead)["status"], "running")   # left alone, not requeued or crashed on
 
     def test_tick_skips_execute_task_of_closed_goal(self):
         closed_goal = bus.create_task("goal closed", "s", ["ok"], ["x.py"], role="scout")["id"]
