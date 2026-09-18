@@ -66,6 +66,18 @@ CLI: `orchestrator scorecard [--by executor|tier] [--json]` · `orchestrator ben
 `orchestrator bench fetch [--force] [--by NAME]` · `orchestrator bench set <model_id> --by <name> key=value...` ·
 `orchestrator status --plain`.
 
+## Headless hosts
+The laptop's `secrets_for_role` command form shells out to `f tok get` (a Keychain wrapper) and the `[[claude_accounts]]`
+tables assume an interactive `/login`. Neither works on a headless Linux host. Two options, independent of each other:
+- **Claude account auth**: run `claude setup-token` once per `CLAUDE_CONFIG_DIR` to mint a long-lived
+  `CLAUDE_CODE_OAUTH_TOKEN`, export it under a name of your choice, and set that name as `oauth_token_env` on the
+  matching `[[claude_accounts]]` row in `pool.toml`. `spawn.run_claude` puts the value into the child's
+  `CLAUDE_CODE_OAUTH_TOKEN` env var when the account has `oauth_token_env` set and that variable is present in the
+  environment; it is never logged.
+- **Role secrets**: for a `[secrets.<role>]` entry, use `ENV_NAME = "env:OTHER_NAME"` instead of a shell command to
+  read `OTHER_NAME` straight from this process's environment (e.g. set by systemd or CI). A missing env var is
+  skipped with a stderr note naming the variable, not its value.
+
 ## Access model (decided 2026-09-16)
 Full access, guardrails as a hard floor, human only at PR approval:
 - Planner and all Claude workers run with permissions bypassed. Read-only roles additionally get `--disallowedTools Edit,Write,NotebookEdit`.

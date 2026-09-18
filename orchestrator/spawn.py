@@ -1,6 +1,6 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
-import json, os, shutil, subprocess, time
+import json, os, shutil, subprocess, sys, time
 from pathlib import Path
 from . import ROOT, STATE, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -75,10 +75,19 @@ def render(name, **kw):
 
 
 def secrets_for_role(role):
-    """pool.toml [secrets.<role>]: ENV_NAME = "bash command printing the value" (e.g. sourcing f.sh for `f tok get X --reveal`).
-    Values never touch disk or logs."""
+    """pool.toml [secrets.<role>]: ENV_NAME = "bash command printing the value" (e.g. sourcing f.sh for `f tok get X --reveal`),
+    or ENV_NAME = "env:OTHER_NAME" to read OTHER_NAME straight from this process's environment (headless hosts: no
+    Keychain, no `f tok get`). Values never touch disk or logs."""
     out = {}
     for name, cmd in Pool().cfg.get("secrets", {}).get(role, {}).items():
+        if cmd.startswith("env:"):
+            var = cmd[len("env:"):]
+            val = os.environ.get(var)
+            if val:
+                out[name] = val
+            else:
+                print(f"secrets_for_role: env var {var} is not set, skipping {name}", file=sys.stderr)
+            continue
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
             out[name] = r.stdout.strip()
@@ -104,6 +113,10 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         shutil.copy(role_cfg, wt / ".mcp.json")
     env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
            "ORCH_ROOT": str(ROOT), **secrets_for_role(task["role"])}
+    # Headless hosts: `claude setup-token` issues a long-lived CLAUDE_CODE_OAUTH_TOKEN per CLAUDE_CONFIG_DIR,
+    # set in this process's environment under the name pool.toml's oauth_token_env points at. Never logged.
+    if acct.oauth_token_env and os.environ.get(acct.oauth_token_env):
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[acct.oauth_token_env]
     # claude 2.1.273 has no turn-cap flag; --max-budget-usd + subprocess timeout are the hard stops (§6.5)
     # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
     # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.

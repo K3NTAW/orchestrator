@@ -21,6 +21,7 @@ class Account:
     affinity: list
     reserve: float = 0.0
     daily_budget: int = 0
+    oauth_token_env: str = ""
     cooldown_until: float = 0.0
     window_tokens: int = 0
     window_started: float = field(default_factory=time.time)
@@ -89,7 +90,8 @@ class Pool:
         self.cfg = cfg or config()
         self.cap = self.cfg.get("window_cap_tokens", 2_000_000)
         self.accounts = [Account(a["id"], a["config_dir"], a["role_affinity"], a.get("reserve_for_planner", 0.0),
-                                 a.get("daily_budget_tokens", 0)) for a in self.cfg["claude_accounts"]]
+                                 a.get("daily_budget_tokens", 0), a.get("oauth_token_env", ""))
+                         for a in self.cfg["claude_accounts"]]
         self.codex = Codex()
         self.executors = self._read_executors()
         self._load()
@@ -116,7 +118,7 @@ class Pool:
         st = json.loads(PERSIST.read_text())
         for a in self.accounts:
             a.__dict__.update({k: v for k, v in st.get("accounts", {}).get(a.id, {}).items()
-                               if k not in {"id", "config_dir", "affinity", "reserve", "daily_budget"}})
+                               if k not in {"id", "config_dir", "affinity", "reserve", "daily_budget", "oauth_token_env"}})
         self.codex.__dict__.update(st.get("codex", {}))
         for eid, ex in self.executors.items():
             ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
