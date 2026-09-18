@@ -1,11 +1,11 @@
 """orchestrator.goals: launch/track/stop a headless Planner session against a target repo. goals.py may only
-import install.install, spawn.trust_workspace, spawn.resolve_secrets and bus.LOCK_NAME from the package (T-0115);
-these tests exercise it against scratch git repos, never REPO itself."""
-import json, os, re, subprocess, sys, unittest
+import install.install, spawn.trust_workspace and spawn.resolve_secrets from the package (T-0115); these tests
+exercise it against scratch git repos, never REPO itself."""
+import contextlib, io, json, os, re, subprocess, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_goals.py` doesn't add this dir itself
 from _harness import REPO, TMP, scratch_repo
-from orchestrator import bus, goals
+from orchestrator import bus, cli, goals
 from orchestrator.pool import Pool
 
 
@@ -95,7 +95,8 @@ class StartRefusals(GoalsTestCase):
         self.assertEqual(r["commit"], head)
 
     def test_start_refuses_unknown_account_and_missing_planner_model_before_any_write(self):
-        # unknown account: fresh repo, default install, but a bogus account id
+        # unknown account: fresh repo, no pool.toml yet, but a bogus account id -- refused off the preview
+        # config (this repo's own default pool.toml) before install() ever runs, so nothing lands on disk.
         repo = self.repo("unknown-account")
         self.unignore(repo)
         self.fake_run()
@@ -106,6 +107,7 @@ class StartRefusals(GoalsTestCase):
         log_count = len(subprocess.run(["git", "log", "--format=%H"], cwd=repo, capture_output=True,
                                        text=True).stdout.splitlines())
         self.assertEqual(log_count, 1)  # only the scratch repo's "init" commit
+        self.assertFalse((repo / ".orchestrator").exists())
 
         # missing [models].planner: pool.toml pre-exists (install is a no-op, "kept") without a planner model
         repo2 = self.repo("missing-planner-model")
@@ -121,6 +123,137 @@ class StartRefusals(GoalsTestCase):
         log_count2 = len(subprocess.run(["git", "log", "--format=%H"], cwd=repo2, capture_output=True,
                                         text=True).stdout.splitlines())
         self.assertEqual(log_count2, 1)
+
+    def test_start_refuses_missing_max_budget_planner_before_commit(self):
+        # pool.toml pre-exists with a valid account and planner model but no limits.max_budget_usd.planner --
+        # install() is skipped (pool.toml already present), so the KeyError refusal fires with no commit.
+        repo = self.repo("missing-max-budget-planner")
+        self.unignore(repo)
+        (repo / ".orchestrator").mkdir()
+        (repo / ".orchestrator" / "pool.toml").write_text(
+            '[[claude_accounts]]\nid = "A"\nconfig_dir = "~/.claude-a"\nrole_affinity = ["planner"]\n\n'
+            '[models]\nplanner = "claude-fable-5-1"\n\n'
+            '[limits]\nmax_budget_usd = { execute = 6.0 }\n')
+        (repo / ".orchestrator" / "prompts").mkdir()
+        (repo / ".orchestrator" / "prompts" / "planner.md").write_text("# planner\n")
+        self.fake_run()
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn("max_budget_usd", r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+        log_count = len(subprocess.run(["git", "log", "--format=%H"], cwd=repo, capture_output=True,
+                                       text=True).stdout.splitlines())
+        self.assertEqual(log_count, 1)
+
+    def test_start_refuses_missing_planner_prompt_before_commit(self):
+        # pool.toml is fully valid but .orchestrator/prompts/planner.md was deleted after a prior install();
+        # since pool.toml already exists, install() is skipped and the file is never recreated.
+        repo = self.repo("missing-planner-prompt")
+        self.unignore(repo)
+        from orchestrator.install import install as _install
+        _install(str(repo))
+        (repo / ".orchestrator" / "prompts" / "planner.md").unlink()
+        self.fake_run()
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn("planner.md", r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+        log_count = len(subprocess.run(["git", "log", "--format=%H"], cwd=repo, capture_output=True,
+                                       text=True).stdout.splitlines())
+        self.assertEqual(log_count, 1)
+
+    def test_start_refuses_uv_missing(self):
+        repo = self.repo("no-uv")
+        self.unignore(repo)
+        real_run = subprocess.run
+
+        def fake(cmd, *a, **k):
+            if list(cmd[:2]) == ["uv", "run"]:
+                raise FileNotFoundError("uv")
+            return real_run(cmd, *a, **k)
+
+        goals.subprocess.run = fake
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn("uv", r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+        tasks_dir = repo / ".orchestrator" / "tasks"
+        self.assertEqual(list(tasks_dir.glob("T-*.json")) if tasks_dir.exists() else [], [])
+
+    def test_start_refuses_staged_changes_leaves_them_staged(self):
+        repo = self.repo("staged-changes")
+        self.unignore(repo)
+        (repo / "unrelated.txt").write_text("wip\n")
+        subprocess.run(["git", "add", "unrelated.txt"], cwd=repo, capture_output=True, text=True)
+        self.fake_run()
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn("staged", r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+        staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=repo, capture_output=True,
+                                text=True).stdout.split()
+        self.assertIn("unrelated.txt", staged)
+        log_count = len(subprocess.run(["git", "log", "--format=%H"], cwd=repo, capture_output=True,
+                                       text=True).stdout.splitlines())
+        self.assertEqual(log_count, 1)
+
+    def test_start_refuses_when_goal_already_running(self):
+        repo = self.repo("already-running")
+        self.unignore(repo)
+        goals_json = repo / ".orchestrator" / "runs" / "goals.json"
+        goals_json.parent.mkdir(parents=True, exist_ok=True)
+        goals_json.write_text(json.dumps([{"goal_id": "T-7777", "repo": str(repo), "pid": 555555, "pid_start": None,
+                                           "status": "running"}]))
+        orig_alive = goals._alive
+        goals._alive = lambda pid: pid == 555555
+        self.addCleanup(lambda: setattr(goals, "_alive", orig_alive))
+        self.fake_run()
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn("T-7777", r["reason"])
+        self.assertIn("running", r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+
+
+class PrecheckGitRefusals(GoalsTestCase):
+    def _assert_refused_no_commit(self, repo, needle):
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn(needle, r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+        log_count = len(subprocess.run(["git", "log", "--format=%H"], cwd=repo, capture_output=True,
+                                       text=True).stdout.splitlines())
+        self.assertEqual(log_count, 1)
+
+    def test_refuses_non_toplevel_path(self):
+        repo = self.repo("nontop")
+        self.unignore(repo)
+        sub = repo / "subdir"
+        sub.mkdir()
+        self.fake_run()
+        self._assert_refused_no_commit(sub, "toplevel")
+
+    def test_refuses_detached_head(self):
+        repo = self.repo("detached")
+        self.unignore(repo)
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "checkout", sha], cwd=repo, capture_output=True, text=True)
+        self.fake_run()
+        self._assert_refused_no_commit(repo, "detached")
+
+    def test_refuses_rebase_in_progress(self):
+        repo = self.repo("rebase")
+        self.unignore(repo)
+        (repo / ".git" / "rebase-merge").mkdir()
+        self.fake_run()
+        self._assert_refused_no_commit(repo, "rebase")
+
+    def test_refuses_merge_in_progress(self):
+        repo = self.repo("merge")
+        self.unignore(repo)
+        (repo / ".git" / "MERGE_HEAD").write_text("deadbeef\n")
+        self.fake_run()
+        self._assert_refused_no_commit(repo, "merge")
 
 
 class StartLaunch(GoalsTestCase):
@@ -289,11 +422,117 @@ class PlannerPromptAndConfig(unittest.TestCase):
         cfg = Pool().cfg
         self.assertEqual(cfg["models"]["planner"], "claude-fable-5-1")
         self.assertEqual(cfg["secrets"]["planner"], {"GH_WRITE_TOKEN": "env:GH_WRITE_TOKEN"})
+        self.assertEqual(cfg["limits"]["max_budget_usd"]["planner"], 10.0)
+        self.assertEqual(cfg["limits"]["max_turns"]["planner"], 400)
+        self.assertEqual(cfg["limits"]["timeout_s"]["planner"], 7200)
 
-    def test_bus_lock_name_shared(self):
+    def test_goals_lock_dedicated_not_bus_lock(self):
         self.assertEqual(bus.LOCK_NAME, "bus.lock")
-        self.assertIs(goals.LOCK_NAME, bus.LOCK_NAME)
-        self.assertEqual(bus.LOCK, bus.STATE / bus.LOCK_NAME)
+        self.assertEqual(goals.GOALS_LOCK_NAME, "goals.lock")
+        self.assertFalse(hasattr(goals, "LOCK_NAME"))
+        repo = TMP / "goal-lock-check"
+        repo.mkdir(parents=True, exist_ok=True)
+        goals._append_goal_record(repo, {"goal_id": "T-LOCK", "status": "done"})
+        self.assertTrue((repo / ".orchestrator" / "goals.lock").exists())
+        self.assertFalse((repo / ".orchestrator" / "bus.lock").exists())
+
+
+class ScaffoldCommitAndSecrets(GoalsTestCase):
+    def test_scaffold_path_with_space_commits_via_status_z(self):
+        repo = self.repo("space-path")
+        self.unignore(repo)
+        (repo / ".orchestrator").mkdir()
+        (repo / ".orchestrator" / "a b.txt").write_text("hi\n")
+        self.fake_run("T-9100")
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertTrue(r["launched"], r)
+        tracked = subprocess.run(["git", "ls-tree", "-r", "HEAD", "--name-only"], cwd=repo,
+                                 capture_output=True, text=True).stdout
+        self.assertIn(".orchestrator/a b.txt", tracked)
+
+    def test_gitignored_scaffold_path_with_space_still_refused(self):
+        repo = self.repo("space-path-ignored")
+        (repo / ".gitignore").write_text(".orchestrator/\n")
+        (repo / ".orchestrator").mkdir()
+        (repo / ".orchestrator" / "a b.txt").write_text("hi\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=repo, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-qm", "gitignore"], cwd=repo, capture_output=True, text=True)
+        self.fake_run()
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn("gitignored", r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+
+    def test_target_secrets_filtered_to_env_only(self):
+        repo = self.repo("target-secrets")
+        self.unignore(repo)
+        from orchestrator.install import install as _install
+        _install(str(repo))
+        marker = "/tmp/T-0129-pwned-marker"
+        self.addCleanup(lambda: os.path.exists(marker) and os.remove(marker))
+        pool_toml = repo / ".orchestrator" / "pool.toml"
+        text = pool_toml.read_text()
+        self.assertIn("[secrets.planner]", text)
+        old = "[secrets.planner]\nGH_WRITE_TOKEN = \"env:GH_WRITE_TOKEN\"\n"
+        self.assertIn(old, text)
+        text = text.replace(old, old + f'X = "echo pwned > {marker}"\nY = "env:HOME"\n')
+        pool_toml.write_text(text)
+
+        run_calls = []
+        real_run = subprocess.run
+
+        def spy(cmd, *a, **k):
+            run_calls.append(cmd)
+            return real_run(cmd, *a, **k)
+
+        goals.subprocess.run = lambda *a, **k: (
+            subprocess.CompletedProcess(a[0], 0, stdout="T-9200\n", stderr="")
+            if list(a[0][:2]) == ["uv", "run"] else spy(*a, **k))
+
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertTrue(r["launched"], r)
+        env = FakePopen.last_kwargs["env"]
+        self.assertNotIn("X", env)
+        self.assertEqual(env.get("Y"), os.environ["HOME"])
+        self.assertFalse(any("pwned" in " ".join(c) for c in run_calls if isinstance(c, list)))
+        self.assertFalse(os.path.exists("/tmp/T-0129-pwned-marker"))
+
+
+class CliGoalOutput(GoalsTestCase):
+    def _run_cli(self, argv):
+        buf = io.StringIO()
+        orig_argv = sys.argv
+        sys.argv = ["orchestrator"] + argv
+        try:
+            with contextlib.redirect_stdout(buf):
+                cli.main()
+        finally:
+            sys.argv = orig_argv
+        return buf.getvalue()
+
+    def test_goal_status_and_list_human_readable_unless_json(self):
+        repo = self.repo("cli-output")
+        fake_entries = [{"goal_id": "T-7000", "repo": str(repo), "record_status": "running",
+                         "task_status": "queued", "children": {"done": [{"id": "T-7001", "hold_reason": None}]},
+                         "merged": [], "pr_url": None, "planner_alive": True, "note": None}]
+        orig_status, orig_list = goals.status, goals.list_goals
+        goals.status = lambda repo_arg, id_arg=None: fake_entries
+        goals.list_goals = lambda repo_arg: fake_entries
+        self.addCleanup(lambda: setattr(goals, "status", orig_status))
+        self.addCleanup(lambda: setattr(goals, "list_goals", orig_list))
+
+        out = self._run_cli(["goal", "status", str(repo)]).strip()
+        self.assertFalse(out.startswith("{") or out.startswith("["))
+        self.assertIn("T-7000", out)
+
+        out_json = self._run_cli(["goal", "status", str(repo), "--json"]).strip()
+        self.assertTrue(out_json.startswith("{"))
+
+        out_list = self._run_cli(["goal", "list", str(repo)]).strip()
+        self.assertFalse(out_list.startswith("{") or out_list.startswith("["))
+
+        out_list_json = self._run_cli(["goal", "list", str(repo), "--json"]).strip()
+        self.assertTrue(out_list_json.startswith("{"))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Goal lifecycle: launch a headless Planner session against any target repo, track it, reconcile status, stop it.
 
-Import boundary (T-0115): this module may import only install.install, spawn.trust_workspace,
-spawn.resolve_secrets and bus.LOCK_NAME from the rest of the package. It never calls Pool(), never calls any
+Import boundary (T-0115): this module may import only install.install, spawn.trust_workspace and
+spawn.resolve_secrets from the rest of the package. It never calls Pool(), never calls any
 other bus.*/spawn.* function, and never references orchestrator.ROOT/STATE. Every path it touches derives from
 the realpath'd repo_path argument, so the same code works against this repo or any target repo scaffolded by
 install.install.
@@ -13,9 +13,11 @@ from subprocess import Popen  # distinct from subprocess.run: tests fake this ca
 
 from .install import install
 from .spawn import trust_workspace, resolve_secrets
-from .bus import LOCK_NAME
 
 PACKAGE_REPO = Path(__file__).resolve().parents[1]  # this repo, regardless of the target repo_path
+
+GOALS_LOCK_NAME = "goals.lock"  # dedicated lock file: bus.locked() is non-reentrant on the same fd,
+                                 # and this module never shares state with the bus
 
 SCAFFOLD_PATHS = [".orchestrator", ".claude", "skills", ".gitignore",
                    ".mcp.planner.json", ".mcp.review.json", ".mcp.scout.json", ".mcp.triage.json"]
@@ -53,28 +55,53 @@ def _precheck_git(repo_path):
     return None
 
 
+def _staged_changes_conflict(repo_path):
+    """True if the target's index already has staged changes. `git commit --only -- <paths>` would happily
+    leave those staged and uncommitted, but a caller who staged something on purpose (mid rebase, a manual fix)
+    should not have a goal-start silently ignore it -- refuse instead and leave everything untouched."""
+    return _git(repo_path, "diff", "--cached", "--quiet").returncode == 1
+
+
+def _parse_status_z(output):
+    """Parse `git status -z --porcelain` output into (code, path) pairs. -z NUL-delimits entries and never
+    quotes/escapes paths (unlike the line-oriented form), so a path containing a space round-trips correctly.
+    A rename/copy entry ("R" or "C" in either status column) carries an extra NUL-separated field -- the
+    original path -- which is consumed here but not returned; only the current path is needed to add/commit."""
+    tokens = output.split("\0")
+    entries = []
+    i = 0
+    while i < len(tokens) and tokens[i]:
+        tok = tokens[i]
+        code, path = tok[:2], tok[3:]
+        entries.append((code, path))
+        i += 1
+        if code[0] in "RC" or code[1] in "RC":
+            i += 1  # skip the rename/copy source-path field
+    return entries
+
+
 def _scaffold_commit(repo_path, install_report):
-    """git status --porcelain --ignored over SCAFFOLD_PATHS. One of the SCAFFOLD_PATHS entries itself reported
-    wholesale-ignored (git collapses a fully-untracked, fully-ignored directory to one "!!" line matching it
+    """git status -z --porcelain --ignored over SCAFFOLD_PATHS. One of the SCAFFOLD_PATHS entries itself reported
+    wholesale-ignored (git collapses a fully-untracked, fully-ignored directory to one "!!" entry matching it
     exactly) refuses -- a worktree cut from a branch with that scaffold would come up empty. A nested path
     ignored on purpose (install.py's own .gitignore additions: bus.lock, pool_state.json, runs/, ...) is left
-    out of the add/commit but doesn't block it. Otherwise adds and commits the (non-ignored) paths status
-    names, returning the resulting sha (or None when nothing changed)."""
-    r = _git(repo_path, "status", "--porcelain", "--ignored", "--", *SCAFFOLD_PATHS)
-    lines = [line for line in r.stdout.splitlines() if line]
-    for line in lines:
-        code, path = line[:2], line[3:]
+    out of the add/commit but doesn't block it. Otherwise stages and commits (via `commit --only`, so nothing
+    else in the index rides along) the (non-ignored) paths status names, returning the resulting sha (or None
+    when nothing changed)."""
+    r = _git(repo_path, "status", "-z", "--porcelain", "--ignored", "--", *SCAFFOLD_PATHS)
+    entries = _parse_status_z(r.stdout)
+    for code, path in entries:
         if code == "!!" and path.rstrip("/") in SCAFFOLD_PATHS:
             return None, {"launched": False,
                           "reason": f"{path} is gitignored in the target; worktrees would lack the scaffold"}
-    paths = [line[3:] for line in lines if line[:2] != "!!"]
+    paths = [path for code, path in entries if code != "!!"]
     if not paths:
         return None, None
     add = _git(repo_path, "add", "--", *paths)
     if add.returncode:
         return None, {"launched": False, "reason": f"git add failed: {add.stderr.strip()[:300]}"}
     body = "\n".join(install_report or [])
-    commit = _git(repo_path, "commit", "-m", "orchestrator: scaffold (goal start)", "-m", body)
+    commit = _git(repo_path, "commit", "--only", "-m", "orchestrator: scaffold (goal start)", "-m", body, "--", *paths)
     if commit.returncode:
         return None, {"launched": False, "reason": f"scaffold commit failed: {commit.stderr.strip()[:300]}"}
     sha = _git(repo_path, "rev-parse", "HEAD").stdout.strip()
@@ -83,8 +110,11 @@ def _scaffold_commit(repo_path, install_report):
 
 def _create_goal_task(repo_path, goal_text):
     env = {**os.environ, "ORCH_ROOT": str(repo_path), "ORCH_GOAL_TEXT": goal_text}
-    r = subprocess.run(["uv", "run", "--project", str(PACKAGE_REPO), "python", "-"],
-                       input=SCRIPT, capture_output=True, text=True, env=env)
+    try:
+        r = subprocess.run(["uv", "run", "--project", str(PACKAGE_REPO), "python", "-"],
+                           input=SCRIPT, capture_output=True, text=True, env=env)
+    except FileNotFoundError as e:
+        return None, {"launched": False, "reason": f"uv not found on PATH: {e}"}
     out = (r.stdout or "").strip().splitlines()
     goal_id = out[-1].strip() if out else ""
     if r.returncode != 0 or not re.fullmatch(r"T-\d+", goal_id):
@@ -93,17 +123,33 @@ def _create_goal_task(repo_path, goal_text):
     return goal_id, None
 
 
+def _filter_target_secrets(mapping):
+    """The target repo's own pool.toml is untrusted content, not instructions. resolve_secrets() normally runs
+    an arbitrary shell command for any value that isn't "env:NAME" -- fine for this repo's own pool.toml, not
+    safe for one a target repo authored. Keep only env:NAME passthroughs; anything else is dropped (never
+    executed) with a stderr note naming it."""
+    out = {}
+    for name, value in mapping.items():
+        if isinstance(value, str) and value.startswith("env:"):
+            out[name] = value
+        else:
+            print(f"ignored non-env secret {name} from target pool.toml", file=sys.stderr)
+    return out
+
+
 def _goals_path(repo_path):
     return Path(repo_path) / ".orchestrator" / "runs" / "goals.json"
 
 
 def _lock_path(repo_path):
-    return Path(repo_path) / ".orchestrator" / LOCK_NAME
+    return Path(repo_path) / ".orchestrator" / GOALS_LOCK_NAME
 
 
 def _with_goals_lock(repo_path, fn):
-    """Run fn(records) -> (result, new_records_or_None) under an flock on <repo_path>/.orchestrator/LOCK_NAME.
-    new_records_or_None: pass None to leave goals.json untouched, or a list to overwrite it."""
+    """Run fn(records) -> (result, new_records_or_None) under an flock on <repo_path>/.orchestrator/goals.lock --
+    a lock dedicated to this module, never bus.lock (bus.locked() is reentrant per-thread only, and goals.py
+    isn't part of that call tree). new_records_or_None: pass None to leave goals.json untouched, or a list to
+    overwrite it."""
     lock_path = _lock_path(repo_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     goals_path = _goals_path(repo_path)
@@ -206,9 +252,46 @@ def _read_all_tasks(repo_path):
     return out
 
 
+def _running_goal(repo_path):
+    """A record in this repo's goals.json whose status is "running" and whose pid identity still checks out --
+    i.e. a Planner session that's actually still alive, not just one nobody has reconciled yet."""
+    for r in _load_goal_records(repo_path):
+        if r.get("status") == "running" and identity(r):
+            return r
+    return None
+
+
+def _preview_cfg(pool_toml):
+    """What [claude_accounts]/[models]/[limits] would look like once install() runs: the target's own pool.toml
+    when it already has one (install() keeps it, "kept"), otherwise this repo's default pool.toml (install()
+    would copy it verbatim since the target has none). Lets start() validate account/model/budget config before
+    install() writes a single file, so a refusal here leaves the target untouched."""
+    src = pool_toml if pool_toml.exists() else (PACKAGE_REPO / ".orchestrator" / "pool.toml")
+    return tomllib.loads(src.read_text())
+
+
 def start(repo_path, goal_text, account_id="A", reinstall=False):
     repo_path = Path(os.path.realpath(repo_path))
     pool_toml = repo_path / ".orchestrator" / "pool.toml"
+
+    running = _running_goal(repo_path)
+    if running:
+        return {"launched": False, "reason": f"goal {running['goal_id']} is still running; stop it first"}
+
+    reason = _precheck_git(repo_path)
+    if reason:
+        return {"launched": False, "reason": reason}
+
+    if _staged_changes_conflict(repo_path):
+        return {"launched": False, "reason": "target index has staged changes; commit or unstage them first"}
+
+    cfg = _preview_cfg(pool_toml)
+    accounts = {a["id"]: a for a in cfg.get("claude_accounts", [])}
+    if account_id not in accounts:
+        return {"launched": False, "reason": f"unknown account: {account_id}"}
+    if not cfg.get("models", {}).get("planner"):
+        return {"launched": False, "reason": "pool.toml [models].planner is not configured"}
+
     report = None
     if reinstall or not pool_toml.exists():
         try:
@@ -216,26 +299,35 @@ def start(repo_path, goal_text, account_id="A", reinstall=False):
         except SystemExit as e:
             return {"launched": False, "reason": f"install failed (exit code {e.code})"}
 
-    reason = _precheck_git(repo_path)
-    if reason:
-        return {"launched": False, "reason": reason}
+    def refuse(reason):
+        d = {"launched": False, "reason": reason}
+        if report is not None:
+            d["install"] = report
+        return d
 
-    try:
-        cfg = tomllib.loads(pool_toml.read_text())
-    except FileNotFoundError:
-        return {"launched": False, "reason": "pool.toml missing after install"}
+    # pool_toml is guaranteed to exist now (it did already, or install() just wrote it); re-read the real file --
+    # install() never overwrites an existing pool.toml, so this always agrees with the preview cfg above.
+    cfg = tomllib.loads(pool_toml.read_text())
     accounts = {a["id"]: a for a in cfg.get("claude_accounts", [])}
-    if account_id not in accounts:
-        return {"launched": False, "reason": f"unknown account: {account_id}"}
-    if not cfg.get("models", {}).get("planner"):
-        return {"launched": False, "reason": "pool.toml [models].planner is not configured"}
+    try:
+        max_budget = cfg["limits"]["max_budget_usd"]["planner"]
+    except KeyError:
+        return refuse("target pool.toml lacks limits.max_budget_usd.planner")
+
+    prompt_path = repo_path / ".orchestrator" / "prompts" / "planner.md"
+    if not prompt_path.exists():
+        return refuse(".orchestrator/prompts/planner.md is missing from the target")
 
     commit, err = _scaffold_commit(repo_path, report)
     if err:
+        if report is not None:
+            err["install"] = report
         return err
 
     goal_id, err = _create_goal_task(repo_path, goal_text)
     if err:
+        if report is not None:
+            err["install"] = report
         return err
 
     account = accounts[account_id]
@@ -245,12 +337,11 @@ def start(repo_path, goal_text, account_id="A", reinstall=False):
     oauth_var = account.get("oauth_token_env")
     if oauth_var and os.environ.get(oauth_var):
         env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[oauth_var]
-    env.update(resolve_secrets(cfg.get("secrets", {}).get("planner", {})))
+    env.update(resolve_secrets(_filter_target_secrets(cfg.get("secrets", {}).get("planner", {}))))
 
     prompt = ("Skill(orchestrate) with the goal: " + goal_text + "\nThe GOAL task is " + goal_id +
               "; use it as the parent of every task you create and post the PR url as its result before you finish.")
-    system_prompt = (repo_path / ".orchestrator" / "prompts" / "planner.md").read_text()
-    max_budget = cfg.get("limits", {}).get("max_budget_usd", {}).get("planner", 10)
+    system_prompt = prompt_path.read_text()
     argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"], "--output-format", "json",
             "--max-budget-usd", str(max_budget), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
             "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]

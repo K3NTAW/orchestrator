@@ -6,6 +6,12 @@ from .bus import RUNS
 from .pool import Pool
 
 
+def _format_goal_line(e):
+    counts = ",".join(f"{status}={len(items)}" for status, items in sorted(e["children"].items())) or "-"
+    return (f"{e['goal_id']}\tstatus={e['record_status']}\tplanner_alive={e['planner_alive']}\t"
+            f"children=[{counts}]\tpr_url={e['pr_url'] or '-'}")
+
+
 def cost(by):
     agg = defaultdict(lambda: defaultdict(int))
     for f in sorted(RUNS.glob("*.jsonl")) if RUNS.exists() else []:
@@ -34,7 +40,7 @@ def main():
     gs.add_argument("--account", default="A"); gs.add_argument("--reinstall", action="store_true")
     gst = gsub.add_parser("status"); gst.add_argument("repo"); gst.add_argument("id", nargs="?")
     gst.add_argument("--json", action="store_true")
-    gl = gsub.add_parser("list"); gl.add_argument("repo")
+    gl = gsub.add_parser("list"); gl.add_argument("repo"); gl.add_argument("--json", action="store_true")
     gsp = gsub.add_parser("stop"); gsp.add_argument("repo"); gsp.add_argument("id")
     bn = sub.add_parser("bench"); bsub = bn.add_subparsers(dest="bench_cmd", required=True)
     bf = bsub.add_parser("fetch"); bf.add_argument("--force", action="store_true"); bf.add_argument("--by", default="orchestrator")
@@ -77,11 +83,18 @@ def main():
             if r.get("commit"):
                 print(f"revert: git revert {r['commit']}")
         elif a.goal_cmd == "status":
-            for e in goals.status(a.repo, a.id):
-                print(json.dumps(e, indent=1))
+            entries = goals.status(a.repo, a.id)
+            if a.json:
+                for e in entries:
+                    print(json.dumps(e, indent=1))
+            else:
+                print("no goals" if not entries else "\n".join(_format_goal_line(e) for e in entries))
         elif a.goal_cmd == "list":
             entries = goals.list_goals(a.repo)
-            print("no goals" if not entries else "\n".join(json.dumps(e, indent=1) for e in entries))
+            if a.json:
+                print("no goals" if not entries else "\n".join(json.dumps(e, indent=1) for e in entries))
+            else:
+                print("no goals" if not entries else "\n".join(_format_goal_line(e) for e in entries))
         elif a.goal_cmd == "stop":
             print(json.dumps(goals.stop(a.repo, a.id), indent=1))
     elif a.cmd == "post":
