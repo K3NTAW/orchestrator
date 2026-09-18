@@ -51,12 +51,19 @@ a running daemon.
 
 ## Pipeline
 Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
-State machine per execute task: `queued` → (depends_on merged, complexity ≥5 → `spec_review` first) → dispatched to
-an executor → `done` → gated (`tests-green.sh`) → complexity ≤3 merges straight away, else a `review` task spawns →
-`review` approve merges, `request_changes` holds it for the Planner to re-spec.
+State machine per execute task: `queued` → (depends_on merged, complexity ≥ `spec_review_min` → `spec_review` first,
+on `spec_review_tier`) → dispatched to an executor → `done` → gated (`tests-green.sh`) → complexity ≤
+`direct_merge_max` merges straight away; complexity between `direct_merge_max` and `two_reviews_from` spawns one
+`review` task, tiered to whichever model did not execute the task; complexity ≥ `two_reviews_from` spawns two,
+the second on a different model than the executor (a different account when possible). A task with one review
+merges on its first `approve`; a task with two merges only once every review of it has approved, and any single
+`request_changes` holds it for the Planner to re-spec regardless of what the other review said. These four
+thresholds live in `pool.toml`'s `[review]` table (defaults: `spec_review_min = 6`, `direct_merge_max = 3`,
+`two_reviews_from = 7`, `spec_review_tier = "sonnet"`); policy and the cost measurement that motivated it are
+noted there.
 `daemon.tick()` drives every stage: `dispatch()` (spec review or executor), `gate()` (tests-green, then merge or
-review), `merge_reviewed()` (merge on approve). Each stage stamps `pipeline.<stage>_at` on the task json under the
-bus lock before acting, so a crash-and-retry never re-runs a stage.
+review), `merge_reviewed()` (merge once every review of a task has approved). Each stage stamps `pipeline.<stage>_at`
+on the task json under the bus lock before acting, so a crash-and-retry never re-runs a stage.
 Run it: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart` in `pool.toml` (`ORCH_DAEMON=0`
 or `autostart = false` disables it), and `uv run orchestrator daemon` takes the same single-instance lock so two loops
 never run at once; `orchestrator daemon --once` runs a single pass without the lock.

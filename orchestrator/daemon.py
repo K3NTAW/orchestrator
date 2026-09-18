@@ -8,11 +8,28 @@ from pathlib import Path
 from . import STATE, bus, executor, handover, merge, spawn
 from .pool import Pool, fallback_tier
 
-SPEC_REVIEW_MIN = 5   # complexity at which a spec must be reviewed before an executor sees it
-DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
+SPEC_REVIEW_MIN = 6    # complexity at which a spec must be reviewed before an executor sees it
+DIRECT_MERGE_MAX = 3   # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
+TWO_REVIEWS_FROM = 7   # complexity at which merge waits for two review approvals instead of one
+SPEC_REVIEW_TIER = "sonnet"  # tier the spec review worker runs on
+# The four constants above are defaults; _load_review_cfg() overwrites them from pool.toml's [review] table
+# at the top of every tick() so dispatch()/gate()/merge_reviewed() (which read them as plain module globals,
+# not through a Pool argument) always see the current policy without threading pool.cfg through every call.
 LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
+
+
+def _load_review_cfg(pool):
+    """Refresh the review-policy thresholds from pool.cfg's [review] table. Missing table or keys fall back to
+    the defaults set on the module above -- so a pool.toml without [review] behaves exactly as if it had one
+    with these values (§review policy, 2026-09-18: reviews were costing as much as execution)."""
+    global SPEC_REVIEW_MIN, DIRECT_MERGE_MAX, TWO_REVIEWS_FROM, SPEC_REVIEW_TIER
+    review = pool.cfg.get("review", {})
+    SPEC_REVIEW_MIN = review.get("spec_review_min", 6)
+    DIRECT_MERGE_MAX = review.get("direct_merge_max", 3)
+    TWO_REVIEWS_FROM = review.get("two_reviews_from", 7)
+    SPEC_REVIEW_TIER = review.get("spec_review_tier", "sonnet")
 
 
 def notify(msg):
@@ -258,7 +275,7 @@ def dispatch(pool):
                 try:
                     sr = bus.create_task(f"spec review: {t['title']}", t["spec"], t["acceptance"], t["scope"],
                                          role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
-                                         complexity=t["complexity"])
+                                         complexity=t["complexity"], tier=SPEC_REVIEW_TIER)
                     spawn_async(spawn.run_worker, sr["id"])
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
@@ -277,9 +294,15 @@ def review_tier(t):
     return "sonnet"
 
 
+def _other_tier(tier):
+    return "sonnet" if tier == "opus" else "opus"
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
-    open a review task (everything else)."""
+    open one review task (complexity between DIRECT_MERGE_MAX and TWO_REVIEWS_FROM) or two (complexity >=
+    TWO_REVIEWS_FROM, the second on whichever tier the first one didn't get, so no single model grades a task
+    twice)."""
     for t in bus.read(status="done", role="execute"):
         if stale(t) or already_merged(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
             continue
@@ -299,18 +322,34 @@ def gate(pool):
         try:
             if not orphaned and t["complexity"] <= DIRECT_MERGE_MAX:
                 report_merge(t["id"], merge.merge(t["id"]))
-            else:
-                spec = t["spec"]
-                if orphaned:
-                    # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
-                    # not from an executor that actually finished: never let complexity alone route it straight
-                    # to merge, whatever the task's normal tier would be.
-                    spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
-                            f"have died mid-task\n\n{spec}")
+                continue
+            spec = t["spec"]
+            if orphaned:
+                # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
+                # not from an executor that actually finished: never let complexity alone route it straight
+                # to merge, whatever the task's normal tier would be. One review is enough here regardless of
+                # complexity -- the orphaned warning is what needs a second pair of eyes, not the model split.
+                spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
+                        f"have died mid-task\n\n{spec}")
                 r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
                                     tier=review_tier(t))
                 spawn_async(spawn.run_worker, r["id"])
+                continue
+            # Any status counts here, not just "done": a review that's still queued/running already claims the
+            # one (or first of two) slot, so a re-entry must not spawn a duplicate on top of it.
+            existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
+            if not existing:
+                r1 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
+                                     tier=review_tier(t))
+                spawn_async(spawn.run_worker, r1["id"])
+                existing = [r1]
+            if t["complexity"] >= TWO_REVIEWS_FROM and len(existing) == 1:
+                r2 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
+                                     tier=_other_tier(existing[0]["tier"]))
+                spawn_async(spawn.run_worker, r2["id"])
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
 
@@ -323,9 +362,19 @@ def report_merge(task_id, r):
     return r
 
 
+def _review_verdict(r, src):
+    """A review task's own review_verdict/result -- not src's -- is the reliable source once a task can carry two
+    reviews: spawn.run_worker writes review_verdict onto both the review task and src, so with two reviews the
+    second to finish clobbers src's field with its own verdict. Each review's own field is never touched by its
+    sibling, so it is checked first; src is only a fallback for older data that predates this field existing on r."""
+    return r.get("review_verdict") or (r.get("result") or {}).get("verdict") or src.get("review_verdict")
+
+
 def merge_reviewed(pool):
     """done review tasks: approve -> serial merge of the reviewed task; request_changes -> hold it for the Planner,
-    which writes the fix-round spec (a daemon must not invent a spec)."""
+    which writes the fix-round spec (a daemon must not invent a spec). A task with two reviews (complexity >=
+    TWO_REVIEWS_FROM) merges only once every review of it has approved; a single request_changes among them holds
+    it regardless of what the other says."""
     for r in bus.read(status="done", role="review"):
         if stale(r) or not (r.get("inputs") and isinstance(r["inputs"][0], str)):
             continue
@@ -335,8 +384,14 @@ def merge_reviewed(pool):
             continue
         if already_merged(src):
             continue
-        verdict = src.get("review_verdict") or r.get("review_verdict") or (r.get("result") or {}).get("verdict")
+        verdict = _review_verdict(r, src)
         if verdict == "approve":
+            if src["complexity"] >= TWO_REVIEWS_FROM:
+                siblings = [x for x in bus.read(role="review") if x["inputs"][:1] == [src["id"]]]
+                if len(siblings) < 2 or any(s["status"] != "done" for s in siblings):
+                    continue  # second review not created or not finished yet
+                if not all(_review_verdict(s, src) == "approve" for s in siblings):
+                    continue
             # stamped before the merge, not after: a conflict leaves merged_into unset, and retrying it every tick
             # would just rebuild the same conflict
             if stamp(r["id"], "merged_at"):
@@ -401,6 +456,7 @@ def tick(pool=None):
         pool.tally_planner()
     except Exception as e:
         print(f"[daemon] tally_planner failed: {e}", file=sys.stderr)
+    _load_review_cfg(pool)
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:

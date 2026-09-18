@@ -169,6 +169,18 @@ class Daemon(unittest.TestCase):
         pool.cfg = cfg_fallback_no_limits
         self.assertEqual(daemon.free_slots(pool), 4)                # missing [limits] defaults max_parallel_claude_workers to 4
 
+    def test_defaults_when_review_table_missing(self):
+        """A pool.toml without a [review] table must not crash tick() -- and must leave the four review-policy
+        module attributes at their documented defaults, the same ones the committed pool.toml's [review] table
+        happens to also carry."""
+        pool = P.Pool()
+        pool.cfg = {k: v for k, v in pool.cfg.items() if k != "review"}
+        daemon.tick(pool)
+        self.assertEqual(daemon.SPEC_REVIEW_MIN, 6)
+        self.assertEqual(daemon.DIRECT_MERGE_MAX, 3)
+        self.assertEqual(daemon.TWO_REVIEWS_FROM, 7)
+        self.assertEqual(daemon.SPEC_REVIEW_TIER, "sonnet")
+
     def test_high_complexity_waits_for_spec_review(self):
         c = self.task("C", complexity=6)
         daemon.tick()
@@ -190,6 +202,19 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.started, [])
         held = bus.get(c)
         self.assertEqual((held["status"], held["hold_reason"]), ("held", "spec_review request_changes"))
+
+    def test_spec_review_threshold_from_cfg(self):
+        """With the committed pool.toml ([review].spec_review_min = 6), a complexity-5 task dispatches straight
+        to the executor while a complexity-6 task is held for a spec review on spec_review_tier."""
+        a = self.task("A", complexity=5)
+        b = self.task("B", complexity=6)
+        daemon.tick()
+        self.assertEqual(self.settle_started(1), [a])
+        self.assertFalse((bus.get(a).get("pipeline") or {}).get("spec_review_at"))
+        reviews = bus.read(role="spec_review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["inputs"], [b])
+        self.assertEqual(reviews[0]["tier"], "sonnet")
 
     def test_green_gate_merges_cheap_task_and_reviews_the_rest(self):
         cheap = self.task("cheap", complexity=2)
@@ -247,6 +272,45 @@ class Daemon(unittest.TestCase):
         bus.update(t, status="done", worktree=str(TMP), executor="astra")
         daemon.tick()
         self.assertEqual(bus.read(role="review")[0]["tier"], "sonnet")
+
+    def test_one_review_only_for_mid_complexity(self):
+        """complexity 5 sits between direct_merge_max (3) and two_reviews_from (7): exactly one review task, and
+        a second gate pass (the task is already gated_at) must not spawn a second one."""
+        t = self.task("mid", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP))
+        daemon.tick()
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["inputs"], [t])
+
+    def test_two_reviews_for_high_complexity_merge_waits_for_both(self):
+        """complexity 7 (>= two_reviews_from) gets two review tasks on the two different Claude tiers, and
+        merge_reviewed() must not merge until both have approved -- one approve alone must not be enough."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="claude:sonnet")
+
+        def fake_merge(tid, target=None):
+            # unlike the shared setUp() stub, this mirrors merge.merge's real side effect of marking the task
+            # merged in the bus -- needed so already_merged() short-circuits the loop's second review the same
+            # way it would in production once the first review's merge call lands.
+            self.merged.append(tid)
+            bus.update(tid, status="done", merged_into="goal/G", sha="abc12345")
+            return {"status": "merged", "target": "goal/G", "sha": "abc12345"}
+        self.swap(merge, "merge", fake_merge)
+
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual(sorted(r["tier"] for r in reviews), ["opus", "sonnet"])  # split across the two tiers
+
+        bus.update(reviews[0]["id"], status="done", review_verdict="approve")
+        daemon.tick()
+        self.assertEqual(self.merged, [])                          # only one of two reviews approved so far
+
+        bus.update(reviews[1]["id"], status="done", review_verdict="approve")
+        daemon.tick()
+        self.assertEqual(self.merged, [t])
 
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")
