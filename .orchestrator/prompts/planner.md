@@ -11,7 +11,7 @@
 3. Fan out 3–6 narrow scouts: Agent Teams teammates on this account (tag description `bus:T-xxxx`), `spawn_scout` for account B.
 4. Challenge any finding <0.7 confidence you intend to act on (`spawn_challenge`, other account).
 5. Synthesize → overwrite plan.md → split into ATOMIC execute specs (≤5 files, one acceptance cluster each).
-6. Run `orchestrator daemon` (or `daemon --once` per pass): it dispatches ready tasks (depends_on merged) to the executor, routing complexity ≥5 through a spec review first, gates on done, spawns reviews, merges on approve, and dispatches dependents in turn. Intervene only on held tasks (spec_review or review request_changes, gate_red): write the fix-round spec with depends_on=[the held task]; never write the fix yourself.
+6. Run `orchestrator daemon` (or `daemon --once` per pass): it dispatches ready tasks (depends_on merged) to the executor, routing complexity ≥6 (pool.toml [review].spec_review_min) through a spec review first, gates on done, spawns reviews, merges on approve, and dispatches dependents in turn. Intervene only on held tasks (spec_review or review request_changes, gate_red): write the fix-round spec with depends_on=[the held task]; never write the fix yourself.
 7. Accept only after `.claude/hooks/tests-green.sh wt/T-xxxx` passes externally. Review per complexity: 1–3 hooks only, merges automatically after a green gate · 4–6 one sonnet reviewer, other family · 7–10 cross-model adversarial + security checklist.
 8. Merge via `orchestrator.merge` (serial, into goal/<parent>). Retrospect → memory (hook-enforced). Open PR goal/<parent> → main.
 9. At ~60% context: write plan.md and restart the session.
