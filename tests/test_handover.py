@@ -3,8 +3,9 @@ daemon.maybe_handover()'s 15-minute throttle.
 
 Each test gets its own sandbox for bus.STATE/TASKS/RUNS and handover.STATE/ROOT (handover.write() looks both up
 at call time, not import time, precisely so a test can swap them) so plan.md and wt/ never touch the real repo."""
-import sys, tempfile, time, unittest
+import json, sys, tempfile, time, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_handover.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
 from orchestrator import bus, daemon, handover
@@ -21,6 +22,11 @@ class Handover(unittest.TestCase):
             self.swap(mod, name, value)
         P.PERSIST.unlink(missing_ok=True)
         self.addCleanup(P.PERSIST.unlink, True)
+        # daemon.HANDOVER_STATE is bound at import time to the real .orchestrator dir, same as pool.PERSIST --
+        # not swapped above, so clean it up directly rather than leaving a throttle timestamp behind for the
+        # next test (or the real daemon) to trip over.
+        daemon.HANDOVER_STATE.unlink(missing_ok=True)
+        self.addCleanup(daemon.HANDOVER_STATE.unlink, True)
 
     def swap(self, mod, name, value):
         orig = getattr(mod, name)
@@ -73,6 +79,69 @@ class Handover(unittest.TestCase):
         self.assertIn(handover.RESUME_SENTENCE, section)
         self.assertIn("test", section.splitlines()[0])
 
+    def test_failed_group_and_other_bucket(self):
+        g = self.goal("Ship migrations")
+        cancelled = self.child(g, "Weird status")
+        bus.update(cancelled, status="cancelled")
+
+        risky = self.goal("Ship the risky bit")
+        failed = self.child(risky, "Migrate schema")
+        bus.update(failed, status="failed", reason="rebase_conflict", resume_hint={"conflict_files": ["a.py"]})
+
+        plan = handover.write("test")
+        _, section = self.section(plan.read_text())
+
+        self.assertIn(f"### {risky} GOAL: Ship the risky bit", section)
+        self.assertIn(f"- failed: {failed}", section)
+        self.assertIn("reason=rebase_conflict", section)
+        self.assertIn(f"- other (cancelled): {cancelled}", section)
+        self.assertNotIn("no child tasks", section)   # a goal with only a failed (or only an unknown-status) child must still show it
+
+    def test_worktree_names_excludes_merged_and_state(self):
+        g = self.goal("Ship worktrees")
+        merged = self.child(g, "Landed")
+        bus.update(merged, status="done", merged_into="goal/G")
+        kept = self.child(g, "Still open")
+        wt = handover.ROOT / "wt"
+        (wt / merged).mkdir(parents=True)
+        (wt / kept).mkdir(parents=True)
+        (wt / "_state").mkdir(parents=True)
+
+        plan = handover.write("test")
+        _, section = self.section(plan.read_text())
+
+        self.assertIn(f"wt/{kept}", section)
+        self.assertNotIn(f"wt/{merged}", section)
+        self.assertNotIn("wt/_state", section)
+
+    def test_replaces_last_heading_only(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        plan.write_text(
+            "# plan.md\n\n"
+            "Note: the auto-handover section starts with a heading like:\n"
+            "```\n## Auto-handover 2026-01-01T00:00:00+01:00 — example\nold quoted body\n```\n\n"
+            "## Auto-handover 2026-01-01T00:00:00+01:00 — first pass\nold real body\n"
+        )
+
+        plan2 = handover.write("second pass")
+        text = plan2.read_text()
+
+        self.assertIn("```\n## Auto-handover 2026-01-01T00:00:00+01:00 — example\nold quoted body\n```", text)
+        self.assertNotIn("old real body", text)
+        self.assertEqual(text.count("## Auto-handover "), 2)  # the quoted one survives, plus the real section
+
+    def test_write_failure_leaves_plan_unchanged(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        plan.write_text("before\n")
+
+        with mock.patch("orchestrator.handover.os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                handover.write("test")
+
+        self.assertEqual(plan.read_text(), "before\n")
+
     def test_truncates_long_lists(self):
         g = self.goal("Big backlog")
         for i in range(20):
@@ -116,6 +185,17 @@ class Handover(unittest.TestCase):
 
         self.assertTrue(daemon.maybe_handover("daemon tick", now=now + 16 * 60))  # past the throttle window
         self.assertEqual(len(calls), 2)
+
+    def test_daemon_throttle_timestamp_lives_in_handover_state_not_pool_state(self):
+        self.swap(handover, "write", lambda reason: None)
+        P.PERSIST.unlink(missing_ok=True)
+        now = time.time()
+
+        self.assertTrue(daemon.maybe_handover("daemon tick", now=now))
+
+        self.assertTrue(daemon.HANDOVER_STATE.exists())
+        self.assertEqual(json.loads(daemon.HANDOVER_STATE.read_text())["handover_last_at"], now)
+        self.assertFalse(P.PERSIST.exists())   # pool_state.json is untouched by the handover throttle
 
 
 if __name__ == "__main__":

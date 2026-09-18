@@ -6,12 +6,13 @@ stage runs at most once no matter how often tick() runs."""
 import fcntl, json, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, bus, executor, handover, merge, spawn
-from .pool import PERSIST, Pool, fallback_tier
+from .pool import Pool, fallback_tier
 
 SPEC_REVIEW_MIN = 5   # complexity at which a spec must be reviewed before an executor sees it
 DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
 LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
+HANDOVER_STATE = STATE / "handover_state.json"
 
 
 def notify(msg):
@@ -348,31 +349,49 @@ def merge_reviewed(pool):
                 notify(f"{src['id']}: review asked for changes; Planner writes the fix round")
 
 
-def _persist_state():
+def _handover_last_at():
     try:
-        return json.loads(PERSIST.read_text())
+        return json.loads(HANDOVER_STATE.read_text()).get("handover_last_at", 0)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        return 0
+
+
+def _save_handover_last_at(now):
+    """Read-modify-write .orchestrator/handover_state.json under an flock on the file itself, the same pattern
+    as pool._save_planner_account -- so a concurrent tick (another thread, or another daemon process briefly
+    racing the lock file) can't clobber this timestamp with a stale read."""
+    HANDOVER_STATE.parent.mkdir(parents=True, exist_ok=True)
+    with open(HANDOVER_STATE, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.seek(0)
+            raw = fh.read()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {}
+            data["handover_last_at"] = now
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(data, indent=1))
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def maybe_handover(reason, now=None):
     """Write the auto-handover section at most once every HANDOVER_INTERVAL_S, so plan.md is never staler than
-    that even when the Planner is gone. The throttle timestamp lives in pool_state.json's top-level
-    handover_last_at key, merged in directly rather than through Pool.save() (which only knows about its own
-    accounts/codex/executors fields and would drop an extra key) -- a concurrent Pool.save() elsewhere can still
-    win the race and clobber that key, but the only effect is an extra handover write, never a missed one."""
+    that even when the Planner is gone. The throttle timestamp lives in its own handover_state.json, not
+    pool_state.json, so a handover tick never races Pool.save()'s full read-modify-write of the pool's own
+    state."""
     now = now if now is not None else time.time()
-    st = _persist_state()
-    if now - st.get("handover_last_at", 0) < HANDOVER_INTERVAL_S:
+    if now - _handover_last_at() < HANDOVER_INTERVAL_S:
         return False
     try:
         handover.write(reason)
     except Exception as e:
         print(f"[daemon] handover failed: {e}", file=sys.stderr)
         return False
-    st = _persist_state()
-    st["handover_last_at"] = now
-    PERSIST.write_text(json.dumps(st, indent=1))
+    _save_handover_last_at(now)
     return True
 
 
