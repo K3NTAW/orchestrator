@@ -59,15 +59,19 @@ def alive(pid):
         return False
 
 
-def stamp(tid, stage, **fields):
+def stamp(tid, stage, pipeline_fields=None, **fields):
     """Claim one pipeline stage for one task. Returns False when another tick already claimed it. The read of the
-    existing stamp and the write of the new one happen under the same bus lock, so two ticks cannot both win."""
+    existing stamp and the write of the new one happen under the same bus lock, so two ticks cannot both win.
+    pipeline_fields merges extra keys into the same pipeline dict as the stage timestamp (e.g. reviews_expected
+    at gate time) so they land atomically with the stamp instead of racing a second bus.update."""
     with bus.locked():
         t = bus.get(tid)
         pipeline = dict(t.get("pipeline") or {})
         if pipeline.get(stage):
             return False
         pipeline[stage] = time.time()
+        if pipeline_fields:
+            pipeline.update(pipeline_fields)
         bus.update(tid, pipeline=pipeline, **fields)
     return True
 
@@ -314,11 +318,14 @@ def gate(pool):
     open the number of review tasks reviews_expected() says (one for complexity between DIRECT_MERGE_MAX and
     TWO_REVIEWS_FROM, or any orphaned result; two otherwise). The second review must never run on the model that
     executed: when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on
-    review_tier(t) -- the non-executing tier -- and the second carries constraints.second_review=true (both
-    reviews may land on the same account; only the model differs from the executor); when the executor is Codex,
-    the second review runs on whichever tier the first one didn't get."""
+    review_tier(t) -- the non-executing tier (both reviews may land on the same account; only the model differs
+    from the executor); when the executor is Codex, the second review runs on whichever tier the first one
+    didn't get. The successful gate stamp also freezes pipeline.reviews_expected = reviews_expected(t) so a later
+    change to the [review] two_reviews_from threshold can't change how many approvals merge_reviewed() waits for
+    on a task already past this stage. Filters run cheap-first, already_merged() (which shells out to git) last,
+    so a task the other checks would skip anyway never pays for a git call."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or already_merged(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
+        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree") or already_merged(t):
             continue
         if not Path(t["worktree"]).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
@@ -330,7 +337,7 @@ def gate(pool):
                      resume_hint={"failures": tg.stderr[-4000:]}):
                 notify(f"{t['id']}: tests red at the gate; held")
             continue
-        if not stamp(t["id"], "gated_at"):
+        if not stamp(t["id"], "gated_at", pipeline_fields={"reviews_expected": reviews_expected(t)}):
             continue
         orphaned = bool((t.get("result") or {}).get("orphaned"))
         try:
@@ -363,13 +370,11 @@ def gate(pool):
                 executor_field = t.get("executor") or ""
                 if executor_field.startswith("claude:"):
                     tier2 = review_tier(t)
-                    constraints = {"second_review": True}
                 else:
                     tier2 = _other_tier(existing[0]["tier"])
-                    constraints = None
                 r2 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                                      inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
-                                     tier=tier2, constraints=constraints)
+                                     tier=tier2)
                 spawn_async(spawn.run_worker, r2["id"])
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
@@ -383,58 +388,96 @@ def report_merge(task_id, r):
     return r
 
 
-def _review_verdict(r, src):
+def _review_verdict(r, src, allow_src_fallback):
     """A review task's own review_verdict/result -- not src's -- is the reliable source once a task can carry two
     reviews: spawn.run_worker writes review_verdict onto both the review task and src, so with two reviews the
     second to finish clobbers src's field with its own verdict. Each review's own field is never touched by its
-    sibling, so it is checked first; src is only a fallback for older data that predates this field existing on r."""
-    return r.get("review_verdict") or (r.get("result") or {}).get("verdict") or src.get("review_verdict")
+    sibling, so it is checked first; src is only a fallback for older data that predates this field existing on
+    r, and only when allow_src_fallback is true -- callers pass that as (len(reviews) == 1), since with two or
+    more reviews src's single field cannot speak for more than one of them."""
+    v = r.get("review_verdict") or (r.get("result") or {}).get("verdict")
+    if v:
+        return v
+    return src.get("review_verdict") if allow_src_fallback else None
 
 
 def merge_reviewed(pool):
-    """done, gated, unmerged execute tasks: merge once reviews_expected() of their reviews have approved; a
-    request_changes, or an approval count that can no longer be reached, holds the task for the Planner to write
-    the fix-round spec (a daemon must not invent a spec). Walking execute tasks (not done review tasks) is what
-    closes the escape hatch T-0159 review item 1 found: a review that never reaches done -- every review of the
-    task failed or was held -- used to never get iterated at all, leaving the task stuck done+gated forever.
-    "No longer reachable" is approved + still-live (queued/running) reviews falling short of reviews_expected():
-    that catches both every review having failed/held (no approval possible) and one sibling already stuck while
-    the other approved (T-0150's case, kept on its original single-sibling wording) in the same check."""
+    """done, unmerged execute tasks with at least one review: merge once reviews_expected() of their reviews have
+    approved; anything else about a done review's verdict holds the task for the Planner to write the fix-round
+    spec (a daemon must not invent a spec). gated_at is not required -- a hand-gated task the Planner spawned
+    reviews for directly still gets swept -- only "has at least one review" gates entry, same as gate() itself
+    creating them. Walking execute tasks (not done review tasks) is what closes the escape hatch T-0159 review
+    item 1 found: a review that never reaches done -- every review of the task failed or was held -- used to
+    never get iterated at all, leaving the task stuck done+gated forever. Every review bucketed by verdict, not
+    just "approve" vs "request_changes": done+approve is approved, done with any other verdict (including a
+    missing or off-vocabulary one) is rejected, queued/running is pending, failed/held is stuck -- exhaustive
+    over the statuses bus tasks can actually carry, so a done review can never fall through every bucket and
+    trip an IndexError on an empty stuck list (T-0164 review item 1: a done sibling with an unrecognised verdict
+    used to satisfy none of the old checks). needed comes from pipeline.reviews_expected, stamped by gate() at
+    gate time, falling back to reviews_expected(t) only for tasks gated before that stamp existed -- so a later
+    change to the [review] two_reviews_from threshold cannot move the goalposts on a task already past gate().
+    Each task's body runs in its own try/except: a bad review record or an unexpected raise prints one stderr
+    line and moves on, so one task can never stop the sweep for the others in the same tick. Filters run
+    cheap-first, already_merged() (which shells out to git) last."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or already_merged(t) or not (t.get("pipeline") or {}).get("gated_at"):
-            continue
-        reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
-        if not reviews:
-            continue  # gate() creates them; nothing to act on yet
-        changes = next((r for r in reviews if r["status"] == "done" and _review_verdict(r, t) == "request_changes"),
-                       None)
-        if changes is not None:
-            if stamp(t["id"], "review_held_at", status="held", hold_reason="review request_changes"):
-                notify(f"{t['id']}: review asked for changes; Planner writes the fix round")
-            continue
-        approved = [r for r in reviews if r["status"] == "done" and _review_verdict(r, t) == "approve"]
+        try:
+            _merge_reviewed_one(t)
+        except Exception as e:
+            print(f"[daemon] merge_reviewed {t['id']} failed: {e}", file=sys.stderr)
+
+
+def _merge_reviewed_one(t):
+    if stale(t):
+        return
+    reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
+    if not reviews:
+        return  # gate() creates them; nothing to act on yet
+    if already_merged(t):
+        return
+    single = len(reviews) == 1
+    approved, rejected, pending, stuck, unknown = [], [], [], [], []
+    for r in reviews:
+        status = r["status"]
+        if status == "done":
+            verdict = _review_verdict(r, t, single)
+            (approved if verdict == "approve" else rejected).append((r, verdict))
+        elif status in ("queued", "running"):
+            pending.append(r)
+        elif status in ("failed", "held"):
+            stuck.append(r)
+        else:
+            unknown.append(r)  # should be impossible: every bus status is one of the above
+    if rejected:
+        r, verdict = rejected[0]
+        reason = f"review request_changes: {r['id']} ({verdict})"
+        if stamp(t["id"], "review_held_at", status="held", hold_reason=reason):
+            notify(f"{t['id']}: {reason}")
+        return
+    needed = (t.get("pipeline") or {}).get("reviews_expected")
+    if needed is None:
         needed = reviews_expected(t)
-        if len(approved) >= needed:
-            # stamped on the source task before the merge, not after: a conflict leaves merged_into unset, and
-            # retrying it every tick would just rebuild the same conflict; stamping here means a task with two
-            # reviews attempts the merge exactly once no matter which review finishes last
-            if stamp(t["id"], "merged_at"):
-                try:
-                    report_merge(t["id"], merge.merge(t["id"]))
-                except Exception as e:
-                    hold_failed(t["id"], "merged_error", "merge", e)
-            continue
-        pending = [r for r in reviews if r["status"] in ("queued", "running")]
-        if len(approved) + len(pending) >= needed:
-            continue  # a still-live sibling could yet supply the missing approval(s); keep waiting
-        stuck = [r for r in reviews if r["status"] in ("failed", "held")]
+    if len(approved) >= needed:
+        # stamped on the source task before the merge, not after: a conflict leaves merged_into unset, and
+        # retrying it every tick would just rebuild the same conflict; stamping here means a task with two
+        # reviews attempts the merge exactly once no matter which review finishes last
+        if stamp(t["id"], "merged_at"):
+            try:
+                report_merge(t["id"], merge.merge(t["id"]))
+            except Exception as e:
+                hold_failed(t["id"], "merged_error", "merge", e)
+        return
+    if len(approved) + len(pending) >= needed:
+        return  # a still-live sibling could yet supply the missing approval(s); keep waiting
+    if stuck:
         if approved:
             first = stuck[0]
             reason = f"review {first['status']}: {first['id']}"
         else:
             reason = f"reviews failed: {', '.join(sorted(r['id'] for r in stuck))}"
-        if stamp(t["id"], "review_held_at", status="held", hold_reason=reason):
-            notify(f"{t['id']}: {reason}")
+    else:
+        reason = f"review state unknown: {', '.join(sorted(r['id'] for r in unknown))}"
+    if stamp(t["id"], "review_held_at", status="held", hold_reason=reason):
+        notify(f"{t['id']}: {reason}")
 
 
 def _handover_last_at():

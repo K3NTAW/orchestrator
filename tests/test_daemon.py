@@ -315,8 +315,7 @@ class Daemon(unittest.TestCase):
 
     def test_two_reviews_claude_executor_same_non_executing_tier(self):
         """T-0150 review item 3: for a Claude-executed complexity-7 task, both reviews must land on the
-        non-executing tier (never the tier that executed), not split across the two tiers -- and the second
-        carries constraints.second_review so a later spawn change can steer routing off it. Both reviews may
+        non-executing tier (never the tier that executed), not split across the two tiers. Both reviews may
         land on the same account; only the model differs from the executor (T-0159 review item 2)."""
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="claude:opus")
@@ -324,7 +323,6 @@ class Daemon(unittest.TestCase):
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 2)
         self.assertEqual([r["tier"] for r in reviews], ["sonnet", "sonnet"])
-        self.assertTrue(reviews[1]["constraints"]["second_review"])
         self.assertNotIn("avoid_account", reviews[1]["constraints"])
 
     def test_orphaned_high_complexity_merges_on_single_approve(self):
@@ -427,7 +425,8 @@ class Daemon(unittest.TestCase):
         daemon.tick()
         self.assertEqual(self.merged, [ok])                       # merged once, not once per tick
         held = bus.get(bad)
-        self.assertEqual((held["status"], held["hold_reason"]), ("held", "review request_changes"))
+        self.assertEqual((held["status"], held["hold_reason"]),
+                         ("held", f"review request_changes: {r_bad} (request_changes)"))
 
     def test_merge_reviewed_falls_back_to_result_verdict(self):
         """T-0139/T-0141: when review_verdict never landed on the review task or its source (spawn.run_worker's
@@ -438,6 +437,90 @@ class Daemon(unittest.TestCase):
         bus.update(r_ok, status="done", result={"verdict": "approve", "confidence": 1.0, "provenance": ["repo"]})
         daemon.tick()
         self.assertEqual(self.merged, [ok])
+
+    def test_odd_review_verdict_holds_without_exception_others_still_processed(self):
+        """T-0164 review item 1(a): a done sibling with verdict "changes_requested" (not the literal string
+        "request_changes") used to satisfy none of the old approved/pending/stuck buckets and crash indexing an
+        empty stuck[0]. It must instead be bucketed as request_changes, holding the task with the sibling and
+        its verdict named -- and merge_reviewed() must still merge an unrelated task in the very same sweep."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra",
+                   pipeline={"gated_at": time.time(), "reviews_expected": 2})
+        r1 = self.task("review r1", complexity=7, role="review", inputs=[t])
+        r2 = self.task("review r2", complexity=7, role="review", inputs=[t])
+        bus.update(r1, status="done", review_verdict="approve")
+        bus.update(r2, status="done", review_verdict="changes_requested")
+
+        ok = self.gated_execute("ok sibling")
+        r_ok = self.task("review ok", complexity=5, role="review", inputs=[ok])
+        bus.update(r_ok, status="done", review_verdict="approve")
+
+        daemon.tick()   # must not raise
+
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(held["hold_reason"], f"review request_changes: {r2} (changes_requested)")
+        self.assertEqual(self.merged, [ok])
+
+    def test_single_review_off_vocab_verdict_names_verdict_in_hold_reason(self):
+        """T-0164 review item 1(b): a complexity-5 task's only review is done with an unrecognised verdict
+        string -- held, with that verdict named in hold_reason, not swallowed into an empty "reviews failed"
+        message (the old stuck[0] path)."""
+        t = self.gated_execute("weird verdict")
+        r = self.task("review weird", complexity=5, role="review", inputs=[t])
+        bus.update(r, status="done", review_verdict="banana")
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(held["hold_reason"], f"review request_changes: {r} (banana)")
+
+    def test_reviews_expected_stamped_at_gate_survives_threshold_change(self):
+        """T-0164 review item 2: gate() freezes pipeline.reviews_expected at gate time. Raising
+        [review].two_reviews_from afterwards (which would otherwise drop reviews_expected(t) for this task from
+        2 to 1) must not let merge_reviewed() merge on one approval instead of the two it was gated for."""
+        pool = P.Pool()
+        pool.cfg["review"]["two_reviews_from"] = 7
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick(pool)
+        self.assertEqual(bus.get(t)["pipeline"]["reviews_expected"], 2)
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+
+        pool.cfg["review"]["two_reviews_from"] = 8
+        bus.update(reviews[0]["id"], status="done", review_verdict="approve")
+        daemon.tick(pool)
+        self.assertEqual(self.merged, [])          # stamped needed==2 still honoured; no crash, no early merge
+
+        bus.update(reviews[1]["id"], status="done", review_verdict="approve")
+        daemon.tick(pool)
+        self.assertEqual(self.merged, [t])
+
+    def test_src_fallback_only_applies_to_single_review_tasks(self):
+        """T-0164 review item 3: src.review_verdict is only a valid fallback when the task carries exactly one
+        review. With two reviews, r2's missing verdict must not silently inherit src's approve and get treated
+        as approved."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra", review_verdict="approve",
+                   pipeline={"gated_at": time.time(), "reviews_expected": 2})
+        r1 = self.task("review r1", complexity=7, role="review", inputs=[t])
+        r2 = self.task("review r2", complexity=7, role="review", inputs=[t])
+        bus.update(r1, status="done", review_verdict="approve")
+        bus.update(r2, status="done")              # done, no verdict anywhere on it
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(self.merged, [])
+
+    def test_sweep_covers_done_task_with_review_but_no_gated_at(self):
+        """T-0164 review item 4: a done execute task with reviews but no gated_at stamp (a hand-gated task the
+        Planner spawned reviews for directly) must still be swept and merged once approved."""
+        t = self.task("hand gated", complexity=5)
+        bus.update(t, status="done")               # no worktree, no pipeline at all
+        r = self.task("review hand gated", complexity=5, role="review", inputs=[t])
+        bus.update(r, status="done", review_verdict="approve")
+        daemon.tick()
+        self.assertEqual(self.merged, [t])
 
     def gated_execute(self, title):
         """A done execute task that already cleared the gate, so gate() leaves it to merge_reviewed()."""
