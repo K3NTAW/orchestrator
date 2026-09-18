@@ -1,7 +1,7 @@
 """orchestrator.serve: the per-user goal HTTP endpoint. Exercised entirely through starlette's TestClient with
 orchestrator.goals.start/list_goals/status/stop patched -- no real git, no real Popen. ORCH_WORK and
 ORCH_REPOS_TOML point at temp dirs so the per-slug lock and the repo config never touch this repo's own state."""
-import inspect, json, subprocess, sys, tempfile, unittest
+import fcntl, inspect, json, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -66,6 +66,12 @@ class HealthAndAuth(ServeTestCase):
         r3 = self.client.get("/goals", headers={"Authorization": "Basic abc"})
         self.assertEqual(r3.status_code, 401)
 
+    def test_non_ascii_bearer_401_not_500(self):
+        # Headers arrive latin-1 decoded; a raw non-ASCII byte must not raise inside hmac.compare_digest.
+        r = self.client.get("/goals", headers={"Authorization": b"Bearer \xe9"})
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.json(), {"reason": "unauthorized"})
+
 
 class CreateGoalValidation(ServeTestCase):
     def test_unknown_repo_404(self):
@@ -83,6 +89,26 @@ class CreateGoalValidation(ServeTestCase):
 
         r3 = self.client.post("/goals", json={"goal": "x"}, headers=self.auth())
         self.assertEqual(r3.status_code, 400)
+
+    def test_goal_too_long_400(self):
+        goal = "x" * (serve.MAX_GOAL_CHARS + 1)
+        r = self.client.post("/goals", json={"repo": "demo", "goal": goal}, headers=self.auth())
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json(), {"reason": "goal too long"})
+
+    def test_body_too_large_413(self):
+        goal = "x" * (serve.MAX_BODY_BYTES + 1)
+        body = json.dumps({"repo": "demo", "goal": goal}).encode()
+        r = self.client.post("/goals", content=body,
+                              headers={**self.auth(), "Content-Type": "application/json"})
+        self.assertEqual(r.status_code, 413)
+        self.assertEqual(r.json(), {"reason": "body too large"})
+
+    def test_invalid_json_body_400(self):
+        r = self.client.post("/goals", content=b"{not valid json",
+                              headers={**self.auth(), "Content-Type": "application/json"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json(), {"reason": "invalid json body"})
 
     def test_bad_requester_type_400(self):
         r = self.client.post("/goals", json={"repo": "demo", "goal": "g", "requester": 123}, headers=self.auth())
@@ -134,6 +160,27 @@ class ListAndGetGoals(ServeTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"goals": [{"goal_id": "T-1", "record_status": "done", "repo": "demo"}]})
 
+    @mock.patch("orchestrator.goals.list_goals")
+    def test_list_unfiltered_fans_out_across_repos(self, mock_list):
+        other_dir = Path(tempfile.mkdtemp(prefix="orch-repo2-"))
+        self._write_repos({"demo": {"path": str(self.repo_dir)}, "other": {"path": str(other_dir)}})
+
+        def fake_list(path):
+            return [{"goal_id": "T-1"}] if path == str(self.repo_dir) else [{"goal_id": "T-2"}]
+        mock_list.side_effect = fake_list
+
+        r = self.client.get("/goals", headers=self.auth())
+        self.assertEqual(r.status_code, 200)
+        out = r.json()["goals"]
+        self.assertEqual({(g["repo"], g["goal_id"]) for g in out}, {("demo", "T-1"), ("other", "T-2")})
+
+    def test_list_repo_not_configured_404(self):
+        self._write_repos({"demo": {"path": str(self.repo_dir)},
+                           "unpathed": {"git_url": "https://example.com/x.git"}})
+        r = self.client.get("/goals?repo=unpathed", headers=self.auth())
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json(), {"reason": "repo not configured"})
+
     @mock.patch("orchestrator.goals.status")
     def test_get_goal_returns_single_entry_200(self, mock_status):
         mock_status.return_value = [{"goal_id": "T-1", "record_status": "done"}]
@@ -169,7 +216,34 @@ class CloneUnderLock(ServeTestCase):
         argv, kwargs = mock_run.call_args
         self.assertEqual(list(argv[0])[:2], ["git", "clone"])
         self.assertIn("timeout", kwargs)
-        self.assertTrue((self.work_dir / ".locks" / "clonable.lock").exists())
+
+    @mock.patch("orchestrator.goals.start")
+    @mock.patch("orchestrator.goals.list_goals")
+    def test_repo_lock_serializes_requests(self, mock_list, mock_start):
+        mock_list.return_value = []
+        mock_start.return_value = {"launched": True, "goal_id": "T-3000"}
+
+        lock_fh = open(serve._lock_path("demo"), "w")
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        result = {}
+
+        def do_post():
+            result["response"] = self.client.post("/goals", json={"repo": "demo", "goal": "g"},
+                                                    headers=self.auth())
+
+        t = threading.Thread(target=do_post)
+        t.start()
+        try:
+            t.join(timeout=0.5)
+            self.assertTrue(t.is_alive(), "request should still be blocked on the held lock")
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            lock_fh.close()
+
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(result["response"].status_code, 201, result["response"].text)
 
     @mock.patch("orchestrator.serve.subprocess.run")
     def test_clone_failure_502_does_not_echo_stderr(self, mock_run):

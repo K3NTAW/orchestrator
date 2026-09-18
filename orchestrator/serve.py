@@ -3,6 +3,9 @@ Runs in the executor container on the home network. Forwards start/status/list/c
 against whichever repo a request names (by slug, resolved through .orchestrator/repos.toml) -- it never touches
 goals.py internals directly, only the module's public functions, so goals.py's own contract (list-of-dicts,
 {"error": "unknown goal"}, {"launched": bool, ...}) is the single source of truth for what a response contains.
+
+Requester scoping is out of scope here by design: the bearer token authenticates one kgpt connection, not an
+individual end user. kgpt is responsible for scoping which users may act before it forwards a request here.
 """
 import fcntl, hmac, json, logging, os, re, subprocess, sys, tomllib
 from pathlib import Path
@@ -14,13 +17,16 @@ try:
     from starlette.responses import JSONResponse
     from starlette.routing import Route
 except ImportError as e:
-    print(f"serve: starlette/uvicorn is not importable ({e}); install the mcp dependency group", file=sys.stderr)
+    print(f"serve: starlette/uvicorn missing: they ship with the mcp package this project depends on; "
+          f"reinstall with uv sync ({e})", file=sys.stderr)
     sys.exit(1)
 
 from . import goals
 
 PACKAGE_REPO = Path(__file__).resolve().parents[1]
 CLONE_TIMEOUT_S = int(os.environ.get("ORCH_CLONE_TIMEOUT_S") or 300)
+MAX_BODY_BYTES = 65536  # reject oversized request bodies with 413 before parsing JSON
+MAX_GOAL_CHARS = 20000  # goal ends up in argv of the Planner launch; longer goals hit E2BIG otherwise
 
 # Redacts a credential embedded in a git URL (https://user:token@host/...) before anything reaches the log --
 # clone stderr is never safe to echo verbatim, and it must never reach a response body at all (T-0146 risk 3).
@@ -76,7 +82,14 @@ def _auth_error(request):
     token = os.environ.get("ORCH_SERVICE_TOKEN", "")
     header = request.headers.get("authorization", "")
     provided = header[len("Bearer "):] if header.startswith("Bearer ") else ""
-    if not provided or not hmac.compare_digest(provided, token):
+    try:
+        # Headers arrive latin-1 decoded; a non-ASCII value must not turn into a 500 here.
+        match = bool(provided) and hmac.compare_digest(
+            provided.encode("utf-8", "surrogateescape"), token.encode("utf-8", "surrogateescape")
+        )
+    except Exception:
+        match = False
+    if not match:
         return JSONResponse({"reason": "unauthorized"}, status_code=401)
     return None
 
@@ -91,6 +104,8 @@ def create_goal(request):
         return auth_err
 
     raw = anyio.from_thread.run(request.body)
+    if len(raw) > MAX_BODY_BYTES:
+        return JSONResponse({"reason": "body too large"}, status_code=413)
     try:
         body = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
@@ -105,6 +120,8 @@ def create_goal(request):
         return JSONResponse({"reason": "repo is required"}, status_code=400)
     if not isinstance(goal, str) or not goal.strip():
         return JSONResponse({"reason": "goal is required"}, status_code=400)
+    if len(goal) > MAX_GOAL_CHARS:
+        return JSONResponse({"reason": "goal too long"}, status_code=400)
     if requester is not None and not isinstance(requester, str):
         return JSONResponse({"reason": "requester must be a string"}, status_code=400)
     if not isinstance(account, str):
