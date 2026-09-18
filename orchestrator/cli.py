@@ -1,4 +1,4 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
 import argparse, json
 from collections import defaultdict
 from . import bus, scorecard
@@ -29,6 +29,7 @@ def main():
     c = sub.add_parser("cost"); c.add_argument("--by", default="role", choices=["role", "tier", "account", "task"])
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
     sub.add_parser("resume").add_argument("account")
+    pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     ins = sub.add_parser("install"); ins.add_argument("target")
@@ -52,7 +53,8 @@ def main():
         if a.plain:
             s = Pool().status()
             for acc in s["accounts"]:
-                print(f"{acc['id']}\tutil={acc['utilization']:.3f}\tcooling={acc['cooling_s']}s\treason={acc['reason'] or '-'}")
+                print(f"{acc['id']}\tutil={acc['utilization']:.3f}\tcooling={acc['cooling_s']}s\t"
+                     f"reason={acc['reason'] or '-'}\tplanner_day_tokens={acc['planner_day_tokens']}")
             c = s["codex"]
             print(f"codex\tavailable={c['available']}\trunning={c['running']}\tday_tasks={c['day_tasks']}\tcooling={c['cooling_s']}s")
         else:
@@ -63,6 +65,13 @@ def main():
         pl = Pool(); pl.cooldown(pl.get(a.account), a.minutes * 60, "manual"); print(json.dumps(pl.status(), indent=1))
     elif a.cmd == "resume":
         pl = Pool(); pl.resume(a.account); print(json.dumps(pl.status(), indent=1))
+    elif a.cmd == "pick":
+        pl = Pool(); pl.tally_planner()
+        picked = pl.pick(a.role)
+        if picked is None:
+            print("hold: no account with headroom")
+            raise SystemExit(3)
+        print(f"{picked.id}\t{picked.config_dir}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
     elif a.cmd == "merge":

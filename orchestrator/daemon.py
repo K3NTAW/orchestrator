@@ -349,6 +349,10 @@ def merge_reviewed(pool):
 
 def tick(pool=None):
     pool = pool or Pool()
+    try:
+        pool.tally_planner()
+    except Exception as e:
+        print(f"[daemon] tally_planner failed: {e}", file=sys.stderr)
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:

@@ -1,10 +1,25 @@
-"""Account pool selection (PoolSel) and the [[executors]] routing table (Executors): bands, quota groups,
-cooldowns, budgets, scored ranking."""
-import json, sys, unittest
+"""Account pool selection (PoolSel), the [[executors]] routing table (Executors), and Planner-transcript token
+tallying (PlannerTally): bands, quota groups, cooldowns, budgets, scored ranking."""
+import json, shutil, sys, time, unittest
+from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_pool.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
 from orchestrator import pool as P, spawn
+
+
+def _iso(ts):
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _assistant(ts, input_tokens=0, output_tokens=0, cache_read_input_tokens=0):
+    return json.dumps({"type": "assistant", "timestamp": ts, "message": {"usage": {
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens}}}) + "\n"
+
+
+def _user(ts):
+    return json.dumps({"type": "user", "timestamp": ts, "message": {"usage": {"input_tokens": 999}}}) + "\n"
 
 
 class PoolSel(unittest.TestCase):
@@ -105,6 +120,84 @@ class Executors(unittest.TestCase):
         # enabling a disabled placeholder later must not silently drop it out of its cooldown group (review T-0030)
         for row in P.config()["executors"]:
             self.assertTrue(row.get("quota_group"), row["id"])
+
+
+class PlannerTally(unittest.TestCase):
+    """Pool.tally_planner reads Claude Code's own transcript files for this project, since a live Planner session
+    never posts a JSON result to run_claude the way a spawned worker does."""
+
+    def setUp(self):
+        P.PERSIST.unlink(missing_ok=True)
+        self.p = P.Pool()
+        self.a = self.p.get("A")
+        self.a.config_dir = str(TMP / "fake-claude-a")  # absolute path: os.path.expanduser is a no-op on it
+        self.proj_dir = Path(self.a.config_dir) / "projects" / P.encode_project_dir(str(P.ROOT.resolve()))
+        shutil.rmtree(self.proj_dir, ignore_errors=True)  # same TMP path is reused across tests in this process
+        self.proj_dir.mkdir(parents=True)
+        self.now = time.time()
+        self.a.window_started = self.now - 100  # window = [now-100, now+17900); comfortably holds "now"
+        self.ts_in = _iso(self.now)
+        self.ts_out = _iso(self.now - 200)       # before window_started -> excluded
+
+    def _write(self, name, lines):
+        (self.proj_dir / name).write_text("".join(lines))
+
+    def test_encode_project_dir_matches_claude_code(self):
+        # verified against a real directory name under ~/.claude/projects/ on 2026-09-18
+        self.assertEqual(P.encode_project_dir("/Users/k3ntaw/.claude-mem"), "-Users-k3ntaw--claude-mem")
+        self.assertEqual(P.encode_project_dir("/Users/k3ntaw/code/orchestrator"), "-Users-k3ntaw-code-orchestrator")
+
+    def test_tally_sums_assistant_usage_in_window(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 100, 50, 20), _assistant(self.ts_out, 999, 999, 999)])
+        self.p.tally_planner()
+        n = 100 + 50 + 20 // 10
+        self.assertEqual(self.a.planner_window_tokens, n)
+        self.assertEqual(self.a.planner_day_tokens, n)
+
+    def test_tally_skips_malformed_and_user_lines(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 5, 0), "not json at all\n", _user(self.ts_in)])
+        self.p.tally_planner()
+        self.assertEqual(self.a.planner_window_tokens, 15)
+
+    def test_tally_resumes_from_offset(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        self.p.tally_planner()
+        self.assertEqual(self.a.planner_window_tokens, 10)
+        with (self.proj_dir / "a.jsonl").open("a") as f:
+            f.write(_assistant(self.ts_in, 5, 0, 0))
+        self.p.tally_planner()
+        self.assertEqual(self.a.planner_window_tokens, 15)  # not 25: the first line isn't re-read
+
+    def test_tally_prunes_missing_files(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        self._write("b.jsonl", [_assistant(self.ts_in, 5, 0, 0)])
+        self.p.tally_planner()
+        self.assertEqual(set(self.a.planner_offsets), {"a.jsonl", "b.jsonl"})
+        (self.proj_dir / "b.jsonl").unlink()
+        self.p.tally_planner()
+        self.assertEqual(set(self.a.planner_offsets), {"a.jsonl"})
+
+    def test_tally_resets_on_rollover(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        self.p.tally_planner()
+        self.assertEqual(self.a.planner_window_tokens, 10)
+        self.a.window_started = self.now - P.WINDOW_S - 10  # force a rollover
+        self.a.utilization(self.p.cap)
+        self.assertEqual(self.a.planner_window_tokens, 0)
+        self.assertIn("a.jsonl", self.a.planner_offsets)     # offset itself survives the rollover
+        with (self.proj_dir / "a.jsonl").open("a") as f:
+            # +1s margin over the rolled window_started: millisecond truncation in _iso() could otherwise put an
+            # exactly-"now" timestamp a fraction before the new window's start
+            f.write(_assistant(_iso(time.time() + 1), 7, 0, 0))
+        self.p.tally_planner()
+        self.assertEqual(self.a.planner_window_tokens, 7)   # only the newly-appended line
+
+    def test_tally_raises_utilization_and_flips_pick(self):
+        self.assertEqual(self.p.pick("scout").id, "A")       # both idle -> ties break to A
+        big = int(self.p.cap * 0.9)                          # over A's 0.65 scout ceiling (reserve_for_planner=0.35)
+        self._write("a.jsonl", [_assistant(self.ts_in, big, 0, 0)])
+        self.p.tally_planner()
+        self.assertEqual(self.p.pick("scout").id, "B")
 
 
 if __name__ == "__main__":

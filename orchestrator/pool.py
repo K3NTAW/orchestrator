@@ -1,13 +1,21 @@
 """Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with-headroom selection. State persists to
 pool_state.json so MCP server restarts don't forget cooldowns."""
-import json, os, re, time, tomllib
+import json, os, re, sys, time, tomllib
 from dataclasses import dataclass, field, asdict, fields
-from datetime import date
-from . import STATE
+from datetime import date, datetime
+from pathlib import Path
+from . import ROOT, STATE
 
 WINDOW_S = 5 * 3600
 CFG = STATE / "pool.toml"
 PERSIST = STATE / "pool_state.json"
+
+
+def encode_project_dir(path: str) -> str:
+    """Reproduces Claude Code's projects/ directory naming: every character that is not [A-Za-z0-9] becomes '-'
+    (so '/' and '.' both map to '-'; '/Users/k3ntaw/.claude-mem' -> '-Users-k3ntaw--claude-mem'). Verified against
+    live ~/.claude/projects/ and ~/.claude-a/projects/ directory names on 2026-09-18."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
 def config():
@@ -28,13 +36,18 @@ class Account:
     day_tokens: int = 0
     day: str = field(default_factory=lambda: date.today().isoformat())
     hold_reason: str = ""
+    planner_window_tokens: int = 0
+    planner_day_tokens: int = 0
+    planner_offsets: dict = field(default_factory=dict)
 
     def utilization(self, cap):
         if time.time() - self.window_started > WINDOW_S:
             self.window_tokens, self.window_started = 0, time.time()
+            self.planner_window_tokens = 0
         if self.day != date.today().isoformat():
             self.day_tokens, self.day = 0, date.today().isoformat()
-        return self.window_tokens / cap
+            self.planner_day_tokens = 0
+        return (self.window_tokens + self.planner_window_tokens) / cap
 
     def cooling(self):
         return self.cooldown_until > time.time()
@@ -138,7 +151,7 @@ class Pool:
             if role not in a.affinity or a.cooling():
                 continue
             u = a.utilization(self.cap)
-            if a.daily_budget and a.day_tokens >= a.daily_budget:
+            if a.daily_budget and (a.day_tokens + a.planner_day_tokens) >= a.daily_budget:
                 continue
             ceiling = 1.0 if role == "planner" else 1.0 - a.reserve
             if u < ceiling:
@@ -161,6 +174,63 @@ class Pool:
 
     def get(self, acct_id):
         return next(a for a in self.accounts if a.id == acct_id)
+
+    # planner usage --------------------------------------------------------------------------
+    def tally_planner(self, now=None):
+        """The Planner session (interactive `claude`, not a worker spawned by run_claude) never posts a JSON
+        result, so its token usage is otherwise invisible to the pool. Read straight from Claude Code's own
+        transcript files for this project under each account's config_dir instead: assistant turns in the
+        current day and 5h window, summed the same way run_claude sums a worker's usage. Incremental: each file's
+        byte offset persists in pool_state so a tick only reads what a prior tick had not yet seen."""
+        now = now if now is not None else time.time()
+        today = datetime.fromtimestamp(now).astimezone().date().isoformat()
+        for a in self.accounts:
+            proj_dir = Path(os.path.expanduser(a.config_dir)) / "projects" / encode_project_dir(str(ROOT.resolve()))
+            if not proj_dir.exists():
+                print(f"planner transcripts not found for {a.id} at {proj_dir}", file=sys.stderr)
+                continue
+            a.utilization(self.cap)  # roll window/day (and the planner counters with it) before filtering
+            window_lo, window_hi = a.window_started, a.window_started + WINDOW_S
+            seen = set()
+            for f in sorted(proj_dir.glob("*.jsonl")):
+                seen.add(f.name)
+                size = f.stat().st_size
+                off = a.planner_offsets.get(f.name, 0)
+                if off > size:
+                    off = 0  # shrunk file: start over
+                if off >= size:
+                    continue
+                pos = off
+                with f.open("rb") as fh:
+                    fh.seek(off)
+                    for raw in fh:
+                        if not raw.endswith(b"\n"):
+                            break  # partial line still being written; pick it up on a later tick
+                        pos += len(raw)
+                        line = raw.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if rec.get("type") != "assistant":
+                            continue
+                        try:
+                            dt = datetime.fromisoformat((rec.get("timestamp") or "").replace("Z", "+00:00"))
+                        except ValueError:
+                            continue
+                        if dt.astimezone().date().isoformat() != today or not (window_lo <= dt.timestamp() < window_hi):
+                            continue
+                        usage = ((rec.get("message") or {}).get("usage")) or {}
+                        n = usage.get("input_tokens", 0) + usage.get("output_tokens", 0) + usage.get("cache_read_input_tokens", 0) // 10
+                        a.planner_window_tokens += n
+                        a.planner_day_tokens += n
+                a.planner_offsets[f.name] = pos
+            for name in list(a.planner_offsets):
+                if name not in seen:
+                    del a.planner_offsets[name]
+        self.save()
 
     # executors ---------------------------------------------------------------------------------
     def pick_executor(self, role, complexity, scores=None):
@@ -237,6 +307,7 @@ class Pool:
         avail = self.codex_available()
         legacy = self._legacy_executor() or Executor(LEGACY_EXECUTOR_ID, "codex", "", ["execute"])
         return {"accounts": [{"id": a.id, "utilization": round(a.utilization(self.cap), 3), "day_tokens": a.day_tokens,
+                              "planner_day_tokens": a.planner_day_tokens,
                               "daily_budget": a.daily_budget, "cooling_s": max(0, int(a.cooldown_until - time.time())),
                               "reason": a.hold_reason} for a in self.accounts],
                 "executors": [{"id": e.id, "model": e.model, "enabled": e.enabled,

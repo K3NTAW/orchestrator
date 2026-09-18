@@ -25,6 +25,20 @@ Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` t
 ## Run it
 `f orch [goal]` (from anywhere) launches the Planner on account A in this repo. `f orch status|cost|daemon|hold|resume|merge` is the CLI.
 `f orch survey` is the old cross-repo briefing session.
+`orchestrator pick planner|scout|review|execute` tallies Planner usage fresh, then prints `<account_id>\t<config_dir>`
+for `pool.pick(role)`, or exits 3 with `hold: no account with headroom`; a launcher not running the daemon calls this
+so its account choice still reflects current Planner usage.
+
+## Planner usage is counted from transcripts
+The Planner itself is an interactive `claude` session, not a worker spawned by `run_claude`, so it never posts a JSON
+result carrying a `usage` block — without `tally_planner()` the pool would only ever see the workers it spawns and
+stay blind to the largest consumer of any account's window. `Pool.tally_planner()` reads Claude Code's own transcript
+files for this project under each account's `config_dir` (`<config_dir>/projects/<encoded ROOT>/*.jsonl`), sums the
+same `input_tokens + output_tokens + cache_read_input_tokens // 10` `run_claude` uses for assistant turns in the
+current day and 5h window, and folds the total into `Account.utilization()` and the daily-budget check alongside the
+worker totals. It reads incrementally (a per-file byte offset persists in `pool_state.json`) and skips a missing
+transcripts directory with one stderr line rather than raising. `daemon.tick()` calls it once per tick; `orchestrator
+pick <role>` calls it directly for callers that need a fresh account choice without a running daemon.
 
 ## Pipeline
 State machine per execute task: `queued` → (depends_on merged, complexity ≥5 → `spec_review` first) → dispatched to
