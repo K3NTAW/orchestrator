@@ -108,3 +108,16 @@ type: decision · goal: T-0073 · tasks: T-0134,T-0137,T-0139 · provenance: rep
 - .orchestrator/pool.toml limits.max_budget_usd.review was 1.5; T-0134 (opus, 389-line delta plus context) died at 1.58 USD after 277 s with nothing posted, then T-0137 with a delta-only spec finished at 1.53 USD and T-0139 approved under the new cap
 - a review that dies at the cap costs more than the extra dollar: the full spend is lost and a retry doubles it
 outcome: 3.0 for review from 2026-09-18 16:00; review specs name the exact diff range to read and say not to re-read the parent task's diff. Revert path: set review = 1.5 on line 138 of pool.toml
+
+## 2026-09-18 C-O4 serve: spec review waived after three rounds; v4 spec dispatched directly
+type: decision · goal: T-0073 · tasks: T-0116,T-0142,T-0144,T-0140,T-0143,T-0146 · provenance: repo
+- three sonnet spec reviews (about 0.33 USD and 3 min each) found 15 risks in total, converging from design (requester field outside scope, 409 by string matching, async handlers) to hardening (per-slug clone lock, credential leak through git stderr, clone timeout, status() list shape); the round-3 reviewer was told approve-unless-blocking and still found a real leak, so the rounds paid off
+- specs and depends_on are immutable on the bus, so each round recreated the task (T-0116, T-0142, T-0144, v4); dependents T-0117/T-0118/T-0124 still name T-0116 and will be satisfied by marking T-0116 done+merged_into when v4 merges (fix-round bookkeeping)
+outcome: same rule as C-O3: after three spec-review rounds the Planner folds the last findings in and dispatches; the opus code review remains. Revert path: none needed (decision only); the v4 task can be failed and a v5 written if the code review shows the spec was wrong
+
+## 2026-09-18 C-O4 serve endpoint merged: bearer-authed starlette API over goals.py, hardened through one security review and two fix rounds
+type: decision · goal: T-0073 · tasks: T-0147,T-0152,T-0153,T-0155,T-0158,T-0161 · provenance: repo
+- orchestrator/serve.py: plain-def handlers, hmac bytes compare with any exception mapped to 401, per-slug flock spanning clone-check + running-check + goals.start, clone as argv with timeout and redacted log-only stderr, body bound before buffering (Content-Length then streamed abort), every goals.* string redacted and capped before a response, 400/404/409/422/502/503/504 map, repo slug on every entry, cancel idempotent; goals.py gains requester
+- reviews: T-0152 opus security (1.39 USD) found the non-ASCII header 500 and body bound gap; T-0155 (1.05) found refusal reasons leaking git stderr and the after-the-fact body check; T-0161 (0.88) approved with low notes (git clone needs a -- separator, missing repos.toml as 503, per-route guards)
+- spec went through three sonnet spec reviews (T-0140, T-0143, T-0146) and four task recreations because specs are immutable on the bus
+outcome: merged 6f8018d into goal/T-0073 2026-09-18 20:45 (rebased chain be42500 T-0147, 38db9bb T-0153, 6f8018d T-0158). Revert path: git revert the three commits on goal/T-0073 in reverse order. Backlog in plan.md: C-O4 polish task for the T-0161 notes
