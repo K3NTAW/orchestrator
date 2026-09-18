@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, os, subprocess, sys, threading, time
+import fcntl, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, bus, executor, merge, spawn
 from .pool import Pool
@@ -15,7 +15,15 @@ LOCK_PATH = STATE / "daemon.lock"
 
 def notify(msg):
     print(f"[notify] {msg}", file=sys.stderr)
-    if sys.platform == "darwin":
+    url = os.environ.get("ORCH_NOTIFY_URL")
+    if url:
+        try:
+            req = urllib.request.Request(url, data=msg.encode(), method="POST",
+                                          headers={"Content-Type": "text/plain"})
+            urllib.request.urlopen(req, timeout=5).close()
+        except Exception as e:
+            print(f"[notify] webhook failed: {e}", file=sys.stderr)
+    if sys.platform == "darwin" and os.environ.get("ORCH_NOTIFY_DESKTOP") != "0":
         # msg is untrusted (merge stderr, task titles): passed as an argv item, never interpolated into the
         # AppleScript source, so a quote in it cannot break out and run arbitrary local commands.
         subprocess.run(["osascript", "-e", "on run argv", "-e",

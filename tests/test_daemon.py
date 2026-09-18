@@ -4,7 +4,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
-import sys, tempfile, time, unittest
+import http.server, os, sys, tempfile, threading, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
@@ -37,6 +37,12 @@ class Daemon(unittest.TestCase):
         orig = getattr(mod, name)
         setattr(mod, name, value)
         self.addCleanup(setattr, mod, name, orig)
+
+    def set_env(self, name, value):
+        had = name in os.environ
+        orig = os.environ.get(name)
+        os.environ[name] = value
+        self.addCleanup(lambda: os.environ.__setitem__(name, orig) if had else os.environ.pop(name, None))
 
     def gate_green(self, green):
         """daemon.subprocess.run covers the tests-green gate, notify()'s osascript, and already_merged()'s git
@@ -251,6 +257,45 @@ class Daemon(unittest.TestCase):
         cmd = calls[-1]
         self.assertEqual(cmd[-1], msg[:200])                       # untrusted text only ever lands in argv
         self.assertTrue(all(msg not in part for part in cmd[:-1]))
+
+    def test_webhook_posts_body(self):
+        received = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received["method"] = self.command
+                received["body"] = self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        url = f"http://127.0.0.1:{server.server_port}/"
+        self.set_env("ORCH_NOTIFY_URL", url)
+        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0))
+
+        daemon.notify("hello webhook")
+        thread.join(timeout=5)
+
+        self.assertEqual(received.get("method"), "POST")
+        self.assertEqual(received.get("body"), b"hello webhook")
+
+    def test_webhook_failure_is_swallowed(self):
+        self.set_env("ORCH_NOTIFY_URL", "http://127.0.0.1:1/")
+        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0))
+        daemon.notify("unreachable")                               # must not raise
+
+    def test_no_osascript_off_darwin(self):
+        calls = []
+        self.swap(daemon.subprocess, "run", lambda *a, **k: calls.append(a[0]) or FakeProc("", 0))
+        self.swap(daemon.sys, "platform", "linux")
+        daemon.notify("linux box")
+        self.assertEqual(calls, [])
 
 
 class BusLock(unittest.TestCase):

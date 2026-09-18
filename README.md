@@ -36,6 +36,10 @@ bus lock before acting, so a crash-and-retry never re-runs a stage.
 Run it: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart` in `pool.toml` (`ORCH_DAEMON=0`
 or `autostart = false` disables it), and `uv run orchestrator daemon` takes the same single-instance lock so two loops
 never run at once; `orchestrator daemon --once` runs a single pass without the lock.
+`notify()` always logs `[notify] <msg>` to stderr. Set `ORCH_NOTIFY_URL` (e.g. `https://ntfy.kentawaibel.com/orchestrator`,
+shape only, not this repo's setup) to also POST the message as a plain-text body to that URL; a failed or unreachable
+webhook only logs `[notify] webhook failed: ...` and never breaks a tick. On macOS a desktop notification fires too
+unless `ORCH_NOTIFY_DESKTOP=0`; it's a no-op on other platforms regardless.
 Holds (`status="held"`) mean the daemon stopped and a human/Planner must act: `spec_review request_changes`, `review
 request_changes`, or `gate_red` (tests failed at the gate). The `hold_reason` field and `resume_hint` on the task say
 which. The Planner clears a hold by writing a new spec with `depends_on=[held_task_id]`, never by editing the held
