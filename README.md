@@ -10,6 +10,8 @@ scaffold committed before ORCH_ROOT, spawn, the bus and merge (all rooted at ORC
 repo, run `uv run orchestrator install /path/to/target` — it's idempotent, prints `created`/`kept`/`updated` per
 file, and wires `.mcp*.json` to run this repo's code with `ORCH_ROOT` set to the target. Then, in the target repo:
 commit the scaffold, and start the Planner there with `ORCH_ROOT=/path/to/target`.
+To run the executor itself in a container on a dedicated host instead of locally, see
+[docs/executor-host.md](docs/executor-host.md).
 
 ## Phase 0 (you, once)
 ```bash
