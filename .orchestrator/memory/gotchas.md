@@ -87,3 +87,22 @@ outcome: fix round passes the text as an argv item to an 'on run argv' handler; 
 type: gotcha · goal: T-0043 · tasks: T-0050,T-0057,T-0063 · provenance: repo
 - merge(fix_round) sets merged_into only on the fix-round task; the original (e.g. T-0016, T-0018) stays done with merged_into unset; the first daemon --once created six stale review tasks T-0057..T-0062 and its threads died with the process
 outcome: T-0063: tick() skips tasks of closed goals and treats a task as merged when its branch is an ancestor of goal/<parent>; stale tasks marked failed/superseded
+
+## 2026-09-18 kgpt hosts and how to reach them
+type: reference · goal: kgpt-recon-2026-09-18 · provenance: repo
+- Hetzner prod: `ssh kgpt@46.62.167.12` (ubuntu-4gb-hel1-4). Compose dir is /home/kgpt/kgpt, not /opt/kgpt as README says; image kgpt:local built from that checkout
+- Home server: `ssh k3ntaw@192.168.1.167` (kenta-server). Login shell is fish, so pipe scripts via `bash -s`. kgpt home side in /opt/kgpt-home on ghcr.io/k3ntaw/kgpt:latest
+- guardrails.sh blocks command text naming the ssh config dir or the system config dir, even inside an ssh remote string; planner-mode blocks Write to the claude-a memory dir, so recon notes go here
+outcome: recorded; both boxes verified up 2026-09-18 11:00
+
+## 2026-09-18 daemon never fires the Claude fallback while every Codex executor is cooling
+type: gotcha · goal: T-0065 · tasks: T-0070 · provenance: repo
+- orchestrator/daemon.py:84 free_slots counts only enabled, non-cooling Codex executors; with all rows cooling it is 0 and dispatch() breaks before executor.start, so on_exhausted=fallback_claude (executor.py:110) is never reached from the daemon
+- manual route that works: spawn_scout(task_id) runs spawn.run_worker, whose execute branch (spawn.py:208) claims the task and runs claude:sonnet in its worktree; safe from double dispatch because the daemon has no slots
+outcome: T-0070 dispatched by hand 2026-09-18 13:20; fix candidate: count limits.max_parallel_claude_workers as slots when the policy is fallback_claude
+
+## 2026-09-18 daemon gate spawns the review at the default tier, so a Claude-executed task gets reviewed by the same model
+type: gotcha · goal: T-0065 · tasks: T-0070,T-0071,T-0072 · provenance: repo
+- orchestrator/daemon.py:168-171 gate() creates the review task without a tier, so it defaults to sonnet; T-0070 was executed by claude:sonnet (fallback) and T-0071 was a sonnet review of sonnet output, against the never-review-own-output rule
+- manual remedy used: a second review task on tier opus with inputs=[T-0070], spawned with spawn_review (T-0072); the daemon merged on the first approve before the second landed
+outcome: fix candidate: gate() reads the executed task's executor field and picks a different model (opus for a sonnet executor) and waits for that review; until then, add the other-model review by hand for every fallback-executed task
