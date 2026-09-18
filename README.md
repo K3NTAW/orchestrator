@@ -5,8 +5,11 @@ Executor (GPT-6 Astra via `codex exec`, sandboxed) · cross-model review · seri
 Spec: the blueprint this repo implements (v2.0, 2026-09). Layout follows its §9.
 
 ## Use on a project
-This repo *is* the §9 layout. Drop it into a project (copy, or `git subtree add`), or point `ORCH_ROOT` at it and run the
-Planner from the project root. Worktrees live in `wt/<task-id>`; the bus lives in `.orchestrator/`.
+This repo *is* the §9 layout. `git worktree add` only ever checks out committed files, so a target repo needs the
+scaffold committed before ORCH_ROOT, spawn, the bus and merge (all rooted at ORCH_ROOT) will work on it. From this
+repo, run `uv run orchestrator install /path/to/target` — it's idempotent, prints `created`/`kept`/`updated` per
+file, and wires `.mcp*.json` to run this repo's code with `ORCH_ROOT` set to the target. Then, in the target repo:
+commit the scaffold, and start the Planner there with `ORCH_ROOT=/path/to/target`.
 
 ## Phase 0 (you, once)
 ```bash
