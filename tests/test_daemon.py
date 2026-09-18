@@ -31,12 +31,21 @@ class Daemon(unittest.TestCase):
         self.swap(spawn, "run_worker", lambda tid: self.workers.append(tid))
         self.swap(merge, "merge", lambda tid, target=None: (self.merged.append(tid),
                                                             {"status": "merged", "target": "goal/G", "sha": "abc12345"})[1])
+        # README now tells operators to export ORCH_NOTIFY_URL/ORCH_NOTIFY_DESKTOP ambiently; without clearing
+        # them here every notify() call in this suite would fire a real webhook POST or osascript popup.
+        self.clear_env("ORCH_NOTIFY_URL")
+        self.clear_env("ORCH_NOTIFY_DESKTOP")
         self.gate_green(True)
 
     def swap(self, mod, name, value):
         orig = getattr(mod, name)
         setattr(mod, name, value)
         self.addCleanup(setattr, mod, name, orig)
+
+    def clear_env(self, name):
+        had = name in os.environ
+        orig = os.environ.pop(name, None)
+        self.addCleanup(lambda: os.environ.__setitem__(name, orig) if had else os.environ.pop(name, None))
 
     def set_env(self, name, value):
         had = name in os.environ
@@ -296,6 +305,40 @@ class Daemon(unittest.TestCase):
         self.swap(daemon.sys, "platform", "linux")
         daemon.notify("linux box")
         self.assertEqual(calls, [])
+
+    def test_ambient_notify_url_does_not_leak_into_other_tests(self):
+        """Stands in for a shell that exported ORCH_NOTIFY_URL before this process's setUp ran: re-applying
+        clear_env's own pop-then-restore here proves that pattern -- not just avoiding the var in test bodies
+        -- is what keeps an internal notify() call (gate()'s worktree-missing path, exercised for real by
+        test_gate_missing_worktree_holds) from ever reaching the webhook."""
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        server.timeout = 0.3
+        self.addCleanup(server.server_close)
+        url = f"http://127.0.0.1:{server.server_port}/"
+
+        os.environ["ORCH_NOTIFY_URL"] = url   # simulate the stale ambient value setUp would normally clear
+        self.clear_env("ORCH_NOTIFY_URL")
+
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        t = self.task("nowt", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP / "does-not-exist"))
+        daemon.tick()                          # gate()'s worktree-missing branch calls notify() internally
+
+        thread.join(timeout=2)
+        self.assertEqual(received, [])
 
 
 class BusLock(unittest.TestCase):
