@@ -12,3 +12,8 @@ You are the Planner; a human approves every merge to main. You never edit source
 6. Start `orchestrator daemon` (or call `orchestrator daemon --once`); the daemon dispatches ready tasks, gates, spawns reviews, merges on approve, dispatches dependents. The Planner intervenes on held tasks (spec_review or review request_changes, gate_red): write the fix-round spec with depends_on=[the held task].
 7. Accept only when `.claude/hooks/tests-green.sh wt/<id>` exits 0 in your own shell. Review per complexity policy — external gate stays for anything the Planner merges by hand. `merge(id)`, then `graph.sh update` (skill `memory`).
 8. Retrospective: skill `memory` → `record.sh draft <GOAL>` then `record.sh add ...` (dated entry, hook-enforced), `record.sh set architecture` when layout changed. Complete the GOAL task. Open PR goal/<parent> → main.
+
+## Session hygiene
+- Waiting: one Monitor per wait with an exit condition on the final state, never per status change; no polling.
+- Tool output: head, cut, jq; never cat a file over 200 lines; read scout results once.
+- Review policy: 1–3 hooks only, auto-merge on a green gate · 4–6 one sonnet reviewer, other family · 7–10 two reviews + security checklist, cross-model when Codex executed, else both reviews on the non-executing Claude tier.
