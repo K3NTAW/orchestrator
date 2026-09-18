@@ -26,6 +26,11 @@ ARG CODEX_VERSION=0.155.0
 # and `sha256sum` them.
 ARG CODEX_SHA256_AMD64=e415cc3adb94ade16e8d44b4dd58a9201cc34b2ee51a5d6eddf2a3a00aecb6c0
 ARG CODEX_SHA256_ARM64=8b4a9c356916c515f7c93f918a01b8fa1371bcc9758addbfa723b85fbec5694b
+# Optional pins for the uv/Claude Code installer *scripts* themselves (astral-sh/Anthropic don't publish
+# checksums for these, unlike the codex tarball above). When set, the build verifies the downloaded
+# script against it before running; when empty, the build only logs the hash for manual audit.
+ARG UV_INSTALL_SHA256=""
+ARG CLAUDE_INSTALL_SHA256=""
 
 ENV HOME=/home/orch \
     DEBIAN_FRONTEND=noninteractive \
@@ -42,6 +47,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Baked default identity for the `git commit` calls goals.py runs inside cloned target repos --
+# overridable per the runbook's executor.env template (GIT_AUTHOR_NAME/EMAIL, GIT_COMMITTER_NAME/EMAIL;
+# git honours those env vars over --system config).
+RUN git config --system user.name "orchestrator-executor" \
+    && git config --system user.email "orchestrator@localhost"
+
 # Reuse an existing group/user at that id (renaming it to orch) instead of failing outright -- the host
 # uid/gid picked up via `id -u`/`id -g` can collide with a base-image system account.
 RUN set -eux; \
@@ -51,12 +62,21 @@ RUN set -eux; \
     if [ -n "$existing_user" ]; then usermod -l orch -d /home/orch -m -g orch "$existing_user"; \
     else useradd -m -u "$UID" -g orch -d /home/orch -s /bin/bash orch; fi
 
+# Pre-create orch's XDG-ish dirs before anything mounts into them (the gh bind-mount in
+# docker-compose.executor.yml lands at /home/orch/.config/gh) so the mount parent is orch-owned.
+RUN install -d -o orch -g orch /home/orch/.config /home/orch/.local /home/orch/.cache
+
 # uv: official installer, pinned via the version segment in the URL (astral-sh/uv supports this).
-# Downloaded to a file first and sha256sum'd into the build log for an audit trail -- astral-sh doesn't
-# publish a separate checksum for the installer script itself.
+# Downloaded to a file first; verified against UV_INSTALL_SHA256 when set, else just sha256sum'd into
+# the build log for an audit trail -- astral-sh doesn't publish a separate checksum for the installer
+# script itself.
 # Bump: change UV_VERSION above to a tag from https://github.com/astral-sh/uv/releases.
 RUN curl -LsSf -o /tmp/uv-install.sh "https://astral.sh/uv/${UV_VERSION}/install.sh" \
-    && sha256sum /tmp/uv-install.sh \
+    && if [ -n "$UV_INSTALL_SHA256" ]; then \
+         echo "${UV_INSTALL_SHA256}  /tmp/uv-install.sh" | sha256sum -c -; \
+       else \
+         sha256sum /tmp/uv-install.sh; \
+       fi \
     && env UV_INSTALL_DIR=/usr/local/bin sh /tmp/uv-install.sh \
     && rm -f /tmp/uv-install.sh
 
@@ -78,23 +98,37 @@ RUN set -eux; \
     install -m 0755 "/tmp/codex-${codex_arch}" /usr/local/bin/codex; \
     rm -rf /tmp/codex*
 
-COPY --chown=orch:orch . /opt/orchestrator
-WORKDIR /opt/orchestrator
-
 USER orch
 
 # Claude Code: native installer (not npm), documented at https://code.claude.com/docs/en/setup. The
 # installer accepts a version argument (`bash -s <version>`) — pinned here via CLAUDE_VERSION.
-# Downloaded to a file first and sha256sum'd into the build log for an audit trail -- Anthropic doesn't
-# publish a separate checksum for the installer script itself.
+# Downloaded to a file first; verified against CLAUDE_INSTALL_SHA256 when set, else just sha256sum'd
+# into the build log for an audit trail -- Anthropic doesn't publish a separate checksum for the
+# installer script itself.
 # Bump: change CLAUDE_VERSION above to a version from `claude --version` upstream or the release notes.
 RUN curl -fsSL -o /tmp/claude-install.sh https://claude.ai/install.sh \
-    && sha256sum /tmp/claude-install.sh \
+    && if [ -n "$CLAUDE_INSTALL_SHA256" ]; then \
+         echo "${CLAUDE_INSTALL_SHA256}  /tmp/claude-install.sh" | sha256sum -c -; \
+       else \
+         sha256sum /tmp/claude-install.sh; \
+       fi \
     && bash /tmp/claude-install.sh "${CLAUDE_VERSION}" \
     && rm -f /tmp/claude-install.sh \
     && claude --version
 
-RUN uv sync --frozen
+USER root
+
+# Source copied last (below every installer layer above) so editing it doesn't bust the installer
+# layers' cache and re-download them. Left root:root (no --chown) so orch can run the orchestrator but
+# not rewrite its own code or hooks; only the venv below is handed back to orch.
+COPY . /opt/orchestrator
+WORKDIR /opt/orchestrator
+
+# UV_CACHE_DIR keeps this root-run sync out of /home/orch/.cache -- writing there as root would leave
+# root-owned cache entries orch can't add to at runtime.
+RUN UV_CACHE_DIR=/root/.cache/uv uv sync --frozen && chown -R orch:orch /opt/orchestrator/.venv
+
+USER orch
 
 # No args (the compose service) -> serve. Args given (e.g. the version-check smoke test in this task's
 # acceptance criteria) -> run them instead, so `docker run --rm <image> sh -c '...'` works directly.

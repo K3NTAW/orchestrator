@@ -76,11 +76,12 @@ it) *before* running any `docker compose run`/`up` command — the compose file 
 marked `required: true`). Start from this template, which lists the variable names only:
 
 ```
-ORCH_SERVICE_TOKEN=
-CLAUDE_OAUTH_TOKEN_A=
-CLAUDE_OAUTH_TOKEN_B=
-ORCH_NOTIFY_URL=
-GH_READ_TOKEN=
+ORCH_SERVICE_TOKEN=<paste here>
+CLAUDE_OAUTH_TOKEN_A=<paste here>
+CLAUDE_OAUTH_TOKEN_B=<paste here>
+ORCH_NOTIFY_URL=<paste here>
+GH_READ_TOKEN=<paste here>
+GH_WRITE_TOKEN=<paste here>
 ```
 
 Fill in the values:
@@ -89,6 +90,21 @@ Fill in the values:
 - `ORCH_SERVICE_TOKEN`: the bearer the kgpt module presents to `/goals`; generate it yourself (e.g.
   `openssl rand -hex 32`) — it isn't minted by any of the CLIs here.
 - `ORCH_NOTIFY_URL`, `GH_READ_TOKEN`: as used elsewhere in this orchestrator's config.
+- `GH_WRITE_TOKEN`: read by `pool.toml`'s `[secrets.planner]` — the Planner uses it to open the goal PR
+  (`goal/<parent>` → `main`) at the end of a run. Mint a fine-grained GitHub personal access token scoped
+  to just the target repo(s), with only Contents (read/write) and Pull requests (read/write) permissions —
+  not a classic token with broader `repo` scope.
+
+The image also bakes a default git identity (`orchestrator-executor <orchestrator@localhost>`) for the
+`git commit` calls the executor runs inside cloned target repos. To use a different identity, add these
+optional variables to `executor.env` — git honours them over the baked default:
+
+```
+GIT_AUTHOR_NAME=<paste here>
+GIT_AUTHOR_EMAIL=<paste here>
+GIT_COMMITTER_NAME=<paste here>
+GIT_COMMITTER_EMAIL=<paste here>
+```
 
 ## 5. Configure repos.toml and pool.toml in ./config
 
