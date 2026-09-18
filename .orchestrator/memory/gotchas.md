@@ -124,3 +124,15 @@ type: gotcha · goal: T-0073 · tasks: T-0115 · provenance: repo
 - the daemon then sees a dead pid and requeues the task as 'process died', which would re-run finished work on top of the executor's commit (T-0115: abc3f56 sat in wt/T-0115 with the task queued)
 - manual remedy 2026-09-18 14:50: bus_claim the task before the daemon redispatches, run .claude/hooks/tests-green.sh on the worktree, verify acceptance by hand, bus_post_result done with the commit sha; the daemon then gates and reviews as usual
 outcome: fix candidate for Phase D session rules (D4): before a handover, either wait for running executes or have the daemon's requeue path check the worktree for a commit ahead of the base and re-gate instead of redispatching; the handover command (C-O7b) should refuse while an execute is running
+
+## 2026-09-18 run_worker crashes with KeyError 'reason' when claude exits non-zero with JSON output (budget cap), so the worker's failure is never recorded properly
+type: gotcha · goal: T-0073 · tasks: T-0134 · provenance: repo
+- spawn.py run_claude returns {status: failed, output: out} without a reason key when the claude process exits non-zero but printed JSON (typical for --max-budget-usd reached); run_worker line 264 then does r['reason'] and the outer except records 'post_result failed: reason'
+- T-0134 (opus review of the 389-line T-0129 delta) hit the review cap at 1.58 USD after 277 s; output_tokens 15924; the reviewer's partial findings were lost
+outcome: review cap raised to 3.0 in pool.toml 2026-09-18 16:00 (decision recorded); fix candidate C-O10: run_claude sets reason from out.get('result')[:500] or 'is_error' when rc != 0, and run_worker uses r.get('reason')
+
+## 2026-09-18 run_worker overwrites a reviewer's own posted verdict with a parse_error result, so the daemon never merges
+type: gotcha · goal: T-0073 · tasks: T-0139,T-0135 · provenance: repo
+- the opus reviewer for T-0135 posted {verdict: approve, ...} itself through bus_post_result, then returned fenced JSON as its final text; spawn.run_worker's review branch ran extract_json on that text, failed, and posted a second result {summary, parse_error, ...} without a verdict, which replaced the first
+- daemon.merge_reviewed reads src.review_verdict or r.review_verdict; neither was set because run_worker only sets them when its own parse yields a verdict, so T-0135 sat done+gated for 15 min until the Planner merged by hand (acc0894)
+outcome: fix candidate C-O11 for spawn.run_worker: when extract_json fails and the task already has a result with a verdict, keep the existing result and set review_verdict from it; when it fails and there is none, post failed with the raw text in resume_hint instead of a done result without a verdict; also make merge_reviewed fall back to r.result.verdict

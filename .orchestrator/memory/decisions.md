@@ -102,3 +102,9 @@ type: decision · goal: T-0073 · tasks: T-0083,T-0102,T-0115,T-0127 · provenan
 - symptom 2026-09-18 14:55: the fresh MCP server ran the reverted daemon, gated T-0115 and spawned review T-0127 on sonnet for a sonnet-executed task; free_slots also back to the version that never fires the Claude fallback
 - restore: the four files taken from 35bf7e2 via git (no hand edits), suite 116 OK, committed from the main checkout; T-0127 marked failed, opus review spawned by hand
 outcome: Revert path: revert the restore commit (that re-applies the accidental revert; not wanted). Rule for Planner commits from the main checkout: inspect status first and stage nothing outside .orchestrator/; if tracked source shows as modified without anyone editing it, the checkout is stale and must be brought back to HEAD before committing. Fix candidate for merge.py: after fast-forwarding a branch that the main worktree has checked out, sync that worktree when it is clean, else warn
+
+## 2026-09-18 Review budget cap raised 1.5 to 3.0 USD; opus reviews get delta-only specs
+type: decision · goal: T-0073 · tasks: T-0134,T-0137,T-0139 · provenance: repo
+- .orchestrator/pool.toml limits.max_budget_usd.review was 1.5; T-0134 (opus, 389-line delta plus context) died at 1.58 USD after 277 s with nothing posted, then T-0137 with a delta-only spec finished at 1.53 USD and T-0139 approved under the new cap
+- a review that dies at the cap costs more than the extra dollar: the full spend is lost and a retry doubles it
+outcome: 3.0 for review from 2026-09-18 16:00; review specs name the exact diff range to read and say not to re-read the parent task's diff. Revert path: set review = 1.5 on line 138 of pool.toml
