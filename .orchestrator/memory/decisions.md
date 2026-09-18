@@ -154,3 +154,8 @@ type: decision · goal: T-0073 · tasks: T-0115,T-0129,T-0147,T-0153,T-0158,T-01
 - process: every spec of complexity 5-6 needed 1-3 spec-review rounds and every code delivery 1-5 fix rounds; opus reviews found real defects each time (deadlocks, credential leaks, silent stalls); about 14 sonnet executes and 25 opus reviews in session 2, reviews as costly as execution; the old daemon in the running server forced hand dispatch and review swaps all day
 - lessons recorded as gotchas: stale main checkout after worktree merges (3130d61), spawn_spec_review runs an execute when given an execute id, dispatch loop breaks on zero slots before later spec reviews, fix rounds carrying unreviewed work must be pre-stamped, docker builds outlive executors, amd64 emulation impossible here
 outcome: Phase C code-complete 2026-09-19 02:00; PR goal/T-0073 to main opened for the human. Alternatives that lost: running the orchestrator from its own repo against targets (install scaffold won, 2026-09-18), platform-pinned amd64 image (multi-arch won). Next: kgpt-side module C-K1..C-K4 on the kgpt bus, Phase D3-D5 after rebasing goal/T-0109
+
+## 2026-09-18 goal/T-0109 rebased onto goal/T-0073 head before Phase D3-D5
+type: decision · goal: T-0109 · tasks: T-0185 · provenance: repo
+- the executor rebased the six D1/D2 commits in wt/T-0185 (only a tick() ordering conflict in daemon.py and a test_pool.py concatenation; README and pool.toml auto-merged); 234 tests green; the Planner then moved the branch ref with git branch -f goal/T-0109 7285bbd (old head c593794)
+outcome: Phase D tasks now build on the merged Phase C code (serve, planner usage, handover, executor image). Revert path: git branch -f goal/T-0109 c593794 (the pre-rebase head) while nothing new has merged on top
