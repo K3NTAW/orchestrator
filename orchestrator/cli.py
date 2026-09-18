@@ -31,6 +31,7 @@ def main():
     sub.add_parser("resume").add_argument("account")
     pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
+    ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
@@ -78,6 +79,9 @@ def main():
         print(f"{picked.id}\t{os.path.expanduser(picked.config_dir)}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
+    elif a.cmd == "handover":
+        from . import handover
+        print(handover.write(a.reason))
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
     elif a.cmd == "install":

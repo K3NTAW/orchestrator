@@ -3,14 +3,15 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, os, subprocess, sys, threading, time, urllib.request
+import fcntl, json, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, bus, executor, merge, spawn
-from .pool import Pool, fallback_tier
+from . import STATE, bus, executor, handover, merge, spawn
+from .pool import PERSIST, Pool, fallback_tier
 
 SPEC_REVIEW_MIN = 5   # complexity at which a spec must be reviewed before an executor sees it
 DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
 LOCK_PATH = STATE / "daemon.lock"
+HANDOVER_INTERVAL_S = 15 * 60
 
 
 def notify(msg):
@@ -347,6 +348,34 @@ def merge_reviewed(pool):
                 notify(f"{src['id']}: review asked for changes; Planner writes the fix round")
 
 
+def _persist_state():
+    try:
+        return json.loads(PERSIST.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def maybe_handover(reason, now=None):
+    """Write the auto-handover section at most once every HANDOVER_INTERVAL_S, so plan.md is never staler than
+    that even when the Planner is gone. The throttle timestamp lives in pool_state.json's top-level
+    handover_last_at key, merged in directly rather than through Pool.save() (which only knows about its own
+    accounts/codex/executors fields and would drop an extra key) -- a concurrent Pool.save() elsewhere can still
+    win the race and clobber that key, but the only effect is an extra handover write, never a missed one."""
+    now = now if now is not None else time.time()
+    st = _persist_state()
+    if now - st.get("handover_last_at", 0) < HANDOVER_INTERVAL_S:
+        return False
+    try:
+        handover.write(reason)
+    except Exception as e:
+        print(f"[daemon] handover failed: {e}", file=sys.stderr)
+        return False
+    st = _persist_state()
+    st["handover_last_at"] = now
+    PERSIST.write_text(json.dumps(st, indent=1))
+    return True
+
+
 def tick(pool=None):
     pool = pool or Pool()
     try:
@@ -373,6 +402,7 @@ def tick(pool=None):
             notify(f"account {a.id} hit its daily budget; tasks held")
     if not pool.codex_available() and pool.codex.cooling():
         notify("Executor (Codex) cooling; execute tasks held, refill the pipeline")
+    maybe_handover("daemon tick")
 
 
 def acquire_lock():
