@@ -316,7 +316,8 @@ class Daemon(unittest.TestCase):
     def test_two_reviews_claude_executor_same_non_executing_tier(self):
         """T-0150 review item 3: for a Claude-executed complexity-7 task, both reviews must land on the
         non-executing tier (never the tier that executed), not split across the two tiers -- and the second
-        carries constraints.avoid_account/second_review so a later spawn change can steer it to a fresh account."""
+        carries constraints.second_review so a later spawn change can steer routing off it. Both reviews may
+        land on the same account; only the model differs from the executor (T-0159 review item 2)."""
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="claude:opus")
         daemon.tick()
@@ -324,7 +325,7 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(reviews), 2)
         self.assertEqual([r["tier"] for r in reviews], ["sonnet", "sonnet"])
         self.assertTrue(reviews[1]["constraints"]["second_review"])
-        self.assertIn("avoid_account", reviews[1]["constraints"])
+        self.assertNotIn("avoid_account", reviews[1]["constraints"])
 
     def test_orphaned_high_complexity_merges_on_single_approve(self):
         """T-0150 review item 1: reviews_expected() must come from the orphaned flag, not complexity alone -- an
@@ -369,6 +370,39 @@ class Daemon(unittest.TestCase):
         held = bus.get(t)
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["hold_reason"], f"review held: {reviews[1]['id']}")
+        self.assertEqual(self.merged, [])
+
+    def test_all_reviews_failed_holds_without_merge(self):
+        """T-0159 review item 1 (a): both reviews of a complexity-7 task fail -- neither ever reaches done, so
+        the old review-centric loop (`for r in bus.read(status="done", role="review")`) never even saw this
+        task. merge_reviewed must still hold it, naming both failed review ids, instead of leaving it stuck
+        done+gated forever."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+        bus.update(reviews[0]["id"], status="failed")
+        bus.update(reviews[1]["id"], status="failed")
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(held["hold_reason"], f"reviews failed: {', '.join(sorted(r['id'] for r in reviews))}")
+        self.assertEqual(self.merged, [])
+
+    def test_single_review_failed_holds_mid_complexity(self):
+        """T-0159 review item 1 (b): a complexity-4 task's one and only review fails -- same escape-hatch gap as
+        above, but with reviews_expected() == 1 instead of 2."""
+        t = self.task("mid", complexity=4)
+        bus.update(t, status="done", worktree=str(TMP))
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        bus.update(reviews[0]["id"], status="failed")
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(held["hold_reason"], f"reviews failed: {reviews[0]['id']}")
         self.assertEqual(self.merged, [])
 
     def test_merged_at_stamped_on_source_task(self):
