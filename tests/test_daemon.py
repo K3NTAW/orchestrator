@@ -294,6 +294,32 @@ class Daemon(unittest.TestCase):
         self.assertEqual(received.get("method"), "POST")
         self.assertEqual(received.get("body"), b"hello webhook")
 
+    def test_webhook_body_capped_at_200_chars(self):
+        received = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received["body"] = self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        url = f"http://127.0.0.1:{server.server_port}/"
+        self.set_env("ORCH_NOTIFY_URL", url)
+        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0))
+
+        msg = "x" * 1000                                            # e.g. unbounded merge stderr (daemon.py:188)
+        daemon.notify(msg)
+        thread.join(timeout=5)
+
+        self.assertEqual(received.get("body"), msg[:200].encode())
+
     def test_webhook_failure_is_swallowed(self):
         self.set_env("ORCH_NOTIFY_URL", "http://127.0.0.1:1/")
         self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0))
@@ -304,6 +330,14 @@ class Daemon(unittest.TestCase):
         self.swap(daemon.subprocess, "run", lambda *a, **k: calls.append(a[0]) or FakeProc("", 0))
         self.swap(daemon.sys, "platform", "linux")
         daemon.notify("linux box")
+        self.assertEqual(calls, [])
+
+    def test_desktop_alert_suppressed_by_env(self):
+        calls = []
+        self.swap(daemon.subprocess, "run", lambda *a, **k: calls.append(a[0]) or FakeProc("", 0))
+        self.swap(daemon.sys, "platform", "darwin")
+        self.set_env("ORCH_NOTIFY_DESKTOP", "0")
+        daemon.notify("suppressed")
         self.assertEqual(calls, [])
 
     def test_ambient_notify_url_does_not_leak_into_other_tests(self):

@@ -18,7 +18,9 @@ def notify(msg):
     url = os.environ.get("ORCH_NOTIFY_URL")
     if url:
         try:
-            req = urllib.request.Request(url, data=msg.encode(), method="POST",
+            # msg is untrusted (merge stderr, task titles): capped the same as the osascript arm below so an
+            # unbounded blob of git output is never shipped whole to an external webhook.
+            req = urllib.request.Request(url, data=msg[:200].encode(), method="POST",
                                           headers={"Content-Type": "text/plain"})
             urllib.request.urlopen(req, timeout=5).close()
         except Exception as e:
