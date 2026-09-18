@@ -106,3 +106,14 @@ type: gotcha · goal: T-0065 · tasks: T-0070,T-0071,T-0072 · provenance: repo
 - orchestrator/daemon.py:168-171 gate() creates the review task without a tier, so it defaults to sonnet; T-0070 was executed by claude:sonnet (fallback) and T-0071 was a sonnet review of sonnet output, against the never-review-own-output rule
 - manual remedy used: a second review task on tier opus with inputs=[T-0070], spawned with spawn_review (T-0072); the daemon merged on the first approve before the second landed
 outcome: fix candidate: gate() reads the executed task's executor field and picks a different model (opus for a sonnet executor) and waits for that review; until then, add the other-model review by hand for every fallback-executed task
+
+## 2026-09-18 spec_review role was in no account's role_affinity, so every spec review held with no account with headroom
+type: gotcha · goal: T-0073 · tasks: T-0081 · provenance: repo
+- orchestrator/pool.py:136 pick() skips accounts whose affinity lacks the role; .orchestrator/pool.toml role_affinity listed planner/scout/triage/execute/review/challenge only, so T-0081 (the first spec_review ever spawned) held twice with 'no account with headroom' at 6 percent utilization
+- the daemon spawns spec reviews for every complexity 5+ task (daemon.py:126-140), so without this every such task would have stalled silently before dispatch
+outcome: fixed 2026-09-18 17:55 in both pool.toml files (orchestrator and kgpt): spec_review added to both accounts; test candidate for C-O6 or later: a pool test asserting every role in ROLES appears in at least one affinity
+
+## 2026-09-18 a rebased fix round hides the original task from already_merged, which checks branch ancestry
+type: gotcha · goal: T-0073 · tasks: T-0078,T-0087,T-0090 · provenance: repo
+- merge.py rebases the fix-round branch onto the goal branch, so the original task branch (task/T-0078 at b4b1b1e) is no longer an ancestor of goal/T-0073 even though its rebased copy (c2aa847) is; daemon.already_merged (daemon.py:59-83) uses git merge-base --is-ancestor and returns False, and the original stays held with merged_into unset, blocking dependents via bus.ready
+outcome: worked around 2026-09-18 by bus.update(T-0078, status=done, merged_into=goal/T-0073); fix candidate: compare by patch id (git patch-id) or by the fix_round_for constraint, and mark the original merged when its fix round merges

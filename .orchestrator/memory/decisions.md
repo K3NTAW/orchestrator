@@ -81,3 +81,10 @@ type: decision · goal: T-0065 · tasks: T-0070,T-0071,T-0072 · provenance: rep
 - alternative that lost: point ORCH_ROOT at this repo and run from the target root (README wording before). Worktrees are cut with git worktree add and carry only committed files, so hooks, prompts and skills must be committed in the target
 - first target: kgpt, installed 2026-09-18 14:05 from goal/T-0065 (d410503); executed by claude:sonnet as Codex fallback, reviewed by sonnet (daemon) and opus (T-0072, other account)
 outcome: revert path: git revert d410503 in the orchestrator; in kgpt, revert the scaffold commit named in kgpt/.orchestrator/memory/decisions.md
+
+## 2026-09-18 Phase C executor runs in its own container on kenta-server; credentials mounted from host files the human creates
+type: decision · goal: T-0073 · provenance: repo
+- user decision 2026-09-18 16:40: container on kenta-server (192.168.1.167, Ubuntu 20.04, Docker). Image from this repo (ubuntu:24.04 base with the claude native installer, the codex release binary, uv, git, gh), spec C-O5 T-0084
+- alternatives that lost: the MacBook (not always on); a native setup on 20.04 (Codex binary glibc floor unconfirmed for glibc 2.31, credentials in a shared home)
+- kgpt reaches a module by URL only (kernel/kgpt_kernel/mcp/client.py:88-144), so the executor service needs no place in the shared kgpt image; the thin kgpt module (modules/orchestrator, kgpt spec C-K2) forwards to it with a per-user bearer
+outcome: revert path: stop the compose service on kenta-server and drop the kgpt module manifest; nothing in kgpt depends on it while KGPT_HOME_AVAILABLE gates home modules
