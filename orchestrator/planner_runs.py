@@ -5,16 +5,16 @@ which operates on any target repo_path.
 
 DEDUP: one record per (goal_id, kind, payload_key) in .orchestrator/runs/planner_runs.json. "scouts_done" and
 "closable" key on goal_id; "held" keys on f"{task_id}:{hold_reason}:{held_at!r}" so a fresh hold (a new held_at)
-is a new decision even if an old one for the same task already gave up. A record with status running, exited_ok
-or gave_up BLOCKS re-decision (decision_points() will not re-yield the key); exited_early does not block while
-attempts < 2 -- reconcile() retries it -- and turns permanently blocking (gave_up) once a second early exit would
-push attempts to 2.
+is a new decision even if an old one for the same task already gave up. A record with status running, claimed,
+exited_ok or gave_up BLOCKS re-decision (decision_points() will not re-yield the key); skipped never blocks;
+exited_early does not block while attempts < 2 -- reconcile() retries it -- and turns permanently blocking
+(gave_up) once a second early exit would push attempts to 2.
 """
-import json, os, time
+import json, os, sys, tempfile, time
 from . import ROOT, STATE, bus, goals, handover, spawn
 from .pool import Pool
 
-_BLOCKING_STATUSES = ("running", "exited_ok", "gave_up")
+_BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 
 
 def _runs_path():
@@ -30,13 +30,35 @@ def _load_records():
     try:
         return json.loads(path.read_text())
     except json.JSONDecodeError:
+        backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+        try:
+            path.rename(backup)
+        except OSError:
+            pass
+        print(f"[planner_runs] ledger corrupt; backed up to {backup}", file=sys.stderr)
         return []
 
 
 def _save_records(records):
+    """mkstemp in the same directory + os.replace: a reader (another process's _load_records) never observes a
+    partially-written file, only the old complete one or the new complete one."""
     path = _runs_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(records, indent=2) + "\n")
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".planner_runs.json.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(records, indent=2) + "\n")
+        os.replace(tmp_name, path)
+    except Exception:
+        os.unlink(tmp_name)
+        raise
+
+
+def _find_record(records, goal_id, kind, payload_key):
+    for r in records:
+        if r["goal_id"] == goal_id and r["kind"] == kind and r["payload_key"] == payload_key:
+            return r
+    return None
 
 
 def _blocked(goal_id, kind, payload_key, records=None):
@@ -124,17 +146,38 @@ def _session_attached():
 
 
 def _existing_attempts(goal_id, kind, payload_key):
-    for r in _load_records():
-        if r["goal_id"] == goal_id and r["kind"] == kind and r["payload_key"] == payload_key:
-            return r.get("attempts", 0)
-    return 0
+    r = _find_record(_load_records(), goal_id, kind, payload_key)
+    return r.get("attempts", 0) if r else 0
+
+
+def _claim(goal_id, kind, payload_key, attempts):
+    """Write/refresh this key's record to status "claimed" (pid None) -- called only from inside run()'s own
+    bus.locked() block, immediately after _blocked() found nothing there yet, so the check and the claim are
+    atomic together. "claimed" is itself a blocking status (_BLOCKING_STATUSES), so a concurrent run() for the
+    same key -- however it interleaves -- sees this the instant it can acquire the lock, before either guard or
+    launch_planner ever runs."""
+    records = _load_records()
+    r = _find_record(records, goal_id, kind, payload_key)
+    if r is None:
+        r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
+        records.append(r)
+    r.update(status="claimed", pid=None, started_at=time.time())
+    _save_records(records)
 
 
 def _record_skip(goal_id, kind, payload_key, reason):
+    """Guard skips update the one row for this key in place (last_skip_at, skip_count, skipped_reason) rather
+    than appending a fresh row per tick -- and "skipped" is never in _BLOCKING_STATUSES, so a skip can never
+    block the next decision_points()/run() call for the same key, including the very next tick's retry."""
     with bus.locked():
         records = _load_records()
-        records.append({"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "status": "skipped",
-                        "skipped_reason": reason, "started_at": time.time(), "attempts": 0})
+        r = _find_record(records, goal_id, kind, payload_key)
+        if r is None:
+            r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": 0,
+                "started_at": time.time()}
+            records.append(r)
+        r.update(status="skipped", skipped_reason=reason, last_skip_at=time.time(),
+                 skip_count=r.get("skip_count", 0) + 1)
         _save_records(records)
 
 
@@ -143,25 +186,27 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts):
     than appending a second one -- one record per key is what lets reconcile() track attempts across retries."""
     with bus.locked():
         records = _load_records()
-        for r in records:
-            if r["goal_id"] == goal_id and r["kind"] == kind and r["payload_key"] == payload_key:
-                r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
-                         account=acct_id, log=launched["log"], status="running")
-                break
-        else:
-            records.append({"goal_id": goal_id, "kind": kind, "payload_key": payload_key,
-                            "pid": launched["pid"], "pid_start": launched["pid_start"],
-                            "started_at": time.time(), "account": acct_id, "log": launched["log"],
-                            "status": "running", "attempts": attempts})
+        r = _find_record(records, goal_id, kind, payload_key)
+        if r is None:
+            r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
+            records.append(r)
+        r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
+                 account=acct_id, log=launched["log"], status="running")
         _save_records(records)
 
 
 def run(goal_id, kind, payload_key):
     """Launch a headless Planner for one decision, guarded against attaching alongside an interactive session or
-    a saturated pool. Guard skips are recorded (status "skipped", no pid) but never block a later decision_points()
-    or run() call for the same key."""
-    if _blocked(goal_id, kind, payload_key):
-        return {"launched": False, "reason": "already decided"}
+    a saturated pool. The already-decided check and the claim that follows it run inside one bus.locked() block
+    (T-0196 review item 2): two concurrent callers for the same key can never both pass the check, since whichever
+    loses the race to the lock sees the winner's "claimed" record and returns "already decided" immediately --
+    before either guard or launch_planner runs on either thread. Guard skips are recorded (status "skipped", no
+    pid) but never block a later decision_points() or run() call for the same key."""
+    with bus.locked():
+        if _blocked(goal_id, kind, payload_key):
+            return {"launched": False, "reason": "already decided"}
+        attempts = _existing_attempts(goal_id, kind, payload_key)
+        _claim(goal_id, kind, payload_key, attempts)
 
     if _session_attached():
         _record_skip(goal_id, kind, payload_key, "planner session attached")
@@ -175,7 +220,6 @@ def run(goal_id, kind, payload_key):
 
     handover.write(f"decision {kind}")
 
-    attempts = _existing_attempts(goal_id, kind, payload_key)
     prompt = spawn.render("planner-decision", kind=kind, goal_id=goal_id, payload=payload_key)
     budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
     log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
@@ -183,6 +227,14 @@ def run(goal_id, kind, payload_key):
 
     _record_running(goal_id, kind, payload_key, launched, acct.id, attempts)
     return {"launched": True, "pid": launched["pid"], "log": launched["log"]}
+
+
+def _first_event_ts(task_id):
+    """The ts of the earliest bus event ever logged for task_id (its "created" event, since that is always the
+    first one _event() writes) -- used to tell a fix-round task the Planner just created apart from some
+    unrelated, pre-existing task that happens to share a depends_on/fix_round_for reference."""
+    row = bus.db().execute("select ts from events where task_id=? order by seq limit 1", (task_id,)).fetchone()
+    return row[0] if row else None
 
 
 def _condition_resolved(r, tasks_by_id, children_by_parent):
@@ -195,9 +247,21 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
     if kind == "held":
         task_id = payload_key.split(":", 1)[0]
         t = tasks_by_id.get(task_id)
+        # A held task never leaves status "held" by itself (CLAUDE.md: the Planner clears a hold by writing a
+        # new task, never by editing the held one) -- so "no longer held" only fires once the task is gone
+        # (id reused/purged) or the daemon requeued it some other way; the real signal is the fix-round task.
         if t is None or t["status"] != "held":
             return True
-        return _held_key(t) != payload_key
+        started_at = r.get("started_at", 0)
+        for other in tasks_by_id.values():
+            if other["id"] == task_id:
+                continue
+            constraints = other.get("constraints") or {}
+            if task_id in (other.get("depends_on") or []) or constraints.get("fix_round_for") == task_id:
+                fts = _first_event_ts(other["id"])
+                if fts is not None and fts > started_at:
+                    return True
+        return False
     return True
 
 

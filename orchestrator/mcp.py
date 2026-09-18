@@ -6,15 +6,6 @@ from .pool import Pool, fallback_tier
 
 srv = MCPServer("orchestrator")
 
-# The pipeline daemon (dispatch/gate/review/merge) used to need a second terminal running `orchestrator daemon`
-# by hand; it now starts and dies with this MCP server instead. A failure here must never take the server down
-# with it — the Planner still needs `f orch` to come up even if the daemon can't get the lock.
-daemon_thread = None
-try:
-    daemon_thread = daemon.start_background(Pool().cfg)
-except Exception as e:
-    print(f"[daemon] autostart failed: {e}", file=sys.stderr)
-
 
 def _planner_session_path():
     return STATE / "planner_session.json"
@@ -55,10 +46,6 @@ def deregister_planner_session():
             path.unlink()
         except FileNotFoundError:
             pass
-
-
-register_planner_session()
-atexit.register(deregister_planner_session)
 
 
 def _bg(task_id):
@@ -139,5 +126,21 @@ def resume_account(account_id: str) -> dict:
     p = Pool(); p.resume(account_id); return p.status()
 
 
-if __name__ == "__main__":
+def main():
+    """Server entrypoint: register this session (ORCH_DAEMON_HOST=mcp + planner_session.json) before the pipeline
+    daemon starts, so an autonomous decision the daemon's very first tick might launch still sees a session
+    attached; then autostart the daemon (dispatch/gate/review/merge -- a failure here must never take the server
+    down, since the Planner still needs `f orch` to come up even if the daemon can't get its lock), then serve.
+    Never run at import time: importing this module (e.g. for register_planner_session/deregister_planner_session
+    in tests) must have zero side effects -- no env var set, no file written, no daemon thread started."""
+    register_planner_session()
+    atexit.register(deregister_planner_session)
+    try:
+        daemon.start_background(Pool().cfg)
+    except Exception as e:
+        print(f"[daemon] autostart failed: {e}", file=sys.stderr)
     srv.run()
+
+
+if __name__ == "__main__":
+    main()

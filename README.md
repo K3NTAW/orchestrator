@@ -92,12 +92,18 @@ all done/failed and no execute task has split off yet), `held` (an execute task 
 execute task of a goal is merged and nothing is left queued or running). `orchestrator/planner_runs.py` tracks one
 record per `(goal_id, kind, payload_key)` in `.orchestrator/runs/planner_runs.json`; `reconcile()` (called first
 every tick) resolves a running record whose process has exited to `exited_ok` (something already finished the
-decision), `exited_early` (retry, up to one more attempt), or `gave_up` (two early exits; notifies once and blocks
-that key for good); `decision_points()` then yields every key with no blocking (`running`/`exited_ok`/`gave_up`)
-record, and `tick()` launches at most one per pass via `goals.launch_planner`. Two guards make sure an autonomous
-launch never runs alongside a human: `ORCH_DAEMON_HOST=mcp` (set by the orchestrator MCP server on its own process
-env) and `.orchestrator/planner_session.json` (written atomically by that same server at start, removed at exit,
-and named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
+decision -- for `held`, that means a fix-round task now exists with `depends_on`/`constraints.fix_round_for`
+pointing at the held task, created after this decision run started), `exited_early` (retry, up to one more
+attempt), or `gave_up` (two early exits; notifies once and blocks that key for good); `decision_points()` then
+yields every key with no blocking (`running`/`claimed`/`exited_ok`/`gave_up`) record. `run()` claims a key --
+writing a `claimed` row, itself blocking -- inside the same `bus.locked()` block as the check that it isn't
+already decided, before it runs either guard or `goals.launch_planner`, so two callers racing for the same key
+(`daemon --once` and the background loop, say) can never both launch; a guard skip afterwards flips that same
+row to `skipped` (never blocking, one row per key with a running `skip_count`) instead of leaving it stuck
+`claimed`. `tick()` launches at most one per pass. Two guards make sure an autonomous launch never runs alongside
+a human: `ORCH_DAEMON_HOST=mcp` (set by the orchestrator MCP server's `main()` entrypoint, before it autostarts
+the daemon) and `.orchestrator/planner_session.json` (written atomically by that same call, removed at exit, and
+named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
 interactive Planner session ever attaches -- leave it off anywhere one might.
 
 ## Executors and routing

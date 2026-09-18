@@ -7,6 +7,7 @@ import json, os, sys, tempfile, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_planner_runs.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
+import orchestrator as orch_pkg
 from orchestrator import bus, daemon, goals, handover
 from orchestrator import planner_runs as PR
 from orchestrator import pool as P
@@ -142,7 +143,7 @@ class RunGuards(PlannerRunsBase):
         rec = self.record(goal_id, "scouts_done", goal_id)
         self.assertEqual(rec["status"], "skipped")
         self.assertEqual(rec["skipped_reason"], "planner session attached")
-        self.assertNotIn("pid", rec)
+        self.assertIsNone(rec.get("pid"))  # claimed with pid=None, then flipped to skipped; never a real pid
 
     def test_run_skips_when_planner_session_file_has_live_pid_and_ignores_stale(self):
         goal_id = self.goal()
@@ -197,6 +198,60 @@ class RunGuards(PlannerRunsBase):
         self.assertFalse(r2["launched"])
         self.assertEqual(len(calls), 1)  # unchanged: the running record already blocks a second launch
 
+    def test_run_claims_before_launch_so_concurrent_callers_launch_once(self):
+        """The blocked-check and the claim happen inside one bus.locked() block (T-0196 review item 2): whichever
+        of two concurrent run() calls for the same key wins the race to the lock claims it, and the other sees
+        that claim and returns "already decided" -- even though launch_planner (patched to block here) is still
+        running on the winner's thread and hasn't recorded a "running" row yet."""
+        import threading
+        goal_id = self.goal()
+        calls = []
+        release = threading.Event()
+        entered = threading.Event()
+
+        def slow_launch(*a, **k):
+            entered.set()
+            release.wait(2)
+            calls.append(a)
+            return {"pid": 999, "pid_start": None, "log": "x"}
+
+        self.patch_launch_planner(slow_launch)
+        results = []
+
+        def call():
+            results.append(PR.run(goal_id, "scouts_done", goal_id))
+
+        t1 = threading.Thread(target=call)
+        t1.start()
+        self.assertTrue(entered.wait(2))  # thread 1 past its claim, now blocked inside launch_planner
+        r2 = PR.run(goal_id, "scouts_done", goal_id)  # thread 2 (this thread): must see the claim, not launch
+        release.set()
+        t1.join(2)
+
+        self.assertFalse(r2["launched"])
+        self.assertEqual(r2["reason"], "already decided")
+        self.assertTrue(results[0]["launched"], results[0])
+        self.assertEqual(len(calls), 1)
+
+    def test_guard_skips_update_one_row_with_a_count_and_never_block(self):
+        goal_id = self.goal()
+        self.scout_child(goal_id, "done")
+        calls = []
+        self.patch_launch_planner(lambda *a, **k: calls.append(a) or {"pid": 1, "pid_start": None, "log": "x"})
+        os.environ["ORCH_DAEMON_HOST"] = "mcp"  # every attempt below hits the "planner session attached" guard
+
+        for _ in range(3):
+            r = PR.run(goal_id, "scouts_done", goal_id)
+            self.assertFalse(r["launched"])
+            self.assertIn((goal_id, "scouts_done", goal_id), list(PR.decision_points()))  # skips never block
+
+        records = [r for r in PR._load_records()
+                  if r["goal_id"] == goal_id and r["kind"] == "scouts_done" and r["payload_key"] == goal_id]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["status"], "skipped")
+        self.assertEqual(records[0]["skip_count"], 3)
+        self.assertEqual(calls, [])
+
 
 class Reconcile(PlannerRunsBase):
     def test_reconcile_exited_ok_exited_early_gave_up_and_gave_up_blocks_redecision(self):
@@ -240,17 +295,115 @@ class Reconcile(PlannerRunsBase):
         self.assertEqual(rec3["status"], "gave_up")
         self.assertEqual(len(notified), 1)
 
+    def test_reconcile_held_resolved_by_fix_round_task_depends_on(self):
+        """A held task never leaves status "held" by itself -- the Planner clears a hold by writing a new task
+        with depends_on=[held_id] (or constraints.fix_round_for == held_id), never by editing the held task. A
+        fix-round task created after the decision run started must resolve the record to exited_ok, not leave it
+        endlessly retrying (and eventually giving up) against a hold that was, in fact, already handled."""
+        goal_id = self.goal()
+        tid = self.execute_child(goal_id)
+        bus.update(tid, status="held", hold_reason="gate_red")
+        key = PR._held_key(bus.get(tid))
+        PR._record_running(goal_id, "held", key, {"pid": 555, "pid_start": None, "log": "x"}, "A", 0)
+
+        time.sleep(0.01)
+        fix = bus.create_task("fix round", "spec", ["x"], ["y"], role="execute", parent=goal_id,
+                              complexity=3, depends_on=[tid])
+
+        self.patch_identity_of(lambda pid, pid_start: False)
+        PR.reconcile()
+        rec = self.record(goal_id, "held", key)
+        self.assertEqual(rec["status"], "exited_ok")
+
+    def test_reconcile_held_resolved_by_fix_round_for_constraint(self):
+        goal_id = self.goal()
+        tid = self.execute_child(goal_id)
+        bus.update(tid, status="held", hold_reason="gate_red")
+        key = PR._held_key(bus.get(tid))
+        PR._record_running(goal_id, "held", key, {"pid": 556, "pid_start": None, "log": "x"}, "A", 0)
+
+        time.sleep(0.01)
+        bus.create_task("fix round", "spec", ["x"], ["y"], role="execute", parent=goal_id, complexity=3,
+                        constraints={"fix_round_for": tid})
+
+        self.patch_identity_of(lambda pid, pid_start: False)
+        PR.reconcile()
+        rec = self.record(goal_id, "held", key)
+        self.assertEqual(rec["status"], "exited_ok")
+
+    def test_reconcile_held_not_resolved_by_unrelated_or_stale_task(self):
+        """A task that existed before this decision run started (e.g. a leftover from an earlier, unrelated fix
+        round) must not be mistaken for the fix that clears this hold, even if it happens to depend on the held
+        task -- only one created after started_at counts."""
+        goal_id = self.goal()
+        tid = self.execute_child(goal_id)
+        stale_fix = bus.create_task("stale fix", "spec", ["x"], ["y"], role="execute", parent=goal_id,
+                                    complexity=3, depends_on=[tid])
+        bus.update(tid, status="held", hold_reason="gate_red")
+        key = PR._held_key(bus.get(tid))
+        # started_at is stamped after the stale fix-round task already existed.
+        PR._record_running(goal_id, "held", key, {"pid": 557, "pid_start": None, "log": "x"}, "A", 0)
+
+        self.patch_identity_of(lambda pid, pid_start: False)
+        PR.reconcile()
+        rec = self.record(goal_id, "held", key)
+        self.assertEqual(rec["status"], "exited_early")
+        self.assertEqual(rec["attempts"], 1)
+
+
+class LedgerIO(PlannerRunsBase):
+    def test_corrupt_ledger_is_backed_up_not_silently_emptied(self):
+        path = PR._runs_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not valid json")
+
+        records = PR._load_records()
+
+        self.assertEqual(records, [])
+        backups = list(path.parent.glob("planner_runs.json.corrupt-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), "{not valid json")
+        self.assertFalse(path.exists())  # renamed away, not left behind alongside the backup
+
+    def test_save_records_is_atomic(self):
+        goal_id = self.goal()
+        PR._record_running(goal_id, "scouts_done", goal_id, {"pid": 1, "pid_start": None, "log": "x"}, "A", 0)
+        path = PR._runs_path()
+        self.assertEqual(json.loads(path.read_text())[0]["goal_id"], goal_id)
+        # no stray temp files left behind after a successful save
+        leftovers = [p for p in path.parent.iterdir() if p.name.startswith(".planner_runs.json.")]
+        self.assertEqual(leftovers, [])
+
 
 class McpSessionRegistration(PlannerRunsBase):
-    def test_mcp_registers_and_deregisters_planner_session(self):
-        # orchestrator.mcp is never imported elsewhere in this test suite (module-level code starts a real
-        # daemon thread and the MCP server object) -- ORCH_DAEMON=0 must be set before this, its first and only
-        # import in the whole process, so that autostart never spins one up against the shared TMP root.
+    def test_mcp_import_has_no_side_effects(self):
+        """Registration and the daemon autostart moved into mcp.main() (called only from `if __name__ ==
+        "__main__":`), never at import time -- so importing this module for its functions, as every test in this
+        class does, must never touch ORCH_DAEMON_HOST, write planner_session.json, or start a daemon thread. The
+        sandbox STATE swap happens before the import purely as a defensive belt-and-suspenders precaution against
+        anything ever again reading STATE at import time; nothing in mcp.py does today."""
+        sandbox = Path(tempfile.mkdtemp(prefix="orch-mcp-import-"))
+        self.swap(orch_pkg, "STATE", sandbox)
         self.set_env("ORCH_DAEMON", "0")
+
+        import orchestrator.mcp as mcp_mod  # noqa: F401 -- import itself is what's under test
+
+        self.assertIsNone(os.environ.get("ORCH_DAEMON_HOST"))
+        self.assertFalse((sandbox / "planner_session.json").exists())
+
+    def test_mcp_registers_and_deregisters_planner_session(self):
+        # ORCH_DAEMON=0 so that, if this is the first import of orchestrator.mcp in the process, a later call to
+        # mcp_mod.main() elsewhere in the suite (there is none) could never autostart a daemon against the
+        # shared TMP root. Importing the module itself has no side effects (see the test above); the sandbox
+        # STATE swap below is what makes register_planner_session()/deregister_planner_session() below safe to
+        # call directly, bypassing main() entirely.
+        self.set_env("ORCH_DAEMON", "0")
+
+        sandbox = Path(tempfile.mkdtemp(prefix="orch-mcp-session-"))
+        self.swap(orch_pkg, "STATE", sandbox)
 
         import orchestrator.mcp as mcp_mod
 
-        sandbox = Path(tempfile.mkdtemp(prefix="orch-mcp-session-"))
         self.swap(mcp_mod, "STATE", sandbox)
 
         path = mcp_mod.register_planner_session()
