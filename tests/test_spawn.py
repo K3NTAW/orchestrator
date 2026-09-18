@@ -66,6 +66,60 @@ class ReviewAvoidsAccount(unittest.TestCase):
         self.assertEqual(captured["avoid"], "B")
 
 
+class RunClaudeBudgetExitReason(unittest.TestCase):
+    """T-0134: a non-zero exit with parseable JSON (typical of --max-budget-usd cutoffs) must carry a "reason"
+    string, not silently drop into a dict run_worker can't read."""
+
+    class FakePopenBudgetExceeded(FakePopen):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.returncode = 1
+
+        def communicate(self, timeout=None):
+            return json.dumps({"is_error": True, "result": "budget exceeded", "usage": {}}), ""
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = self.FakePopenBudgetExceeded
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_non_zero_exit_with_json_returns_reason(self):
+        t = bus.create_task("budget-test", "s", ["a"], ["x.py"], role="execute", tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", ["execute"])
+        pool = P.Pool()
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS["execute"], 2.0, 60)
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("rc=1", r["reason"])
+        self.assertIn("budget exceeded", r["reason"])
+
+
+class RunWorkerMissingReason(unittest.TestCase):
+    """T-0134: run_worker must not KeyError when run_claude returns a failure dict without a "reason" key, and
+    should preserve any partial output as a resume_hint for the next attempt."""
+
+    def test_failed_without_reason_key_sets_default_and_resume_hint(self):
+        task = bus.create_task("feat-noreason", "s", ["a"], ["rv.py"], role="execute")
+        (TMP / "wt" / task["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "failed", "output": {"result": "partial"}}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(task["id"])
+        updated = bus.get(task["id"])
+        self.assertEqual(updated["status"], "failed")
+        self.assertEqual(updated["reason"], "unknown failure")
+        self.assertEqual(updated["resume_hint"]["partial_output"], "partial")
+
+
 class SpecReview(unittest.TestCase):
     def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_spec_and_code_excerpt(self):
         scratch_repo(TMP)

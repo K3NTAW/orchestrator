@@ -151,7 +151,10 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
                 outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), **log,
                 **{k: used.get(k, 0) for k in
                    ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
-    return {"status": "done" if p.returncode == 0 else "failed", "output": out}
+    if not out.get("is_error") and p.returncode == 0:
+        return {"status": "done", "output": out}
+    reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
+    return {"status": "failed", "output": out, "reason": reason}
 
 
 def extract_json(text):
@@ -259,9 +262,13 @@ def run_worker(task_id):
                     except KeyError:
                         pass
         elif r["status"] == "held":
-            bus.update(task_id, status="held", hold_reason=r["reason"])
+            bus.update(task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
         else:
-            bus.update(task_id, status="failed", reason=r["reason"])
+            update_fields = {"status": "failed", "reason": r.get("reason", "unknown failure")}
+            result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
+            if isinstance(result, str):
+                update_fields["resume_hint"] = {"partial_output": result[:2000]}
+            bus.update(task_id, **update_fields)
     except Exception as e:
         bus.log_run(task=task_id, role=role, outcome="post_failed",
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
