@@ -50,6 +50,7 @@ through to the pool's stored numbers rather than crashing pick) for callers that
 a running daemon.
 
 ## Pipeline
+Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
 State machine per execute task: `queued` → (depends_on merged, complexity ≥5 → `spec_review` first) → dispatched to
 an executor → `done` → gated (`tests-green.sh`) → complexity ≤3 merges straight away, else a `review` task spawns →
 `review` approve merges, `request_changes` holds it for the Planner to re-spec.

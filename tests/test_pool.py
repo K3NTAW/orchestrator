@@ -253,5 +253,24 @@ class PlannerTally(unittest.TestCase):
         self.assertEqual(pu["A"]["day_tokens"], 10)            # not clobbered by the stale save
 
 
+class ScoutLimits(unittest.TestCase):
+    """Scout turns/budget/timeout cut 2026-09-18 (T-0121): 8 sonnet scouts cost $4.59 in one afternoon."""
+
+    def test_scout_limits_are_tightened(self):
+        limits = P.config()["limits"]
+        self.assertEqual(limits["max_turns"]["scout"], 12)
+        self.assertEqual(limits["max_budget_usd"]["scout"], 1.0)
+        self.assertEqual(limits["timeout_s"]["scout"], 600)
+
+
+class OrchestrateSkillCopies(unittest.TestCase):
+    """Two orchestrate SKILL.md copies (Planner-visible and skills/planner) must stay byte-identical (T-0121)."""
+
+    def test_skill_copies_are_byte_identical(self):
+        a = (REPO / ".claude" / "skills" / "orchestrate" / "SKILL.md").read_bytes()
+        b = (REPO / "skills" / "planner" / "orchestrate" / "SKILL.md").read_bytes()
+        self.assertEqual(a, b)
+
+
 if __name__ == "__main__":
     unittest.main()
