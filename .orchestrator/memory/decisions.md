@@ -88,3 +88,10 @@ type: decision · goal: T-0073 · provenance: repo
 - alternatives that lost: the MacBook (not always on); a native setup on 20.04 (Codex binary glibc floor unconfirmed for glibc 2.31, credentials in a shared home)
 - kgpt reaches a module by URL only (kernel/kgpt_kernel/mcp/client.py:88-144), so the executor service needs no place in the shared kgpt image; the thin kgpt module (modules/orchestrator, kgpt spec C-K2) forwards to it with a per-user bearer
 outcome: revert path: stop the compose service on kenta-server and drop the kgpt module manifest; nothing in kgpt depends on it while KGPT_HOME_AVAILABLE gates home modules
+
+## 2026-09-18 Phase D token diet opened; Planner sessions hand over at 150k context; one review per task
+type: decision · goal: T-0109 · provenance: repo
+- measured 2026-09-18: Planner session 411 turns, avg context 257k, 112 monitor notifications, about 11.2M tokens by the pool metric vs 2.5M for 25 worker runs (16.78 USD, reviews as costly as execution)
+- specs D1-D5 (T-0120..T-0124) on goal/T-0109: review policy in pool.toml [review], scout budget, planner_runs decision points with [planner] autonomous=false default, session rules, scorecard by task and goal
+- C-O3 goal runner needed three spec-review rounds (T-0081, T-0096/T-0097, T-0104) before v4 T-0115; the fourth round was waived by Planner decision
+outcome: revert path: git revert the D commits on goal/T-0109 individually; policy text lives in CLAUDE.md and the orchestrate skill
