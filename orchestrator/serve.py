@@ -50,10 +50,22 @@ def _load_repos():
     return tomllib.loads(p.read_text())
 
 
+def _load_repos_or_503():
+    """(repos, None) when usable, else (None, 503 JSONResponse). A malformed repos.toml must not 500 every
+    goal route -- the parse error is logged, the caller gets a clean 503."""
+    try:
+        return _load_repos(), None
+    except Exception as e:
+        access_log.error("repos.toml unreadable: %s", e)
+        return None, JSONResponse({"reason": "repos.toml unreadable"}, status_code=503)
+
+
 def _resolve_repo(slug):
     """(cfg, None) when usable, else (None, error JSONResponse). Distinguishes an unknown slug (404 "unknown
     repo") from a configured-but-incomplete entry missing "path" (404 "repo not configured", never a 500)."""
-    repos = _load_repos()
+    repos, err = _load_repos_or_503()
+    if err:
+        return None, err
     if slug not in repos:
         return None, JSONResponse({"reason": "unknown repo"}, status_code=404)
     cfg = repos[slug]
@@ -94,6 +106,37 @@ def _auth_error(request):
     return None
 
 
+def _safe_reason(text, log_context):
+    """A goals.* refusal reason can embed raw git/subprocess stderr; redact any embedded credential before it
+    reaches a response body, cap what the client sees at 300 chars, and log the full redacted text so an
+    operator still has enough detail to diagnose the refusal (T-0155 review)."""
+    text = text if isinstance(text, str) else str(text)
+    redacted = CREDENTIAL_RE.sub("://***@", text)
+    access_log.error("%s: %s", log_context, redacted)
+    return redacted[:300]
+
+
+async def _read_body_bounded(request):
+    """Never calls request.body(): a Content-Length above MAX_BODY_BYTES rejects before the stream is touched
+    at all, and a body with no (or a lying) Content-Length aborts as soon as the running total exceeds
+    MAX_BODY_BYTES, so at most one chunk past the limit is ever buffered (T-0155 review)."""
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_BODY_BYTES:
+                return None
+        except ValueError:
+            pass
+    total = 0
+    chunks = []
+    async for chunk in request.stream():
+        total += len(chunk)
+        chunks.append(chunk)
+        if total > MAX_BODY_BYTES:
+            return None
+    return b"".join(chunks)
+
+
 def healthz(request):
     return JSONResponse({"status": "ok"}, status_code=200)
 
@@ -103,8 +146,8 @@ def create_goal(request):
     if auth_err:
         return auth_err
 
-    raw = anyio.from_thread.run(request.body)
-    if len(raw) > MAX_BODY_BYTES:
+    raw = anyio.from_thread.run(_read_body_bounded, request)
+    if raw is None:
         return JSONResponse({"reason": "body too large"}, status_code=413)
     try:
         body = json.loads(raw) if raw else {}
@@ -153,7 +196,8 @@ def create_goal(request):
 
         r = goals.start(path, goal, account_id=account, requester=requester)
         if not r.get("launched"):
-            return JSONResponse({"reason": r.get("reason")}, status_code=422)
+            reason = _safe_reason(r.get("reason", ""), f"goals.start refused for repo={repo}")
+            return JSONResponse({"reason": reason}, status_code=422)
         return JSONResponse({"goal_id": r["goal_id"], "repo": repo, "status": "running", "requester": requester},
                              status_code=201)
 
@@ -166,20 +210,29 @@ def list_all_goals(request):
         return auth_err
 
     repo_filter = request.query_params.get("repo")
-    repos = _load_repos()
 
     if repo_filter:
         cfg, err = _resolve_repo(repo_filter)
         if err:
             return err
-        slugs = [repo_filter]
-    else:
-        slugs = [s for s, cfg in repos.items() if "path" in cfg]
+        out = []
+        for e in goals.list_goals(cfg["path"]):
+            out.append({**e, "repo": repo_filter})
+        return JSONResponse({"goals": out}, status_code=200)
+
+    repos, err = _load_repos_or_503()
+    if err:
+        return err
+    slugs = [s for s, cfg in repos.items() if "path" in cfg]
 
     out = []
     for slug in slugs:
-        for e in goals.list_goals(repos[slug]["path"]):
-            out.append({**e, "repo": slug})
+        try:
+            for e in goals.list_goals(repos[slug]["path"]):
+                out.append({**e, "repo": slug})
+        except Exception:
+            access_log.error("list_goals failed for repo=%s", slug, exc_info=True)
+            out.append({"repo": slug, "error": "unreadable"})
     return JSONResponse({"goals": out}, status_code=200)
 
 
@@ -210,7 +263,11 @@ def cancel_goal(request):
     if err:
         return err
 
-    r = goals.stop(cfg["path"], goal_id)
+    try:
+        r = goals.stop(cfg["path"], goal_id)
+    except (ProcessLookupError, PermissionError):
+        return JSONResponse({"goal_id": goal_id, "repo": slug, "status": "stopped",
+                              "note": "planner already gone"}, status_code=200)
     if r.get("error") == "unknown goal":
         return JSONResponse({"reason": "unknown goal"}, status_code=404)
     return JSONResponse({"goal_id": goal_id, "repo": slug, "status": "stopped"}, status_code=200)

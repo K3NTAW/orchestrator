@@ -1,7 +1,7 @@
 """orchestrator.serve: the per-user goal HTTP endpoint. Exercised entirely through starlette's TestClient with
 orchestrator.goals.start/list_goals/status/stop patched -- no real git, no real Popen. ORCH_WORK and
 ORCH_REPOS_TOML point at temp dirs so the per-slug lock and the repo config never touch this repo's own state."""
-import fcntl, inspect, json, subprocess, sys, tempfile, threading, unittest
+import asyncio, fcntl, inspect, json, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -104,6 +104,32 @@ class CreateGoalValidation(ServeTestCase):
         self.assertEqual(r.status_code, 413)
         self.assertEqual(r.json(), {"reason": "body too large"})
 
+    def test_content_length_over_limit_rejects_without_reading_stream(self):
+        fake_request = mock.Mock()
+        fake_request.headers.get.return_value = str(serve.MAX_BODY_BYTES + 1)
+        result = asyncio.run(serve._read_body_bounded(fake_request))
+        self.assertIsNone(result)
+        fake_request.stream.assert_not_called()
+
+    def test_chunked_body_over_limit_aborts_after_one_extra_chunk(self):
+        consumed = []
+
+        async def gen():
+            consumed.append(1)
+            yield b"a" * (serve.MAX_BODY_BYTES - 10)
+            consumed.append(2)
+            yield b"a" * 1000  # pushes the running total over the limit
+            consumed.append(3)
+            yield b"a" * 1000  # must never be reached
+
+        fake_request = mock.Mock()
+        fake_request.headers.get.return_value = None
+        fake_request.stream.return_value = gen()
+
+        result = asyncio.run(serve._read_body_bounded(fake_request))
+        self.assertIsNone(result)
+        self.assertEqual(consumed, [1, 2])
+
     def test_invalid_json_body_400(self):
         r = self.client.post("/goals", content=b"{not valid json",
                               headers={**self.auth(), "Content-Type": "application/json"})
@@ -144,6 +170,28 @@ class CreateGoalLifecycle(ServeTestCase):
 
     @mock.patch("orchestrator.goals.start")
     @mock.patch("orchestrator.goals.list_goals")
+    def test_start_refusal_reason_is_redacted_and_logged(self, mock_list, mock_start):
+        mock_list.return_value = []
+        mock_start.return_value = {"launched": False,
+                                    "reason": "git add failed: fatal: https://u:SECRET@h/r.git"}
+        with self.assertLogs("orchestrator.serve.access", level="ERROR") as logs:
+            r = self.client.post("/goals", json={"repo": "demo", "goal": "build it"}, headers=self.auth())
+        self.assertEqual(r.status_code, 422)
+        self.assertNotIn("SECRET", r.text)
+        self.assertIn("***", r.json()["reason"])
+        self.assertTrue(any("SECRET" not in entry and "***" in entry for entry in logs.output))
+
+    @mock.patch("orchestrator.goals.start")
+    @mock.patch("orchestrator.goals.list_goals")
+    def test_start_refusal_reason_capped_at_300_chars(self, mock_list, mock_start):
+        mock_list.return_value = []
+        mock_start.return_value = {"launched": False, "reason": "x" * 1000}
+        r = self.client.post("/goals", json={"repo": "demo", "goal": "build it"}, headers=self.auth())
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(len(r.json()["reason"]), 300)
+
+    @mock.patch("orchestrator.goals.start")
+    @mock.patch("orchestrator.goals.list_goals")
     def test_second_start_409_while_running(self, mock_list, mock_start):
         mock_list.return_value = [{"goal_id": "T-99", "record_status": "running", "planner_alive": True}]
         r = self.client.post("/goals", json={"repo": "demo", "goal": "build it"}, headers=self.auth())
@@ -181,6 +229,23 @@ class ListAndGetGoals(ServeTestCase):
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json(), {"reason": "repo not configured"})
 
+    @mock.patch("orchestrator.goals.list_goals")
+    def test_fan_out_isolates_one_failing_repo(self, mock_list):
+        other_dir = Path(tempfile.mkdtemp(prefix="orch-repo2-"))
+        self._write_repos({"demo": {"path": str(self.repo_dir)}, "other": {"path": str(other_dir)}})
+
+        def fake_list(path):
+            if path == str(other_dir):
+                raise RuntimeError("boom")
+            return [{"goal_id": "T-1"}]
+        mock_list.side_effect = fake_list
+
+        r = self.client.get("/goals", headers=self.auth())
+        self.assertEqual(r.status_code, 200)
+        out = r.json()["goals"]
+        self.assertIn({"goal_id": "T-1", "repo": "demo"}, out)
+        self.assertIn({"repo": "other", "error": "unreadable"}, out)
+
     @mock.patch("orchestrator.goals.status")
     def test_get_goal_returns_single_entry_200(self, mock_status):
         mock_status.return_value = [{"goal_id": "T-1", "record_status": "done"}]
@@ -194,6 +259,25 @@ class ListAndGetGoals(ServeTestCase):
         r = self.client.get("/goals/demo/T-404", headers=self.auth())
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json(), {"reason": "unknown goal"})
+
+
+class ReposTomlUnreadable(ServeTestCase):
+    def test_malformed_repos_toml_503_on_goal_routes(self):
+        self.repos_toml.write_text("not [ valid toml")
+
+        r = self.client.get("/goals", headers=self.auth())
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json(), {"reason": "repos.toml unreadable"})
+
+        r2 = self.client.post("/goals", json={"repo": "demo", "goal": "g"}, headers=self.auth())
+        self.assertEqual(r2.status_code, 503)
+        self.assertEqual(r2.json(), {"reason": "repos.toml unreadable"})
+
+    def test_healthz_unaffected_by_malformed_repos_toml(self):
+        self.repos_toml.write_text("not [ valid toml")
+        r = self.client.get("/healthz")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"status": "ok"})
 
 
 class CloneUnderLock(ServeTestCase):
@@ -276,6 +360,22 @@ class CancelGoal(ServeTestCase):
         r = self.client.post("/goals/demo/T-404/cancel", headers=self.auth())
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json(), {"reason": "unknown goal"})
+
+    @mock.patch("orchestrator.goals.stop")
+    def test_cancel_returns_200_when_planner_already_gone(self, mock_stop):
+        mock_stop.side_effect = ProcessLookupError()
+        r = self.client.post("/goals/demo/T-1/cancel", headers=self.auth())
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"goal_id": "T-1", "repo": "demo", "status": "stopped",
+                                     "note": "planner already gone"})
+
+    @mock.patch("orchestrator.goals.stop")
+    def test_cancel_returns_200_on_permission_error(self, mock_stop):
+        mock_stop.side_effect = PermissionError()
+        r = self.client.post("/goals/demo/T-1/cancel", headers=self.auth())
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"goal_id": "T-1", "repo": "demo", "status": "stopped",
+                                     "note": "planner already gone"})
 
 
 class ServeShape(ServeTestCase):
