@@ -159,3 +159,9 @@ outcome: Phase C code-complete 2026-09-19 02:00; PR goal/T-0073 to main opened f
 type: decision · goal: T-0109 · tasks: T-0185 · provenance: repo
 - the executor rebased the six D1/D2 commits in wt/T-0185 (only a tick() ordering conflict in daemon.py and a test_pool.py concatenation; README and pool.toml auto-merged); 234 tests green; the Planner then moved the branch ref with git branch -f goal/T-0109 7285bbd (old head c593794)
 outcome: Phase D tasks now build on the merged Phase C code (serve, planner usage, handover, executor image). Revert path: git branch -f goal/T-0109 c593794 (the pre-rebase head) while nothing new has merged on top
+
+## 2026-09-18 D5 scorecard by task and goal merged into goal/T-0109
+type: decision · goal: T-0109 · tasks: T-0186,T-0191,T-0194,T-0195 · provenance: repo
+- scorecard.py by_task()/by_goal() aggregate .orchestrator/runs/*.jsonl by task and goal (children via parent), role split execute/review/spec_review/scout/other in percent of usd, per-goal decision runs from planner_runs.json (- / 0 runs / n runs), pool-wide planner transcript tokens from planner_usage.json day_tokens as one footer line; cli scorecard --by task|goal; default output byte-identical
+- reviews: T-0191 (opus) caught the wrong planner_usage key, the pool-wide daily count stamped per goal and challenge/triage usd dropped from totals; T-0195 approved with notes: unguarded json.loads on jsonl lines, Codex runs log no usd so the percent split undercounts them, float total tokens
+outcome: merged 8a1a569 into goal/T-0109 2026-09-19 04:45 (chain 38d91fe T-0186, 28d0fad T-0194). Revert path: git revert the two commits in reverse order. The T-0195 notes go to a D5 polish task
