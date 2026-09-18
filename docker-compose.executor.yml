@@ -1,5 +1,6 @@
-# Runs the orchestrator executor on kenta-server. Reached on the home docker network by the kgpt
-# module; publishes no ports. See docs/executor-host.md for the full setup runbook.
+# Runs the orchestrator executor on kenta-server. Joins the existing home docker network named by
+# ORCH_NET (the kgpt module's docker compose project's default network) so the kgpt module can reach it
+# there; publishes no ports. See docs/executor-host.md for the full setup runbook.
 services:
   orchestrator-executor:
     build:
@@ -8,16 +9,31 @@ services:
         UID: ${UID:-1000}
         GID: ${GID:-1000}
     image: orchestrator-executor
-    env_file: ./executor.env
+    env_file:
+      - path: ./executor.env
+        required: true
     volumes:
       - ./work:/work
-      - ${ORCH_CREDS}/claude-a:/home/orch/.claude-a
-      - ${ORCH_CREDS}/claude-b:/home/orch/.claude-b
-      - ${ORCH_CREDS}/codex:/home/orch/.codex
-      - ${ORCH_CREDS}/gh:/home/orch/.config/gh
+      - ./config/repos.toml:/opt/orchestrator/.orchestrator/repos.toml:ro
+      - ./config/pool.toml:/opt/orchestrator/.orchestrator/pool.toml:ro
+      - ${ORCH_CREDS:?set ORCH_CREDS to the credential root, e.g. ~/orch-creds}/claude-a:/home/orch/.claude-a
+      - ${ORCH_CREDS:?set ORCH_CREDS to the credential root, e.g. ~/orch-creds}/claude-b:/home/orch/.claude-b
+      - ${ORCH_CREDS:?set ORCH_CREDS to the credential root, e.g. ~/orch-creds}/codex:/home/orch/.codex
+      - ${ORCH_CREDS:?set ORCH_CREDS to the credential root, e.g. ~/orch-creds}/gh:/home/orch/.config/gh
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8090/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 6g
+    pids_limit: 512
+
+networks:
+  default:
+    external: true
+    name: "${ORCH_NET:?set ORCH_NET to the docker network the kgpt module runs on}"
