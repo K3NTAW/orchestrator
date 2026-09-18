@@ -333,7 +333,7 @@ def merge_reviewed(pool):
             continue
         if already_merged(src):
             continue
-        verdict = src.get("review_verdict") or r.get("review_verdict")
+        verdict = src.get("review_verdict") or r.get("review_verdict") or (r.get("result") or {}).get("verdict")
         if verdict == "approve":
             # stamped before the merge, not after: a conflict leaves merged_into unset, and retrying it every tick
             # would just rebuild the same conflict

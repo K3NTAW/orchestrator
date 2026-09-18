@@ -66,6 +66,58 @@ class ReviewAvoidsAccount(unittest.TestCase):
         self.assertEqual(captured["avoid"], "B")
 
 
+class ReviewVerdictSurvivesParseFailure(unittest.TestCase):
+    """T-0139/T-0141: a reviewer that posts its verdict itself via bus_post_result mid-run, then ends with text
+    the daemon can't parse, must not lose that verdict to a second, verdict-less post."""
+
+    def test_verdict_survives_unparseable_final_text(self):
+        reviewed = bus.create_task("feat-parsefail", "s", ["a"], ["rv.py"], role="execute")
+        review = bus.create_task("review feat-parsefail", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        # Simulate the worker's own bus_post_result MCP call mid-run, before its final text fails to parse below.
+        bus.post_result(review["id"], {"verdict": "approve", "comments": []})
+
+        fake_out = {"result": "```json\n{unparseable: true}\n```", "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+
+        updated = bus.get(review["id"])
+        self.assertEqual(updated["result"]["verdict"], "approve")
+        self.assertEqual(updated["review_verdict"], "approve")
+        self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "approve")
+
+
+class ReviewNoVerdictAnywhereFails(unittest.TestCase):
+    def test_unparseable_with_no_prior_verdict_fails_with_raw_hint(self):
+        reviewed = bus.create_task("feat-noverdict", "s", ["a"], ["rv.py"], role="execute")
+        review = bus.create_task("review feat-noverdict", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        fake_out = {"result": "```json\n{unparseable: true}\n```", "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+
+        updated = bus.get(review["id"])
+        self.assertEqual(updated["status"], "failed")
+        self.assertIn("verdict", updated["reason"])
+        self.assertIn("unparseable", updated["resume_hint"]["raw"])
+
+
 class RunClaudeBudgetExitReason(unittest.TestCase):
     """T-0134: a non-zero exit with parseable JSON (typical of --max-budget-usd cutoffs) must carry a "reason"
     string, not silently drop into a dict run_worker can't read."""

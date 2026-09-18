@@ -261,6 +261,16 @@ class Daemon(unittest.TestCase):
         held = bus.get(bad)
         self.assertEqual((held["status"], held["hold_reason"]), ("held", "review request_changes"))
 
+    def test_merge_reviewed_falls_back_to_result_verdict(self):
+        """T-0139/T-0141: when review_verdict never landed on the review task or its source (spawn.run_worker's
+        parse failed before it could set them), merge_reviewed still finds the verdict inside the review's own
+        posted result."""
+        ok = self.gated_execute("approved-fallback")
+        r_ok = self.task("review approved-fallback", complexity=5, role="review", inputs=[ok])
+        bus.update(r_ok, status="done", result={"verdict": "approve", "confidence": 1.0, "provenance": ["repo"]})
+        daemon.tick()
+        self.assertEqual(self.merged, [ok])
+
     def gated_execute(self, title):
         """A done execute task that already cleared the gate, so gate() leaves it to merge_reviewed()."""
         t = self.task(title, complexity=5)

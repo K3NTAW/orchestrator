@@ -255,9 +255,24 @@ def run_worker(task_id):
             bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
                                       "review": "other account, different model; label PR same-family-review"}), "done")
         elif r["status"] == "done":
-            result = extract_json(r["output"].get("result", ""))
-            bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
-            if role in ("review", "spec_review") and result.get("verdict"):
+            text = r["output"].get("result", "")
+            result = extract_json(text)
+            review_role = role in ("review", "spec_review")
+            # A review worker may post its verdict itself via bus_post_result mid-run, then end with prose or
+            # fenced JSON this parser can't take; or return valid JSON that simply lacks "verdict". Either way
+            # treat it as a failed parse for review roles so we never silently drop an already-posted verdict
+            # (T-0139: an approve sat unmerged after a second, verdict-less post overwrote the first).
+            parse_failed = bool(result.get("parse_error")) or (review_role and not result.get("verdict"))
+            existing_result = (bus.get(task_id).get("result") or {}) if parse_failed else {}
+            if parse_failed and existing_result.get("verdict"):
+                result = existing_result  # keep the worker's own posted result; do not overwrite it
+            elif parse_failed and review_role:
+                bus.update(task_id, status="failed", reason="review returned no parseable verdict",
+                          resume_hint={"raw": text[-2000:]})
+                result = None
+            else:
+                bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+            if result and review_role and result.get("verdict"):
                 verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
                     if role == "spec_review" else {"review_verdict": result["verdict"]}
                 bus.update(task_id, **verdict_fields)
