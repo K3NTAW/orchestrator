@@ -1,4 +1,4 @@
-"""orchestrator.daemon pipeline: dependency-gated dispatch, spec review for complexity >=5, the tests-green gate,
+"""orchestrator.daemon pipeline: dependency-gated dispatch, spec review for complexity >=6, the tests-green gate,
 review routing and the serial merge — all driven by `tick()` with the four side-effecting calls (executor.start,
 spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead of act.
 
@@ -285,10 +285,11 @@ class Daemon(unittest.TestCase):
         self.assertEqual(reviews[0]["inputs"], [t])
 
     def test_two_reviews_for_high_complexity_merge_waits_for_both(self):
-        """complexity 7 (>= two_reviews_from) gets two review tasks on the two different Claude tiers, and
-        merge_reviewed() must not merge until both have approved -- one approve alone must not be enough."""
+        """complexity 7 (>= two_reviews_from), Codex-executed: two review tasks split across the two different
+        Claude tiers, and merge_reviewed() must not merge until both have approved -- one approve alone must not
+        be enough."""
         t = self.task("big", complexity=7)
-        bus.update(t, status="done", worktree=str(TMP), executor="claude:sonnet")
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
 
         def fake_merge(tid, target=None):
             # unlike the shared setUp() stub, this mirrors merge.merge's real side effect of marking the task
@@ -311,6 +312,75 @@ class Daemon(unittest.TestCase):
         bus.update(reviews[1]["id"], status="done", review_verdict="approve")
         daemon.tick()
         self.assertEqual(self.merged, [t])
+
+    def test_two_reviews_claude_executor_same_non_executing_tier(self):
+        """T-0150 review item 3: for a Claude-executed complexity-7 task, both reviews must land on the
+        non-executing tier (never the tier that executed), not split across the two tiers -- and the second
+        carries constraints.avoid_account/second_review so a later spawn change can steer it to a fresh account."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="claude:opus")
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual([r["tier"] for r in reviews], ["sonnet", "sonnet"])
+        self.assertTrue(reviews[1]["constraints"]["second_review"])
+        self.assertIn("avoid_account", reviews[1]["constraints"])
+
+    def test_orphaned_high_complexity_merges_on_single_approve(self):
+        """T-0150 review item 1: reviews_expected() must come from the orphaned flag, not complexity alone -- an
+        orphaned complexity-7 task only ever gets one review task, and merge_reviewed() must merge it on that
+        review's single approve instead of waiting for a second review gate() never opens."""
+        t = self.task("orphaned big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), result={"orphaned": True, "commit": "deadbee"})
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        bus.update(reviews[0]["id"], status="done", review_verdict="approve")
+        daemon.tick()
+        self.assertEqual(self.merged, [t])
+
+    def test_sibling_review_failed_holds_source_without_waiting(self):
+        """T-0150 review item 2: one sibling review approved, the other failed -- merge_reviewed() must hold the
+        source task naming the failed sibling instead of waiting on a review that can never finish."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+        bus.update(reviews[0]["id"], status="done", review_verdict="approve")
+        bus.update(reviews[1]["id"], status="failed")
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(held["hold_reason"], f"review failed: {reviews[1]['id']}")
+        self.assertEqual(self.merged, [])
+
+    def test_sibling_review_held_holds_source_without_waiting(self):
+        """T-0150 review item 2, held variant: a sibling review itself held (e.g. no account headroom) must not
+        be waited on forever either."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick()
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+        bus.update(reviews[0]["id"], status="done", review_verdict="approve")
+        bus.update(reviews[1]["id"], status="held", hold_reason="no account with headroom")
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(held["hold_reason"], f"review held: {reviews[1]['id']}")
+        self.assertEqual(self.merged, [])
+
+    def test_merged_at_stamped_on_source_task(self):
+        """T-0150 review item 5: the merge dedup stamp lives on the source execute task, not the review task, so
+        a conflict is attempted once per task rather than once per review."""
+        ok = self.gated_execute("stamp-on-source")
+        r_ok = self.task("review stamp-on-source", complexity=5, role="review", inputs=[ok])
+        bus.update(r_ok, status="done", review_verdict="approve")
+        daemon.tick()
+        self.assertEqual(self.merged, [ok])
+        self.assertTrue(bus.get(ok)["pipeline"].get("merged_at"))
+        self.assertFalse((bus.get(r_ok).get("pipeline") or {}).get("merged_at"))
 
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")

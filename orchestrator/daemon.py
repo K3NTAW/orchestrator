@@ -298,11 +298,25 @@ def _other_tier(tier):
     return "sonnet" if tier == "opus" else "opus"
 
 
+def reviews_expected(t):
+    """How many review approvals an execute task needs before merge_reviewed() may merge it -- the single source
+    of truth gate() also uses to decide how many review tasks to open. An orphaned result (reconcile_dead
+    re-gating a dead worker's last commit) always needs exactly one, whatever the task's complexity: the orphaned
+    warning is what needs the second pair of eyes, not the model split (T-0150 review: an orphaned complexity-7
+    task was stuck waiting on a second review gate() never opens)."""
+    if (t.get("result") or {}).get("orphaned") or t["complexity"] < TWO_REVIEWS_FROM:
+        return 1
+    return 2
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
-    open one review task (complexity between DIRECT_MERGE_MAX and TWO_REVIEWS_FROM) or two (complexity >=
-    TWO_REVIEWS_FROM, the second on whichever tier the first one didn't get, so no single model grades a task
-    twice)."""
+    open the number of review tasks reviews_expected() says (one for complexity between DIRECT_MERGE_MAX and
+    TWO_REVIEWS_FROM, or any orphaned result; two otherwise). The second review must never run on the model that
+    executed: when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on
+    review_tier(t) -- the non-executing tier -- and the second carries constraints.avoid_account (the first
+    review's account, when already known) and constraints.second_review=true; when the executor is Codex, the
+    second review runs on whichever tier the first one didn't get."""
     for t in bus.read(status="done", role="execute"):
         if stale(t) or already_merged(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
             continue
@@ -345,10 +359,18 @@ def gate(pool):
                                      tier=review_tier(t))
                 spawn_async(spawn.run_worker, r1["id"])
                 existing = [r1]
-            if t["complexity"] >= TWO_REVIEWS_FROM and len(existing) == 1:
+            if reviews_expected(t) == 2 and len(existing) == 1:
+                executor_field = t.get("executor") or ""
+                if executor_field.startswith("claude:"):
+                    tier2 = review_tier(t)
+                    avoid_account = existing[0].get("account") or existing[0].get("assigned_to")
+                    constraints = {"avoid_account": avoid_account, "second_review": True}
+                else:
+                    tier2 = _other_tier(existing[0]["tier"])
+                    constraints = None
                 r2 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                                      inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
-                                     tier=_other_tier(existing[0]["tier"]))
+                                     tier=tier2, constraints=constraints)
                 spawn_async(spawn.run_worker, r2["id"])
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
@@ -372,9 +394,11 @@ def _review_verdict(r, src):
 
 def merge_reviewed(pool):
     """done review tasks: approve -> serial merge of the reviewed task; request_changes -> hold it for the Planner,
-    which writes the fix-round spec (a daemon must not invent a spec). A task with two reviews (complexity >=
-    TWO_REVIEWS_FROM) merges only once every review of it has approved; a single request_changes among them holds
-    it regardless of what the other says."""
+    which writes the fix-round spec (a daemon must not invent a spec). A task needing two reviews
+    (reviews_expected() == 2) merges only once every review of it has approved; a single request_changes among
+    them holds it regardless of what the other says. A sibling review that failed or was itself held can never
+    finish, so it must not be waited on forever: either one holds the source task immediately, naming the sibling,
+    and notifies once. Only a sibling still queued/running keeps the wait going."""
     for r in bus.read(status="done", role="review"):
         if stale(r) or not (r.get("inputs") and isinstance(r["inputs"][0], str)):
             continue
@@ -386,15 +410,24 @@ def merge_reviewed(pool):
             continue
         verdict = _review_verdict(r, src)
         if verdict == "approve":
-            if src["complexity"] >= TWO_REVIEWS_FROM:
+            if reviews_expected(src) == 2:
                 siblings = [x for x in bus.read(role="review") if x["inputs"][:1] == [src["id"]]]
+                failed = next((s for s in siblings if s["status"] == "failed"), None)
+                held = next((s for s in siblings if s["status"] == "held"), None)
+                stuck = failed or held
+                if stuck is not None:
+                    reason = f"review {'failed' if stuck is failed else 'held'}: {stuck['id']}"
+                    if stamp(src["id"], "review_held_at", status="held", hold_reason=reason):
+                        notify(f"{src['id']}: {reason}")
+                    continue
                 if len(siblings) < 2 or any(s["status"] != "done" for s in siblings):
                     continue  # second review not created or not finished yet
                 if not all(_review_verdict(s, src) == "approve" for s in siblings):
                     continue
-            # stamped before the merge, not after: a conflict leaves merged_into unset, and retrying it every tick
-            # would just rebuild the same conflict
-            if stamp(r["id"], "merged_at"):
+            # stamped on the source task before the merge, not after: a conflict leaves merged_into unset, and
+            # retrying it every tick would just rebuild the same conflict; stamping the source (not the review)
+            # means a task with two reviews attempts the merge exactly once no matter which review finishes last
+            if stamp(src["id"], "merged_at"):
                 try:
                     report_merge(src["id"], merge.merge(src["id"]))
                 except Exception as e:
