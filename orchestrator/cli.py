@@ -42,6 +42,7 @@ def main():
     gst.add_argument("--json", action="store_true")
     gl = gsub.add_parser("list"); gl.add_argument("repo"); gl.add_argument("--json", action="store_true")
     gsp = gsub.add_parser("stop"); gsp.add_argument("repo"); gsp.add_argument("id")
+    sv = sub.add_parser("serve"); sv.add_argument("--host", default="127.0.0.1"); sv.add_argument("--port", type=int, default=8090)
     bn = sub.add_parser("bench"); bsub = bn.add_subparsers(dest="bench_cmd", required=True)
     bf = bsub.add_parser("fetch"); bf.add_argument("--force", action="store_true"); bf.add_argument("--by", default="orchestrator")
     bsub.add_parser("show")
@@ -97,6 +98,9 @@ def main():
                 print("no goals" if not entries else "\n".join(_format_goal_line(e) for e in entries))
         elif a.goal_cmd == "stop":
             print(json.dumps(goals.stop(a.repo, a.id), indent=1))
+    elif a.cmd == "serve":
+        from .serve import main as serve_main
+        serve_main(host=a.host, port=a.port)
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":

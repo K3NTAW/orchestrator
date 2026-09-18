@@ -270,7 +270,7 @@ def _preview_cfg(pool_toml):
     return tomllib.loads(src.read_text())
 
 
-def start(repo_path, goal_text, account_id="A", reinstall=False):
+def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None):
     repo_path = Path(os.path.realpath(repo_path))
     pool_toml = repo_path / ".orchestrator" / "pool.toml"
 
@@ -354,7 +354,7 @@ def start(repo_path, goal_text, account_id="A", reinstall=False):
 
     record = {"goal_id": goal_id, "repo": str(repo_path), "text": goal_text, "pid": proc.pid,
               "pid_start": _proc_start(proc.pid), "started_at": time.time(), "account": account_id,
-              "commit": commit, "status": "running"}
+              "commit": commit, "status": "running", "requester": requester}
     _append_goal_record(repo_path, record)
 
     return {"launched": True, "goal_id": goal_id, "pid": proc.pid, "log": str(log_path), "commit": commit,
@@ -391,7 +391,8 @@ def _status_entry(repo_path, record):
             note = "process-start verification unavailable on this platform; liveness check only"
     return {"goal_id": goal_id, "repo": record.get("repo"), "record_status": record["status"],
             "task_status": goal_task["status"] if goal_task else None, "children": by_status,
-            "merged": merged, "pr_url": pr_url, "planner_alive": planner_alive, "note": note}
+            "merged": merged, "pr_url": pr_url, "planner_alive": planner_alive, "note": note,
+            "requester": record.get("requester")}
 
 
 def _load_goal_records(repo_path, goal_id=None):

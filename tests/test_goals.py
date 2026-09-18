@@ -311,6 +311,16 @@ class StartLaunch(GoalsTestCase):
         self.assertTrue(r2["launched"], r2)
         self.assertEqual(FakePopen.last_kwargs["env"]["CLAUDE_CODE_OAUTH_TOKEN"], "tok-abc")
 
+    def test_start_records_requester_and_status_returns_it(self):
+        repo = self.repo("requester")
+        self.unignore(repo)
+        self.fake_run("T-9006")
+        r = goals.start(str(repo), "goal text", account_id="A", requester="alice")
+        self.assertTrue(r["launched"], r)
+        entries = goals.status(str(repo), "T-9006")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["requester"], "alice")
+
     def test_start_marks_workspace_trusted(self):
         repo = self.repo("trust")
         self.unignore(repo)
