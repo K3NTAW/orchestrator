@@ -53,6 +53,65 @@ def stamp(tid, stage, **fields):
     return True
 
 
+def _git_in(worktree, *args):
+    return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+
+
+def reconcile_dead(t):
+    """A running task whose worker died >60s ago: the `claude -p` child (spawn.py Popen) can outlive the daemon
+    thread that would have posted its result, finish and commit in its worktree, and leave the task stuck
+    "running" with a dead pid. Requeuing unconditionally would redo that finished work on top of the executor's
+    own commit (gotchas.md 2026-09-18: T-0115, commit abc3f56 sat in wt/T-0115 while the task went back to
+    queued). Only an execute task with a worktree gets the extra check: a clean worktree with commits ahead of
+    its base is posted as a done result so gate() re-gates it normally; a dirty one is held for the Planner.
+    Everything else (scout/review/etc, or an execute task with no worktree or no commits ahead) requeues as
+    before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
+    tid, worktree = t["id"], t.get("worktree")
+    if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
+        bus.update(tid, status="queued", pid=None, reason="process died; requeued")
+        return "requeued"
+
+    base = None
+    parent = t.get("parent")
+    if parent:
+        r = _git_in(worktree, "merge-base", "HEAD", f"goal/{parent}")
+        if r.returncode == 0:
+            base = r.stdout.strip()
+    if base is None:
+        r = _git_in(worktree, "rev-parse", f"task/{tid}@{{upstream}}")
+        if r.returncode == 0:
+            base = r.stdout.strip()
+    if base is None:
+        bus.update(tid, status="queued", pid=None, reason="process died; requeued")
+        return "requeued"
+
+    r = _git_in(worktree, "rev-list", "--count", f"{base}..HEAD")
+    ahead = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else 0
+    if ahead == 0:
+        bus.update(tid, status="queued", pid=None, reason="process died; requeued")
+        return "requeued"
+
+    status = _git_in(worktree, "status", "--porcelain")
+    sha = _git_in(worktree, "rev-parse", "HEAD").stdout.strip()
+    if status.stdout.strip():
+        bus.update(tid, status="held", hold_reason="orphaned_dirty_worktree", pid=None,
+                   resume_hint={"commit": sha, "dirty": status.stdout.splitlines()[:20]})
+        notify(f"{tid}: dead worker left a dirty worktree with commit {sha[:8]} ahead of {base[:8]}; held")
+        return "held"
+
+    bus.post_result(tid, {
+        "summary": f"executor exited without posting a result; daemon found commit {sha} ahead of "
+                   f"{base[:8]} in the worktree and re-gated it",
+        "commit": sha,
+        "executed_by": t.get("executor") or f"claude:{t.get('tier', 'sonnet')}",
+        "orphaned": True,
+        "provenance": ["repo"],
+    }, "done")
+    print(f"[daemon] {tid}: dead worker left commit {sha[:8]} ahead of {base[:8]} in the worktree; re-gated",
+          file=sys.stderr)
+    return "regated"
+
+
 def stale(t):
     """True for a task the daemon must not act on: one whose parent goal task exists and is already done (the goal
     closed and dispatching or merging into it would just redo a re-merge or a notify nobody asked for), or a
@@ -270,7 +329,7 @@ def tick(pool=None):
     pool = pool or Pool()
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
-            bus.update(t["id"], status="queued", pid=None, reason="process died; requeued")
+            reconcile_dead(t)
     for stage in (dispatch, gate, merge_reviewed):
         try:
             stage(pool)

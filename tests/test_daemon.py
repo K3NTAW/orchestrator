@@ -4,7 +4,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
-import http.server, os, sys, tempfile, threading, time, unittest
+import http.server, os, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
@@ -337,6 +337,121 @@ class Daemon(unittest.TestCase):
         pending = bus.get(pending_id)
         self.assertEqual(self.merged, [pending_id])         # non-ancestor task still gated and merged as before
         self.assertTrue(pending["pipeline"]["gated_at"])
+
+    def dead_pid(self):
+        """A pid guaranteed not alive: spawn a trivial child and wait for it to exit."""
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    def test_reconcile_dead_regates_clean_worktree_ahead_of_base(self):
+        """An execute task's worker died, but it had already committed and left the worktree clean: tick() must
+        post that commit as a done result (orphaned=true) instead of requeuing and redoing the work."""
+        scratch_repo(TMP)
+        self.addCleanup(lambda: (TMP / "orphan_clean.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", "task/orphan-clean")
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")
+        g("checkout", "-b", "task/orphan-clean")
+        (TMP / "orphan_clean.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "finished work")
+        sha = g("rev-parse", "HEAD").stdout.strip()
+
+        t = self.task("orphan clean")
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual(task["status"], "done")
+        self.assertTrue(task["result"]["orphaned"])
+        self.assertEqual(task["result"]["commit"], sha)
+
+    def test_reconcile_dead_holds_dirty_worktree_ahead_of_base(self):
+        """Same as above but the worktree has an uncommitted change on top of the commit: too risky to auto-gate,
+        so tick() must hold the task for the Planner instead, naming the commit in the resume hint."""
+        scratch_repo(TMP)
+        self.addCleanup(lambda: (TMP / "orphan_dirty.txt").unlink(missing_ok=True))
+        self.addCleanup(lambda: (TMP / "uncommitted.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", "task/orphan-dirty")
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")
+        g("checkout", "-b", "task/orphan-dirty")
+        (TMP / "orphan_dirty.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "finished work")
+        sha = g("rev-parse", "HEAD").stdout.strip()
+        (TMP / "uncommitted.txt").write_text("dirty")   # untracked change: worktree is no longer clean
+
+        t = self.task("orphan dirty")
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "orphaned_dirty_worktree"))
+        self.assertEqual(task["resume_hint"]["commit"], sha)
+
+    def test_reconcile_dead_requeues_when_no_commits_ahead(self):
+        """The worker died before committing anything: no ahead commits, so tick() must fall back to the plain
+        requeue instead of treating an unchanged worktree as orphaned work."""
+        scratch_repo(TMP)
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")   # HEAD == base: nothing ahead
+
+        t = self.task("orphan none")
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual((task["status"], task["reason"]), ("queued", "process died; requeued"))
+
+    def test_reconcile_dead_requeues_non_execute_role_unchanged(self):
+        """A scout task's worker died: this is the pre-existing path and must be untouched by the orphaned-work
+        check, which only ever applies to execute tasks."""
+        t = self.task("scout dead", role="scout", complexity=2)
+        bus.update(t, status="running", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual((task["status"], task["reason"]), ("queued", "process died; requeued"))
+
+    def test_reconcile_dead_return_values(self):
+        """reconcile_dead(task) itself returns the tri-state result the daemon acted on, so this is testable
+        directly without going through tick()'s live-pid check."""
+        scratch_repo(TMP)
+        self.addCleanup(lambda: (TMP / "rv.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", "task/rv")
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")
+        g("checkout", "-b", "task/rv")
+        (TMP / "rv.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "work")
+
+        t = self.task("rv clean")
+        task = bus.get(t)
+        task["worktree"] = str(TMP)
+        self.assertEqual(daemon.reconcile_dead(task), "regated")
+
+        (TMP / "rv.txt").write_text("y")   # dirty it for the held case
+        t2 = self.task("rv dirty")
+        task2 = bus.get(t2)
+        task2["worktree"] = str(TMP)
+        self.assertEqual(daemon.reconcile_dead(task2), "held")
+
+        g("reset", "--hard", "goal/T-0043")   # discard the dirty change and land back on base: nothing ahead
+        t3 = self.task("rv none")
+        task3 = bus.get(t3)
+        task3["worktree"] = str(TMP)
+        self.assertEqual(daemon.reconcile_dead(task3), "requeued")
+
+        t4 = self.task("rv scout", role="scout", complexity=2)
+        task4 = bus.get(t4)
+        self.assertEqual(daemon.reconcile_dead(task4), "requeued")
 
     def test_tick_skips_execute_task_of_closed_goal(self):
         closed_goal = bus.create_task("goal closed", "s", ["ok"], ["x.py"], role="scout")["id"]
