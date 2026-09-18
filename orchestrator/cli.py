@@ -1,5 +1,5 @@
 """orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
-import argparse, json
+import argparse, json, os, sys
 from collections import defaultdict
 from . import bus, scorecard
 from .bus import RUNS
@@ -66,12 +66,16 @@ def main():
     elif a.cmd == "resume":
         pl = Pool(); pl.resume(a.account); print(json.dumps(pl.status(), indent=1))
     elif a.cmd == "pick":
-        pl = Pool(); pl.tally_planner()
+        pl = Pool()
+        try:
+            pl.tally_planner()
+        except Exception as e:
+            print(f"pick: planner tally failed: {e}", file=sys.stderr)
         picked = pl.pick(a.role)
         if picked is None:
-            print("hold: no account with headroom")
+            print("hold: no account with headroom", file=sys.stderr)
             raise SystemExit(3)
-        print(f"{picked.id}\t{picked.config_dir}")
+        print(f"{picked.id}\t{os.path.expanduser(picked.config_dir)}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
     elif a.cmd == "merge":

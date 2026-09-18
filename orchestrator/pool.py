@@ -1,6 +1,6 @@
 """Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with-headroom selection. State persists to
 pool_state.json so MCP server restarts don't forget cooldowns."""
-import json, os, re, sys, time, tomllib
+import fcntl, json, os, re, sys, time, tomllib
 from dataclasses import dataclass, field, asdict, fields
 from datetime import date, datetime
 from pathlib import Path
@@ -9,6 +9,9 @@ from . import ROOT, STATE
 WINDOW_S = 5 * 3600
 CFG = STATE / "pool.toml"
 PERSIST = STATE / "pool_state.json"
+PLANNER_USAGE = STATE / "planner_usage.json"
+PLANNER_ACCOUNT_FIELDS = {"planner_window_tokens", "planner_day_tokens", "planner_offsets"}
+_WARNED_MISSING_DIRS = set()
 
 
 def encode_project_dir(path: str) -> str:
@@ -20,6 +23,35 @@ def encode_project_dir(path: str) -> str:
 
 def config():
     return tomllib.loads(CFG.read_text())
+
+
+def _load_planner_usage():
+    try:
+        return json.loads(PLANNER_USAGE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_planner_account(acct_id, window_tokens, day_tokens, offsets):
+    """Read-modify-write .orchestrator/planner_usage.json under an flock on the file itself, so a concurrent
+    tally (another account's loop iteration in this process, or another process entirely) can't clobber this
+    account's entry. Pool.save() never touches this file; only tally_planner writes it."""
+    PLANNER_USAGE.parent.mkdir(parents=True, exist_ok=True)
+    with open(PLANNER_USAGE, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.seek(0)
+            raw = fh.read()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {}
+            data[acct_id] = {"window_tokens": window_tokens, "day_tokens": day_tokens, "offsets": offsets}
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(data, indent=1))
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 @dataclass
@@ -126,18 +158,27 @@ class Pool:
 
     # persistence -------------------------------------------------------------------------------
     def _load(self):
-        if not PERSIST.exists():
-            return
-        st = json.loads(PERSIST.read_text())
+        if PERSIST.exists():
+            st = json.loads(PERSIST.read_text())
+            for a in self.accounts:
+                a.__dict__.update({k: v for k, v in st.get("accounts", {}).get(a.id, {}).items()
+                                   if k not in {"id", "config_dir", "affinity", "reserve", "daily_budget",
+                                                "oauth_token_env", *PLANNER_ACCOUNT_FIELDS}})
+            self.codex.__dict__.update(st.get("codex", {}))
+            for eid, ex in self.executors.items():
+                ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
+        pu = _load_planner_usage()
         for a in self.accounts:
-            a.__dict__.update({k: v for k, v in st.get("accounts", {}).get(a.id, {}).items()
-                               if k not in {"id", "config_dir", "affinity", "reserve", "daily_budget", "oauth_token_env"}})
-        self.codex.__dict__.update(st.get("codex", {}))
-        for eid, ex in self.executors.items():
-            ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
+            entry = pu.get(a.id, {})
+            a.planner_window_tokens = entry.get("window_tokens", 0)
+            a.planner_day_tokens = entry.get("day_tokens", 0)
+            a.planner_offsets = entry.get("offsets", {})
 
     def save(self):
-        PERSIST.write_text(json.dumps({"accounts": {a.id: asdict(a) for a in self.accounts}, "codex": asdict(self.codex),
+        PERSIST.write_text(json.dumps({"accounts": {a.id: {k: v for k, v in asdict(a).items()
+                                                            if k not in PLANNER_ACCOUNT_FIELDS}
+                                                     for a in self.accounts},
+                                       "codex": asdict(self.codex),
                                        "executors": {eid: {k: getattr(ex, k) for k in sorted(EXEC_STATE_FIELDS)}
                                                      for eid, ex in self.executors.items()}}, indent=1))
 
@@ -180,28 +221,41 @@ class Pool:
         """The Planner session (interactive `claude`, not a worker spawned by run_claude) never posts a JSON
         result, so its token usage is otherwise invisible to the pool. Read straight from Claude Code's own
         transcript files for this project under each account's config_dir instead: assistant turns in the
-        current day and 5h window, summed the same way run_claude sums a worker's usage. Incremental: each file's
-        byte offset persists in pool_state so a tick only reads what a prior tick had not yet seen."""
+        current day and 5h window, summed the same way run_claude sums a worker's usage. Day and window are
+        gated independently per line (a same-day line outside the window still counts toward the day, and vice
+        versa). Incremental: each file's byte offset persists in planner_usage.json so a tick only reads what a
+        prior tick had not yet seen; a missing transcripts directory warns once per account per process rather
+        than on every tick."""
         now = now if now is not None else time.time()
         today = datetime.fromtimestamp(now).astimezone().date().isoformat()
         for a in self.accounts:
             proj_dir = Path(os.path.expanduser(a.config_dir)) / "projects" / encode_project_dir(str(ROOT.resolve()))
             if not proj_dir.exists():
-                print(f"planner transcripts not found for {a.id} at {proj_dir}", file=sys.stderr)
+                key = str(proj_dir)
+                if key not in _WARNED_MISSING_DIRS:
+                    print(f"planner transcripts not found for {a.id} at {proj_dir}", file=sys.stderr)
+                    _WARNED_MISSING_DIRS.add(key)
                 continue
             a.utilization(self.cap)  # roll window/day (and the planner counters with it) before filtering
             window_lo, window_hi = a.window_started, a.window_started + WINDOW_S
             seen = set()
             for f in sorted(proj_dir.glob("*.jsonl")):
+                try:
+                    size = f.stat().st_size
+                except FileNotFoundError:
+                    continue  # vanished between glob and read
                 seen.add(f.name)
-                size = f.stat().st_size
                 off = a.planner_offsets.get(f.name, 0)
                 if off > size:
                     off = 0  # shrunk file: start over
                 if off >= size:
                     continue
                 pos = off
-                with f.open("rb") as fh:
+                try:
+                    fh = f.open("rb")
+                except FileNotFoundError:
+                    continue  # vanished between glob and read
+                with fh:
                     fh.seek(off)
                     for raw in fh:
                         if not raw.endswith(b"\n"):
@@ -216,20 +270,28 @@ class Pool:
                             continue
                         if rec.get("type") != "assistant":
                             continue
+                        ts = rec.get("timestamp")
+                        if not isinstance(ts, str):
+                            continue
                         try:
-                            dt = datetime.fromisoformat((rec.get("timestamp") or "").replace("Z", "+00:00"))
+                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                         except ValueError:
                             continue
-                        if dt.astimezone().date().isoformat() != today or not (window_lo <= dt.timestamp() < window_hi):
+                        in_day = dt.astimezone().date().isoformat() == today
+                        in_window = window_lo <= dt.timestamp() < window_hi
+                        if not in_day and not in_window:
                             continue
                         usage = ((rec.get("message") or {}).get("usage")) or {}
                         n = usage.get("input_tokens", 0) + usage.get("output_tokens", 0) + usage.get("cache_read_input_tokens", 0) // 10
-                        a.planner_window_tokens += n
-                        a.planner_day_tokens += n
+                        if in_day:
+                            a.planner_day_tokens += n
+                        if in_window:
+                            a.planner_window_tokens += n
                 a.planner_offsets[f.name] = pos
             for name in list(a.planner_offsets):
                 if name not in seen:
                     del a.planner_offsets[name]
+            _save_planner_account(a.id, a.planner_window_tokens, a.planner_day_tokens, a.planner_offsets)
         self.save()
 
     # executors ---------------------------------------------------------------------------------

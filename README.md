@@ -34,11 +34,15 @@ The Planner itself is an interactive `claude` session, not a worker spawned by `
 result carrying a `usage` block — without `tally_planner()` the pool would only ever see the workers it spawns and
 stay blind to the largest consumer of any account's window. `Pool.tally_planner()` reads Claude Code's own transcript
 files for this project under each account's `config_dir` (`<config_dir>/projects/<encoded ROOT>/*.jsonl`), sums the
-same `input_tokens + output_tokens + cache_read_input_tokens // 10` `run_claude` uses for assistant turns in the
-current day and 5h window, and folds the total into `Account.utilization()` and the daily-budget check alongside the
-worker totals. It reads incrementally (a per-file byte offset persists in `pool_state.json`) and skips a missing
-transcripts directory with one stderr line rather than raising. `daemon.tick()` calls it once per tick; `orchestrator
-pick <role>` calls it directly for callers that need a fresh account choice without a running daemon.
+same `input_tokens + output_tokens + cache_read_input_tokens // 10` `run_claude` uses for assistant turns, gating the
+day and window counters independently per line (a same-day line outside the current window still counts toward the
+day, and vice versa), and folds both totals into `Account.utilization()` and the daily-budget check alongside the
+worker totals. It reads incrementally (a per-file byte offset persists in `.orchestrator/planner_usage.json`, written
+only by `tally_planner()` under an flock so it isn't raced by `pool_state.json` saves) and skips a missing transcripts
+directory with one stderr line per account per process rather than raising on every tick. `daemon.tick()` calls it
+once per tick; `orchestrator pick <role>` calls it directly (tally failures there print one stderr line and fall
+through to the pool's stored numbers rather than crashing pick) for callers that need a fresh account choice without
+a running daemon.
 
 ## Pipeline
 State machine per execute task: `queued` → (depends_on merged, complexity ≥5 → `spec_review` first) → dispatched to

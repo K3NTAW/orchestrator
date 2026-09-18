@@ -1,8 +1,9 @@
 """Account pool selection (PoolSel), the [[executors]] routing table (Executors), and Planner-transcript token
 tallying (PlannerTally): bands, quota groups, cooldowns, budgets, scored ranking."""
-import json, shutil, sys, time, unittest
+import io, json, shutil, sys, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_pool.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
 from orchestrator import pool as P, spawn
@@ -24,7 +25,7 @@ def _user(ts):
 
 class PoolSel(unittest.TestCase):
     def setUp(self):
-        P.PERSIST.unlink(missing_ok=True); self.p = P.Pool()
+        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
 
     def test_affinity_reserve_cooldown_budget(self):
         self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
@@ -68,7 +69,7 @@ class Executors(unittest.TestCase):
     LIVE = {"astra", "luna", "terra", "sol"}
 
     def setUp(self):
-        P.PERSIST.unlink(missing_ok=True); self.p = P.Pool()
+        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
 
     def test_bands_and_enabled(self):
         self.assertIn(self.p.pick_executor("execute", 3).id, self.LIVE)
@@ -128,6 +129,8 @@ class PlannerTally(unittest.TestCase):
 
     def setUp(self):
         P.PERSIST.unlink(missing_ok=True)
+        P.PLANNER_USAGE.unlink(missing_ok=True)
+        P._WARNED_MISSING_DIRS.clear()
         self.p = P.Pool()
         self.a = self.p.get("A")
         self.a.config_dir = str(TMP / "fake-claude-a")  # absolute path: os.path.expanduser is a no-op on it
@@ -137,7 +140,7 @@ class PlannerTally(unittest.TestCase):
         self.now = time.time()
         self.a.window_started = self.now - 100  # window = [now-100, now+17900); comfortably holds "now"
         self.ts_in = _iso(self.now)
-        self.ts_out = _iso(self.now - 200)       # before window_started -> excluded
+        self.ts_out = _iso(self.now - 2 * 86400)  # a different calendar day -> excluded from both day and window
 
     def _write(self, name, lines):
         (self.proj_dir / name).write_text("".join(lines))
@@ -198,6 +201,56 @@ class PlannerTally(unittest.TestCase):
         self._write("a.jsonl", [_assistant(self.ts_in, big, 0, 0)])
         self.p.tally_planner()
         self.assertEqual(self.p.pick("scout").id, "B")
+
+    def test_tally_gates_day_and_window_independently(self):
+        self.a.window_started = self.now                     # window = [now, now+WINDOW_S)
+        three_h_ago = self.now - 3 * 3600                     # still today, but before window_started
+        self._write("a.jsonl", [_assistant(_iso(three_h_ago), 10, 5, 0)])
+        self.p.tally_planner()
+        self.assertEqual(self.a.planner_day_tokens, 15)
+        self.assertEqual(self.a.planner_window_tokens, 0)
+
+    def test_tally_skips_line_with_deleted_file_between_glob_and_read(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        orig_stat = Path.stat
+
+        def flaky_stat(path, *a, **k):
+            if path.name == "a.jsonl":
+                raise FileNotFoundError
+            return orig_stat(path, *a, **k)
+
+        with mock.patch.object(Path, "stat", flaky_stat):
+            self.p.tally_planner()  # must not raise
+        self.assertEqual(self.a.planner_window_tokens, 0)
+        self.assertEqual(self.a.planner_day_tokens, 0)
+
+    def test_tally_skips_non_string_timestamp(self):
+        line = json.dumps({"type": "assistant", "timestamp": 12345, "message": {"usage": {"input_tokens": 10}}}) + "\n"
+        self._write("a.jsonl", [line])
+        self.p.tally_planner()  # must not raise
+        self.assertEqual(self.a.planner_window_tokens, 0)
+        self.assertEqual(self.a.planner_day_tokens, 0)
+
+    def test_missing_transcripts_dir_warns_once_per_process(self):
+        shutil.rmtree(self.proj_dir)
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            self.p.tally_planner()
+            self.p.tally_planner()
+        lines = [l for l in err.getvalue().splitlines() if "planner transcripts not found for A" in l]
+        self.assertEqual(len(lines), 1)
+
+    def test_planner_usage_lives_outside_pool_state_and_survives_stale_save(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        fresh = P.Pool()                                      # a second Pool, also loaded before the tally
+        fresh.get("A").config_dir = self.a.config_dir
+        fresh.tally_planner()
+        self.assertEqual(fresh.get("A").planner_day_tokens, 10)
+        st = json.loads(P.PERSIST.read_text())
+        self.assertFalse(set(st["accounts"]["A"]) & P.PLANNER_ACCOUNT_FIELDS)
+        self.p.save()                                         # stale pool, loaded before the tally, saved after it
+        pu = json.loads(P.PLANNER_USAGE.read_text())
+        self.assertEqual(pu["A"]["day_tokens"], 10)            # not clobbered by the stale save
 
 
 if __name__ == "__main__":
