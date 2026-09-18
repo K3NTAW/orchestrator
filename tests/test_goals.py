@@ -321,6 +321,35 @@ class StartLaunch(GoalsTestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["requester"], "alice")
 
+    def test_start_uses_launch_planner(self):
+        repo = self.repo("uses-launch-planner")
+        self.unignore(repo)
+        self.fake_run("T-9010")
+        calls = []
+
+        def fake_launch(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None):
+            calls.append({"repo_path": repo_path, "prompt": prompt, "account_id": account_id,
+                          "max_budget_usd": max_budget_usd, "log_path": log_path, "extra_env": extra_env})
+            return {"pid": 555555, "pid_start": None, "log": str(log_path)}
+
+        orig = goals.launch_planner
+        goals.launch_planner = fake_launch
+        self.addCleanup(lambda: setattr(goals, "launch_planner", orig))
+
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertTrue(r["launched"], r)
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(call["account_id"], "A")
+        self.assertEqual(call["max_budget_usd"], 10.0)
+        self.assertIn("goal text", call["prompt"])
+        self.assertIn(r["goal_id"], call["prompt"])
+        self.assertIsNone(call["extra_env"])
+        self.assertEqual(r["pid"], 555555)
+        self.assertEqual(r["log"], str(call["log_path"]))
+        # Popen must never be invoked directly by start() once launch_planner is stubbed out.
+        self.assertEqual(FakePopen.calls, 0)
+
     def test_start_marks_workspace_trusted(self):
         repo = self.repo("trust")
         self.unignore(repo)

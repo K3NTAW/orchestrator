@@ -221,15 +221,18 @@ def _alive(pid):
         return False
 
 
-def identity(record):
+def identity_of(pid, pid_start):
     """True unless the pid is dead, or alive but demonstrably a different, reused pid."""
-    pid, pid_start = record["pid"], record.get("pid_start")
     if not _alive(pid):
         return False
     if pid_start is None:
         return True
     now_start = _proc_start(pid)
     return now_start is None or abs(now_start - pid_start) < 5
+
+
+def identity(record):
+    return identity_of(record["pid"], record.get("pid_start"))
 
 
 def _read_task(repo_path, tid):
@@ -270,6 +273,38 @@ def _preview_cfg(pool_toml):
     return tomllib.loads(src.read_text())
 
 
+def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None):
+    """Start one headless Planner subprocess against repo_path. Reads the target's own pool.toml fresh on every
+    call -- so an account's oauth_token_env or secrets.planner section added since a previous launch takes effect
+    immediately, and this never risks disagreeing with a caller's own (possibly stale) cfg about which pool.toml
+    won. Returns {pid, pid_start, log} for the caller to persist; never touches goals.json itself, so callers that
+    don't track a goal (e.g. an autonomous decision run) can use it too."""
+    repo_path = Path(os.path.realpath(repo_path))
+    cfg = tomllib.loads((repo_path / ".orchestrator" / "pool.toml").read_text())
+    accounts = {a["id"]: a for a in cfg.get("claude_accounts", [])}
+    account = accounts[account_id]
+    trust_workspace(account["config_dir"], repo_path)
+
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(account["config_dir"]), "ORCH_ROOT": str(repo_path)}
+    oauth_var = account.get("oauth_token_env")
+    if oauth_var and os.environ.get(oauth_var):
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[oauth_var]
+    env.update(resolve_secrets(_filter_target_secrets(cfg.get("secrets", {}).get("planner", {}))))
+    if extra_env:
+        env.update(extra_env)
+
+    system_prompt = (repo_path / ".orchestrator" / "prompts" / "planner.md").read_text()
+    argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"], "--output-format", "json",
+            "--max-budget-usd", str(max_budget_usd), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
+            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]
+
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w") as log_fh:
+        proc = Popen(argv, cwd=str(repo_path), env=env, stdout=log_fh, stderr=log_fh, start_new_session=True)
+    return {"pid": proc.pid, "pid_start": _proc_start(proc.pid), "log": str(log_path)}
+
+
 def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None):
     repo_path = Path(os.path.realpath(repo_path))
     pool_toml = repo_path / ".orchestrator" / "pool.toml"
@@ -308,7 +343,6 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
     # pool_toml is guaranteed to exist now (it did already, or install() just wrote it); re-read the real file --
     # install() never overwrites an existing pool.toml, so this always agrees with the preview cfg above.
     cfg = tomllib.loads(pool_toml.read_text())
-    accounts = {a["id"]: a for a in cfg.get("claude_accounts", [])}
     try:
         max_budget = cfg["limits"]["max_budget_usd"]["planner"]
     except KeyError:
@@ -330,34 +364,18 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
             err["install"] = report
         return err
 
-    account = accounts[account_id]
-    trust_workspace(account["config_dir"], repo_path)
-
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(account["config_dir"]), "ORCH_ROOT": str(repo_path)}
-    oauth_var = account.get("oauth_token_env")
-    if oauth_var and os.environ.get(oauth_var):
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[oauth_var]
-    env.update(resolve_secrets(_filter_target_secrets(cfg.get("secrets", {}).get("planner", {}))))
-
     prompt = ("Skill(orchestrate) with the goal: " + goal_text + "\nThe GOAL task is " + goal_id +
               "; use it as the parent of every task you create and post the PR url as its result before you finish.")
-    system_prompt = prompt_path.read_text()
-    argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"], "--output-format", "json",
-            "--max-budget-usd", str(max_budget), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
-            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]
-
     runs_dir = repo_path / ".orchestrator" / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
     log_path = runs_dir / f"planner-{goal_id}.log"
-    with open(log_path, "w") as log_fh:
-        proc = Popen(argv, cwd=str(repo_path), env=env, stdout=log_fh, stderr=log_fh, start_new_session=True)
+    launched = launch_planner(repo_path, prompt, account_id, max_budget, log_path)
 
-    record = {"goal_id": goal_id, "repo": str(repo_path), "text": goal_text, "pid": proc.pid,
-              "pid_start": _proc_start(proc.pid), "started_at": time.time(), "account": account_id,
+    record = {"goal_id": goal_id, "repo": str(repo_path), "text": goal_text, "pid": launched["pid"],
+              "pid_start": launched["pid_start"], "started_at": time.time(), "account": account_id,
               "commit": commit, "status": "running", "requester": requester}
     _append_goal_record(repo_path, record)
 
-    return {"launched": True, "goal_id": goal_id, "pid": proc.pid, "log": str(log_path), "commit": commit,
+    return {"launched": True, "goal_id": goal_id, "pid": launched["pid"], "log": launched["log"], "commit": commit,
             "install": report,
             "note": "goal-Planner spend is not counted against any account budget until C-O7a tallies "
                      "transcripts; the daemon may schedule other work on this account meanwhile (accepted gap)"}

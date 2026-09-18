@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, json, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, bus, executor, handover, merge, spawn
+from . import STATE, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
 
 SPEC_REVIEW_MIN = 6    # complexity at which a spec must be reviewed before an executor sees it
@@ -545,6 +545,14 @@ def tick(pool=None):
             stage(pool)
         except Exception as e:
             print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
+    if pool.cfg.get("planner", {}).get("autonomous", False):
+        try:
+            planner_runs.reconcile()
+            for goal_id, kind, payload_key in planner_runs.decision_points():
+                planner_runs.run(goal_id, kind, payload_key)
+                break  # at most one autonomous Planner launch per tick
+        except Exception as e:
+            print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
     m = pool.both_cooling_minutes()
     if m > 30:
         notify(f"both Claude accounts cooling for {m:.0f} more min")

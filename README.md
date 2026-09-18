@@ -85,6 +85,21 @@ request_changes`, or `gate_red` (tests failed at the gate). The `hold_reason` fi
 which. The Planner clears a hold by writing a new spec with `depends_on=[held_task_id]`, never by editing the held
 task directly.
 
+### Autonomous decisions
+`pool.toml`'s `[planner] autonomous` (default `false`) lets `daemon.tick()` launch a short-lived headless Planner on
+its own, without an interactive session, to act on one of three decision points: `scouts_done` (a goal's scouts are
+all done/failed and no execute task has split off yet), `held` (an execute task is held), or `closable` (every
+execute task of a goal is merged and nothing is left queued or running). `orchestrator/planner_runs.py` tracks one
+record per `(goal_id, kind, payload_key)` in `.orchestrator/runs/planner_runs.json`; `reconcile()` (called first
+every tick) resolves a running record whose process has exited to `exited_ok` (something already finished the
+decision), `exited_early` (retry, up to one more attempt), or `gave_up` (two early exits; notifies once and blocks
+that key for good); `decision_points()` then yields every key with no blocking (`running`/`exited_ok`/`gave_up`)
+record, and `tick()` launches at most one per pass via `goals.launch_planner`. Two guards make sure an autonomous
+launch never runs alongside a human: `ORCH_DAEMON_HOST=mcp` (set by the orchestrator MCP server on its own process
+env) and `.orchestrator/planner_session.json` (written atomically by that same server at start, removed at exit,
+and named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
+interactive Planner session ever attaches -- leave it off anywhere one might.
+
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),
 `roles`, `complexity_min`/`max`, `max_parallel`, `daily_budget_tasks`, `quota_group`, `weight`, `enabled`.

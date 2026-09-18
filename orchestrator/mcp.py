@@ -1,7 +1,7 @@
 """MCP server `orchestrator`: scheduler for the Planner. Spawns run in background threads; results land on the bus."""
-import sys, threading
+import atexit, json, os, sys, tempfile, threading, time
 from mcp.server.mcpserver import MCPServer
-from . import bus, daemon, executor, merge as mq, spawn
+from . import STATE, bus, daemon, executor, goals, merge as mq, spawn
 from .pool import Pool, fallback_tier
 
 srv = MCPServer("orchestrator")
@@ -14,6 +14,51 @@ try:
     daemon_thread = daemon.start_background(Pool().cfg)
 except Exception as e:
     print(f"[daemon] autostart failed: {e}", file=sys.stderr)
+
+
+def _planner_session_path():
+    return STATE / "planner_session.json"
+
+
+def register_planner_session():
+    """This MCP server lives exactly as long as one interactive Planner session (pool.toml [daemon] autostart
+    comment): mark that with ORCH_DAEMON_HOST=mcp for anything spawned as a child of this process, and with
+    .orchestrator/planner_session.json for anything (e.g. an autonomous daemon.tick()) that only shares the
+    filesystem, not the environment. Written atomically (temp file + os.replace) so a reader never observes a
+    half-written file. A reader treats a stale file -- one whose pid fails goals.identity_of -- as absent."""
+    os.environ["ORCH_DAEMON_HOST"] = "mcp"
+    path = _planner_session_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"pid": os.getpid(), "pid_start": goals._proc_start(os.getpid()), "started_at": time.time(), "host": "mcp"}
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".planner_session.json.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data))
+        os.replace(tmp_name, path)
+    except Exception:
+        os.unlink(tmp_name)
+        raise
+    return path
+
+
+def deregister_planner_session():
+    """atexit hook: remove planner_session.json only while it still names this process -- a later MCP server that
+    started after this one exited already overwrote it with its own registration, and this process must never
+    delete that newer one out from under it."""
+    path = _planner_session_path()
+    try:
+        data = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    if data.get("pid") == os.getpid():
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+register_planner_session()
+atexit.register(deregister_planner_session)
 
 
 def _bg(task_id):
