@@ -7,28 +7,28 @@ container restarts on its own.
 
 ## Prerequisites
 
-- Docker Engine and the `docker compose` plugin on the host.
+- Docker Engine with BuildKit, and Docker Compose v2.24+ (needed for the `env_file` long syntax used here).
 - A host user that will own the credential directories (any user is fine; its uid/gid drive the build).
 - Network egress to `claude.ai`, `github.com`, `astral.sh`, `cli.github.com` for the image build, and to
   Anthropic's and OpenAI's APIs at runtime.
-- The image builds for `linux/amd64` only. On an Apple Silicon laptop, either run the smoke build under
-  emulation (default, slow) or add `--platform linux/amd64` explicitly to `docker build`.
+- Build natively on each host's own architecture -- kenta-server builds amd64 natively, an Apple Silicon
+  laptop builds arm64 natively for smoke tests. Never build under emulation: on Apple Silicon, QEMU
+  emulation of amd64 segfaults running the Claude Code installer's Bun binary (no AVX under emulation).
 
 ## 1. Align UID/GID
 
 The container's `orch` user is created at build time with `--build-arg UID`/`--build-arg GID`, so files it
 writes into the bind-mounted credential directories are readable/writable by the same host user that owns
-those directories. On the host:
+those directories. On the host, write a compose `.env` file (gitignored and dockerignored; `docker compose`
+reads it automatically from the directory it runs in):
 
 ```bash
-id -u   # note this value
-id -g   # note this value
-export UID
-export GID
+printf 'ORCH_UID=%s\nORCH_GID=%s\n' "$(id -u)" "$(id -g)" > .env
 ```
 
-`docker-compose.executor.yml` reads `UID`/`GID` from the environment (default `1000`/`1000` if unset) and
-passes them as build args.
+`docker-compose.executor.yml` reads `ORCH_UID`/`ORCH_GID` from that file (default `1000`/`1000` if unset)
+and passes them as build args. Use the same values below wherever a `chown` needs to match the container's
+`orch` user.
 
 ## 2. Create the credential, work and config directories
 
@@ -38,7 +38,8 @@ defaults to that path):
 ```bash
 export ORCH_CREDS=${ORCH_CREDS:-$HOME/orch-creds}
 mkdir -p "$ORCH_CREDS"/claude-a "$ORCH_CREDS"/claude-b "$ORCH_CREDS"/codex "$ORCH_CREDS"/gh ./work ./config
-chown -R "$UID:$GID" "$ORCH_CREDS" ./work ./config
+source .env
+chown -R "$ORCH_UID:$ORCH_GID" "$ORCH_CREDS" ./work ./config
 ```
 
 The four credential directories mount to `/home/orch/.claude-a`, `/home/orch/.claude-b`, `/home/orch/.codex`
@@ -157,8 +158,9 @@ export ORCH_NET=<network name from above>
 
 `codex login` and `gh auth login` write into `~/.codex` and `~/.config/gh` respectively, which are the
 directories bind-mounted in step 2 — run them once through the container so the resulting auth files land in
-the mounted volume instead of the container's throwaway filesystem. This needs `UID`/`GID`, `ORCH_CREDS` and
-`ORCH_NET` exported and `executor.env`/`./config` already in place (steps 1–6):
+the mounted volume instead of the container's throwaway filesystem. This needs `.env` (`ORCH_UID`/
+`ORCH_GID`), `ORCH_CREDS` and `ORCH_NET` exported and `executor.env`/`./config` already in place (steps
+1–6):
 
 ```bash
 docker compose -f docker-compose.executor.yml run --rm orchestrator-executor codex login --device-auth
@@ -178,8 +180,15 @@ module, not from the host's own network namespace.
 
 ## 9. Smoke test
 
-From the host (or any container on the same docker network), replacing `$ORCH_SERVICE_TOKEN` with the value
-you put in `executor.env`:
+No ports are published, so the host can't reach the container by its own network namespace. From the host,
+go through `docker compose exec`:
+
+```bash
+docker compose -f docker-compose.executor.yml exec orchestrator-executor curl -f http://localhost:8090/healthz
+```
+
+From any other container on the same docker network (e.g. the kgpt module), reach it by service name
+directly, replacing `$ORCH_SERVICE_TOKEN` with the value you put in `executor.env`:
 
 ```bash
 curl -f http://orchestrator-executor:8090/healthz

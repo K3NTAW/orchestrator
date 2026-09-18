@@ -8,8 +8,12 @@
 # used here, so there's no published checksum file to check against. The uv and Claude Code installer
 # scripts are downloaded to a file and sha256sum'd into the build log for audit before running -- neither
 # vendor publishes a checksum file for the script itself to verify against.
-# Bump: `docker buildx imagetools inspect ubuntu:24.04` and take the digest for platform linux/amd64.
-FROM --platform=linux/amd64 ubuntu:24.04@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
+# No --platform pin: this digest is the multi-arch manifest list, so Docker picks the matching entry for
+# whatever host builds it (amd64 on kenta-server, arm64 native on the laptop for smoke tests -- never
+# emulate). The codex asset below is selected per-arch separately, since it has no multi-arch manifest.
+# Bump: `docker manifest inspect ubuntu:24.04` and take the Docker-Content-Digest of the index itself
+# (the top-level response), not one of the per-platform manifests it lists.
+FROM ubuntu:24.04@sha256:b3cc40b72b93588182b5410f723c7aaf142363311c2aa993d8a453ddcbb3ae15
 
 ARG UID=1000
 ARG GID=1000
