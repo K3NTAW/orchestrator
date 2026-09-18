@@ -93,9 +93,19 @@ def already_merged(t):
 
 def free_slots(pool):
     """How many execute dispatches this tick may make: the executor pool's idle parallelism. Bounds tick()'s work
-    so a queue of forty ready tasks does not fork forty subprocesses at once."""
-    return sum(max(0, ex.max_parallel - ex.running) for ex in pool.executors.values()
-               if ex.enabled and "execute" in ex.roles and not ex.cooling())
+    so a queue of forty ready tasks does not fork forty subprocesses at once.
+
+    When every Codex executor is cooling and codex.on_exhausted == "fallback_claude", the Codex sum is 0 but
+    executor.start()'s _exhausted() path (executor.py:110) will itself route the task to a Claude fallback tier
+    instead of holding it -- so the real ceiling here is limits.max_parallel_claude_workers, less whatever Claude
+    fallback executes are already running (gotchas.md 2026-09-18: T-0070 needed a hand dispatch without this)."""
+    codex_slots = sum(max(0, ex.max_parallel - ex.running) for ex in pool.executors.values()
+                      if ex.enabled and "execute" in ex.roles and not ex.cooling())
+    if codex_slots or pool.cfg["codex"]["on_exhausted"] != "fallback_claude":
+        return codex_slots
+    running_claude = sum(1 for t in bus.read(status="running", role="execute")
+                         if (t.get("executor") or "").startswith("claude:"))
+    return max(0, pool.cfg["limits"]["max_parallel_claude_workers"] - running_claude)
 
 
 def spawn_async(fn, *args):
@@ -154,6 +164,19 @@ def dispatch(pool):
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
 
 
+def review_tier(t):
+    """Never let a model review its own output (CLAUDE.md rule): a task the daemon fell back to a Claude tier for
+    (executor.py's _exhausted(), executor field "claude:<tier>") must be reviewed by the other Claude tier, not
+    the reviewer's usual sonnet default (gotchas.md 2026-09-18: T-0071 was sonnet-executed and sonnet-reviewed).
+    Codex-executed tasks keep the default tier."""
+    ex = t.get("executor") or ""
+    if ex.startswith("claude:sonnet"):
+        return "opus"
+    if ex.startswith("claude:opus"):
+        return "sonnet"
+    return "sonnet"
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
     open a review task (everything else)."""
@@ -177,7 +200,8 @@ def gate(pool):
                 report_merge(t["id"], merge.merge(t["id"]))
             else:
                 r = bus.create_task(f"review: {t['title']}", t["spec"], t["acceptance"], t["scope"], role="review",
-                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"])
+                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
+                                    tier=review_tier(t))
                 spawn_async(spawn.run_worker, r["id"])
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)

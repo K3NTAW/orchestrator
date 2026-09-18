@@ -95,6 +95,38 @@ class Daemon(unittest.TestCase):
         daemon.tick()
         self.assertEqual(self.settle_started(2), [a, b])           # A is not dispatched twice: dispatched_at is stamped
 
+    def test_free_slots_uses_claude_capacity_under_fallback(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)                        # cools the whole "chatgpt" quota group
+        self.assertEqual(pool.cfg["codex"]["on_exhausted"], "fallback_claude")
+        self.assertEqual(daemon.free_slots(pool), pool.cfg["limits"]["max_parallel_claude_workers"])
+
+    def test_free_slots_zero_under_hold_policy(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        pool.cfg["codex"]["on_exhausted"] = "hold"
+        self.assertEqual(daemon.free_slots(pool), 0)
+
+    def test_free_slots_subtracts_running_claude_executes(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        a = self.task("running A", complexity=3)
+        bus.update(a, status="running", executor="claude:sonnet")
+        b = self.task("running B", complexity=3)
+        bus.update(b, status="running", executor="claude:opus")
+        want = pool.cfg["limits"]["max_parallel_claude_workers"] - 2
+        self.assertEqual(daemon.free_slots(pool), want)
+
+    def test_daemon_once_dispatches_under_fallback_when_codex_cooling(self):
+        """§T-0083 acceptance: with pool.toml as committed and every Codex executor cooling, a single tick still
+        dispatches a queued low-complexity execute task instead of stalling at free_slots()==0 (gotchas.md
+        2026-09-18: T-0070 needed a hand dispatch before this fix)."""
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        a = self.task("A", complexity=3)
+        daemon.tick(pool)
+        self.assertTrue(bus.get(a)["pipeline"].get("dispatched_at"))
+
     def test_high_complexity_waits_for_spec_review(self):
         c = self.task("C", complexity=6)
         daemon.tick()
@@ -139,6 +171,24 @@ class Daemon(unittest.TestCase):
         self.assertEqual((held["status"], held["hold_reason"]), ("held", "gate_red"))
         self.assertEqual(bus.read(role="review"), [])
         self.assertEqual(self.merged, [])
+
+    def test_gate_review_tier_opus_for_sonnet_executor(self):
+        t = self.task("big", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), executor="claude:sonnet")
+        daemon.tick()
+        self.assertEqual(bus.read(role="review")[0]["tier"], "opus")
+
+    def test_gate_review_tier_sonnet_for_opus_executor(self):
+        t = self.task("big", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), executor="claude:opus")
+        daemon.tick()
+        self.assertEqual(bus.read(role="review")[0]["tier"], "sonnet")
+
+    def test_gate_review_tier_default_for_codex(self):
+        t = self.task("big", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick()
+        self.assertEqual(bus.read(role="review")[0]["tier"], "sonnet")
 
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")
