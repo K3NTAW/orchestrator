@@ -30,6 +30,8 @@ Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` t
 `orchestrator pick planner|scout|review|execute` tallies Planner usage fresh, then prints `<account_id>\t<config_dir>`
 for `pool.pick(role)`, or exits 3 with `hold: no account with headroom`; a launcher not running the daemon calls this
 so its account choice still reflects current Planner usage.
+`orchestrator scorecard --by task|goal` rolls runs/*.jsonl up by task or by goal (role split in percent of usd,
+plus a planner line from `.orchestrator/planner_usage.json`/`runs/planner_runs.json` when present, else `-`).
 `uv run orchestrator handover [--reason TEXT]` writes/replaces the `## Auto-handover` section at the end of
 `.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
 calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.

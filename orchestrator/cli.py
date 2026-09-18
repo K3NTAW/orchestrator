@@ -35,7 +35,8 @@ def main():
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
-    sc = sub.add_parser("scorecard"); sc.add_argument("--by", default="executor", choices=["executor", "tier"])
+    sc = sub.add_parser("scorecard")
+    sc.add_argument("--by", default="executor", choices=["executor", "tier", "task", "goal"])
     sc.add_argument("--json", action="store_true")
     g = sub.add_parser("goal"); gsub = g.add_subparsers(dest="goal_cmd", required=True)
     gs = gsub.add_parser("start"); gs.add_argument("repo"); gs.add_argument("text")
@@ -121,15 +122,47 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        card = scorecard.build(by=a.by)
-        sc = scorecard.scores(card)
-        if a.json:
-            print(json.dumps(card, indent=1))
-        else:
-            print("id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore")
-            for eid, r in sorted(card.items()):
-                print(f"{eid}\t{r['merged']}\t{r['failed']}\t{r['rounds_avg']}\t{round(r['wall_s'])}\t"
-                      f"{round(r['usd'], 2)}\t{r['held_usage_limit']}\t{round(sc.get(eid, 1.0), 3)}")
+        if a.by in ("executor", "tier"):
+            card = scorecard.build(by=a.by)
+            sc = scorecard.scores(card)
+            if a.json:
+                print(json.dumps(card, indent=1))
+            else:
+                print("id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore")
+                for eid, r in sorted(card.items()):
+                    print(f"{eid}\t{r['merged']}\t{r['failed']}\t{r['rounds_avg']}\t{round(r['wall_s'])}\t"
+                          f"{round(r['usd'], 2)}\t{r['held_usage_limit']}\t{round(sc.get(eid, 1.0), 3)}")
+        elif a.by == "task":
+            card = scorecard.by_task()
+            if a.json:
+                print(json.dumps(card, indent=1))
+            else:
+                print("task\trole\ttier\tusd\ttokens\twall_s")
+                total_usd = total_tokens = total_wall = 0.0
+                for tid, r in sorted(card.items(), key=lambda kv: kv[1]["usd"], reverse=True):
+                    print(f"{tid}\t{r['role'] or '-'}\t{r['tier'] or '-'}\t{round(r['usd'], 2)}\t"
+                          f"{r['tokens']}\t{round(r['wall_s'])}")
+                    total_usd += r["usd"]; total_tokens += r["tokens"]; total_wall += r["wall_s"]
+                print(f"total\t-\t-\t{round(total_usd, 2)}\t{total_tokens}\t{round(total_wall)}")
+        elif a.by == "goal":
+            card = scorecard.by_goal()
+            if a.json:
+                print(json.dumps(card, indent=1))
+            else:
+                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tplanner%\tplanner_tokens")
+                total_usd = 0.0
+                footnote = False
+                for gid, r in sorted(card.items(), key=lambda kv: kv[1]["total_usd"], reverse=True):
+                    pct = scorecard.goal_percentages(r)
+                    planner_pct, planner_tok = scorecard.format_planner_cell(r)
+                    footnote = footnote or planner_pct.endswith("%*")
+                    print(f"{gid}\t{round(r['total_usd'], 2)}\t{round(pct['execute'], 1)}%\t"
+                          f"{round(pct['review'], 1)}%\t{round(pct['spec_review'], 1)}%\t{round(pct['scout'], 1)}%\t"
+                          f"{planner_pct}\t{planner_tok}")
+                    total_usd += r["total_usd"]
+                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-")
+                if footnote:
+                    print("* planner percent is share of tokens, not usd (transcripts carry no cost)")
     elif a.cmd == "bench":
         from . import bench
         if a.bench_cmd == "fetch":
