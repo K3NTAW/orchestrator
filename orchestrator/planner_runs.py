@@ -4,17 +4,22 @@ without an interactive Planner session in the loop. ROOT only (this repo's own b
 which operates on any target repo_path.
 
 DEDUP: one record per (goal_id, kind, payload_key) in .orchestrator/runs/planner_runs.json. "scouts_done" and
-"closable" key on goal_id; "held" keys on f"{task_id}:{hold_reason}:{held_at!r}" so a fresh hold (a new held_at)
-is a new decision even if an old one for the same task already gave up. A record with status running, claimed,
-exited_ok or gave_up BLOCKS re-decision (decision_points() will not re-yield the key); skipped never blocks;
-exited_early does not block while attempts < 2 -- reconcile() retries it -- and turns permanently blocking
-(gave_up) once a second early exit would push attempts to 2.
+"closable" key on goal_id; "held" keys on f"{task_id}:{held_at!r}" (no hold_reason -- untrusted task content
+never becomes part of a key or a rendered prompt, see _held_key/run()) so a fresh hold (a new held_at) is a new
+decision even if an old one for the same task already gave up. A record with status running, claimed, exited_ok
+or gave_up BLOCKS re-decision (decision_points() will not re-yield the key); skipped never blocks; exited_early
+does not block while attempts < 2 -- reconcile() retries it -- and turns permanently blocking (gave_up) once a
+second early exit would push attempts to 2. failed_launch (an exception between claim and launch, or a claimed
+row reconcile() aged out because the process never got as far as recording "running") behaves like exited_early:
+it does not block, but counts toward the same attempts/gave_up-at-2 rule.
 """
-import json, os, sys, tempfile, time
+import json, os, re, sys, tempfile, time
 from . import ROOT, STATE, bus, goals, handover, spawn
 from .pool import Pool
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
+_STALE_CLAIM_S = 120
+_SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 
 
 def _runs_path():
@@ -81,10 +86,13 @@ def _held_at(t):
 
 
 def _held_key(t):
+    """task_id and held_at only -- never hold_reason. hold_reason is untrusted task content (T-0198 review item 2):
+    it must never end up in a key that later gets rendered into the decision Planner's prompt. The decision
+    Planner reads hold_reason itself, from the bus, as data."""
     held_at = _held_at(t)
     if held_at is None:
         return None
-    return f"{t['id']}:{t.get('hold_reason')}:{held_at!r}"
+    return f"{t['id']}:{held_at!r}"
 
 
 def decision_points():
@@ -142,7 +150,10 @@ def _session_attached():
         data = json.loads(path.read_text())
     except json.JSONDecodeError:
         return False
-    return goals.identity_of(data.get("pid"), data.get("pid_start"))
+    pid = data.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return False
+    return goals.identity_of(pid, data.get("pid_start"))
 
 
 def _existing_attempts(goal_id, kind, payload_key):
@@ -195,35 +206,72 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts):
         _save_records(records)
 
 
+def _record_failed_launch(goal_id, kind, payload_key, attempts, error):
+    """A failure anywhere between _claim() and _record_running() (an exception raised while rendering the prompt,
+    picking an account, or launching the process) must release the key rather than leave it stuck "claimed"
+    forever: flip to "failed_launch" (not in _BLOCKING_STATUSES) so decision_points() yields it again next tick,
+    same as exited_early. attempts is incremented here and follows the same gave_up-at-2 rule as reconcile()'s
+    exited_early path, so a launch that keeps throwing does not retry forever either."""
+    with bus.locked():
+        records = _load_records()
+        r = _find_record(records, goal_id, kind, payload_key)
+        if r is None:
+            r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
+            records.append(r)
+        new_attempts = attempts + 1
+        status = "gave_up" if new_attempts >= 2 else "failed_launch"
+        r.update(status=status, attempts=new_attempts, error=str(error)[:300], last_failed_at=time.time())
+        _save_records(records)
+    return status, new_attempts
+
+
 def run(goal_id, kind, payload_key):
     """Launch a headless Planner for one decision, guarded against attaching alongside an interactive session or
     a saturated pool. The already-decided check and the claim that follows it run inside one bus.locked() block
     (T-0196 review item 2): two concurrent callers for the same key can never both pass the check, since whichever
     loses the race to the lock sees the winner's "claimed" record and returns "already decided" immediately --
     before either guard or launch_planner runs on either thread. Guard skips are recorded (status "skipped", no
-    pid) but never block a later decision_points() or run() call for the same key."""
+    pid) but never block a later decision_points() or run() call for the same key. Everything from here to the
+    launch itself is wrapped in try/except BaseException (T-0198 review item 1): any failure -- a guard raising,
+    render() rejecting an unsafe key, launch_planner itself throwing -- flips the claimed row to "failed_launch"
+    instead of leaving it stuck "claimed" forever, and is never re-raised."""
     with bus.locked():
         if _blocked(goal_id, kind, payload_key):
             return {"launched": False, "reason": "already decided"}
         attempts = _existing_attempts(goal_id, kind, payload_key)
         _claim(goal_id, kind, payload_key, attempts)
 
-    if _session_attached():
-        _record_skip(goal_id, kind, payload_key, "planner session attached")
-        return {"launched": False, "reason": "planner session attached"}
+    try:
+        if _session_attached():
+            _record_skip(goal_id, kind, payload_key, "planner session attached")
+            return {"launched": False, "reason": "planner session attached"}
 
-    pool = Pool()
-    acct = pool.pick("planner")
-    if acct is None:
-        _record_skip(goal_id, kind, payload_key, "no account with headroom")
-        return {"launched": False, "reason": "no account with headroom"}
+        pool = Pool()
+        acct = pool.pick("planner")
+        if acct is None:
+            _record_skip(goal_id, kind, payload_key, "no account with headroom")
+            return {"launched": False, "reason": "no account with headroom"}
 
-    handover.write(f"decision {kind}")
+        # Defense in depth (T-0198 review item 2): kind/goal_id/payload_key are ids and reprs of timestamps, never
+        # free text -- but refuse to render a prompt from any of them if that ever stops being true, rather than
+        # trust it silently.
+        if not all(_SAFE_KEY.match(v) for v in (kind, goal_id, payload_key)):
+            _record_skip(goal_id, kind, payload_key, "unsafe decision key")
+            return {"launched": False, "reason": "unsafe decision key"}
 
-    prompt = spawn.render("planner-decision", kind=kind, goal_id=goal_id, payload=payload_key)
-    budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
-    log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
-    launched = goals.launch_planner(ROOT, prompt, acct.id, budget, log)
+        handover.write(f"decision {kind}")
+
+        prompt = spawn.render("planner-decision", kind=kind, goal_id=goal_id, payload=payload_key)
+        budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
+        log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
+        launched = goals.launch_planner(ROOT, prompt, acct.id, budget, log)
+    except BaseException as e:
+        status, new_attempts = _record_failed_launch(goal_id, kind, payload_key, attempts, e)
+        if status == "gave_up":
+            from . import daemon  # deferred: daemon imports this module at load time
+            daemon.notify(f"{goal_id}: planner decision {kind} ({payload_key}) gave up after {new_attempts} "
+                          f"attempts (last: launch failed)")
+        return {"launched": False, "reason": "failed_launch", "error": str(e)[:300]}
 
     _record_running(goal_id, kind, payload_key, launched, acct.id, attempts)
     return {"launched": True, "pid": launched["pid"], "log": launched["log"]}
@@ -268,7 +316,12 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
 def reconcile():
     """For each running record whose process is gone: exited_ok if the decision's own condition already resolved
     (someone else, or a prior attempt, finished it), else exited_early with attempts += 1 -- gave_up (and one
-    notify) once that reaches 2. Call at the start of the autonomous block every tick, before decision_points()."""
+    notify) once that reaches 2. Also ages out any "claimed" record (pid still None -- run() died, or its host
+    process was killed, between _claim() and _record_running()) older than _STALE_CLAIM_S: without this, a claim
+    whose process never got far enough to record "running" would block re-decision forever, since "claimed" is
+    itself a blocking status. Aged-out claims go to failed_launch/gave_up via the same attempts-based rule as a
+    failed launch (T-0198 review item 1). Call at the start of the autonomous block every tick, before
+    decision_points()."""
     all_tasks = bus.read()
     tasks_by_id = {t["id"]: t for t in all_tasks}
     children_by_parent = {}
@@ -278,10 +331,23 @@ def reconcile():
             children_by_parent.setdefault(parent, []).append(t)
 
     gave_up = []
+    now = time.time()
     with bus.locked():
         records = _load_records()
         changed = False
         for r in records:
+            if r.get("status") == "claimed" and r.get("pid") is None:
+                if now - r.get("started_at", 0) <= _STALE_CLAIM_S:
+                    continue
+                changed = True
+                r["attempts"] = r.get("attempts", 0) + 1
+                r["error"] = f"stale claim: no pid recorded within {_STALE_CLAIM_S}s"
+                if r["attempts"] >= 2:
+                    r["status"] = "gave_up"
+                    gave_up.append(r)
+                else:
+                    r["status"] = "failed_launch"
+                continue
             if r.get("status") != "running":
                 continue
             if goals.identity_of(r.get("pid"), r.get("pid_start")):
