@@ -5,6 +5,7 @@ logged to .orchestrator/runs/jev/gate.jsonl. Fails open on anything unusual: Jev
 (ask() returns None), a missing/corrupt transcript, or a malformed answer -- the caller never blocks on our
 account. destructive is logged only; guardrails.sh is the one hook that actually blocks destructive commands.
 """
+import hashlib
 import time
 _IMPORTED_AT = time.time()
 import json, os, re, sys
@@ -126,13 +127,51 @@ def load_task(task_id):
 
 
 def _target(tool_name, tool_input):
+    from . import jev
     ti = tool_input or {}
-    for key in ("file_path", "path", "notebook_path", "pattern", "url"):
-        if ti.get(key):
-            return ti[key]
+    if tool_name in {"Read", "Edit", "Write", "Grep", "Glob"}:
+        for key in ("file_path", "path", "notebook_path"):
+            if ti.get(key):
+                return jev.redact(str(ti[key]))
     if tool_name == "Bash":
-        return (ti.get("command") or "")[:60]
+        return jev.redact(str(ti.get("command") or "")[:80])
     return ""
+
+
+def _input_hash(tool_name, tool_input):
+    normalized = json.dumps(tool_input or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha1((tool_name + normalized).encode("utf-8")).hexdigest()
+
+
+def _session_state(session_id):
+    path = STATE / "runs" / "jev" / f"session-{session_id}.json"
+    try:
+        data = json.loads(path.read_text())
+        return path, data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return path, {}
+
+
+def _target_mtime(target):
+    try:
+        return os.stat(target).st_mtime_ns
+    except (OSError, TypeError):
+        return None
+
+
+def _record_call(session_id, tool_name, tool_input):
+    """Return (hash, target, repeat, zero-based call index), updating the per-session index."""
+    path, state = _session_state(session_id or "unknown")
+    input_hash = _input_hash(tool_name, tool_input)
+    target = _target(tool_name, tool_input)
+    mtime = _target_mtime(target)
+    previous = state.get(input_hash) or {}
+    repeat = input_hash in state and previous.get("mtime") == mtime
+    call_index = sum(int(v.get("count", 0)) for v in state.values() if isinstance(v, dict))
+    state[input_hash] = {"count": int(previous.get("count", 0)) + 1, "mtime": mtime}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, sort_keys=True))
+    return input_hash, target, repeat, call_index
 
 
 def build_state(task, recent, tool_name, tool_input):
@@ -202,7 +241,8 @@ def _message(reason, tool_name, tool_input):
     return "jev-gate: not needed for the acceptance criteria; continue with the next criterion"
 
 
-def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency_ms, startup_ms=0.0):
+def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency_ms, startup_ms=0.0,
+         tool_target="", input_hash="", repeat=False, sampled=False):
     answers = answers or {}
     _, reason = decide(answers, "block")
     rule = ("none" if reason is None else
@@ -217,6 +257,7 @@ def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency
         "confidence": needed.get("confidence"),
         "mode": mode, "blocked": blocked, "latency_ms": latency_ms, "scored": scored,
         "startup_ms": startup_ms,
+        "tool_target": tool_target, "input_hash": input_hash, "repeat": repeat, "sampled": sampled,
     }
     GATE_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(GATE_LOG, "a") as fh:
@@ -242,8 +283,25 @@ def run(payload):
     if not task or task.get("role") not in cfg.get("gate_roles", GATED_ROLES):
         return 0
 
+    input_hash, target, repeat, call_index = _record_call(session_id, tool_name, tool_input)
+
     if is_protected(tool_name, tool_input):
-        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=0.0)
+        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=0.0,
+             tool_target=target, input_hash=input_hash, repeat=repeat)
+        return 0
+
+    if mode == "block" and cfg.get("block_repeats", False) and repeat:
+        _log(task_id, session_id, tool_name, None, mode, blocked=True, scored=False, latency_ms=0.0,
+             tool_target=target, input_hash=input_hash, repeat=True)
+        print("jev-gate: identical read already made this session; use the earlier result", file=sys.stderr)
+        return 2
+
+    sample_rate = float(cfg.get("sample_rate", 0.1))
+    sampled = mode != "sample" or (int(hashlib.sha1(f"{session_id}{call_index}".encode()).hexdigest(), 16) % 1000
+                                    < sample_rate * 1000)
+    if mode == "sample" and not sampled:
+        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=0.0,
+             tool_target=target, input_hash=input_hash, repeat=repeat, sampled=False)
         return 0
 
     from . import jev  # Network imports only after enabled, role and skip checks.
@@ -256,11 +314,13 @@ def run(payload):
     latency_ms = (time.monotonic() - started) * 1000
 
     if answers is None:
-        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=latency_ms, startup_ms=startup_ms)
+        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=latency_ms,
+             startup_ms=startup_ms, tool_target=target, input_hash=input_hash, repeat=repeat, sampled=sampled)
         return 0
 
     blocked, reason = decide(answers, mode)
-    _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms, startup_ms=startup_ms)
+    _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms,
+         startup_ms=startup_ms, tool_target=target, input_hash=input_hash, repeat=repeat, sampled=sampled)
     if blocked:
         print(_message(reason, tool_name, tool_input), file=sys.stderr)
         return 2

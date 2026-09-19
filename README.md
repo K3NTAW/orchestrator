@@ -153,7 +153,7 @@ JSON, daily budget exhausted -- makes `ask()` return `None` (fail-open) instead 
 `noul()`, `choice()` and `score()` wrap `ask()` for yes/no, multiple-choice and leveled-score questions. Egress
 note: task specs, tool-call metadata and memory titles leave the machine; file contents never do.
 
-Jev API confidence is optional: with confidence at least 0.6 the gate blocks at P(redundant) ≥ 0.85 or P(needed) ≤ 0.15; without confidence it uses stricter thresholds of 0.92 and 0.08, respectively. Enable block mode only after a week of log-mode rows.
+Jev API confidence is optional: with confidence at least 0.6 the gate blocks at P(redundant) ≥ 0.85 or P(needed) ≤ 0.15; without confidence it uses stricter thresholds of 0.92 and 0.08. The gate defaults to deterministic `sample` mode (10% of calls), detects repeated inputs while tracking target mtimes, and `orchestrator jev diagnose` reports waste, repeats, latency and role/tool splits. Use its JSONL export for hand labelling before enabling any block rule; `block_repeats` can then deny unchanged repeats locally without a network call.
 
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),

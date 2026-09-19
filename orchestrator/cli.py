@@ -1,9 +1,77 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary"""
-import argparse, json, os, sys
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
+import argparse, json, os, random, sys
 from collections import defaultdict
+from datetime import datetime
 from . import ROOT, bus, scorecard
 from .bus import RUNS
 from .pool import Pool
+
+
+def _percentile(values, percentile):
+    if not values:
+        return "-"
+    values = sorted(values)
+    index = (len(values) - 1) * percentile / 100
+    low, high = int(index), min(int(index) + 1, len(values) - 1)
+    return round(values[low] + (values[high] - values[low]) * (index - low), 1)
+
+
+def _jev_diagnose(since=None, export=None, n=10):
+    path = ROOT / ".orchestrator" / "runs" / "jev" / "gate.jsonl"
+    rows = []
+    if path.exists():
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if since and datetime.fromtimestamp(row.get("ts", 0)).date().isoformat() < since:
+                continue
+            rows.append(row)
+
+    roles = {}
+    tasks = {}
+    for row in rows:
+        tid = row.get("task")
+        if tid not in tasks:
+            try:
+                tasks[tid] = bus.get(tid).get("role") or "?"
+            except Exception:
+                tasks[tid] = "?"
+        row["role"] = tasks[tid]
+
+    def bucket(key):
+        out = {}
+        for row in rows:
+            name = row.get(key) or "?"
+            item = out.setdefault(name, {"calls": 0, "scored": 0, "waste": 0, "repeat": 0})
+            item["calls"] += 1
+            item["scored"] += bool(row.get("scored"))
+            item["repeat"] += bool(row.get("repeat"))
+            if row.get("scored") and ((row.get("p_needed") is not None and row["p_needed"] < 0.3) or
+                                       (row.get("p_redundant") is not None and row["p_redundant"] > 0.7)):
+                item["waste"] += 1
+        for item in out.values():
+            item["waste_pct"] = round(item["waste"] / item["scored"] * 100, 1) if item["scored"] else 0.0
+            item["repeat_pct"] = round(item["repeat"] / item["calls"] * 100, 1) if item["calls"] else 0.0
+        return out
+
+    scored = [r for r in rows if r.get("scored")]
+    latencies = [float(r.get("latency_ms") or 0) for r in scored]
+    startup = [float(r.get("startup_ms") or 0) for r in scored]
+    network = [max(0.0, l - s) for l, s in zip(latencies, startup)]
+    print(f"calls={len(rows)} scored={len(scored)} sampled_share={round(len(scored) / len(rows) * 100, 1) if rows else 0.0}%")
+    print(f"blocked={sum(bool(r.get('blocked')) for r in rows)}")
+    print(f"latency_ms_p50={_percentile(latencies, 50)} latency_ms_p95={_percentile(latencies, 95)} "
+          f"startup_ms_p50={_percentile(startup, 50)} network_ms_p50={_percentile(network, 50)}")
+    print("by_tool=" + json.dumps(bucket("tool"), sort_keys=True))
+    print("by_role=" + json.dumps(bucket("role"), sort_keys=True))
+    if export:
+        chosen = random.sample(scored, min(max(0, n), len(scored)))
+        with open(export, "w") as fh:
+            for row in chosen:
+                fh.write(json.dumps({**row, "label": ""}) + "\n")
+        print(f"exported {len(chosen)} rows to {export}")
 
 
 def _format_goal_line(e):
@@ -69,6 +137,8 @@ def main():
     sc.add_argument("--by", default="executor", choices=["executor", "tier", "task", "goal"])
     sc.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
+    j = sub.add_parser("jev"); jsub = j.add_subparsers(dest="jev_cmd", required=True)
+    jd = jsub.add_parser("diagnose"); jd.add_argument("--since"); jd.add_argument("--export"); jd.add_argument("--n", type=int, default=10)
     g = sub.add_parser("goal"); gsub = g.add_subparsers(dest="goal_cmd", required=True)
     gs = gsub.add_parser("start"); gs.add_argument("repo"); gs.add_argument("text")
     gs.add_argument("--account", default="A"); gs.add_argument("--reinstall", action="store_true")
@@ -218,6 +288,8 @@ def main():
         s = planner_runs.summary()
         print(f"decisions={s['decisions']}\tjev_scored={s['jev_scored']}\t"
               f"agreement_rate={s['agreement_rate']}\tmean_confidence={s['mean_confidence']}")
+    elif a.cmd == "jev" and a.jev_cmd == "diagnose":
+        _jev_diagnose(a.since, a.export, a.n)
     elif a.cmd == "bench":
         from . import bench
         if a.bench_cmd == "fetch":
