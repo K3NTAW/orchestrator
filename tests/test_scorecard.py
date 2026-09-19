@@ -216,13 +216,54 @@ class Scorecard(unittest.TestCase):
         lines = out.getvalue().splitlines()
         self.assertEqual(
             lines[0],
-            "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\tcalls\twaste_pct\tturns",
+            "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\tcalls\twaste_pct\tturns",
         )
         row = next(l for l in lines[1:] if l.startswith("T-9600\t"))
         cells = row.split("\t")
-        self.assertEqual(len(cells), 11)
+        self.assertEqual(len(cells), 17)
         self.assertEqual(float(cells[1]), 2.5)                        # a real numeric cell, not just shape
         self.assertEqual(cells[-3:], ["-", "-", "-"])
+
+    def test_by_goal_token_buckets(self):
+        self.write_task("T-9930", status="done", result={"pr": "https://github.com/acme/repo/pull/3"})
+        self.write_task("T-9931", parent="T-9930", role="execute")
+        self.write_task("T-9932", parent="T-9930", role="review", status="failed")
+        self.write_task("T-9940", status="queued")
+        self.write_task("T-9941", parent="T-9940", role="execute")  # no run rows must still appear
+        self.write_runs(
+            {"task": "T-9931", "role": "execute", "input_tokens": 100, "output_tokens": 20,
+             "cache_read_input_tokens": 100},
+            {"task": "T-9932", "role": "review", "input_tokens": 30},  # Codex/no-usd failure
+        )
+        (self.root / "runs" / "jev").mkdir()
+        (self.root / "runs" / "jev" / "2026-01-01.jsonl").write_text("\n".join(json.dumps(row) for row in (
+            {"goal_id": "T-9930", "caller": "gate", "input_tokens": 7},
+            {"goal_id": "T-9930", "caller": "rank", "input_tokens": 11},
+        )))
+        (self.root / "runs" / "planner_runs.json").write_text(json.dumps([
+            {"goal_id": "T-9930", "tokens": 5},
+        ]))
+        card = scorecard.by_goal(root=self.root)
+        row = card["T-9930"]
+        self.assertEqual(row["tokens_by_role"], {"execute": 130, "review": 30, "spec_review": 0, "scout": 0, "other": 0})
+        self.assertEqual((row["tokens_uncached"], row["tokens_cache_read"], row["tokens_output"]), (130, 100, 20))
+        self.assertEqual((row["jev_tokens"], row["jev_tokens_gate"], row["jev_tokens_rank"]), (18, 7, 11))
+        self.assertEqual((row["planner_tokens"], row["failed_tokens"], row["total_tokens"]), (5, 30, 183))
+        self.assertEqual(card["T-9940"]["total_tokens"], 0)
+
+    def test_tokens_per_accepted_goal(self):
+        self.write_task("T-9950", status="done", result={"url": "https://github.com/acme/repo/pull/5"})
+        self.write_task("T-9951", parent="T-9950", role="execute")
+        self.write_task("T-9960", status="queued")
+        self.write_task("T-9961", parent="T-9960", role="execute")
+        self.write_runs(
+            {"task": "T-9951", "role": "execute", "usd": 2, "input_tokens": 20},
+            {"task": "T-9961", "role": "execute", "usd": 9, "input_tokens": 90},
+        )
+        self.assertEqual(scorecard.accepted_goals(root=self.root), ["T-9950"])
+        self.assertEqual(scorecard.tokens_per_accepted_goal(root=self.root),
+                         {"tokens": 20.0, "count": 1, "goal_ids": ["T-9950"]})
+        self.assertEqual(scorecard.usd_per_accepted_goal(root=self.root)["usd"], 2.0)
 
     def test_malformed_jsonl_line_skipped_and_counted(self):
         self.write_task("T-9800", executor="good", complexity=3, status="done", merged_into="goal/G")

@@ -462,10 +462,7 @@ def _status_entry(repo_path, record):
     for c in children:
         by_status.setdefault(c["status"], []).append({"id": c["id"], "hold_reason": c.get("hold_reason")})
     merged = [c["merged_into"] for c in children if c.get("merged_into")]
-    pr_url = None
-    if goal_task and goal_task.get("result"):
-        m = PR_URL_RE.search(json.dumps(goal_task["result"]))
-        pr_url = m.group(0) if m else None
+    pr_url = task_pr_url(goal_task)
     planner_alive, note = None, None
     if record["status"] == "running":
         planner_alive = identity(record)
@@ -475,6 +472,14 @@ def _status_entry(repo_path, record):
             "task_status": goal_task["status"] if goal_task else None, "children": by_status,
             "merged": merged, "pr_url": pr_url, "planner_alive": planner_alive, "note": note,
             "requester": record.get("requester")}
+
+
+def task_pr_url(task):
+    """Return the PR URL recorded in a goal task result, if it has one."""
+    if not task or not task.get("result"):
+        return None
+    match = PR_URL_RE.search(json.dumps(task["result"]))
+    return match.group(0) if match else None
 
 
 def _load_goal_records(repo_path, goal_id=None):

@@ -344,10 +344,56 @@ def by_goal(root=STATE):
     runs_path = root / "runs" / "planner_runs.json"
     gate = _gate_stats(root)
 
+    # Planner transcript usage is pool-wide.  A planner run with no token field is
+    # therefore assigned an approximation: the day's transcript total multiplied
+    # by this goal's share of that day's worker-run rows.
+    planner_usage = _planner_usage_totals(root)
+    dated_runs = {}
+    for path, entry in _read_jsonl_entries(root):
+        goal_id = entry.get("goal_id")
+        if goal_id:
+            dated_runs.setdefault(path.stem, []).append(goal_id)
+
+    def tokens(entry):
+        return {
+            "uncached": int(entry.get("input_tokens") or 0),
+            "cache_read": int(entry.get("cache_read_input_tokens") or 0),
+            "cache_write": int(entry.get("cache_write_input_tokens") or entry.get("cache_creation_input_tokens") or 0),
+            "output": int(entry.get("output_tokens") or 0),
+            "reasoning": int(entry.get("reasoning_tokens") or 0),
+        }
+
+    def effective(bucket):
+        return bucket["uncached"] + bucket["output"] + bucket["cache_read"] // 10 + bucket["cache_write"] + bucket["reasoning"]
+
+    # Jev records deliberately have no role, and live below runs/jev rather than
+    # the worker JSONL files read by by_task().
+    jev_by_goal = {}
+    jev_dir = root / "runs" / "jev"
+    for path in sorted(jev_dir.glob("*.jsonl")) if jev_dir.exists() else []:
+        if path.name == "gate.jsonl":
+            continue
+        for line in path.read_text().splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            goal_id = entry.get("goal_id")
+            if not goal_id:
+                continue
+            amount = int(entry.get("input_tokens") or 0)
+            value = jev_by_goal.setdefault(goal_id, {"gate": 0, "rank": 0})
+            if str(entry.get("caller") or "").startswith("gate"):
+                value["gate"] += amount
+            elif str(entry.get("caller") or "").startswith("rank"):
+                value["rank"] += amount
+
     card = {}
     for gid in goal_ids:
         roles = {b: {"usd": 0.0, "tokens": 0} for b in ALL_BUCKETS}
         runs_no_usd = 0
+        token_buckets = {"uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0, "reasoning": 0}
+        failed_tokens = 0
         calls = waste = blocked = turns = 0
         has_turns = False
         for t in tasks:
@@ -360,6 +406,14 @@ def by_goal(root=STATE):
             roles[bucket]["usd"] += totals["usd"]
             roles[bucket]["tokens"] += totals["tokens"]
             runs_no_usd += totals.get("runs_no_usd", 0)
+            for path, entry in _read_jsonl_entries(root):
+                if entry.get("task") != t["id"]:
+                    continue
+                raw = tokens(entry)
+                for key, value in raw.items():
+                    token_buckets[key] += value
+                if t.get("status") == "failed" or t.get("merged_via") == "superseded":
+                    failed_tokens += effective(raw)
             if gate is not None:
                 g = gate.get(t["id"], {"calls": 0, "waste": 0, "blocked": 0})
                 calls += g["calls"]; waste += g["waste"]; blocked += g["blocked"]
@@ -367,20 +421,70 @@ def by_goal(root=STATE):
                 turns += totals.get("turns") or 0
                 has_turns = True
         total_usd = sum(r["usd"] for r in roles.values())
-        total_tokens = sum(r["tokens"] for r in roles.values())
+        worker_tokens = effective(token_buckets)
         if runs_path.exists():
             runs = _planner_runs_for_goal(root, gid)
             usd_vals = [r["usd"] for r in runs if "usd" in r]
             planner = {"n_runs": len(runs), "usd": sum(usd_vals) if usd_vals else None}
         else:
             planner = None
+        explicit_planner_tokens = sum(int(run.get("tokens") or 0) for run in (runs if runs_path.exists() else []))
+        if any("tokens" in run for run in (runs if runs_path.exists() else [])):
+            planner_tokens = explicit_planner_tokens
+        elif planner_usage is not None:
+            today_rows = dated_runs.get(date.today().isoformat(), [])
+            own_rows = sum(1 for run_goal_id in today_rows if run_goal_id == gid)
+            planner_tokens = round(planner_usage[0] * own_rows / len(today_rows)) if today_rows else 0
+        else:
+            planner_tokens = 0
+        jev = jev_by_goal.get(gid, {"gate": 0, "rank": 0})
+        # total_tokens keeps the established discounted cache-read convention.
+        total_tokens = worker_tokens + jev["gate"] + jev["rank"] + planner_tokens
         card[gid] = {"roles": roles, "total_usd": total_usd, "total_tokens": total_tokens, "planner": planner,
+                      "tokens_by_role": {name: roles[name]["tokens"] for name in ALL_BUCKETS},
+                      "tokens_uncached": token_buckets["uncached"], "tokens_cache_read": token_buckets["cache_read"],
+                      "tokens_cache_write": token_buckets["cache_write"], "tokens_output": token_buckets["output"],
+                      "tokens_reasoning": token_buckets["reasoning"], "jev_tokens": jev["gate"] + jev["rank"],
+                      "jev_tokens_gate": jev["gate"], "jev_tokens_rank": jev["rank"], "planner_tokens": planner_tokens,
+                      "failed_tokens": failed_tokens,
                       "runs_no_usd": runs_no_usd,
                       "calls": calls if gate is not None else "-",
                       "waste_pct": (round(waste / calls * 100, 1) if calls else 0.0) if gate is not None else "-",
                       "blocked": blocked if gate is not None else "-",
                       "turns": turns if has_turns else "-"}
     return card
+
+
+def accepted_goals(root=STATE):
+    """Goal ids accepted by a PR result or by fully merged execute children."""
+    from . import goals
+    tasks_dir = root / "tasks"
+    tasks = [json.loads(path.read_text()) for path in sorted(tasks_dir.glob("T-*.json"))] if tasks_dir.exists() else []
+    task_by_id = {task["id"]: task for task in tasks}
+    goal_ids = sorted({task.get("parent") for task in tasks if task.get("parent")})
+    accepted = []
+    for goal_id in goal_ids:
+        goal = task_by_id.get(goal_id)
+        children = [task for task in tasks if task.get("parent") == goal_id and task.get("role") == "execute"]
+        if goals.task_pr_url(goal) or (goal and goal.get("status") == "done" and all(child.get("merged_into") for child in children)):
+            accepted.append(goal_id)
+    return accepted
+
+
+def tokens_per_accepted_goal(root=STATE):
+    card = by_goal(root)
+    goal_ids = accepted_goals(root)
+    count = len(goal_ids)
+    total = sum(card.get(goal_id, {}).get("total_tokens", 0) for goal_id in goal_ids)
+    return {"tokens": total / count if count else 0, "count": count, "goal_ids": goal_ids}
+
+
+def usd_per_accepted_goal(root=STATE):
+    card = by_goal(root)
+    goal_ids = accepted_goals(root)
+    count = len(goal_ids)
+    total = sum(card.get(goal_id, {}).get("total_usd", 0.0) for goal_id in goal_ids)
+    return {"usd": total / count if count else 0.0, "count": count, "goal_ids": goal_ids}
 
 
 def goal_percentages(entry):

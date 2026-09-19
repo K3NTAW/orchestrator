@@ -181,19 +181,25 @@ def main():
             if a.json:
                 print(json.dumps(card, indent=1))
             else:
-                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\tcalls\twaste_pct\tturns")
+                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\tcalls\twaste_pct\tturns")
                 total_usd = 0.0
                 for gid, r in sorted(card.items(), key=lambda kv: kv[1]["total_usd"], reverse=True):
                     pct = scorecard.goal_percentages(r)
                     runs_cell = scorecard.format_planner_runs_cell(r)
                     print(f"{gid}\t{round(r['total_usd'], 2)}\t{round(pct['execute'], 1)}%\t"
                           f"{round(pct['review'], 1)}%\t{round(pct['spec_review'], 1)}%\t{round(pct['scout'], 1)}%\t"
-                          f"{round(pct['other'], 1)}%\t{runs_cell}\t{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
+                          f"{round(pct['other'], 1)}%\t{runs_cell}\t{r['total_tokens']}\t{r['tokens_uncached']}\t"
+                          f"{r['tokens_cache_read']}\t{r['tokens_output']}\t{r['jev_tokens']}\t{r['planner_tokens']}\t"
+                          f"{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
                     total_usd += r["total_usd"]
                 totals = _scorecard_measurement_totals(card, "goal")
-                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t"
+                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t"
                       f"{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
                 print(scorecard.planner_footer())
+                accepted_tokens = scorecard.tokens_per_accepted_goal(root=scorecard.STATE)
+                accepted_usd = scorecard.usd_per_accepted_goal(root=scorecard.STATE)
+                print(f"tokens per accepted goal: {round(accepted_tokens['tokens'])} over {accepted_tokens['count']} goals "
+                      f"(usd {round(accepted_usd['usd'], 2)})")
     elif a.cmd == "planner-runs":
         from . import planner_runs
         s = planner_runs.summary()

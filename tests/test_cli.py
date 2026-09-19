@@ -74,6 +74,16 @@ class Cli(unittest.TestCase):
         self.assertEqual([rows["T-0241"][key] for key in header[-3:]], ["-", "-", "-"])
         self.assertEqual(rows["total"]["waste_pct"], "-")
 
+    def test_scorecard_goal_footer(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-0240", status="done", result={"pr": "https://github.com/acme/repo/pull/24"})
+        build = cli.scorecard.by_goal
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root), mock.patch.object(
+            cli.scorecard, "by_goal", side_effect=lambda *args, **kwargs: build(root=fixture.root)
+        ):
+            output = self._scorecard_output("--by", "goal")
+        self.assertIn("tokens per accepted goal: 0 over 1 goals (usd 2.0)", output)
+
     def test_scorecard_default_output_unchanged(self):
         with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):
             self.assertEqual(self._scorecard_output(), "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore\n")
