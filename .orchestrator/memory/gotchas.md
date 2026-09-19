@@ -202,3 +202,23 @@ outcome: The Planner writes a fix round with constraints.fix_round_for naming th
 type: gotcha · goal: T-0240 · tasks: T-0254 · provenance: repo
 - tests/test_handover.py:288 test_handover_survives_jev_exception failed once in the daemon gate of T-0254 (executor.py-only diff) with AssertionError 305 != 2 on the orchestrator.jev.ask subtest, after a RuntimeError boom traceback from another test's thread; green on two Planner reruns of tests-green.sh on the same worktree. The gate runs the full suite inside the MCP server's daemon thread, so state leaked by a sibling test (daemon dispatch threads, module-level jev caches) is the likely cause
 outcome: Planner cleared hold_reason gate_red and pipeline.gated_at with bus.update and let the daemon re-gate. Polish candidate (c2): isolate the count the test asserts (mock call count or line count) from module state, and make gate reds that pass a rerun visible as flaky in the scorecard
+
+## 2026-09-19 scout worktrees are cut from origin/main, so scouts on a goal branch report findings about stale code
+type: gotcha · goal: T-0260 · tasks: T-0261,T-0262,T-0263 · provenance: repo
+- orchestrator/spawn.py base_for() bases execute tasks with a parent on goal/parent, reviews on the reviewed branch, challenges on the goal branch, and every other role (scout, triage) on origin/main; wt/T-0261..T-0263 sat at 2ae174e (PR 5 merge) while goal/T-0260 is 40 commits ahead, so two scouts described missing security_paths, non-compact bus_read and no fix_round_for. T-0261 noticed and read goal/T-0260 explicitly
+outcome: Read scout findings against the current branch before acting; G0 (T-0270) makes scouts base on the goal branch and print their base sha. Until it merges, put 'read goal/T-xxxx, not your worktree base' in every scout spec
+
+## 2026-09-19 execute and fix-round prompts never tell the worker to commit and name a gate script that does not exist
+type: gotcha · goal: T-0260 · tasks: T-0267,T-0276,T-0242 · provenance: repo
+- .orchestrator/prompts/execute.md and fix-delta.md end with 'run scripts/tests_green.sh' (absent; the gate is .claude/hooks/tests-green.sh) and say nothing about committing; three Codex runs finished with all work uncommitted (T-0267, T-0276, the first T-0242 thread) and needed a second thread just to commit
+outcome: G11 (T-0324) rewrites both prompts: run the real gate, git add -A and commit with the task id, report sha and failures-only output. Until it merges, a Codex prompt written by hand must say commit
+
+## 2026-09-19 pre-lease daemon stamps spec_review_at and creates no spec review task; the execute task waits forever
+type: gotcha · goal: T-0260 · tasks: T-0296,T-0312 · provenance: repo
+- T-0296 carried pipeline.spec_review_at from 21:54 with no spec_review child; clearing the stamp did not help because the old server's dispatch loop never reached it again; the Planner created the child with bus.create_task in the daemon's shape (title spec review: ..., the execute task's spec, acceptance and scope, inputs [id], role spec_review) and called spawn_spec_review on it
+outcome: G6 v4 (T-0290, merged on goal/T-0260) reconciles this window once a server runs that code. Until then: create the daemon-shaped child by hand and spawn_spec_review(child id)
+
+## 2026-09-19 executor running counters leak in the pre-F3 server after hand-posted results, so status() reports Codex exhausted and new dispatches fall back to Claude sonnet
+type: gotcha · goal: T-0260 · tasks: T-0276 · provenance: repo
+- status() at 22:33 showed astra running 7, luna 2, terra 2, sol 2 with zero codex exec processes alive; codex(T-0276) answered status fallback tier sonnet; the counters live in the MCP server's memory and only decrement when the executor thread posts the result itself, which the pre-F3 server never does
+outcome: Restart the session once no worker is alive; the new server starts with empty counters and F3 posts results itself. Check pgrep -f codex exec before trusting status().running
