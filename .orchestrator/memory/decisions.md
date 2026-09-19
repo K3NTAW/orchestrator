@@ -228,3 +228,10 @@ outcome: Accepted: tests-green exit 0 on wt/goal-T-0260 at 2ca1517; PR 11 https:
 type: decision · goal: T-0260 · tasks: T-0260 · provenance: repo
 - plan.md rewritten for the closed goal and the docs.kentawaibel.com kickoff facts; decisions.md carries the Phase G retrospective; gotchas.md the slot-counter and review-redispatch rules
 outcome: revert path: git revert 93f0a7c (plan.md, decisions.md, gotchas.md only)
+
+## 2026-09-20 docs.kentawaibel.com goal started in its own repo via orchestrator goal start (headless Planner on account B)
+type: decision · goal: T-0260 · tasks: T-0001 · provenance: repo
+- user request 2026-09-19 23:46: docs.kentawaibel.com with the visual of kentawaibel.com and one entry for the orchestrator; the user granted the rights for the outward-facing steps (Vercel project, domain, deploy)
+- repo /Users/k3ntaw/code/docs-kentawaibel created empty with git init, scaffolded by goal start at 085d4d9 (its own .orchestrator, hooks, skills, pool.toml copied from this repo), GOAL task T-0001 on the docs bus, headless Planner pid 28790, log .orchestrator/runs/planner-T-0001.log, budget 10 USD
+- facts handed in the goal text: portfolio stack and @theme tokens at k3ntaw-portfolio/src/index.css, markdown content pipeline, vitest+eslint so tests-green.sh (npm test, npm run lint) gates, vercel.json SPA rewrites; deploy explicitly excluded from the headless run
+outcome: the interactive Planner adds the Vercel project docs-kentawaibel, the domain docs.kentawaibel.com (DNS already points at Vercel, DEPLOYMENT_NOT_FOUND) and deploys once the docs repo builds green. Revert path: in the docs repo git revert 085d4d9, or delete the repo directory (human)
