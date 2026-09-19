@@ -176,3 +176,8 @@ outcome: Planner committed the worktree as found, cleared merged_into and gated_
 type: gotcha · goal: T-0201 · tasks: T-0229,T-0236 · provenance: repo
 - tests/test_jev.py::test_disabled_returns_none_without_network reads pool.toml through jev._cfg(); the Planner set [jev].enabled = true at 17:45 and every worktree cut afterwards fails tests-green with 'urlopen must not be called when jev is disabled' (E3 T-0229 held gate_red at 18:25; T-0230, T-0233, T-0234, T-0235 will follow)
 outcome: P10 T-0236 pins the config inside the tests; held tasks then go through merge() (rebase onto goal, tests, fast-forward) instead of a fresh gate. Rule: a test may never depend on a committed pool.toml value; a Planner config commit must run the test suite from ROOT first
+
+## 2026-09-19 daemon-dispatched Codex runs finish but never reach the bus: _dispatch_worker discards executor.start()'s result
+type: gotcha · goal: T-0201 · tasks: T-0235,T-0237,T-0238 · provenance: repo
+- daemon._dispatch_worker() (about line 305) calls executor.start() and drops the return dict; executor._run() logs the run and returns status done with the final message, but nothing calls bus.post_result, so the task stays running with pid null forever (three Codex tasks sat running 30 min after their runs logged done at 16:04). The Claude fallback path posts from spawn.run_worker, which is why this never showed while Codex cooled
+outcome: Planner ran tests-green on each worktree and posted the results by hand. Fix candidate (polish P11): _dispatch_worker posts done/failed/held from the returned dict with summary = message[:3000], executed_by codex:<ex>, and the daemon then gates as usual
