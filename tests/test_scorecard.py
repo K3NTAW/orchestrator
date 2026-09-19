@@ -204,6 +204,71 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(len(cells), 8)
         self.assertEqual(float(cells[1]), 2.5)                        # a real numeric cell, not just shape
 
+    def test_malformed_jsonl_line_skipped_and_counted(self):
+        self.write_task("T-9800", executor="good", complexity=3, status="done", merged_into="goal/G")
+        runs_file = self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl"
+        runs_file.write_text(
+            json.dumps({"role": "execute", "executor": "good", "duration_s": 1.0}) + "\n"
+            "{not valid json\n"
+        )
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["good"]["merged"], 1)
+        self.assertEqual(scorecard.malformed_run_lines(), 1)
+        self.assertEqual(scorecard.malformed_footer(), "malformed run lines skipped: 1")
+
+    def test_malformed_footer_empty_when_no_bad_lines(self):
+        self.write_runs({"role": "execute", "executor": "good", "duration_s": 1.0})
+        scorecard.build(root=self.root)
+        self.assertEqual(scorecard.malformed_run_lines(), 0)
+        self.assertEqual(scorecard.malformed_footer(), "")
+
+    def test_by_task_also_skips_malformed_lines(self):
+        runs_file = self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl"
+        runs_file.write_text(
+            json.dumps({"task": "T-9810", "role": "execute", "usd": 1.0, "duration_s": 1.0,
+                        "input_tokens": 5, "output_tokens": 0, "cache_read_input_tokens": 0}) + "\n"
+            "]] this is not json [[\n"
+        )
+        card = scorecard.by_task(root=self.root)
+        self.assertEqual(card["T-9810"]["usd"], 1.0)
+        self.assertEqual(scorecard.malformed_run_lines(), 1)
+
+    def test_runs_without_usd_reported(self):
+        goal = "T-9700"
+        self.write_task("T-9701", role="execute", parent=goal)
+        self.write_runs(
+            {"task": "T-9701", "role": "execute", "usd": 1.0, "duration_s": 1,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"task": "T-9701", "role": "execute", "duration_s": 1,          # codex run: no usd field
+             "input_tokens": 20, "output_tokens": 0, "cache_read_input_tokens": 0},
+        )
+        task_card = scorecard.by_task(root=self.root)
+        self.assertEqual(task_card["T-9701"]["runs_no_usd"], 1)
+        goal_card = scorecard.by_goal(root=self.root)
+        self.assertEqual(goal_card[goal]["runs_no_usd"], 1)
+
+    def test_runs_without_usd_zero_when_all_runs_carry_usd(self):
+        goal = "T-9710"
+        self.write_task("T-9711", role="execute", parent=goal)
+        self.write_runs({"task": "T-9711", "role": "execute", "usd": 1.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        goal_card = scorecard.by_goal(root=self.root)
+        self.assertEqual(goal_card[goal]["runs_no_usd"], 0)
+
+    def test_token_totals_are_int(self):
+        self.write_runs(
+            {"task": "T-9820", "role": "execute", "duration_s": 1.0,
+             "input_tokens": 100.0, "output_tokens": 50.0, "cache_read_input_tokens": 20.0},
+        )
+        card = scorecard.by_task(root=self.root)
+        self.assertIsInstance(card["T-9820"]["tokens"], int)
+        self.assertEqual(card["T-9820"]["tokens"], 152)
+
+        self.write_runs({"role": "execute", "executor": "tokfloat", "duration_s": 1.0,
+                          "input_tokens": 100.0, "output_tokens": 0, "cache_read_input_tokens": 0})
+        card = scorecard.build(root=self.root)
+        self.assertIsInstance(card["tokfloat"]["tokens"]["in"], int)
+
     def write_bench(self, models):
         bench.STATE.mkdir(parents=True, exist_ok=True)
         bench.FILE.write_text(json.dumps({"models": models}))
