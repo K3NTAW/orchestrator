@@ -696,6 +696,28 @@ class JevShadowTriage(PlannerRunsBase):
         rec = self.record(goal_id, "scouts_done", goal_id)
         self.assertIsNone(rec["jev"])
 
+    def test_triage_not_called_when_guard_skips(self):
+        """T-0232 review item 1: jev_triage runs only after every guard has passed, immediately before
+        launch_planner -- a decision point that gets skipped (session attached, no headroom, unsafe key) must
+        never spend a Jev request, and its skip record must carry no jev field at all."""
+        goal_id = self.goal()
+        self.scout_child(goal_id, "done")
+        launch_calls = []
+        self.patch_launch_planner(lambda *a, **k: launch_calls.append(a) or
+                                  {"pid": 1, "pid_start": None, "log": "x"})
+        jev_calls = []
+        self.swap(jev, "ask", lambda *a, **k: jev_calls.append(a) or None)
+        os.environ["ORCH_DAEMON_HOST"] = "mcp"  # forces the session-attached guard to skip
+
+        r = PR.run(goal_id, "scouts_done", goal_id)
+        self.assertFalse(r["launched"])
+        self.assertEqual(jev_calls, [])
+        self.assertEqual(launch_calls, [])
+
+        rec = self.record(goal_id, "scouts_done", goal_id)
+        self.assertEqual(rec["status"], "skipped")
+        self.assertNotIn("jev", rec)
+
     def test_jev_triage_exception_still_launches(self):
         """jev_triage/jev.ask are documented fail-open, but _safe_jev_triage is defense in depth: even a raise
         while building state or parsing a malformed response must not stop the real launch."""
@@ -768,6 +790,32 @@ class JevAgreementScoring(PlannerRunsBase):
         self.assertIsNone(self.record(goal_id, "scouts_done", goal_id)["agreement"])
 
 
+class RetryResetsAgreement(PlannerRunsBase):
+    def test_retry_resets_agreement(self):
+        """A retry's new jev value must never inherit the previous attempt's scored agreement -- reconcile()
+        scores agreement once per attempt, against that attempt's own jev choice, so a stale True/False left over
+        from an earlier attempt would misrepresent the new one until reconcile() runs again."""
+        goal_id = self.goal()
+        PR._record_running(goal_id, "scouts_done", goal_id, {"pid": 1, "pid_start": None, "log": "x"}, "A", 0,
+                           {"choice": "synthesize_now", "probabilities": {}, "confidence": 0.9, "latency_ms": 1.0})
+        records = PR._load_records()
+        for r in records:
+            r["agreement"] = True
+        PR._save_records(records)
+
+        PR._record_running(goal_id, "scouts_done", goal_id, {"pid": 2, "pid_start": None, "log": "y"}, "A", 1,
+                           {"choice": "wait_for_more", "probabilities": {}, "confidence": 0.5, "latency_ms": 2.0})
+        rec = self.record(goal_id, "scouts_done", goal_id)
+        self.assertIsNone(rec["agreement"])
+        self.assertEqual(rec["jev"]["choice"], "wait_for_more")
+
+        # Also holds when a retry's own jev triage comes back None.
+        PR._record_running(goal_id, "scouts_done", goal_id, {"pid": 3, "pid_start": None, "log": "z"}, "A", 2, None)
+        rec2 = self.record(goal_id, "scouts_done", goal_id)
+        self.assertIsNone(rec2["agreement"])
+        self.assertIsNone(rec2["jev"])
+
+
 class Summary(PlannerRunsBase):
     def test_planner_runs_summary(self):
         self.assertEqual(PR.summary(),
@@ -785,6 +833,9 @@ class Summary(PlannerRunsBase):
         tid = self.execute_child(goal_id)
         bus.update(tid, status="held", hold_reason="gate_red")
         key = PR._held_key(bus.get(tid))
+        # jev=None here (Jev unavailable for this decision) -- reconcile() would never set agreement on a row
+        # like this in practice, but summary() must not count it toward agreement_rate even if something did
+        # (T-0232 review item 2: the denominator is rows with both jev and agreement, not agreement alone).
         PR._record_running(goal_id, "held", key, {"pid": 2, "pid_start": None, "log": "y"}, "A", 0, None)
         records = PR._load_records()
         for r in records:
@@ -795,8 +846,37 @@ class Summary(PlannerRunsBase):
         s = PR.summary()
         self.assertEqual(s["decisions"], 2)
         self.assertEqual(s["jev_scored"], 1)
-        self.assertEqual(s["agreement_rate"], 0.5)
+        self.assertEqual(s["agreement_rate"], 1.0)  # the jev=None held row is excluded from the denominator
         self.assertEqual(s["mean_confidence"], 0.8)
+
+    def test_summary_tolerates_null_confidence(self):
+        """A None confidence (jev_triage()'s own coercion of a non-numeric Jev response, T-0232 review item 3)
+        must count toward jev_scored/agreement_rate but be excluded from mean_confidence entirely, never treated
+        as 0.0. A row whose jev/confidence predates that coercion (a raw non-numeric string, or jev not even a
+        dict) must not make summary() raise either."""
+        goal_id = self.goal()
+        PR._record_running(goal_id, "scouts_done", goal_id, {"pid": 1, "pid_start": None, "log": "x"}, "A", 0,
+                           {"choice": "synthesize_now", "probabilities": {}, "confidence": None, "latency_ms": 1.0})
+        records = PR._load_records()
+        for r in records:
+            r["agreement"] = True
+        PR._save_records(records)
+
+        s = PR.summary()
+        self.assertEqual(s["jev_scored"], 1)
+        self.assertEqual(s["agreement_rate"], 1.0)
+        self.assertIsNone(s["mean_confidence"])
+
+        # A malformed ledger row (confidence stored as a non-numeric string, from before coercion existed) --
+        # summary() must tolerate it rather than raising, and still exclude it from mean_confidence.
+        records = PR._load_records()
+        records.append({"goal_id": "bogus", "kind": "held", "payload_key": "bogus", "attempts": 0,
+                        "jev": {"choice": "noop", "probabilities": {}, "confidence": "n/a"}, "agreement": None})
+        PR._save_records(records)
+
+        s2 = PR.summary()
+        self.assertEqual(s2["jev_scored"], 2)
+        self.assertIsNone(s2["mean_confidence"])
 
 
 if __name__ == "__main__":

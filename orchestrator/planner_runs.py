@@ -220,7 +220,9 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts, jev
     """Update the key's existing record in place on a retry (preserving attempts, set by reconcile()) rather
     than appending a second one -- one record per key is what lets reconcile() track attempts across retries.
     jev_result (from jev_triage(), shadow mode only) is stored as-is -- {choice, probabilities, confidence,
-    latency_ms} or None -- and never influences anything else recorded here."""
+    latency_ms} or None -- and never influences anything else recorded here. agreement is reset to None
+    alongside it: a prior attempt's agreement was scored against that attempt's own jev choice, and must never
+    be left dangling against a new (or newly-absent) jev value that reconcile() hasn't scored yet."""
     with bus.locked():
         records = _load_records()
         r = _find_record(records, goal_id, kind, payload_key)
@@ -228,7 +230,7 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts, jev
             r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
             records.append(r)
         r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
-                 account=acct_id, log=launched["log"], status="running", jev=jev_result)
+                 account=acct_id, log=launched["log"], status="running", jev=jev_result, agreement=None)
         _save_records(records)
 
 
@@ -300,6 +302,21 @@ def _jev_state(kind, task, attempts):
     }
 
 
+def _coerce_float(v):
+    """Non-numeric (a bad string, None, a list -- whatever a malformed Jev response hands back) becomes None
+    rather than raising, so one bad field never sinks the whole shadow triage row."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_probabilities(probs):
+    if not isinstance(probs, dict):
+        return {}
+    return {k: _coerce_float(v) for k, v in probs.items()}
+
+
 def jev_triage(kind, task, attempts=0):
     """Ask Jev what it would decide for this decision point, purely to record for later agreement measurement
     (E2/T-0214's typed-question client) -- shadow mode only, never consulted by run()/launch_planner, and its
@@ -307,7 +324,9 @@ def jev_triage(kind, task, attempts=0):
     {choice, probabilities, confidence, latency_ms} or None -- fail-open the same way jev.ask() itself is
     fail-open (disabled, no key, budget exhausted, timeout, bad response all return None, never raise), with an
     explicit 3s cap (jev.ask's own pool.toml timeout may be longer/shorter) so a slow Jev endpoint can never be
-    on the critical path to a real launch."""
+    on the critical path to a real launch. confidence/probabilities are coerced to float (non-numeric -> None,
+    see _coerce_float) rather than trusted as already-numeric, since Jev's response is untrusted external data --
+    a None confidence is excluded from summary()'s mean_confidence, never treated as 0.0."""
     if task is None:
         return None
     state = _jev_state(kind, task, attempts)
@@ -321,8 +340,8 @@ def jev_triage(kind, task, attempts=0):
         return None
     try:
         a = result["answers"]["next_action"]
-        return {"choice": a["choice"], "probabilities": a["probabilities"], "confidence": a["confidence"],
-                "latency_ms": latency_ms}
+        return {"choice": a["choice"], "probabilities": _coerce_probabilities(a["probabilities"]),
+                "confidence": _coerce_float(a["confidence"]), "latency_ms": latency_ms}
     except (KeyError, TypeError):
         return None
 
@@ -355,8 +374,6 @@ def run(goal_id, kind, payload_key):
         attempts = _existing_attempts(goal_id, kind, payload_key)
         _claim(goal_id, kind, payload_key, attempts)
 
-    jev_result = _safe_jev_triage(goal_id, kind, payload_key, attempts)
-
     try:
         if _session_attached():
             _record_skip(goal_id, kind, payload_key, "planner session attached")
@@ -380,6 +397,12 @@ def run(goal_id, kind, payload_key):
         prompt = spawn.render("planner-decision", kind=kind, goal_id=goal_id, payload=payload_key)
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
+
+        # Only spent once every guard above has passed and launch is about to happen for real (T-0232 review
+        # item 1): a decision point skipped for session-attached/no-headroom/unsafe-key never spends a Jev
+        # request, so skip records above never carry a jev field.
+        jev_result = _safe_jev_triage(goal_id, kind, payload_key, attempts)
+
         launched = goals.launch_planner(ROOT, prompt, acct.id, budget, log)
     except (KeyboardInterrupt, SystemExit) as e:
         _record_failed_launch(goal_id, kind, payload_key, attempts, e)
@@ -545,17 +568,22 @@ def reconcile():
 
 def summary():
     """{decisions, jev_scored, agreement_rate, mean_confidence} over the whole ledger, printed by
-    `orchestrator planner-runs --summary` (D3, T-0217). decisions is every row ever written; jev_scored counts
-    rows that got a Jev shadow choice (row["jev"] is not None); agreement_rate is the fraction of rows with a
-    computed agreement (True/False, set once by reconcile()) that agreed, or None with zero such rows;
-    mean_confidence averages jev.confidence over the jev_scored rows, or None with zero. An empty ledger returns
+    `orchestrator planner-runs` (D3, T-0217; T-0232). decisions is every row ever written; jev_scored counts rows
+    that got a Jev shadow choice (row["jev"] is a dict); agreement_rate is computed only over rows that both have
+    a jev dict and a scored agreement (True/False, set once by reconcile()) -- the fraction of those that
+    agreed, or None with zero such rows; mean_confidence averages jev.confidence over the jev_scored rows whose
+    confidence coerced to a real float (jev_triage()'s _coerce_float already turns a non-numeric confidence into
+    None; a None confidence is excluded here, never treated as 0.0), or None with zero. Never raises on a
+    malformed row (jev not a dict, confidence not numeric) -- isinstance checks throughout, not direct indexing --
+    since older or hand-edited ledger rows may predate the coercion in jev_triage(). An empty ledger returns
     all-zero/None rather than raising, since the CLI must print cleanly with no decisions recorded yet."""
     records = _load_records()
-    jev_rows = [r for r in records if r.get("jev")]
-    agreements = [r["agreement"] for r in records if r.get("agreement") is not None]
+    jev_rows = [r for r in records if isinstance(r.get("jev"), dict)]
+    scored = [r for r in jev_rows if r.get("agreement") is not None]
+    confidences = [r["jev"]["confidence"] for r in jev_rows if isinstance(r["jev"].get("confidence"), (int, float))]
     return {
         "decisions": len(records),
         "jev_scored": len(jev_rows),
-        "agreement_rate": (sum(1 for a in agreements if a) / len(agreements)) if agreements else None,
-        "mean_confidence": (sum(r["jev"]["confidence"] for r in jev_rows) / len(jev_rows)) if jev_rows else None,
+        "agreement_rate": (sum(1 for r in scored if r["agreement"]) / len(scored)) if scored else None,
+        "mean_confidence": (sum(confidences) / len(confidences)) if confidences else None,
     }

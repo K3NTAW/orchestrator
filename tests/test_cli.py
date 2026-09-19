@@ -57,6 +57,21 @@ class Cli(unittest.TestCase):
         self.assertIn("jev_scored=0", line)
         self.assertIn("agreement_rate=None", line)
 
+    def test_planner_runs_default_prints_summary(self):
+        """T-0232 review item 4: `orchestrator planner-runs` with no flag prints the same summary line as
+        `--summary` -- the flag is still accepted, but no longer required."""
+        from orchestrator import planner_runs as PR
+        PR._runs_path().unlink(missing_ok=True)
+        sys.argv = ["orchestrator", "planner-runs"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        line = out.getvalue().strip()
+        self.assertIn("decisions=0", line)
+        self.assertIn("jev_scored=0", line)
+        self.assertIn("agreement_rate=None", line)
+        self.assertIn("mean_confidence=None", line)
+
     def test_cost_ignores_jev_lines(self):
         bus.RUNS.mkdir(parents=True, exist_ok=True)
         marker = f"cli-cost-jev-{time.time()}"

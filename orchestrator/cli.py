@@ -171,10 +171,9 @@ def main():
                 print(scorecard.planner_footer())
     elif a.cmd == "planner-runs":
         from . import planner_runs
-        if a.summary:
-            s = planner_runs.summary()
-            print(f"decisions={s['decisions']}\tjev_scored={s['jev_scored']}\t"
-                  f"agreement_rate={s['agreement_rate']}\tmean_confidence={s['mean_confidence']}")
+        s = planner_runs.summary()
+        print(f"decisions={s['decisions']}\tjev_scored={s['jev_scored']}\t"
+              f"agreement_rate={s['agreement_rate']}\tmean_confidence={s['mean_confidence']}")
     elif a.cmd == "bench":
         from . import bench
         if a.bench_cmd == "fetch":
