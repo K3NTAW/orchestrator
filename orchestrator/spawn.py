@@ -119,22 +119,51 @@ def packet(task, worktree) -> str:
 
     read_scope = {"tests/", *imported_paths}
     read_scope.update(str(Path(p).parent) + ("/" if str(Path(p).parent) != "." else "") for p in scope)
+    # Scope-owned test files are the most useful starting point for an executor.
+    # Keep them first and outside the discovery cap: a broad symbol such as
+    # ``get`` must never hide a test explicitly named in a task's scope.
     tests = []
+    for item in scope:
+        path = Path(item)
+        if len(path.parts) > 1 and path.parts[0] == "tests" and (wt / path).is_file():
+            tests.append(str(path))
     for path in py_files:
         candidate = wt / "tests" / f"test_{path.stem}.py"
         if candidate.is_file():
             tests.append(str(candidate.relative_to(wt)))
+    tests = list(dict.fromkeys(tests))
+
+    stop_symbols = {"get", "read", "update", "events", "claim", "db", "locked", "next_id",
+                    "main", "run", "load", "save", "path", "root", "task", "tasks", "result", "status"}
+    relevant_symbols = {name for name in symbol_names if len(name) >= 5 and name not in stop_symbols}
+    module_names = {path.stem for path in py_files if "tests" not in path.parts}
+    qualified = {
+        name: re.compile(rf"(?<!\w){re.escape(name)}\s*\(|(?:"
+                         + "|".join(re.escape(module) for module in sorted(module_names))
+                         + rf")\.{re.escape(name)}\b")
+        for name in relevant_symbols
+    } if module_names else {
+        name: re.compile(rf"(?<!\w){re.escape(name)}\s*\(") for name in relevant_symbols
+    }
+    matches = []
     for test_file in sorted((wt / "tests").glob("test_*.py")) if (wt / "tests").is_dir() else []:
         try:
-            tree = ast.parse(test_file.read_text(errors="replace"))
+            source = test_file.read_text(errors="replace")
+            tree = ast.parse(source)
         except (OSError, SyntaxError):
             continue
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_") and \
-                    any(re.search(rf"\b{re.escape(name)}\b", ast.get_source_segment(test_file.read_text(errors='replace'), node) or "")
-                        for name in symbol_names):
-                tests.append(f"{test_file.relative_to(wt)}::{node.name}")
-    tests = list(dict.fromkeys(tests))[:15]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                body = ast.get_source_segment(source, node) or ""
+                specificity = sum(bool(pattern.search(body)) for pattern in qualified.values())
+                if specificity:
+                    matches.append((-specificity, str(test_file.relative_to(wt)), node.name))
+    for _, filename, name in sorted(matches):
+        if len(tests) >= 15:
+            break
+        entry = f"{filename}::{name}"
+        if entry not in tests:
+            tests.append(entry)
 
     parent = task.get("parent") or "(none)"
     goal_branch = f"goal/{parent}" if task.get("parent") else "origin/main"

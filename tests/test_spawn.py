@@ -393,6 +393,36 @@ class Render(unittest.TestCase):
         self.assertIn("## objective\nBuild widget", text)
         self.assertIn("packet truncated:", text)
 
+    def test_relevant_tests_scope_files_first(self):
+        scratch_repo(TMP)
+        (TMP / "widget.py").write_text("def inspect_widget():\n    return True\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_scoped.py").write_text("def test_scoped():\n    assert True\n")
+        (TMP / "tests" / "test_widget.py").write_text(
+            "from widget import inspect_widget\n\ndef test_symbol_match():\n    assert inspect_widget()\n")
+        task = {"title": "x", "acceptance": [], "scope": ["tests/test_scoped.py", "widget.py"], "inputs": []}
+        relevant = spawn.packet(task, TMP).split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0].splitlines()
+        self.assertEqual(relevant[:2], ["- tests/test_scoped.py", "- tests/test_widget.py"])
+
+    def test_relevant_tests_ignores_short_symbols(self):
+        scratch_repo(TMP)
+        (TMP / "tiny.py").write_text("def get():\n    return True\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_other.py").write_text("def test_ordinary_word():\n    assert get is not None\n")
+        task = {"title": "x", "acceptance": [], "scope": ["tiny.py"], "inputs": []}
+        relevant = spawn.packet(task, TMP).split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0]
+        self.assertNotIn("test_other.py::test_ordinary_word", relevant)
+
+    def test_relevant_tests_ranked_by_specificity(self):
+        scratch_repo(TMP)
+        (TMP / "widget.py").write_text("def build_widget():\n    return True\n\ndef inspect_widget():\n    return True\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_other.py").write_text(
+            "from widget import build_widget, inspect_widget\n\ndef test_one():\n    assert build_widget()\n\ndef test_two():\n    assert build_widget() and inspect_widget()\n")
+        task = {"title": "x", "acceptance": [], "scope": ["widget.py"], "inputs": []}
+        relevant = spawn.packet(task, TMP).split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0].splitlines()
+        self.assertEqual(relevant[1:3], ["- tests/test_other.py::test_two", "- tests/test_other.py::test_one"])
+
     def test_execute_prompt_contains_packet(self):
         p = spawn.packet(self.packet_fixture(), TMP)
         text = spawn.render("execute", packet=p, spec="s", acceptance=["a"], scope=["widget.py"])
