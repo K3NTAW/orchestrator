@@ -37,6 +37,8 @@ _security_paths_empty_warned = False  # notify() the first time security_paths i
 LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
+STAGE_LEASE_S = 900
+LEASED_STAGES = {"dispatched_at", "spec_review_at", "gated_at", "merged_at"}
 
 
 def _load_review_cfg(pool):
@@ -44,7 +46,7 @@ def _load_review_cfg(pool):
     the defaults set on the module above -- so a pool.toml without [review] behaves exactly as if it had one
     with these values (§review policy, 2026-09-18: reviews were costing as much as execution)."""
     global SPEC_REVIEW_MIN, DIRECT_MERGE_MAX, TWO_REVIEWS_FROM, SPEC_REVIEW_TIER
-    global CODE_REVIEW, SECURITY_PATHS, SECURITY_REVIEW_TIER, _code_review_warned
+    global CODE_REVIEW, SECURITY_PATHS, SECURITY_REVIEW_TIER, _code_review_warned, STAGE_LEASE_S
     review = pool.cfg.get("review", {})
     SPEC_REVIEW_MIN = review.get("spec_review_min", 6)
     DIRECT_MERGE_MAX = review.get("direct_merge_max", 3)
@@ -66,6 +68,7 @@ def _load_review_cfg(pool):
     SECURITY_PATHS = security_paths
 
     SECURITY_REVIEW_TIER = review.get("security_review_tier", "sonnet")
+    STAGE_LEASE_S = pool.cfg.get("daemon", {}).get("stage_lease_s", 900)
 
 
 def notify(msg):
@@ -105,11 +108,35 @@ def stamp(tid, stage, pipeline_fields=None, **fields):
         pipeline = dict(t.get("pipeline") or {})
         if pipeline.get(stage):
             return False
-        pipeline[stage] = time.time()
+        now = time.time()
+        pipeline[stage] = now
+        if stage in LEASED_STAGES and fields.get("status") != "held":
+            pipeline[f"{stage}_lease"] = now + STAGE_LEASE_S
         if pipeline_fields:
             pipeline.update(pipeline_fields)
         bus.update(tid, pipeline=pipeline, **fields)
     return True
+
+
+def complete(tid, stage, **fields):
+    """Record that a stamped side effect was issued, under the same bus lock as its pipeline update."""
+    with bus.locked():
+        t = bus.get(tid)
+        pipeline = dict(t.get("pipeline") or {})
+        pipeline[f"{stage}_done"] = time.time()
+        bus.update(tid, pipeline=pipeline, **fields)
+
+
+def clear_stage(tid, stage, pipeline_fields=None, **fields):
+    """Clear a claim and every marker that belongs to it, atomically, for a safe retry."""
+    with bus.locked():
+        t = bus.get(tid)
+        pipeline = dict(t.get("pipeline") or {})
+        for key in (stage, f"{stage}_lease", f"{stage}_done"):
+            pipeline.pop(key, None)
+        if pipeline_fields:
+            pipeline.update(pipeline_fields)
+        bus.update(tid, pipeline=pipeline, **fields)
 
 
 def _git_in(worktree, *args):
@@ -158,8 +185,7 @@ def _requeue(tid, pipeline):
     """Put a task back in the queue for dispatch() to retry. Clearing pipeline.dispatched_at is what actually
     makes that retry happen: dispatch()'s stamp() no-ops when the stage is already stamped, so a requeue that
     left dispatched_at in place would leave the task queued forever without a live worker."""
-    clean = {k: v for k, v in (pipeline or {}).items() if k != "dispatched_at"}
-    bus.update(tid, status="queued", pid=None, reason="process died; requeued", pipeline=clean)
+    clear_stage(tid, "dispatched_at", status="queued", pid=None, reason="process died; requeued")
     return "requeued"
 
 
@@ -349,6 +375,7 @@ def dispatch(pool):
                 slots -= 1
                 prompt = spawn.render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"])
                 spawn_async(_dispatch_worker, t["id"], prompt)
+                complete(t["id"], "dispatched_at")
         elif verdict == "request_changes":
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
@@ -359,6 +386,7 @@ def dispatch(pool):
                                          role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
                                          complexity=t["complexity"], tier=SPEC_REVIEW_TIER)
                     spawn_async(spawn.run_worker, sr["id"])
+                    complete(t["id"], "spec_review_at")
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
 
@@ -472,6 +500,34 @@ def _dirty_scope_paths(worktree, scope):
     return sorted(dirty)
 
 
+def _open_reviews(t, n_reviews, review_reason):
+    """Create exactly the missing review children and issue their workers."""
+    existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
+    security = review_reason in ("diff_unavailable", "security_paths_empty") or review_reason.startswith("security_paths:")
+    while len(existing) < n_reviews:
+        number = len(existing)
+        spec = t["spec"]
+        complexity = t["complexity"]
+        if review_reason == "orphaned":
+            spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
+                    f"have died mid-task\n\n{spec}")
+            tier = review_tier(t)
+        elif security:
+            complexity = max(complexity, SECURITY_CHECKLIST_COMPLEXITY)
+            tier = _security_review_tier(t)
+        elif number == 0:
+            tier = review_tier(t)
+        elif (t.get("executor") or "").startswith("claude:"):
+            tier = review_tier(t)
+        else:
+            tier = _other_tier(existing[0]["tier"])
+        r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+                            inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier)
+        spawn_async(spawn.run_worker, r["id"])
+        existing.append(r)
+    return existing
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
@@ -514,58 +570,12 @@ def gate(pool):
         if not stamp(t["id"], "gated_at",
                      pipeline_fields={"reviews_expected": n_reviews, "review_reason": review_reason}):
             continue
-        orphaned = review_reason == "orphaned"
-        security = (review_reason in ("diff_unavailable", "security_paths_empty")
-                    or review_reason.startswith("security_paths:"))
         try:
             if n_reviews == 0:
                 report_merge(t["id"], merge.merge(t["id"]))
-                continue
-            spec = t["spec"]
-            if orphaned:
-                # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
-                # not from an executor that actually finished: never let complexity or code_review policy
-                # alone route it straight to merge. One review is enough here regardless of complexity -- the
-                # orphaned warning is what needs a second pair of eyes, not the model split.
-                spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
-                        f"have died mid-task\n\n{spec}")
-                r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
-                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
-                                    tier=review_tier(t))
-                spawn_async(spawn.run_worker, r["id"])
-                continue
-            if security:
-                # a security-path match, a diff the daemon couldn't inspect, or an empty security_paths list:
-                # exactly one review, on _security_review_tier(t), complexity bumped so spawn.py's hardcoded
-                # checklist cutoff always fires here.
-                existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
-                if not existing:
-                    r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
-                                        inputs=[t["id"]], parent=t.get("parent"),
-                                        complexity=max(t["complexity"], SECURITY_CHECKLIST_COMPLEXITY),
-                                        tier=_security_review_tier(t))
-                    spawn_async(spawn.run_worker, r["id"])
-                continue
-            # code_review == "always": the pre-2026-09-19 D1 complexity split. Any status counts here, not just
-            # "done": a review that's still queued/running already claims the one (or first of two) slot, so a
-            # re-entry must not spawn a duplicate on top of it.
-            existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
-            if not existing:
-                r1 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
-                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
-                                     tier=review_tier(t))
-                spawn_async(spawn.run_worker, r1["id"])
-                existing = [r1]
-            if n_reviews == 2 and len(existing) == 1:
-                executor_field = t.get("executor") or ""
-                if executor_field.startswith("claude:"):
-                    tier2 = review_tier(t)
-                else:
-                    tier2 = _other_tier(existing[0]["tier"])
-                r2 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
-                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
-                                     tier=tier2)
-                spawn_async(spawn.run_worker, r2["id"])
+            else:
+                _open_reviews(t, n_reviews, review_reason)
+            complete(t["id"], "gated_at")
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
 
@@ -653,14 +663,11 @@ def _merge_reviewed_one(t):
         if stamp(t["id"], "merged_at"):
             try:
                 result = report_merge(t["id"], merge.merge(t["id"]))
+                complete(t["id"], "merged_at")
                 if result.get("status") != "merged":
-                    with bus.locked():
-                        current = bus.get(t["id"])
-                        pipeline = dict(current.get("pipeline") or {})
-                        if result.get("status") == "tests_red":
-                            pipeline.pop("merged_at", None)
-                        bus.update(t["id"], status="held",
-                                   hold_reason=f"merge {result.get('status')}", pipeline=pipeline)
+                    if result.get("status") == "tests_red":
+                        clear_stage(t["id"], "merged_at")
+                    bus.update(t["id"], status="held", hold_reason=f"merge {result.get('status')}")
             except Exception as e:
                 hold_failed(t["id"], "merged_error", "merge", e)
         return
@@ -676,6 +683,62 @@ def _merge_reviewed_one(t):
         reason = f"review state unknown: {', '.join(sorted(r['id'] for r in unknown))}"
     if stamp(t["id"], "review_held_at", status="held", hold_reason=reason):
         notify(f"{t['id']}: {reason}")
+
+
+def _merged_target(t):
+    return f"goal/{t['parent']}" if t.get("parent") else t.get("merged_into")
+
+
+def sweep_leases(pool):
+    """Reconcile expired post-lease claims. Old timestamp-only claims intentionally remain untouched."""
+    now = time.time()
+    for status in ("queued", "running", "done"):
+        for t in bus.read(status=status):
+            pipeline = t.get("pipeline") or {}
+            for stage in LEASED_STAGES:
+                lease = pipeline.get(f"{stage}_lease")
+                if not lease or pipeline.get(f"{stage}_done") or lease > now:
+                    continue
+                tid = t["id"]
+                if stage == "dispatched_at":
+                    if status == "queued":
+                        clear_stage(tid, stage)
+                elif stage == "spec_review_at":
+                    children = [r for r in bus.read(role="spec_review") if r["inputs"][:1] == [tid]]
+                    if children and children[0]["status"] == "queued" and not children[0].get("claimed_at"):
+                        spawn_async(spawn.run_worker, children[0]["id"])
+                        complete(tid, stage)
+                    elif children:
+                        clear_stage(tid, stage)
+                    else:
+                        clear_stage(tid, stage)
+                elif stage == "gated_at":
+                    if already_merged(t):
+                        complete(tid, stage, merged_into=_merged_target(t))
+                        continue
+                    expected = pipeline["reviews_expected"]
+                    if expected == 0:
+                        report_merge(tid, merge.merge(tid))
+                        complete(tid, stage)
+                        continue
+                    children = [r for r in bus.read(role="review") if r["inputs"][:1] == [tid]]
+                    if len(children) >= expected:
+                        for child in children:
+                            if child["status"] == "queued" and not child.get("claimed_at"):
+                                spawn_async(spawn.run_worker, child["id"])
+                    else:
+                        _open_reviews(t, expected, pipeline["review_reason"])
+                    complete(tid, stage)
+                else:  # merged_at
+                    if already_merged(t):
+                        complete(tid, stage, merged_into=_merged_target(t))
+                        continue
+                    retries = pipeline.get("merge_retries", 0) + 1
+                    if retries >= 2:
+                        clear_stage(tid, stage, pipeline_fields={"merge_retries": retries},
+                                    status="held", hold_reason="merge lease expired twice")
+                    else:
+                        clear_stage(tid, stage, pipeline_fields={"merge_retries": retries})
 
 
 def _handover_last_at():
@@ -731,6 +794,10 @@ def tick(pool=None):
     except Exception as e:
         print(f"[daemon] tally_planner failed: {e}", file=sys.stderr)
     _load_review_cfg(pool)
+    try:
+        sweep_leases(pool)
+    except Exception as e:
+        print(f"[daemon] sweep_leases failed: {e}", file=sys.stderr)
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:

@@ -87,8 +87,12 @@ goalposts on a task already past this stage. A task with one review merges on it
 cost measurement that motivated dropping code review by default are noted next to `[review]` in `pool.toml`. The
 human reviews every merged PR regardless of pipeline outcome.
 `daemon.tick()` drives every stage: `dispatch()` (spec review or executor), `gate()` (tests-green, then merge or
-review), `merge_reviewed()` (merge once every review of a task has approved). Each stage stamps `pipeline.<stage>_at`
-on the task json under the bus lock before acting, so a crash-and-retry never re-runs a stage.
+review), `merge_reviewed()` (merge once every review of a task has approved). Each side-effecting stage stamps a
+lease (`[daemon].stage_lease_s`, 900 seconds by default) and writes a done marker after issuing its action; old
+pre-lease stamps are deliberately not reconciled. On expiry, a queued dispatch is retried (a running dispatch is
+left to dead-pid requeue; Codex runs carry no pid), direct merges are retried, and unclaimed child reviews are
+re-spawned or missing reviews created. Already-landed merges are marked done. Held tasks are excluded from lease
+reconciliation.
 Run it: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart` in `pool.toml` (`ORCH_DAEMON=0`
 or `autostart = false` disables it), and `uv run orchestrator daemon` takes the same single-instance lock so two loops
 never run at once; `orchestrator daemon --once` runs a single pass without the lock.

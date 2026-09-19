@@ -844,6 +844,99 @@ class Daemon(unittest.TestCase):
         daemon.tick()
         self.assertEqual(self.merged, [t])
 
+    def expired(self, tid, stage, **extra):
+        pipeline = {stage: time.time() - 1000, f"{stage}_lease": time.time() - 1, **extra}
+        bus.update(tid, pipeline=pipeline)
+
+    def test_lease_dispatch_rerun_only_when_queued(self):
+        t = self.task("lease dispatch")
+        self.expired(t, "dispatched_at")
+        daemon.sweep_leases(P.Pool())
+        self.assertNotIn("dispatched_at", bus.get(t)["pipeline"])
+        bus.update(t, status="running")
+        self.expired(t, "dispatched_at")
+        daemon.sweep_leases(P.Pool())
+        self.assertIn("dispatched_at", bus.get(t)["pipeline"])
+
+    def test_lease_spec_review_respawns_unclaimed_child(self):
+        t = self.task("lease spec", complexity=7)
+        child = self.task("spec child", role="spec_review", inputs=[t])
+        self.expired(t, "spec_review_at")
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(self.workers, [child])
+        self.assertIn("spec_review_at_done", bus.get(t)["pipeline"])
+
+    def test_lease_gate_direct_merge_retried_when_no_reviews_expected(self):
+        t = self.task("lease direct")
+        bus.update(t, status="done")
+        self.expired(t, "gated_at", reviews_expected=0, review_reason="none")
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(self.merged, [t])
+        self.assertIn("gated_at_done", bus.get(t)["pipeline"])
+
+    def test_lease_gate_creates_missing_second_review(self):
+        t = self.task("lease reviews", complexity=7)
+        bus.update(t, status="done", executor="astra")
+        self.task("first", role="review", inputs=[t], tier="sonnet")
+        self.expired(t, "gated_at", reviews_expected=2, review_reason="always")
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(len(bus.read(role="review")), 2)
+        self.assertEqual(len(self.workers), 1)
+
+    def test_lease_gate_done_when_count_at_least_expected(self):
+        t = self.task("lease extras")
+        bus.update(t, status="done")
+        for _ in range(2): self.task("review", role="review", inputs=[t])
+        self.expired(t, "gated_at", reviews_expected=1, review_reason="always")
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(len(bus.read(role="review")), 2)
+        self.assertIn("gated_at_done", bus.get(t)["pipeline"])
+
+    def test_lease_merge_retry_then_hold(self):
+        t = self.task("lease merge")
+        bus.update(t, status="done")
+        self.expired(t, "merged_at")
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(bus.get(t)["pipeline"]["merge_retries"], 1)
+        self.expired(t, "merged_at", merge_retries=1)
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(bus.get(t)["status"], "held")
+        self.assertEqual(bus.get(t)["hold_reason"], "merge lease expired twice")
+
+    def test_tests_red_retry_clears_done_marker(self):
+        t = self.gated_execute("red retry")
+        r = self.task("review", role="review", inputs=[t])
+        bus.update(r, status="done", review_verdict="approve")
+        self.swap(merge, "merge", lambda tid, target=None: {"status": "tests_red"})
+        daemon.tick()
+        self.assertNotIn("merged_at_done", bus.get(t)["pipeline"])
+
+    def test_lease_reconciles_already_merged(self):
+        t = self.task("landed")
+        bus.update(t, status="done")
+        self.expired(t, "merged_at")
+        self.swap(daemon, "already_merged", lambda task: True)
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(bus.get(t)["merged_into"], "goal/T-0043")
+
+    def test_sweep_skips_held_tasks(self):
+        t = self.task("held")
+        bus.update(t, status="held")
+        self.expired(t, "merged_at")
+        daemon.sweep_leases(P.Pool())
+        self.assertNotIn("merge_retries", bus.get(t)["pipeline"])
+
+    def test_sweep_skips_prelease_stamps(self):
+        t = self.task("old")
+        bus.update(t, pipeline={"dispatched_at": time.time() - 1000})
+        daemon.sweep_leases(P.Pool())
+        self.assertIn("dispatched_at", bus.get(t)["pipeline"])
+
+    def test_hold_stamps_have_no_lease(self):
+        t = self.task("held stamp")
+        daemon.stamp(t, "gated_at", status="held", hold_reason="x")
+        self.assertNotIn("gated_at_lease", bus.get(t)["pipeline"])
+
     def gated_execute(self, title):
         """A done execute task that already cleared the gate, so gate() leaves it to merge_reviewed()."""
         t = self.task(title, complexity=5)
