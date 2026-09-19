@@ -243,3 +243,13 @@ outcome: Planner runs spawn_review(<review id>) by hand for any review or spec_r
 type: gotcha · goal: T-0260 · tasks: T-0271,T-0326,T-0273 · provenance: repo
 - three Phase G tasks came back 'tests pass, gate exit 0' with zero changes under tests/ although the acceptance named the tests (T-0271 three, T-0326 eleven, T-0273 seven); the gate is green because absent tests do not fail; each cost a review round (T-0309, T-0338) or a codex_reply
 outcome: Before posting or trusting a Codex result, diff --stat the branch for tests/ when the acceptance names test ids; a codex_reply listing the missing ids fixes it in one round (T-0326, T-0273). Polish candidate (c3): the gate checks that every tests/...::name in the acceptance resolves to a defined test and fails otherwise
+
+## 2026-09-19 executor running counters are persisted in pool_state.json and only decrement on a normal executor exit, so every restart-killed Codex process leaks one slot until dispatch starves
+type: gotcha · goal: T-0260 · tasks: T-0344,T-0277 · provenance: repo
+- pool_state.json at 23:24 held codex.running 7 (day field 2026-09-16), astra 6, luna 2, terra 2, sol 2 with one codex exec alive; executor.py:83-95 increments on start and decrements only in its normal finally path, pool._sync_legacy_codex mirrors codex.running onto astra, and daemon.free_slots sums max_parallel minus running, so two ready tasks (T-0344, T-0277) sat queued five minutes with no worker
+outcome: Planner reset the running fields in pool_state.json by hand to the count of bus tasks running per executor (Pool() is rebuilt per tick, so the next tick sees it). Polish candidate (c3): Pool load derives running from bus tasks with status running and executor == id instead of trusting the persisted increment, and drops the legacy codex mirror
+
+## 2026-09-19 hand-resetting pool_state.json running counters only sticks when no executor thread is alive: executor.start saves its start-time Pool snapshot at exit
+type: gotcha · goal: T-0260 · tasks: T-0348,T-0277,T-0344 · provenance: repo
+- the 23:24 reset (codex 7 to 1) was undone by 23:38 (codex 6, astra 6, terra 2, sol 2): executor.py builds Pool() once at start and calls pool.save() in its finally after running -= 1, writing back the stale counters loaded minutes earlier; T-0277 and T-0344 were alive across the reset
+outcome: Reset only when pgrep shows no codex exec and no claude -p worker, then confirm the next tick dispatches. The c3 polish (derive running from bus state at Pool load) removes the whole class

@@ -215,3 +215,11 @@ outcome: revert path: git revert 7297936 (touches only .orchestrator/plan.md and
 type: decision · goal: T-0260 · tasks: T-0337,T-0331,T-0332 · provenance: repo
 - G7 v4 and G10 merged; fix rounds T-0341 (G5) and T-0344 (G3) written; review T-0332 re-spawned by hand
 outcome: revert path: git revert d12ae2c (plan.md and gotchas.md only)
+
+## 2026-09-19 Phase G retrospective: T-0260 token economy closed, 11 sub-goals merged on goal/T-0260 at 2ca1517, gate green externally, PR 11
+type: decision · goal: T-0260 · tasks: T-0264,T-0265,T-0266,T-0267,T-0270,T-0271,T-0273,T-0274,T-0275,T-0276,T-0277,T-0290,T-0324,T-0326 · provenance: repo
+- 82 tasks under the goal: 40 execute (20 of them fix rounds), 31 reviews (14 approve, 17 request_changes), 8 spec reviews (6 request_changes; G6 and G7 three rounds each then waived), 3 scouts; 37 commits, 42 files, +3055/-171 over goal/T-0240
+- cost 22.38 USD, 442 calls, 636 turns; review 62.8 percent, spec review 24.2 percent, scouts 6.8 percent, Codex execute 6.2 percent; every request_changes review named a real defect (hunk-header duplication, fail-open diff guards, unlocked state file, unguarded lookups, packet ordering, missing tests)
+- what cost the most: Codex (luna) five times reported acceptance-named tests as passing without writing them (T-0271, T-0326, T-0273, T-0277, T-0348), each caught by a review round or a Planner diff --stat check plus one codex_reply; the 22:50 session restart orphaned two Codex runs and leaked executor slot counters twice; plan.md carried one wrong merged claim (G3)
+- what worked: the Phase F daemon posted every Codex result it dispatched (T-0240 acceptance 3 verified on T-0273), gated, spawned reviews and merged serially without Planner posts; fix rounds cut from the held branch kept every chain linear; a Planner diff --stat check before the review saved review rounds on T-0273, T-0277 and T-0348
+outcome: Accepted: tests-green exit 0 on wt/goal-T-0260 at 2ca1517; PR 11 https://github.com/K3NTAW/orchestrator/pull/11 goal/T-0260 to main for the human after PR 10; T-0260 marked done 23:56. Backlog (c2-c3): derive executor running counters from bus state; codex/codex_reply tools post results; re-dispatch requeued reviews; gate checks acceptance-named test ids exist; consistent total_tokens for legacy rows. Revert path for the whole phase: close PR 11 unmerged
