@@ -1,7 +1,7 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ... | planner-runs --summary"""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary"""
 import argparse, json, os, sys
 from collections import defaultdict
-from . import bus, scorecard
+from . import ROOT, bus, scorecard
 from .bus import RUNS
 from .pool import Pool
 
@@ -61,6 +61,8 @@ def main():
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
+    rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
+    rm.add_argument("--stdout", action="store_true")
     ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard")
@@ -114,6 +116,17 @@ def main():
         print(handover.write(a.reason))
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
+    elif a.cmd == "repomap":
+        from .repomap import build
+        # Leave a little room for command wrappers while keeping the requested value an upper bound.
+        result = build(ROOT, max(0, a.budget - 100))
+        if a.stdout:
+            print(result, end="")
+        else:
+            output = ROOT / ".orchestrator" / "memory" / "architecture.md"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(result)
+            print(output)
     elif a.cmd == "install":
         from .install import install
         for line in install(a.target):

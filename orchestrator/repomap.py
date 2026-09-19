@@ -1,0 +1,91 @@
+"""A compact, static map of the orchestrator package for worker context."""
+import ast
+import datetime as dt
+import re
+import subprocess
+from pathlib import Path
+
+
+def _first_sentence(text):
+    text = " ".join((text or "").split())
+    match = re.match(r".*?[.!?](?:\s|$)", text)
+    return (match.group(0).strip() if match else text)
+
+
+def _parameters(arguments):
+    names = [argument.arg for argument in arguments.posonlyargs + arguments.args]
+    if arguments.vararg:
+        names.append("*" + arguments.vararg.arg)
+    elif arguments.kwonlyargs:
+        names.append("*")
+    names.extend(argument.arg for argument in arguments.kwonlyargs)
+    if arguments.kwarg:
+        names.append("**" + arguments.kwarg.arg)
+    return ", ".join(names)
+
+
+def _module_imports(tree, names):
+    imports = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[0] == "orchestrator" and len(parts) > 1 and parts[1] in names:
+                    imports.add(parts[1])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and (node.module or "").startswith("orchestrator"):
+                parts = node.module.split(".")
+                if len(parts) > 1 and parts[1] in names:
+                    imports.add(parts[1])
+                elif node.module == "orchestrator":
+                    imports.update(alias.name for alias in node.names if alias.name in names)
+            elif node.level == 1:
+                if node.module and node.module.split(".")[0] in names:
+                    imports.add(node.module.split(".")[0])
+                elif not node.module:
+                    imports.update(alias.name for alias in node.names if alias.name in names)
+    return imports
+
+
+def _render(sha, date, modules):
+    lines = [f"repo map {sha} {date}"]
+    for module in modules:
+        description = f" — {module['doc']}" if module["doc"] else ""
+        lines.extend(("", f"## {module['name']}.py{description}"))
+        lines.extend(f"- {symbol}" for symbol in module["symbols"])
+    return "\n".join(lines) + "\n"
+
+
+def build(root, budget_chars=4000):
+    """Return a deterministic, AST-only markdown summary of ``orchestrator/*.py``."""
+    root = Path(root)
+    files = sorted((root / "orchestrator").glob("*.py"))
+    parsed = []
+    names = {path.stem for path in files}
+    for path in files:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        symbols = []
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                symbols.append(f"class {node.name}")
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                symbols.append(f"{prefix} {node.name}({_parameters(node.args)})")
+        parsed.append({"name": path.stem, "doc": _first_sentence(ast.get_docstring(tree)),
+                       "symbols": sorted(symbols), "imports": _module_imports(tree, names)})
+
+    ranks = {module["name"]: 0 for module in parsed}
+    for module in parsed:
+        for imported in module["imports"]:
+            ranks[imported] += 1
+    revision = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root,
+                              capture_output=True, text=True, check=False)
+    sha = revision.stdout.strip() or "unknown"
+    date = dt.date.today().isoformat()
+    modules = [{**module, "symbols": list(module["symbols"])} for module in parsed]
+    candidates = sorted((ranks[module["name"]], module["name"], symbol)
+                        for module in modules for symbol in module["symbols"])
+    while len(_render(sha, date, modules)) > budget_chars and candidates:
+        _, module_name, symbol = candidates.pop(0)
+        next(module for module in modules if module["name"] == module_name)["symbols"].remove(symbol)
+    return _render(sha, date, modules)[:budget_chars]

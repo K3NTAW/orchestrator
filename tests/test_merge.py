@@ -3,6 +3,7 @@ commit. Builds its own scratch git repo at TMP (harness scratch_repo) so it neve
 having turned TMP into a repo first."""
 import json, sys, unittest
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_merge.py` doesn't add this dir itself
 from _harness import TMP, g, scratch_repo
 from orchestrator import STATE, bus, merge, spawn
@@ -103,6 +104,22 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(g("rev-parse", "goal/CO-none").stdout.strip(), sha)
         self.assertEqual(g("symbolic-ref", "-q", "HEAD").stdout.strip(), orig_branch)
         self.assertEqual(g("rev-parse", "HEAD").stdout.strip(), orig_sha)
+
+    def test_merge_refreshes_repomap_on_py_change(self):
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        (TMP / "orchestrator").mkdir()
+        (TMP / "orchestrator" / "repomap.py").write_text("\"\"\"repomap marker\"\"\"\n")
+        (TMP / "orchestrator" / "changed.py").write_text("VALUE = 0\n")
+        g("add", "-A"); g("commit", "-qm", "add orchestrator module")
+        task = bus.create_task("repomap", "s", ["a"], ["orchestrator/changed.py"], role="execute")
+        wt = spawn.ensure_worktree(task["id"], base="HEAD"); bus.update(task["id"], worktree=str(wt))
+        (wt / "orchestrator" / "changed.py").write_text("VALUE = 1\n")
+        g("add", "-A", cwd=wt); g("commit", "-qm", "change orchestrator module", cwd=wt)
+        with patch("orchestrator.merge.build", return_value="repo map test\n") as mapped:
+            result = merge.merge(task["id"], target="goal/repomap")
+        self.assertEqual(result["status"], "merged", result)
+        mapped.assert_called_once_with(TMP)
 
 
 if __name__ == "__main__":
