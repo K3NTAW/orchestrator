@@ -1,5 +1,5 @@
 """orchestrator.cli: `status`, `scorecard` and `pick` subcommands, plain-text and JSON output."""
-import contextlib, io, json, os, sys, time, unittest
+import contextlib, io, json, os, sys, tempfile, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -10,6 +10,50 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_jev_diagnose_summary(self):
+        from orchestrator import jev
+        execute = bus.create_task("diagnose execute", "s", ["a"], ["x"], role="execute")["id"]
+        review = bus.create_task("diagnose review", "s", ["a"], ["x"], role="review")["id"]
+        stamp = datetime(2026, 9, 20, 12).timestamp()
+        rows = [
+            {"ts": stamp, "task": execute, "tool": "Read", "scored": True, "sampled": True,
+             "p_needed": 0.1, "repeat": False, "latency_ms": 100, "startup_ms": 10},
+            {"ts": stamp, "task": review, "tool": "Bash", "scored": True, "sampled": True,
+             "p_needed": 0.9, "repeat": False, "latency_ms": 300, "startup_ms": 30},
+            {"ts": stamp, "task": review, "tool": "Read", "scored": False, "sampled": False,
+             "p_needed": None, "repeat": True, "blocked": True, "latency_ms": 0},
+            {"ts": 0, "task": execute, "tool": "Write", "scored": True, "p_needed": 0.1},
+        ]
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            gate = root / ".orchestrator/runs/jev/gate.jsonl"
+            gate.parent.mkdir(parents=True)
+            gate.write_text("\n".join(json.dumps(row) for row in rows) + "\ninvalid json\n")
+            export = root / "labels.jsonl"
+            out = io.StringIO()
+            with mock.patch.object(cli, "ROOT", root), mock.patch.object(sys, "argv", [
+                "orchestrator", "jev", "diagnose", "--since", "2026-09-19", "--export", str(export), "--n", "1"
+            ]), mock.patch.object(jev, "ask", side_effect=AssertionError("network forbidden")), contextlib.redirect_stdout(out):
+                cli.main()
+            lines = out.getvalue().splitlines()
+            self.assertIn("calls=3 scored=2 sampled_share=66.7%", lines)
+            self.assertIn("blocked=1", lines)
+            self.assertIn("latency_ms_p50=200.0 latency_ms_p95=290.0", lines[2])
+            self.assertIn("startup_ms_p50=20.0", lines[2])
+            self.assertIn("network_ms_p50=", lines[2])
+            tools = json.loads(next(line.removeprefix("by_tool=") for line in lines if line.startswith("by_tool=")))
+            roles = json.loads(next(line.removeprefix("by_role=") for line in lines if line.startswith("by_role=")))
+            self.assertEqual(set(tools), {"Read", "Bash"})
+            self.assertEqual((tools["Read"]["calls"], tools["Read"]["scored"], tools["Read"]["waste_pct"]), (2, 1, 100.0))
+            self.assertEqual(roles["execute"]["waste_pct"], 100.0)
+            self.assertEqual(roles["review"]["waste_pct"], 0.0)
+            self.assertEqual(roles["review"]["repeat_pct"], 50.0)
+            self.assertIn(f"exported 1 rows to {export}", lines)
+            labelled, = [json.loads(line) for line in export.read_text().splitlines()]
+            self.assertEqual(labelled.pop("label"), "")
+            self.assertIn(labelled.pop("role"), {"execute", "review"})
+            self.assertIn(labelled, rows[:2])
+
     def _scorecard_fixture(self):
         import test_scorecard
         fixture = test_scorecard.Scorecard()

@@ -4,11 +4,11 @@ real network. Covers the transcript reader's error correlation, gate_mode="log" 
 blocking a confident redundant call and allowing a needed one, the protected-call allowlist, a missing
 transcript, and the shell hook exiting 0 for a Planner session (no task id)."""
 import contextlib, io, json, sys, unittest
-import os, subprocess, tempfile
+import hashlib, os, subprocess, tempfile, tomllib
 from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_jev_gate.py` doesn't add this dir itself
-from _harness import TMP, hook
+from _harness import REPO, TMP, hook
 from orchestrator import bus, jev, jev_gate
 
 BLOCK_CFG = {"enabled": True, "gate_mode": "block"}
@@ -58,6 +58,149 @@ class JevGateTests(unittest.TestCase):
                 os.environ["ORCH_TASK_ID"] = old
 
     # -- transcript reader -------------------------------------------------
+
+    def _sample_fixture(self, rate=0.0):
+        directory = tempfile.TemporaryDirectory(dir=TMP)
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        for name, value in (("STATE", root), ("GATE_LOG", root / "runs/jev/gate.jsonl")):
+            replacement = patch.object(jev_gate, name, value)
+            replacement.start()
+            self.addCleanup(replacement.stop)
+        jev_gate._cfg = lambda: {"enabled": True, "gate_mode": "sample", "sample_rate": rate,
+                                 "block_repeats": False}
+        target = root / "source.py"
+        target.write_text("original")
+        payload = {"session_id": "sample-test", "tool_name": "Read",
+                   "tool_input": {"file_path": str(target)}}
+        return self._task()["id"], payload, target
+
+    def test_sample_mode_is_deterministic(self):
+        task, payload, _ = self._sample_fixture(0.1)
+        expected = [int(hashlib.sha1(f"sample-test{i}".encode()).hexdigest(), 16) % 1000 < 100
+                    for i in range(50)]
+        self.assertTrue(any(expected))
+        self.assertFalse(all(expected))
+        sequences = []
+        for _ in range(2):
+            with patch.object(jev, "ask", return_value=answers()) as ask:
+                for index in range(50):
+                    payload["tool_input"]["offset"] = index
+                    self.assertEqual(self._run(payload, task), 0)
+                self.assertEqual(ask.call_count, sum(expected))
+            sequences.append([row["sampled"] for row in self._log_lines()])
+            (jev_gate.STATE / "runs/jev/session-sample-test.json").unlink()
+            self._clean_log()
+        self.assertEqual(sequences, [expected, expected])
+
+    def test_unsampled_call_makes_no_request(self):
+        task, payload, _ = self._sample_fixture()
+        with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")) as ask:
+            self.assertEqual(self._run(payload, task), 0)
+            ask.assert_not_called()
+        row, = self._log_lines()
+        self.assertFalse(row["sampled"])
+        self.assertFalse(row["scored"])
+        self.assertEqual(row["latency_ms"], 0)
+
+    def test_repeat_detected_without_network(self):
+        task, payload, target = self._sample_fixture()
+        with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")) as ask:
+            for _ in range(2):
+                self.assertEqual(self._run(payload, task), 0)
+            ask.assert_not_called()
+        rows = self._log_lines()
+        self.assertEqual([r["repeat"] for r in rows], [False, True])
+        state = json.loads((jev_gate.STATE / "runs/jev/session-sample-test.json").read_text())
+        self.assertEqual(state[rows[0]["input_hash"]], {"count": 2, "mtime": target.stat().st_mtime_ns})
+        payload["session_id"] = "another-session"
+        with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
+            self.assertEqual(self._run(payload, task), 0)
+        self.assertFalse(self._log_lines()[-1]["repeat"])
+
+    def test_repeat_cleared_when_mtime_changes(self):
+        task, payload, target = self._sample_fixture()
+        with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
+            self.assertEqual(self._run(payload, task), 0)
+            stat = target.stat()
+            target.write_text("changed")
+            os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+            self.assertEqual(self._run(payload, task), 0)
+            self.assertEqual(self._run(payload, task), 0)
+        self.assertEqual([r["repeat"] for r in self._log_lines()], [False, False, True])
+
+    def test_rows_have_target_hash_and_flags(self):
+        task, payload, target = self._sample_fixture(1.0)
+        with patch.object(jev, "ask", return_value=answers()):
+            for tool in ("Read", "Edit", "Write", "Grep", "Glob", "Bash"):
+                value = {"command": "echo " + "x " * 100} if tool == "Bash" else {"path": str(target), "pattern": "x"}
+                payload.update(tool_name=tool, tool_input=value)
+                self.assertEqual(self._run(payload, task), 0)
+                payload["tool_input"] = dict(reversed(list(value.items())))
+                self.assertEqual(self._run(payload, task), 0)
+        rows = self._log_lines()
+        for first, second in zip(rows[::2], rows[1::2]):
+            self.assertEqual(first["tool_target"], ("echo " + "x " * 100)[:80] if first["tool"] == "Bash" else str(target))
+            self.assertRegex(first["input_hash"], r"^[0-9a-f]{40}$")
+            self.assertEqual(first["input_hash"], second["input_hash"])
+            self.assertFalse(first["repeat"])
+            self.assertTrue(second["repeat"])
+            self.assertTrue(first["sampled"])
+            self.assertTrue(first["scored"])
+        with patch.object(jev, "redact", return_value="[redacted]") as redact:
+            self.assertEqual(jev_gate._target("Read", {"file_path": "secret"}), "[redacted]")
+            redact.assert_called_once_with("secret")
+
+    def test_block_repeats_denies(self):
+        task, payload, _ = self._sample_fixture()
+        with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
+            self.assertEqual(self._run(payload, task), 0)
+            jev_gate._cfg = lambda: {**BLOCK_CFG, "block_repeats": True}
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self._run(payload, task), 2)
+        self.assertIn("identical read already made this session; use the earlier result", err.getvalue())
+        self.assertTrue(self._log_lines()[-1]["blocked"])
+        self.assertFalse(self._log_lines()[-1]["scored"])
+        jev_gate._cfg = lambda: {**BLOCK_CFG, "block_repeats": False}
+        with patch.object(jev, "ask", return_value=answers()):
+            self.assertEqual(self._run(payload, task), 0)
+
+    def test_hook_honours_sample_defaults(self):
+        config = tomllib.loads((REPO / ".orchestrator/pool.toml").read_text())["jev"]
+        self.assertEqual((config["gate_mode"], config["sample_rate"], config["block_repeats"]),
+                         ("sample", 0.1, False))
+        task = self._task()["id"]
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            state = root / ".orchestrator"
+            (state / "tasks").mkdir(parents=True)
+            (state / "pool.toml").write_text('[jev]\nenabled = true\ngate_mode = "sample"\nsample_rate = 0.1\nblock_repeats = false\n')
+            (state / "tasks" / f"{task}.json").write_text(json.dumps({"id": task, "role": "execute"}))
+            bin_dir = root / ".venv/bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "python").symlink_to(sys.executable)
+            # Loaded in the hook's interpreter: replace Jev before any scoring can reach the network.
+            (root / "sitecustomize.py").write_text(
+                'from orchestrator import jev\n'
+                'def fake_ask(*args):\n'
+                f'    with open({str(root / "requests")!r}, "a") as fh: fh.write("called\\n")\n'
+                f'    return {answers()!r}\n'
+                'jev.ask = fake_ask\n')
+            flags = [int(hashlib.sha1(f"hook-sample{i}".encode()).hexdigest(), 16) % 1000 < 100
+                     for i in range(50)]
+            count = flags.index(True) + 2
+            for _ in range(count):
+                result = hook("jev-gate.sh", {"session_id": "hook-sample", "tool_name": "Read",
+                              "tool_input": {"file_path": str(state / "pool.toml")}}, cwd=root,
+                              env={"ORCH_ROOT": str(root), "ORCH_TASK_ID": task,
+                                   "PYTHONPATH": os.pathsep.join((str(root), str(REPO)))})
+                self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [json.loads(line) for line in (state / "runs/jev/gate.jsonl").read_text().splitlines()]
+            self.assertEqual([r["sampled"] for r in rows], flags[:count])
+            self.assertEqual((root / "requests").read_text().splitlines(), ["called"] * sum(flags[:count]))
+            self.assertTrue(all(r["mode"] == "sample" and not r["blocked"] for r in rows))
+            self.assertTrue(all(r["repeat"] for r in rows[1:]))
 
     def test_transcript_reader_correlates_errors(self):
         lines = [
