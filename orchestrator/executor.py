@@ -1,5 +1,12 @@
-"""Executor: GPT-6 Astra via `codex exec` (Codex CLI 0.154.0 has no `codex mcp-server`). One thread per atomic task,
-`codex exec resume <thread>` for the bounded fix loop. Usage-limit errors cool Codex down and hold the task (§4.10)."""
+"""Executor: GPT-6 Astra via ``codex exec``. One thread per atomic task; resume drives the bounded fix loop.
+
+Observed ``codex exec resume --help`` options (2026-09-19): ``--config``, ``--last``, ``--all``, ``--enable``,
+``--disable``, ``--image``, ``--strict-config``, ``--model``, ``--dangerously-bypass-approvals-and-sandbox``,
+``--dangerously-bypass-hook-trust``, ``--worktree``, ``--thread-source``, ``--skip-git-repo-check``, ``--ephemeral``,
+``--ignore-user-config``, ``--ignore-rules``, ``--output-schema``, ``--json``, ``--output-last-message``, and ``--help``.
+Notably, resume accepts ``--json`` and the access flags, but not ``-C``; its process cwd selects the worktree.
+Usage-limit errors cool Codex down and hold the task (§4.10).
+"""
 import json, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
@@ -8,6 +15,15 @@ from . import scorecard
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
+
+
+def argv_for(kind, args, cwd, access):
+    """Return a Codex argv without spawning it; fresh exec preserves its historical byte shape."""
+    if kind == "exec":
+        return ["codex", "exec", *args, "--json", "-C", str(cwd), *access]
+    if kind == "resume":
+        return ["codex", "exec", "resume", *args, "--json", *access]
+    raise ValueError(f"unknown codex command kind: {kind}")
 
 
 def parse_events(lines):
@@ -48,20 +64,27 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     cfg = pool.cfg["codex"]
     # dangerous_full_access (pool.toml): user decision 2026-09-16; otherwise workspace-write sandbox (container-safe default)
     access = ["--dangerously-bypass-approvals-and-sandbox"] if cfg.get("dangerous_full_access") else ["-s", "workspace-write"]
-    cmd = ["codex", "exec", *args, "--json", "-C", str(cwd), *access]
+    kind = "resume" if args and args[0] == "resume" else "exec"
+    command_args = args[1:] if kind == "resume" else args
+    cmd = argv_for(kind, command_args, cwd, access)
     log = {"executor": ex.id if ex else "codex", "complexity": task["complexity"]}
     t0 = time.time()
     if ex:
         ex.running += 1
     pool.codex.running += 1; pool.save()          # legacy mirror, until B3 drops pool.codex
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+        if kind == "resume":
+            run_kwargs["cwd"] = cwd
+        r = subprocess.run(cmd, **run_kwargs)
     except subprocess.TimeoutExpired:
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
     finally:
         if ex:
             ex.running -= 1
         pool.codex.running -= 1; pool.save()
+    if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
+        return {"status": "failed", "reason": f"codex argv error: {r.stderr[-800:]}"}
     ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
     if ev["thread_id"]:
         bus.update(task["id"], codex_thread=ev["thread_id"])
@@ -135,6 +158,8 @@ def reply(task_id, delta):
     if ex is None or ex.cooling() or ex.running >= ex.max_parallel:
         bus.update(task_id, status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
         return {"status": "held", "codex": pool.status()["codex"]}
-    bus.update(task_id, rounds=rounds)
-    return {"round": rounds, **_run(pool, t, ["resume", t["codex_thread"], delta], t["worktree"],
-                                    t["constraints"].get("timeout_s", 1800), ex=ex)}
+    result = _run(pool, t, ["resume", t["codex_thread"], delta], t["worktree"],
+                  t["constraints"].get("timeout_s", 1800), ex=ex)
+    if not result.get("reason", "").startswith("codex argv error:"):
+        bus.update(task_id, rounds=rounds)
+    return {"round": rounds, **result}
