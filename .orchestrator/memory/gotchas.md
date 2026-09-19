@@ -161,3 +161,8 @@ type: gotcha · goal: T-0109 · tasks: T-0200 · provenance: repo
 - 2026-09-19 about 13:00: spawn.run_claude raised FileNotFoundError for 'claude'; shutil.which('claude') is None; the homebrew link for claude resolves to ../lib/node_modules/@anthropic-ai/claude-code/.../claude.exe which no longer exists; no native copy under ~/.local or ~/.claude/local. Workers ran fine until about 07:00 the same morning; the interactive session itself kept running (its own binary was already loaded)
 - symptom on the bus: the daemon re-spawned review T-0200 and requeued it as 'process died' with no run record and no stderr visible; running spawn.run_worker from the Planner shell showed the traceback
 outcome: the human reinstalls the CLI (npm global package or the native setup); then spawn_review(T-0200) resumes Phase D. Fix candidate: run_claude should check shutil.which('claude') first and hold the task with reason 'claude CLI not found' instead of dying silently in a daemon thread
+
+## 2026-09-19 fix-round worktrees come from the goal branch within one daemon tick; a Planner-made worktree loses the race
+type: gotcha · goal: T-0201 · tasks: T-0222,T-0223 · provenance: repo
+- spawn.base_for() ignores constraints.fix_round_for and inputs; the daemon dispatched T-0222 about 20 s after creation with a worktree on goal/T-0201 (6358799) instead of task/T-0220 (d8531a3); planner-mode.sh also stops the Planner from repointing a worktree
+outcome: workaround: the fix-round spec opens with a STEP 0 that puts the worktree on task/<parent task>, and the acceptance requires the parent commit in the log (T-0223). Fix candidate for a polish task: base_for() prefers constraints.fix_round_for's task branch
