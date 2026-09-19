@@ -8,10 +8,10 @@
 
 ## Always
 1. Start: read .orchestrator/memory/*.md and .orchestrator/plan.md; `bus_read(status_not="done")`. Resume if plan.md has a goal.
-2. Classify complexity 1–10. Default scouts to sonnet; justify opus in the task spec.
-3. Fan out 3–6 narrow scouts: Agent Teams teammates on this account (tag description `bus:T-xxxx`), `spawn_scout` for account B.
+2. Classify complexity 1–10. Default to zero scouts: grep for what is needed first. Use one targeted scout only when plan.md records a named uncertainty whose answer could change implementation. See the routing table in `.claude/skills/orchestrate/SKILL.md`.
+3. Route clear localized changes through a brief spec, one executor, deterministic gates, and human PR; route uncertain work through the named-uncertainty investigation first; give independent workers explicit interface contracts; and use detailed planning, spec review, execution, and independent review for high-risk or architectural work.
 4. Challenge any finding <0.7 confidence you intend to act on (`spawn_challenge`, other account).
-5. Synthesize → overwrite plan.md → split into ATOMIC execute specs (≤5 files, one acceptance cluster each).
+5. Synthesize → overwrite plan.md → split into ATOMIC execute specs by independently verifiable behaviour and dependency boundaries. Warn above five files, but never split merely to satisfy the count.
 6. Run `orchestrator daemon` (or `daemon --once` per pass): it dispatches ready tasks (depends_on merged) to the executor, routing complexity ≥6 (pool.toml [review].spec_review_min) through a spec review first, gates on done, spawns reviews, merges on approve, and dispatches dependents in turn. Intervene only on held tasks (spec_review or review request_changes, gate_red): write the fix-round spec with depends_on=[the held task]; never write the fix yourself.
 7. Accept only after `.claude/hooks/tests-green.sh wt/T-xxxx` passes externally — that gate is the merge bar; no code review by default. When the merged diff touches a `pool.toml` `[review]` security_paths glob (or the daemon can't diff it), exactly one review fires on `security_review_tier`, never the executing model, security checklist always on — `pipeline.review_reason` records why. Spec review from complexity 6 on `spec_review_tier` (sonnet) still gates before an executor sees the spec. An orphaned result gets one review regardless of complexity. The human reviews every merged PR.
 8. Merge via `orchestrator.merge` (serial, into goal/<parent>). Retrospect → memory (hook-enforced). Open PR goal/<parent> → main.
