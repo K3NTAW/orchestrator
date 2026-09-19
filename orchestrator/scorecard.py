@@ -187,6 +187,72 @@ def write(card):
 ROLE_BUCKETS = ("execute", "review", "spec_review", "scout")
 ALL_BUCKETS = ROLE_BUCKETS + ("other",)
 
+JEV_USD_PER_M = 0.042
+
+
+def _gate_stats(root):
+    """Per-task {calls, waste, blocked} raw counts from runs/jev/gate.jsonl (E3 v2, T-0229). None when that
+    file doesn't exist at all -- distinct from a task simply having no rows in it (which yields zero counts) --
+    so by_task/by_goal can tell "never measured" ('-') apart from "measured, found nothing" (0). calls counts
+    only scored rows; waste counts the scored rows that were a bad call (p_needed<0.3 or p_redundant>0.7);
+    blocked counts every row the gate actually blocked, scored or not."""
+    path = root / "runs" / "jev" / "gate.jsonl"
+    if not path.exists():
+        return None
+    stats = {}
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        tid = e.get("task")
+        if not tid:
+            continue
+        s = stats.setdefault(tid, {"calls": 0, "waste": 0, "blocked": 0})
+        if e.get("scored"):
+            s["calls"] += 1
+            p_needed, p_redundant = e.get("p_needed"), e.get("p_redundant")
+            if (p_needed is not None and p_needed < 0.3) or (p_redundant is not None and p_redundant > 0.7):
+                s["waste"] += 1
+        if e.get("blocked"):
+            s["blocked"] += 1
+    return stats
+
+
+def _turns_by_task(root):
+    """Per-task sum of the "turns" field run records carry (E7, T-0212). A task absent from the returned dict
+    has no run record with a turns field at all -- callers render '-' for that case rather than 0."""
+    turns = {}
+    for _, e in _read_jsonl_entries(root):
+        tid, val = e.get("task"), e.get("turns")
+        if tid and val is not None:
+            turns[tid] = turns.get(tid, 0) + val
+    return turns
+
+
+def jev_footer(root=STATE):
+    """Trailing scorecard line for --by task|goal: today-and-all-time question count and USD cost from
+    runs/jev/<date>.jsonl input_tokens (gate.jsonl is decisions, not questions, so it's excluded by name).
+    Missing runs/jev/ dir -> "jev: 0 questions, 0.0 USD", never raise."""
+    n, tokens = 0, 0
+    jev_dir = root / "runs" / "jev"
+    for p in sorted(jev_dir.glob("*.jsonl")) if jev_dir.exists() else []:
+        if p.name == "gate.jsonl":
+            continue
+        for line in p.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            n += 1
+            tokens += int(e.get("input_tokens") or 0)
+    usd = tokens / 1_000_000 * JEV_USD_PER_M
+    return f"jev: {n} questions, {round(usd, 4)} USD"
+
 
 def _tokens_of(e):
     """int cast on each field: a run logged with a float token count (e.g. cache_read_input_tokens=20.0)
@@ -202,7 +268,9 @@ def by_task(root=STATE):
     duration_s, usd, input_tokens/output_tokens/cache_read_input_tokens -- the fields bus.log_run writes).
     tokens uses the same input+output+cache_read//10 formula pool.record and Pool.tally_planner use elsewhere.
     runs_no_usd counts lines with no usd field at all (Codex runs log none) so callers rolling usd into a
-    percent split can also show what that split leaves uncounted."""
+    percent split can also show what that split leaves uncounted. calls/waste_pct/blocked come from the E3 v2
+    jev gate log (T-0229) and turns from E7 run records (T-0212) -- see _gate_stats/_turns_by_task for the
+    '-' fallback rules when that data doesn't exist."""
     totals = {}
     for p, e in _read_jsonl_entries(root):
         tid = e.get("task")
@@ -217,6 +285,18 @@ def by_task(root=STATE):
         t["tier"] = t["tier"] or e.get("tier")
         if "usd" not in e:
             t["runs_no_usd"] += 1
+
+    gate = _gate_stats(root)
+    turns = _turns_by_task(root)
+    for tid, t in totals.items():
+        if gate is None:
+            t["calls"], t["waste_pct"], t["blocked"] = "-", "-", "-"
+        else:
+            g = gate.get(tid, {"calls": 0, "waste": 0, "blocked": 0})
+            t["calls"] = g["calls"]
+            t["waste_pct"] = round(g["waste"] / g["calls"] * 100, 1) if g["calls"] else 0.0
+            t["blocked"] = g["blocked"]
+        t["turns"] = turns.get(tid, "-")
     return totals
 
 
@@ -262,11 +342,14 @@ def by_goal(root=STATE):
     tasks = [json.loads(p.read_text()) for p in sorted(tasks_dir.glob("T-*.json"))] if tasks_dir.exists() else []
     goal_ids = sorted({t["parent"] for t in tasks if t.get("parent")})
     runs_path = root / "runs" / "planner_runs.json"
+    gate = _gate_stats(root)
 
     card = {}
     for gid in goal_ids:
         roles = {b: {"usd": 0.0, "tokens": 0} for b in ALL_BUCKETS}
         runs_no_usd = 0
+        calls = waste = blocked = turns = 0
+        has_turns = False
         for t in tasks:
             if t.get("parent") != gid:
                 continue
@@ -277,6 +360,12 @@ def by_goal(root=STATE):
             roles[bucket]["usd"] += totals["usd"]
             roles[bucket]["tokens"] += totals["tokens"]
             runs_no_usd += totals.get("runs_no_usd", 0)
+            if gate is not None:
+                g = gate.get(t["id"], {"calls": 0, "waste": 0, "blocked": 0})
+                calls += g["calls"]; waste += g["waste"]; blocked += g["blocked"]
+            if totals.get("turns") != "-":
+                turns += totals.get("turns") or 0
+                has_turns = True
         total_usd = sum(r["usd"] for r in roles.values())
         total_tokens = sum(r["tokens"] for r in roles.values())
         if runs_path.exists():
@@ -286,7 +375,11 @@ def by_goal(root=STATE):
         else:
             planner = None
         card[gid] = {"roles": roles, "total_usd": total_usd, "total_tokens": total_tokens, "planner": planner,
-                      "runs_no_usd": runs_no_usd}
+                      "runs_no_usd": runs_no_usd,
+                      "calls": calls if gate is not None else "-",
+                      "waste_pct": (round(waste / calls * 100, 1) if calls else 0.0) if gate is not None else "-",
+                      "blocked": blocked if gate is not None else "-",
+                      "turns": turns if has_turns else "-"}
     return card
 
 

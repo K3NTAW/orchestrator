@@ -271,6 +271,114 @@ class Scorecard(unittest.TestCase):
         goal_card = scorecard.by_goal(root=self.root)
         self.assertEqual(goal_card[goal]["runs_no_usd"], 0)
 
+    def write_gate(self, *rows):
+        (self.root / "runs" / "jev").mkdir(parents=True, exist_ok=True)
+        (self.root / "runs" / "jev" / "gate.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def test_waste_pct_from_gate_log(self):
+        self.write_runs({"task": "T-9900", "role": "execute", "usd": 1.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        self.write_gate(
+            {"ts": 1, "task": "T-9900", "tool": "Read", "p_needed": 0.9, "p_redundant": 0.1,
+             "p_destructive": 0.0, "blocked": False, "scored": True},
+            {"ts": 2, "task": "T-9900", "tool": "Read", "p_needed": 0.1, "p_redundant": 0.1,
+             "p_destructive": 0.0, "blocked": False, "scored": True},   # wasteful: p_needed < 0.3
+            {"ts": 3, "task": "T-9900", "tool": "Bash", "p_needed": 0.5, "p_redundant": 0.9,
+             "p_destructive": 0.0, "blocked": False, "scored": True},   # wasteful: p_redundant > 0.7
+            {"ts": 4, "task": "T-9900", "tool": "Bash", "p_needed": 0.5, "p_redundant": 0.5,
+             "p_destructive": 0.0, "blocked": False, "scored": False},  # not scored -- excluded from calls
+        )
+        card = scorecard.by_task(root=self.root)
+        self.assertEqual(card["T-9900"]["calls"], 3)
+        self.assertAlmostEqual(card["T-9900"]["waste_pct"], round(200 / 3, 1))
+
+    def test_blocked_count(self):
+        self.write_runs({"task": "T-9901", "role": "execute", "usd": 1.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        self.write_gate(
+            {"ts": 1, "task": "T-9901", "tool": "Bash", "p_needed": 0.9, "p_redundant": 0.1,
+             "p_destructive": 0.9, "blocked": True, "scored": True},
+            {"ts": 2, "task": "T-9901", "tool": "Read", "p_needed": 0.9, "p_redundant": 0.1,
+             "p_destructive": 0.0, "blocked": False, "scored": True},
+        )
+        card = scorecard.by_task(root=self.root)
+        self.assertEqual(card["T-9901"]["blocked"], 1)
+
+    def test_turns_column(self):
+        self.write_runs(
+            {"task": "T-9902", "role": "execute", "usd": 1.0, "duration_s": 1, "turns": 4,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"task": "T-9902", "role": "execute", "usd": 1.0, "duration_s": 1, "turns": 3,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"task": "T-9903", "role": "execute", "usd": 1.0, "duration_s": 1,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},  # no turns field
+        )
+        card = scorecard.by_task(root=self.root)
+        self.assertEqual(card["T-9902"]["turns"], 7)
+        self.assertEqual(card["T-9903"]["turns"], "-")
+
+    def test_missing_gate_log_renders_dash(self):
+        self.write_runs({"task": "T-9904", "role": "execute", "usd": 1.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        card = scorecard.by_task(root=self.root)
+        self.assertEqual(card["T-9904"]["calls"], "-")
+        self.assertEqual(card["T-9904"]["waste_pct"], "-")
+        self.assertEqual(card["T-9904"]["blocked"], "-")
+
+    def test_by_goal_gate_and_turns_columns(self):
+        goal = "T-9910"
+        self.write_task("T-9911", role="execute", parent=goal)
+        self.write_task("T-9912", role="execute", parent=goal)
+        self.write_runs(
+            {"task": "T-9911", "role": "execute", "usd": 1.0, "duration_s": 1, "turns": 2,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"task": "T-9912", "role": "execute", "usd": 1.0, "duration_s": 1, "turns": 5,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+        )
+        self.write_gate(
+            {"ts": 1, "task": "T-9911", "tool": "Read", "p_needed": 0.1, "p_redundant": 0.1,
+             "p_destructive": 0.0, "blocked": False, "scored": True},
+            {"ts": 2, "task": "T-9912", "tool": "Read", "p_needed": 0.9, "p_redundant": 0.1,
+             "p_destructive": 0.9, "blocked": True, "scored": True},
+        )
+        card = scorecard.by_goal(root=self.root)
+        g = card[goal]
+        self.assertEqual(g["calls"], 2)
+        self.assertAlmostEqual(g["waste_pct"], 50.0)
+        self.assertEqual(g["blocked"], 1)
+        self.assertEqual(g["turns"], 7)
+
+    def test_by_goal_missing_gate_log_renders_dash(self):
+        goal = "T-9920"
+        self.write_task("T-9921", role="execute", parent=goal)
+        self.write_runs({"task": "T-9921", "role": "execute", "usd": 1.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        card = scorecard.by_goal(root=self.root)
+        g = card[goal]
+        self.assertEqual(g["calls"], "-")
+        self.assertEqual(g["waste_pct"], "-")
+        self.assertEqual(g["blocked"], "-")
+        self.assertEqual(g["turns"], "-")
+
+    def test_jev_footer_cost(self):
+        jev_dir = self.root / "runs" / "jev"
+        jev_dir.mkdir(parents=True, exist_ok=True)
+        (jev_dir / "2026-09-18.jsonl").write_text(
+            "\n".join(json.dumps(l) for l in [
+                {"ts": 1, "caller": "scorecard-test", "input_tokens": 500_000, "model": "jev-latest",
+                 "latency_ms": 10.0, "ok": True},
+                {"ts": 2, "caller": "scorecard-test", "input_tokens": 500_000, "model": "jev-latest",
+                 "latency_ms": 10.0, "ok": True},
+            ]) + "\n")
+        # gate.jsonl sits in the same dir but must not be counted as a jev question
+        self.write_gate({"ts": 1, "task": "T-1", "tool": "Read", "p_needed": 0.9, "p_redundant": 0.1,
+                          "p_destructive": 0.0, "blocked": False, "scored": True})
+        self.assertEqual(scorecard.jev_footer(root=self.root), "jev: 2 questions, 0.042 USD")
+
+    def test_jev_footer_missing_dir(self):
+        self.assertEqual(scorecard.jev_footer(root=self.root), "jev: 0 questions, 0.0 USD")
+
     def test_token_totals_are_int(self):
         self.write_runs(
             {"task": "T-9820", "role": "execute", "duration_s": 1.0,
