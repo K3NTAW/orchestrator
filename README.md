@@ -125,6 +125,8 @@ JSON, daily budget exhausted -- makes `ask()` return `None` (fail-open) instead 
 `noul()`, `choice()` and `score()` wrap `ask()` for yes/no, multiple-choice and leveled-score questions. Egress
 note: task specs, tool-call metadata and memory titles leave the machine; file contents never do.
 
+Jev API confidence is optional: with confidence at least 0.6 the gate blocks at P(redundant) ≥ 0.85 or P(needed) ≤ 0.15; without confidence it uses stricter thresholds of 0.92 and 0.08, respectively. Enable block mode only after a week of log-mode rows.
+
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),
 `roles`, `complexity_min`/`max`, `max_parallel`, `daily_budget_tasks`, `quota_group`, `weight`, `enabled`.

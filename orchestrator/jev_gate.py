@@ -176,13 +176,22 @@ def decide(answers, mode):
     destructive is logged only (guardrails.sh owns blocking destructive commands)."""
     if mode != "block" or not answers:
         return False, None
+    cfg = _cfg()
     redundant = answers.get("redundant") or {}
     p_r, c_r = redundant.get("p"), redundant.get("confidence")
-    if p_r is not None and c_r is not None and p_r >= REDUNDANT_HIGH and c_r >= CONFIDENCE_MIN:
+    if p_r is not None and (
+        (c_r is None and p_r >= cfg.get("block_redundant_p_noconf", 0.92))
+        or (c_r is not None and c_r >= CONFIDENCE_MIN
+            and p_r >= cfg.get("block_redundant_p", REDUNDANT_HIGH))
+    ):
         return True, "redundant"
     needed = answers.get("needed") or {}
     p_n, c_n = needed.get("p"), needed.get("confidence")
-    if p_n is not None and c_n is not None and p_n <= NEEDED_LOW and c_n >= CONFIDENCE_MIN:
+    if p_n is not None and (
+        (c_n is None and p_n <= cfg.get("block_needed_p_noconf", 0.08))
+        or (c_n is not None and c_n >= CONFIDENCE_MIN
+            and p_n <= cfg.get("block_needed_p", NEEDED_LOW))
+    ):
         return True, "needed"
     return False, None
 
@@ -195,9 +204,13 @@ def _message(reason, tool_name, tool_input):
 
 def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency_ms, startup_ms=0.0):
     answers = answers or {}
+    _, reason = decide(answers, "block")
+    rule = ("none" if reason is None else
+            "noconf" if answers[reason].get("confidence") is None else "conf")
     needed = answers.get("needed") or {}
     entry = {
         "ts": time.time(), "task": task_id, "session": session_id, "tool": tool_name,
+        "rule": rule,
         "p_needed": needed.get("p"),
         "p_redundant": (answers.get("redundant") or {}).get("p"),
         "p_destructive": (answers.get("destructive") or {}).get("p"),

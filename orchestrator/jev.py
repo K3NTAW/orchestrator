@@ -72,6 +72,7 @@ def _cfg():
         "timeout_s": jev.get("timeout_s", DEFAULT_TIMEOUT_S),
         "daily_budget_tokens": jev.get("daily_budget_tokens", DEFAULT_DAILY_BUDGET_TOKENS),
         "max_state_chars": jev.get("max_state_chars", DEFAULT_MAX_STATE_CHARS),
+        "votes": jev.get("votes", 1),
     }
 
 
@@ -147,10 +148,10 @@ def _add_day_tokens(input_tokens):
     _with_state_lock(op)
 
 
-def _log_usage(caller, input_tokens, model, latency_ms, ok):
+def _log_usage(caller, input_tokens, model, latency_ms, ok, votes=1):
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     entry = {"ts": time.time(), "caller": caller, "input_tokens": input_tokens, "model": model,
-              "latency_ms": latency_ms, "ok": ok}
+              "latency_ms": latency_ms, "ok": ok, "votes": votes}
     with open(RUNS_DIR / f"{_today()}.jsonl", "a") as fh:
         fh.write(json.dumps(entry) + "\n")
 
@@ -189,7 +190,13 @@ def ask(state, questions, *, model=None, timeout_s=None):
     state_text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
     state_text = redact(state_text)[:cfg["max_state_chars"]]
 
-    payload = json.dumps({"state": state_text, "model": model, "questions": questions}).encode()
+    votes = cfg.get("votes", 1)
+    if not isinstance(votes, int) or isinstance(votes, bool) or votes < 1:
+        return None
+    sent_questions = questions if votes == 1 else {
+        f"{key}_{i}": question for key, question in questions.items() for i in range(1, votes + 1)
+    }
+    payload = json.dumps({"state": state_text, "model": model, "questions": sent_questions}).encode()
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     started = time.monotonic()
@@ -202,15 +209,41 @@ def ask(state, questions, *, model=None, timeout_s=None):
             if e.code in RETRY_STATUS and attempt == 0:
                 time.sleep(RETRY_BACKOFF_S)
                 continue
-            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False)
+            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False, votes)
             return None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False)
+            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False, votes)
             return None
         else:
             input_tokens = (body.get("usage") or {}).get("input_tokens", 0)
-            _log_usage(caller, input_tokens, model, (time.monotonic() - started) * 1000, True)
+            _log_usage(caller, input_tokens, model, (time.monotonic() - started) * 1000, True, votes)
             _add_day_tokens(input_tokens)
+            try:
+                answers = body.get("answers") or {}
+                if votes > 1:
+                    averaged = {}
+                    for key, question in questions.items():
+                        rows = [answers[f"{key}_{i}"] for i in range(1, votes + 1)]
+                        answer = dict(rows[0])
+                        if question["type"] == "noul":
+                            answer["noul"] = sum(row["noul"] for row in rows) / votes
+                        elif question["type"] == "choice":
+                            answer["probabilities"] = {
+                                option: sum(row["probabilities"][option] for row in rows) / votes
+                                for option in question["criteria"]
+                            }
+                            answer["choice"] = max(answer["probabilities"], key=answer["probabilities"].get)
+                        elif question["type"] == "score":
+                            answer["score"] = sum(row["score"] for row in rows) / votes
+                        confidences = [row.get("confidence") for row in rows]
+                        answer["confidence"] = (None if None in confidences else sum(confidences) / votes)
+                        averaged[key] = answer
+                    body["answers"] = averaged
+                else:
+                    for answer in answers.values():
+                        answer.setdefault("confidence", None)
+            except (KeyError, TypeError, ValueError, AttributeError):
+                return None
             return body
     return None
 

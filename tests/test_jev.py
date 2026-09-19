@@ -214,5 +214,49 @@ class JevTests(unittest.TestCase):
         self.assertNotIn("a1b2c3d", captured["state"])
 
 
+class JevVotesTests(unittest.TestCase):
+    def test_votes_averaged(self):
+        from unittest.mock import patch
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        with TemporaryDirectory() as directory, \
+                patch.object(jev, "RUNS_DIR", Path(directory)), \
+                patch.object(jev, "_cfg", return_value={**ENABLED_CFG, "votes": 3}), \
+                patch.object(jev, "_api_key", return_value="fake-key"), \
+                patch.object(jev, "_day_tokens_used", return_value=0), \
+                patch.object(jev, "_add_day_tokens") as tally:
+            questions = {"needed": {"type": "noul", "instructions": "needed?"},
+                         "redundant": {"type": "noul", "instructions": "redundant?"}}
+            response = {"answers": {
+                "needed_1": {"noul": 0.3}, "needed_2": {"noul": 0.6}, "needed_3": {"noul": 0.9},
+                "redundant_1": {"noul": 0.1, "confidence": 0.6},
+                "redundant_2": {"noul": 0.2, "confidence": 0.9},
+                "redundant_3": {"noul": 0.3, "confidence": 0.9}}, "usage": {"input_tokens": 123}}
+            with patch.object(jev.urllib.request, "urlopen", return_value=FakeResp(response)) as request:
+                result = jev.ask("state", questions)
+            request.assert_called_once()
+            sent = json.loads(request.call_args.args[0].data)
+            self.assertEqual(sent["questions"], {f"{key}_{i}": value for key, value in questions.items()
+                                                for i in range(1, 4)})
+            self.assertAlmostEqual(result["answers"]["needed"]["noul"], 0.6)
+            self.assertIsNone(result["answers"]["needed"]["confidence"])
+            self.assertAlmostEqual(result["answers"]["redundant"]["noul"], 0.2)
+            self.assertAlmostEqual(result["answers"]["redundant"]["confidence"], 0.8)
+            tally.assert_called_once_with(123)
+            entry = json.loads((Path(directory) / f"{jev._today()}.jsonl").read_text())
+            self.assertEqual(entry["votes"], 3)
+
+    def test_missing_confidence_stays_none(self):
+        from unittest.mock import patch
+        with patch.object(jev, "_cfg", return_value=ENABLED_CFG), \
+                patch.object(jev, "_api_key", return_value="fake-key"), \
+                patch.object(jev, "_day_tokens_used", return_value=0), \
+                patch.object(jev, "_add_day_tokens"), patch.object(jev, "_log_usage"), \
+                patch.object(jev.urllib.request, "urlopen",
+                             side_effect=lambda *a, **k: FakeResp({"answers": {"q": {"noul": 0.95}}})):
+            self.assertIsNone(jev.ask("state", {"q": {"type": "noul"}})["answers"]["q"]["confidence"])
+            self.assertEqual(jev.noul("state", "needed?"), 0.95)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -92,6 +92,50 @@ class JevGateTests(unittest.TestCase):
 
     # -- gate_mode ----------------------------------------------------------
 
+    def test_block_without_confidence_uses_strict_thresholds(self):
+        jev_gate._cfg = lambda: BLOCK_CFG
+        for key, probability, blocked in (("redundant", 0.92, True), ("redundant", 0.919, False),
+                                           ("needed", 0.08, True), ("needed", 0.081, False)):
+            with self.subTest(key=key, probability=probability):
+                value = {key: {"p": probability, "confidence": None}}
+                self.assertEqual(jev_gate.decide(value, "block"), (blocked, key if blocked else None))
+                self.assertEqual(jev_gate.decide(value, "log"), (False, None))
+        jev_gate._cfg = lambda: {**BLOCK_CFG, "block_redundant_p_noconf": 0.99,
+                                "block_needed_p_noconf": 0.01}
+        self.assertEqual(jev_gate.decide({"redundant": {"p": 0.95}}, "block"), (False, None))
+        self.assertEqual(jev_gate.decide({"needed": {"p": 0.05}}, "block"), (False, None))
+
+    def test_block_with_confidence_uses_default_thresholds(self):
+        jev_gate._cfg = lambda: BLOCK_CFG
+        for key, probability, blocked in (("redundant", 0.85, True), ("redundant", 0.849, False),
+                                           ("needed", 0.15, True), ("needed", 0.151, False)):
+            with self.subTest(key=key, probability=probability):
+                value = {key: {"p": probability, "confidence": 0.6}}
+                self.assertEqual(jev_gate.decide(value, "block"), (blocked, key if blocked else None))
+                value[key]["confidence"] = 0.59
+                self.assertEqual(jev_gate.decide(value, "block"), (False, None))
+        jev_gate._cfg = lambda: {**BLOCK_CFG, "block_redundant_p": 0.99, "block_needed_p": 0.01}
+        for key, probability in (("redundant", 0.95), ("needed", 0.05)):
+            self.assertEqual(jev_gate.decide({key: {"p": probability, "confidence": 0.9}}, "block"),
+                             (False, None))
+
+    def test_rule_logged(self):
+        jev_gate._cfg = lambda: LOG_CFG
+        for confidence, probability, rule in ((None, 0.92, "noconf"), (0.6, 0.85, "conf"),
+                                               (None, 0.9, "none"), (0.59, 0.99, "none")):
+            self._clean_log()
+            response = answers(redundant=(probability, confidence))
+            if confidence is None:
+                del response["answers"]["redundant"]["confidence"]
+            jev.ask = lambda state, questions: response
+            self.assertEqual(self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}},
+                                       self._task()["id"]), 0)
+            self.assertEqual(self._log_lines()[0]["rule"], rule)
+        self._clean_log()
+        jev.ask = lambda state, questions: None
+        self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}}, self._task()["id"])
+        self.assertEqual(self._log_lines()[0]["rule"], "none")
+
     def test_log_mode_never_blocks(self):
         jev_gate._cfg = lambda: LOG_CFG
         jev.ask = lambda state, questions: answers(needed=(0.05, 0.9), redundant=(0.95, 0.9))
