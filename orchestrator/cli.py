@@ -193,7 +193,7 @@ def main():
                           f"{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
                     total_usd += r["total_usd"]
                 totals = _scorecard_measurement_totals(card, "goal")
-                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t"
+                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t"
                       f"{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
                 print(scorecard.planner_footer())
                 accepted_tokens = scorecard.tokens_per_accepted_goal(root=scorecard.STATE)

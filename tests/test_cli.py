@@ -39,7 +39,7 @@ class Cli(unittest.TestCase):
     def _scorecard_text_rows(self, fixture, by):
         build = getattr(cli.scorecard, "by_" + by)
         with mock.patch.object(cli.scorecard, "STATE", fixture.root), mock.patch.object(
-            cli.scorecard, "by_" + by, side_effect=lambda: build(root=fixture.root)
+            cli.scorecard, "by_" + by, side_effect=lambda *args, **kwargs: build(root=fixture.root)
         ), mock.patch.object(cli.scorecard, "planner_footer", return_value="planner: -"):
             output = self._scorecard_output("--by", by)
         lines = output.splitlines()
