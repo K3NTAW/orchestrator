@@ -113,9 +113,11 @@ def trust_workspace(config_dir, wt):
 def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     wt = Path(task.get("worktree") or ensure_worktree(task["id"]))
     trust_workspace(acct.config_dir, wt)
+    # Explicit --mcp-config + --strict-mcp-config means workers never auto-load the project/user configs
+    # (github, orchestrator MCP schemas cost tokens every turn a worker never needs them). Role-specific
+    # override (.mcp.<role>.json) wins when present; every other role gets the bus-only worker config.
     role_cfg = ROOT / f".mcp.{task['role']}.json"
-    if role_cfg.exists():
-        shutil.copy(role_cfg, wt / ".mcp.json")
+    mcp_config = role_cfg if role_cfg.exists() else ROOT / ".mcp.worker.json"
     env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
            "ORCH_ROOT": str(ROOT), **secrets_for_role(task["role"])}
     # Headless hosts: `claude setup-token` issues a long-lived CLAUDE_CODE_OAUTH_TOKEN per CLAUDE_CONFIG_DIR,
@@ -126,7 +128,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
     # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.
     cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
-           "--dangerously-skip-permissions"]
+           "--dangerously-skip-permissions", "--allowedTools", tools,
+           "--strict-mcp-config", "--mcp-config", str(mcp_config)]
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
@@ -161,8 +164,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
     bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
-                outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), **log,
-                **{k: used.get(k, 0) for k in
+                outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), turns=out.get("num_turns", 0),
+                **log, **{k: used.get(k, 0) for k in
                    ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
     if not out.get("is_error") and p.returncode == 0:
         return {"status": "done", "output": out}

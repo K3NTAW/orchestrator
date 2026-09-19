@@ -190,6 +190,89 @@ class RunClaudeHoldsWhenCliMissing(unittest.TestCase):
         self.assertEqual(json.loads(last_line)["outcome"], "no_cli")
 
 
+class RunClaudeToolsAndMcpConfig(unittest.TestCase):
+    """T-0212: TOOLS[role] was defined but never reached the `claude` argv (dead config); --strict-mcp-config +
+    an explicit --mcp-config keeps workers off the github/orchestrator MCP schemas they never call."""
+
+    class CapturingPopen(FakePopen):
+        last_cmd = None
+
+        def __init__(self, cmd, cwd=None, env=None, stdout=None, stderr=None, text=None):
+            RunClaudeToolsAndMcpConfig.CapturingPopen.last_cmd = cmd
+            super().__init__(cmd, cwd=cwd, env=env, stdout=stdout, stderr=stderr, text=text)
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = self.CapturingPopen
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def run_claude_task(self, role="execute"):
+        t = bus.create_task("tools-test", "s", ["a"], ["x.py"], role=role, tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", [role])
+        pool = P.Pool()
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS[role], 2.0, 60)
+        self.assertEqual(r["status"], "done")
+        return self.CapturingPopen.last_cmd
+
+    def test_run_claude_passes_allowed_tools(self):
+        cmd = self.run_claude_task(role="execute")
+        self.assertIn("--allowedTools", cmd)
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], spawn.TOOLS["execute"])
+
+    def test_run_claude_uses_worker_mcp_config(self):
+        """No .mcp.<role>.json override exists for "execute": falls back to the tracked, bus-only worker config."""
+        cmd = self.run_claude_task(role="execute")
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertIn("--mcp-config", cmd)
+        self.assertEqual(cmd[cmd.index("--mcp-config") + 1], str(spawn.ROOT / ".mcp.worker.json"))
+
+    def test_run_claude_keeps_role_override_mcp_config_when_present(self):
+        # "triage" (not "review"): [secrets.review] shells out for a real token in pool.toml, which would hit
+        # this test's patched subprocess.Popen; [secrets.triage] is empty so resolve_secrets never calls it.
+        override = spawn.ROOT / ".mcp.triage.json"
+        override.write_text('{"mcpServers": {}}')
+        self.addCleanup(override.unlink)
+        cmd = self.run_claude_task(role="triage")
+        self.assertEqual(cmd[cmd.index("--mcp-config") + 1], str(override))
+
+
+class FakePopenWithTurns(FakePopen):
+    def communicate(self, timeout=None):
+        return json.dumps({"result": "ok", "usage": {}, "num_turns": 7}), ""
+
+
+class RunRecordHasTurns(unittest.TestCase):
+    """bus.log_run's run record must carry claude's num_turns so the scorecard can show turns per run."""
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = FakePopenWithTurns
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_run_record_has_turns(self):
+        t = bus.create_task("turns-test", "s", ["a"], ["x.py"], role="execute", tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", ["execute"])
+        pool = P.Pool()
+
+        runs_dir = TMP / ".orchestrator" / "runs"
+        before = len(list(runs_dir.glob("*.jsonl"))) if runs_dir.exists() else 0
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS["execute"], 2.0, 60)
+        self.assertEqual(r["status"], "done")
+
+        run_files = sorted(runs_dir.glob("*.jsonl"))
+        self.assertGreaterEqual(len(run_files), max(before, 1))
+        last_line = run_files[-1].read_text().strip().splitlines()[-1]
+        self.assertEqual(json.loads(last_line)["turns"], 7)
+
+
 class RunWorkerMissingReason(unittest.TestCase):
     """T-0134: run_worker must not KeyError when run_claude returns a failure dict without a "reason" key, and
     should preserve any partial output as a resume_hint for the next attempt."""
