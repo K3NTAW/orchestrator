@@ -22,7 +22,17 @@ def argv_for(kind, args, cwd, access):
     if kind == "exec":
         return ["codex", "exec", *args, "--json", "-C", str(cwd), *access]
     if kind == "resume":
-        return ["codex", "exec", "resume", *args, "--json", *access]
+        resume_access = []
+        i = 0
+        while i < len(access):
+            flag = access[i]
+            if flag == "--dangerously-bypass-approvals-and-sandbox":
+                resume_access.append(flag)
+            elif flag in ("-s", "--sandbox") and i + 1 < len(access):
+                i += 1
+                resume_access.extend(["--config", f'sandbox_mode="{access[i]}"'])
+            i += 1
+        return ["codex", "exec", "resume", *args, "--json", *resume_access]
     raise ValueError(f"unknown codex command kind: {kind}")
 
 
@@ -84,7 +94,11 @@ def _run(pool, task, args, cwd, timeout, ex=None):
             ex.running -= 1
         pool.codex.running -= 1; pool.save()
     if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
-        return {"status": "failed", "reason": f"codex argv error: {r.stderr[-800:]}"}
+        reason = f"codex argv error: {r.stderr[-800:]}"
+        bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex",
+                    duration_s=round(time.time() - t0, 1), outcome="failed", reason=reason, **log)
+        bus.update(task["id"], resume_hint={"argv_error": reason[:300]})
+        return {"status": "failed", "reason": reason}
     ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
     if ev["thread_id"]:
         bus.update(task["id"], codex_thread=ev["thread_id"])
