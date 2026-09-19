@@ -136,6 +136,27 @@ class Executor(unittest.TestCase):
         self.assertEqual(seen["ex"].id, t["executor"])
         self.assertEqual(P.Pool().executors[t["executor"]].day_tasks, 1)
 
+    def test_start_routes_with_task(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(complexity=3, title="route-with-task")
+        task = bus.get(tid)
+        seen = {}
+        orig_pick = P.Pool.pick_executor
+        orig_run = executor._run
+
+        def capture_pick(pool, *args, **kwargs):
+            seen.update(kwargs)
+            return orig_pick(pool, *args, **kwargs)
+
+        P.Pool.pick_executor = capture_pick
+        executor._run = lambda *args, **kwargs: {"status": "done"}
+        self.addCleanup(lambda: setattr(P.Pool, "pick_executor", orig_pick))
+        self.addCleanup(lambda: setattr(executor, "_run", orig_run))
+
+        executor.start(tid, "do it")
+
+        self.assertEqual(seen["task"], task)
+
     def test_usage_limit_cools_the_whole_quota_group(self):
         self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "th-limit"},
                                      {"type": "error", "message": "You've hit your usage limit. Try again in 30 minutes."}), 1)

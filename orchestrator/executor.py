@@ -134,7 +134,7 @@ def start(task_id, prompt):
         scores = scorecard.scores(scorecard.build())
     except Exception:
         scores = {}
-    ex = pool.pick_executor("execute", t["complexity"], scores=scores)
+    ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
     if ex is None or ex.provider != "codex":
         return _exhausted(pool, t)
     from .spawn import ensure_worktree
