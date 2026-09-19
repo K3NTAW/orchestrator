@@ -132,6 +132,8 @@ a human: `ORCH_DAEMON_HOST=mcp` (set by the orchestrator MCP server's `main()` e
 the daemon) and `.orchestrator/planner_session.json` (written atomically by that same call, removed at exit, and
 named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
 interactive Planner session ever attaches -- leave it off anywhere one might.
+Each run receives a compact decision packet assembled from bus and run data; the interactive handover threshold is
+`[planner].handover_context_tokens` and packet size is bounded by `[planner].decision_packet_chars`.
 
 ### Jev
 Jev (TypeSafe AI) answers typed questions about a piece of state with calibrated probabilities instead of free

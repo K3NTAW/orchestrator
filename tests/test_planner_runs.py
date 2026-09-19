@@ -4,6 +4,7 @@ goals.identity_of are patched per test so nothing here spawns a real `claude` su
 state; every test gets its own sandbox for bus.STATE/TASKS/RUNS, handover.STATE/ROOT and planner_runs.STATE so
 plan.md, tasks and planner_runs.json never touch the shared TMP root other test files use."""
 import json, os, sys, tempfile, time, unittest
+from datetime import date
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_planner_runs.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
@@ -821,6 +822,48 @@ class RetryResetsAgreement(PlannerRunsBase):
         rec2 = self.record(goal_id, "scouts_done", goal_id)
         self.assertIsNone(rec2["agreement"])
         self.assertIsNone(rec2["jev"])
+
+
+class DecisionUsage(PlannerRunsBase):
+    def test_decision_run_logs_tokens(self):
+        goal_id = self.goal()
+        self.scout_child(goal_id, "done")
+        log_path = PR.STATE / "runs" / "planner-decision-test.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps({
+            "usage": {"input_tokens": 100, "output_tokens": 50,
+                      "cache_read_input_tokens": 20, "cache_creation_input_tokens": 5},
+            "total_cost_usd": 0.0123,
+            "is_error": False,
+        }))
+        PR._record_running(goal_id, "scouts_done", goal_id,
+                           {"pid": 111, "pid_start": None, "log": str(log_path)}, "A", 0)
+        self.execute_child(goal_id)  # resolves scouts_done's own condition
+        self.patch_identity_of(lambda pid, pid_start: False)
+
+        PR.reconcile()
+
+        rec = self.record(goal_id, "scouts_done", goal_id)
+        self.assertEqual(rec["status"], "exited_ok")
+        self.assertTrue(rec["usage_logged"])
+        self.assertEqual(rec["tokens"], 175)  # 100 input + 20 cache_read + 5 cache_write + 50 output
+        self.assertEqual(rec["usd"], 0.0123)
+
+        runs_file = bus.RUNS / f"{date.today().isoformat()}.jsonl"
+        rows = [json.loads(line) for line in runs_file.read_text().splitlines()]
+        matches = [r for r in rows if r.get("role") == "planner_decision" and r.get("goal_id") == goal_id]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["tokens"], 175)
+        self.assertEqual(matches[0]["tier"], "planner")
+        self.assertEqual(matches[0]["account"], "A")
+        self.assertEqual(matches[0]["provider"], "claude")
+        self.assertEqual(matches[0]["outcome"], "done")
+        self.assertEqual(matches[0]["usd"], 0.0123)
+
+        # reconcile() never re-parses a log or re-logs a run once usage_logged is set.
+        PR.reconcile()
+        rows2 = [json.loads(line) for line in runs_file.read_text().splitlines()]
+        self.assertEqual(len([r for r in rows2 if r.get("role") == "planner_decision"]), 1)
 
 
 class Summary(PlannerRunsBase):

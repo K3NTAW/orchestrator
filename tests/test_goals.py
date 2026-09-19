@@ -1,7 +1,7 @@
 """orchestrator.goals: launch/track/stop a headless Planner session against a target repo. goals.py may only
 import install.install, spawn.trust_workspace and spawn.resolve_secrets from the package (T-0115); these tests
 exercise it against scratch git repos, never REPO itself."""
-import contextlib, io, json, os, re, subprocess, sys, threading, unittest
+import contextlib, io, json, os, re, subprocess, sys, threading, tomllib, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_goals.py` doesn't add this dir itself
 from _harness import REPO, TMP, scratch_repo
@@ -610,6 +610,63 @@ class ScaffoldCommitAndSecrets(GoalsTestCase):
         self.assertEqual(env.get("Y"), os.environ["HOME"])
         self.assertFalse(any("pwned" in " ".join(c) for c in run_calls if isinstance(c, list)))
         self.assertFalse(os.path.exists("/tmp/T-0129-pwned-marker"))
+
+
+class DecisionPacket(unittest.TestCase):
+    def test_decision_packet_held_has_packet_and_failures_fenced(self):
+        goal = bus.create_task("GOAL: held decision", "goal spec", ["Planner closes the goal with a PR"], ["**"],
+                               role="triage", complexity=5)
+        goal_id = goal["id"]
+        held = bus.create_task("fix the thing", "do the fix", ["x"], ["orchestrator/goals.py"],
+                               role="execute", parent=goal_id, complexity=3)
+        held_id = held["id"]
+        bus.update(held_id, status="held", hold_reason="gate_red",
+                  resume_hint={"failures": "AssertionError: expected 1 got 2"})
+        review = bus.create_task("review of fix", "spec", ["x"], ["y"], role="review", parent=goal_id,
+                                 complexity=3, inputs=[held_id])
+        bus.post_result(review["id"], {"comments": [{"path": "orchestrator/goals.py", "line": 42,
+                                                      "issue": "missing null check"}]}, status="done")
+
+        packet = goals.decision_packet(goal_id, "held", f"{held_id}:123.456")
+
+        self.assertIn(f"Held task: fix the thing ({held_id})", packet)
+        self.assertIn("Held task packet:", packet)
+        self.assertIn("Hold reason: gate_red", packet)
+        self.assertIn("```data", packet)
+        self.assertIn("AssertionError: expected 1 got 2", packet)
+        self.assertIn("orchestrator/goals.py:42 missing null check", packet)
+        # the fenced failures block closes, it isn't left open
+        self.assertIn("```data\nAssertionError: expected 1 got 2\n```", packet)
+
+    def test_decision_packet_scouts_done(self):
+        goal = bus.create_task("GOAL: scouts done decision", "goal spec",
+                               ["Planner closes the goal with a PR"], ["**"], role="triage", complexity=5)
+        goal_id = goal["id"]
+        s1 = bus.create_task("scout one", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
+        bus.post_result(s1["id"], {"summary": "a" * 400}, status="done")
+        s2 = bus.create_task("scout two", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
+        bus.update(s2["id"], status="failed")
+
+        packet = goals.decision_packet(goal_id, "scouts_done", goal_id)
+
+        self.assertIn("Scouts:", packet)
+        self.assertIn(f"{s1['id']}: {'a' * 300}", packet)
+        self.assertNotIn("a" * 301, packet)  # summary capped to the first 300 chars
+        self.assertIn(f"{s2['id']}: ", packet)
+
+    def test_decision_packet_capped(self):
+        goal = bus.create_task("GOAL: cap decision", "goal spec", ["Planner closes the goal with a PR"], ["**"],
+                               role="triage", complexity=5)
+        goal_id = goal["id"]
+        for i in range(30):
+            s = bus.create_task(f"scout {i}", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
+            bus.post_result(s["id"], {"summary": "s" * 300}, status="done")
+
+        cfg = tomllib.loads((goals.PACKAGE_REPO / ".orchestrator" / "pool.toml").read_text())
+        cap = cfg["planner"]["decision_packet_chars"]
+
+        packet = goals.decision_packet(goal_id, "scouts_done", goal_id)
+        self.assertEqual(len(packet), cap)
 
 
 class CliGoalOutput(GoalsTestCase):

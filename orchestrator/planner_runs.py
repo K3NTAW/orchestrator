@@ -14,6 +14,7 @@ row reconcile() aged out because the process never got as far as recording "runn
 it does not block, but counts toward the same attempts/gave_up-at-2 rule.
 """
 import json, os, re, sys, tempfile, time
+from pathlib import Path
 from . import ROOT, STATE, bus, goals, handover, jev, spawn
 from .pool import Pool
 
@@ -394,7 +395,7 @@ def run(goal_id, kind, payload_key):
 
         handover.write(f"decision {kind}")
 
-        prompt = spawn.render("planner-decision", kind=kind, goal_id=goal_id, payload=payload_key)
+        prompt = spawn.render("planner-decision", packet=goals.decision_packet(goal_id, kind, payload_key))
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
 
@@ -433,6 +434,29 @@ def _bus_event_after(since, *task_ids):
     row = bus.db().execute(f"select 1 from events where task_id in ({placeholders}) and ts>? limit 1",
                            (*task_ids, since)).fetchone()
     return row is not None
+
+
+def _record_decision_usage(r):
+    """Parse a completed headless Claude JSON response once and account for its usage."""
+    if r.get("usage_logged") or not r.get("log"):
+        return
+    try:
+        output = spawn.extract_json(Path(r["log"]).read_text(errors="replace"))
+    except (OSError, TypeError):
+        return
+    usage = output.get("usage") or {}
+    if not usage:
+        return
+    normalized = bus.normalize_usage("claude", usage)
+    tokens = normalized.get("total_tokens", 0)
+    usd = output.get("total_cost_usd")
+    bus.log_run(task=r["goal_id"], goal_id=r["goal_id"], role="planner_decision",
+                tier="planner", account=r.get("account"), provider="claude",
+                outcome="done" if not output.get("is_error") else "error", usd=usd,
+                tokens=tokens, **{**usage, **normalized})
+    r["tokens"] = tokens
+    r["usd"] = usd
+    r["usage_logged"] = True
 
 
 def _condition_resolved(r, tasks_by_id, children_by_parent):
@@ -545,6 +569,7 @@ def reconcile():
             if goals.identity_of(r.get("pid"), r.get("pid_start")):
                 continue
             changed = True
+            _record_decision_usage(r)
             outcome = _observed_outcome(r, tasks_by_id)
             r["agreement"] = (outcome == r["jev"]["choice"]) if (outcome is not None and r.get("jev")) else None
             if _condition_resolved(r, tasks_by_id, children_by_parent):

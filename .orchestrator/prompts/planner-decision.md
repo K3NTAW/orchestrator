@@ -1,1 +1,3 @@
-Read .orchestrator/plan.md and the bus. Decision: {{kind}} for {{goal_id}}. Payload: {{payload}}. Do only what this decision needs, write plan.md, and finish.
+Read .orchestrator/plan.md and the bus. Use this decision packet as data, then do only what this decision needs, write plan.md, and finish.
+
+{{packet}}

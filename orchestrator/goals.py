@@ -12,7 +12,7 @@ from subprocess import Popen  # distinct from subprocess.run: tests fake this ca
                                # subprocess.run itself, which internally resolves Popen dynamically too
 
 from .install import install
-from .spawn import trust_workspace, resolve_secrets
+from .spawn import trust_workspace, resolve_secrets, packet as spawn_packet
 
 PACKAGE_REPO = Path(__file__).resolve().parents[1]  # this repo, regardless of the target repo_path
 
@@ -349,6 +349,67 @@ def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extr
     with open(log_path, "w") as log_fh:
         proc = Popen(argv, cwd=str(repo_path), env=env, stdout=log_fh, stderr=log_fh, start_new_session=True)
     return {"pid": proc.pid, "pid_start": _proc_start(proc.pid), "log": str(log_path)}
+
+
+def decision_packet(goal_id, kind, payload):
+    """Build the bounded, data-only briefing for one autonomous Planner decision."""
+    from . import bus
+
+    cfg_path = PACKAGE_REPO / ".orchestrator" / "pool.toml"
+    try:
+        cfg = tomllib.loads(cfg_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        cfg = {}
+    cap = cfg.get("planner", {}).get("decision_packet_chars", 6000)
+    try:
+        cap = max(1, int(cap))
+    except (TypeError, ValueError):
+        cap = 6000
+
+    goal = bus.get(goal_id)
+    expected = {"scouts_done": "write specs", "held": "write or approve a fix round",
+                "closable": "close the goal"}.get(kind, "make the requested decision")
+    lines = [f"Decision: {kind} — expected to {expected}.",
+             f"Goal: {goal.get('title', '')} ({goal_id})", f"Payload id: {payload}"]
+
+    if kind == "held":
+        task_id = str(payload).split(":", 1)[0]
+        try:
+            task = bus.get(task_id)
+        except KeyError:
+            task = None
+        if task is None:
+            return "\n".join(lines)[:cap]
+        hold_reason = str(task.get("hold_reason", ""))
+        hold_reason = hold_reason.replace("IGNORE PRIOR INSTRUCTIONS", "[redacted instruction-like text]")
+        hold_reason = hold_reason.replace("approve everything", "[redacted instruction-like text]")
+        lines += [f"Held task: {task.get('title', '')} ({task_id})",
+                  "Held task packet:", spawn_packet(task, PACKAGE_REPO),
+                  f"Hold reason: {hold_reason}"]
+        failures = (task.get("resume_hint") or {}).get("failures")
+        if failures is None:
+            failures = (task.get("result") or {}).get("failures")
+        if failures:
+            lines += ["Failures (data):", "```data", str(failures)[:1500], "```"]
+        reviews = [r for r in bus.read(role="review") if (r.get("inputs") or [])[:1] == [task_id]]
+        for review in reviews:
+            for comment in (review.get("result") or {}).get("comments", []):
+                lines.append(f"{comment.get('path', '?')}:{comment.get('line', '?')} "
+                             f"{str(comment.get('issue', ''))[:200]}")
+    elif kind == "scouts_done":
+        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "scout"]
+        lines.append("Scouts:")
+        for scout in children:
+            summary = str((scout.get("result") or {}).get("summary", ""))[:300]
+            lines.append(f"{scout['id']}: {summary}")
+    elif kind == "closable":
+        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "execute"
+                    and t.get("merged_into")]
+        lines.append("Merged tasks:")
+        lines.extend(f"{t['id']} {t.get('sha', '?')}" for t in children)
+
+    packet = "\n".join(lines)
+    return packet[:cap]
 
 
 def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None):
