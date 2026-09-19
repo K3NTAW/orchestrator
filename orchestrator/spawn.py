@@ -450,6 +450,7 @@ def run_worker(task_id):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
     avoid = None
+    reviewed = None
     if role == "review" and t.get("inputs") and isinstance(t["inputs"][0], str):
         try:
             reviewed = bus.get(t["inputs"][0])

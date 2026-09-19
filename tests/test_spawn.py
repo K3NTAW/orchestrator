@@ -42,6 +42,39 @@ class ReviewVerdict(unittest.TestCase):
         self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "request_changes")
 
 
+class ReviewWithoutInputs(unittest.TestCase):
+    def test_review_without_inputs_falls_back_to_task(self):
+        review = bus.create_task("review-without-inputs", "task spec", ["task acceptance"], ["task.py"],
+                                 role="review", inputs=[])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        seen = {}
+        orig_scoped_diff = spawn.scoped_diff
+        def fake_scoped_diff(src):
+            seen["src"] = src
+            return "TASK_FALLBACK_DIFF"
+        spawn.scoped_diff = fake_scoped_diff
+        self.addCleanup(lambda: setattr(spawn, "scoped_diff", orig_scoped_diff))
+
+        captured = {}
+        orig_run_claude = spawn.run_claude
+        def fake_run_claude(*args, **kwargs):
+            captured["prompt"] = args[3]
+            return {"status": "done", "output": {"result": json.dumps({"verdict": "approve", "comments": []}),
+                                                       "usage": {}}}
+        spawn.run_claude = fake_run_claude
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+
+        self.assertEqual(seen["src"]["id"], review["id"])
+        self.assertIn("task acceptance", captured["prompt"])
+
+
 class ReviewAvoidsAccount(unittest.TestCase):
     def test_review_avoids_executing_account_from_assigned_to(self):
         reviewed = bus.create_task("feat-avoid", "s", ["a"], ["rv.py"], role="execute")
