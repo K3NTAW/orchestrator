@@ -18,9 +18,12 @@ SPEC_REVIEW_TIER = "sonnet"  # tier the spec review worker runs on
 DEFAULT_SECURITY_PATHS = [
     "orchestrator/daemon.py", "orchestrator/merge.py", "orchestrator/bus.py", "orchestrator/executor.py",
     "orchestrator/serve.py", "orchestrator/goals.py", "orchestrator/spawn.py", "orchestrator/pool.py",
-    "orchestrator/install.py", "orchestrator/planner_runs.py", "orchestrator/jev*.py",
+    "orchestrator/install.py", "orchestrator/planner_runs.py",
+    "orchestrator/jev*.py",  # no jev*.py files exist yet; T-0214 (E2) adds them, this glob is ready for that
+    "orchestrator/mcp.py", "orchestrator/bus_mcp.py",
     ".claude/hooks/**", ".claude/settings.json", ".orchestrator/pool.toml", ".orchestrator/protected-paths.txt",
-    ".mcp*.json", "Dockerfile", "docker-compose*.yml", "pyproject.toml", "uv.lock",
+    ".orchestrator/prompts/**", "skills/**", ".claude/skills/**",
+    ".mcp*.json", ".mcp.worker.json", "Dockerfile", "docker-compose*.yml", "pyproject.toml", "uv.lock",
 ]
 CODE_REVIEW = "always"              # never | security_paths | always -- "always" is the safest default when
                                      # [review] is missing entirely, matching pre-2026-09-19 D1 behaviour
@@ -34,6 +37,7 @@ SECURITY_CHECKLIST_COMPLEXITY = 7   # spawn.py's run_worker hardcodes the securi
 # top of every tick() so dispatch()/gate()/merge_reviewed() (which read them as plain module globals, not
 # through a Pool argument) always see the current policy without threading pool.cfg through every call.
 _code_review_warned = False  # notify() the first time pool.toml carries an unrecognised code_review value, not every tick
+_security_paths_empty_warned = False  # notify() the first time security_paths is empty under code_review="security_paths"
 LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
@@ -131,10 +135,12 @@ def _resolve_base(worktree, parent):
 
 
 def changed_paths(t):
-    """git diff --name-only <base>..HEAD in the task's worktree, repo-relative paths, base picked by
-    _resolve_base(). None on any failure -- a non-git worktree, no base to diff against, or a git error -- so
-    gate()'s security_paths policy can fail closed: a diff it cannot inspect is treated as a security match
-    (review_reason "diff_unavailable"), never as "nothing changed"."""
+    """git diff --name-only -z <base>..HEAD in the task's worktree, repo-relative paths, base picked by
+    _resolve_base(). The -z / NUL split (rather than newline splitting on plain --name-only output) keeps a
+    quoted or non-ASCII path intact so it still matches the security globs. None on any failure -- a non-git
+    worktree, no base to diff against, or a git error -- so gate()'s security_paths policy can fail closed: a
+    diff it cannot inspect is treated as a security match (review_reason "diff_unavailable"), never as "nothing
+    changed"."""
     worktree = t.get("worktree")
     if not worktree or not Path(worktree).is_dir():
         return None
@@ -142,10 +148,10 @@ def changed_paths(t):
         base = _resolve_base(worktree, t.get("parent"))
         if base is None:
             return None
-        r = _git_in(worktree, "diff", "--name-only", f"{base}..HEAD")
+        r = _git_in(worktree, "diff", "--name-only", "-z", f"{base}..HEAD")
         if r.returncode != 0:
             return None
-        return [line for line in r.stdout.splitlines() if line]
+        return [p for p in r.stdout.split("\0") if p]
     except Exception:
         return None
 
@@ -397,13 +403,22 @@ def _review_plan(t):
     says (see reviews_expected()'s docstring). Otherwise: "never" merges everything straight through;
     "security_paths" reviews only a diff that touches a security-sensitive glob, or one changed_paths()
     couldn't determine (fails closed, review_reason "diff_unavailable" -- a plumbing error must never merge
-    unreviewed work); "always" is the pre-2026-09-19 D1 policy (DIRECT_MERGE_MAX lets the cheapest tasks merge
-    on hooks alone, reviews_expected(t) drives the complexity split above that)."""
+    unreviewed work); an empty or missing security_paths list also fails closed (review_reason
+    "security_paths_empty" -- a blank list must never silently mean "nothing is security-sensitive"); "always"
+    is the pre-2026-09-19 D1 policy (DIRECT_MERGE_MAX lets the cheapest tasks merge on hooks alone,
+    reviews_expected(t) drives the complexity split above that)."""
     if (t.get("result") or {}).get("orphaned"):
         return 1, "orphaned"
     if CODE_REVIEW == "never":
         return 0, "none"
     if CODE_REVIEW == "security_paths":
+        if not SECURITY_PATHS:
+            global _security_paths_empty_warned
+            if not _security_paths_empty_warned:
+                notify("pool.toml [review].security_paths is empty; every security_paths review fails closed "
+                       "to one review until it is configured")
+                _security_paths_empty_warned = True
+            return 1, "security_paths_empty"
         paths = changed_paths(t)
         if paths is None:
             return 1, "diff_unavailable"

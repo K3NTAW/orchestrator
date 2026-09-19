@@ -4,7 +4,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
-import http.server, os, subprocess, sys, tempfile, threading, time, unittest
+import http.server, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
@@ -474,6 +474,105 @@ class Daemon(unittest.TestCase):
         gated = bus.get(t)
         self.assertEqual(gated["pipeline"]["review_reason"], "diff_unavailable")
         self.assertEqual(gated["pipeline"]["reviews_expected"], 1)
+
+    def real_repo(self):
+        """A throwaway git repo in its own tempdir (not the shared module-level TMP, whose .claude and
+        .orchestrator/prompts are symlinks into this actual repo's checkout -- writing test commits under those
+        paths would edit the real repo). scratch_repo() already gives it a main branch and initial commit."""
+        repo = Path(tempfile.mkdtemp(prefix="orch-secpaths-"))
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        scratch_repo(repo)
+        return repo
+
+    def commit_in(self, repo, branch, relpath, content):
+        """scratch_repo()'s default .gitignore excludes .claude/ (it's a symlink into the real repo checkout in
+        the shared TMP sandbox), which would silently drop a .claude/hooks/ test file here too -- so this adds
+        with -f to force past that for these throwaway repos."""
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", branch)
+        path = repo / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        run("add", "-A", "-f")
+        run("commit", "-qm", f"add {relpath}")
+
+    def test_changed_paths_real_repo_hook_matches(self):
+        """changed_paths() over a real repo picks up a change under .claude/hooks/, and it matches the
+        .claude/hooks/** security glob."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        self.commit_in(repo, "task/hook-change", ".claude/hooks/new-hook.sh", "#!/bin/sh\n")
+
+        t = self.task("hook change", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertIn(".claude/hooks/new-hook.sh", paths)
+        self.assertEqual(daemon._matching_security_path(paths), ".claude/hooks/**")
+
+    def test_changed_paths_real_repo_source_no_match(self):
+        """A change to a plain source file outside every security glob does not match."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        self.commit_in(repo, "task/source-change", "src/app.py", "print('hi')\n")
+
+        t = self.task("source change", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertEqual(paths, ["src/app.py"])
+        self.assertIsNone(daemon._matching_security_path(paths))
+
+    def test_changed_paths_quoted_path_matches(self):
+        """A path with a space and an umlaut is quoted/escaped by plain `git diff --name-only`; -z disables that
+        quoting so changed_paths() gets the raw path back and it still matches its security glob."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        fname = "deploy überprüfen.md"
+        self.commit_in(repo, "task/quoted-path", f"skills/{fname}", "# deploy\n")
+
+        t = self.task("quoted path", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertIn(f"skills/{fname}", paths)
+        self.assertEqual(daemon._matching_security_path(paths), "skills/**")
+
+    def test_changed_paths_non_git_returns_none(self):
+        """A worktree that isn't a git repo makes changed_paths() fail closed with None, never an empty list."""
+        non_git = Path(tempfile.mkdtemp(prefix="orch-nongit-"))
+        self.addCleanup(shutil.rmtree, non_git, ignore_errors=True)
+        t = self.task("no repo", complexity=2)
+        bus.update(t, worktree=str(non_git))
+        self.assertIsNone(daemon.changed_paths(bus.get(t)))
+
+    def test_empty_security_paths_fails_closed(self):
+        """An empty [review].security_paths list must fail closed to one review, with review_reason
+        "security_paths_empty", and notify once -- never a silent "nothing is security-sensitive"."""
+        notified = []
+        self.swap(daemon, "notify", lambda msg: notified.append(msg))
+        self.swap(daemon, "_security_paths_empty_warned", False)
+        pool = self.review_pool("security_paths")
+        pool.cfg["review"]["security_paths"] = []
+
+        t = self.task("empty security paths", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP))
+        daemon.tick(pool)
+        self.assertEqual(self.merged, [])
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "security_paths_empty")
+        self.assertEqual(gated["pipeline"]["reviews_expected"], 1)
+        self.assertEqual(len(notified), 1)
+
+        t2 = self.task("empty security paths again", complexity=2)
+        bus.update(t2, status="done", worktree=str(TMP))
+        daemon.tick(pool)
+        self.assertEqual(len(notified), 1)   # same empty list again: no repeat notification
 
     def test_code_review_always_keeps_two_reviews(self):
         """code_review="always" reproduces the pre-2026-09-19 D1 policy exactly: a complexity-7, Codex-executed
