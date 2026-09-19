@@ -112,6 +112,12 @@ task directly.
 A filtered `bus_read` (no `task_id`) returns compact rows by default — no spec, events, acceptance or scope — pass
 `full=True` or `bus_read(task_id=...)` for the full task.
 
+Automatic fix rounds run after dispatch, gate, and reviewed merges, before the autonomous Planner. Gate failures
+are routine only when pytest `FAILED <nodeid>` or unittest `FAIL`/`ERROR` lines can be extracted; unknown runner
+output escalates. Review holds are routine only when every rejecting review comment is inside scope. Rounds follow
+the fix lineage and stop at `[daemon].auto_fix_rounds` (default 2). Each hold uses `planner_runs._held_at(task)` as
+its deduplication key; skipped/escalated holds notify once per key.
+
 ### Autonomous decisions
 `pool.toml`'s `[planner] autonomous` (default `false`) lets `daemon.tick()` launch a short-lived headless Planner on
 its own, without an interactive session, to act on one of three decision points: `scouts_done` (a goal's scouts are

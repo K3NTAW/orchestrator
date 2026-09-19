@@ -76,6 +76,18 @@ class PlannerRunsBase(unittest.TestCase):
 
 
 class DecisionPoints(PlannerRunsBase):
+    def test_held_decision_skipped_when_fix_round_exists(self):
+        goal = self.goal()
+        tid = self.execute_child(goal, status="held", hold_reason="gate_red")
+        point = (goal, "held", PR._held_key(bus.get(tid)))
+        self.assertIn(point, list(PR.decision_points()))
+        fix = self.execute_child(goal, constraints={"fix_round_for": tid})
+        for status in ("queued", "running", "held", "done"):
+            bus.update(fix, status=status)
+            self.assertNotIn(point, list(PR.decision_points()))
+        bus.update(fix, status="failed")
+        self.assertIn(point, list(PR.decision_points()))
+
     def test_merge_hold_is_a_decision_point(self):
         goal_id = self.goal("merge hold")
         tid = self.execute_child(goal_id)

@@ -225,6 +225,9 @@ def decision_points():
         for c in executes:
             if c["status"] != "held":
                 continue
+            if any(x.get("status") != "failed" and
+                   (x.get("constraints") or {}).get("fix_round_for") == c["id"] for x in all_tasks):
+                continue
             key = _held_key(c)
             if key is None:
                 continue

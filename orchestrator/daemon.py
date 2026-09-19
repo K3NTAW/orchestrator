@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, fnmatch, json, os, subprocess, sys, threading, time, urllib.request
+import fcntl, fnmatch, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
@@ -39,6 +39,112 @@ HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
 STAGE_LEASE_S = 900
 LEASED_STAGES = {"dispatched_at", "spec_review_at", "gated_at", "merged_at"}
+
+
+def root(task):
+    """Return the root task of a fix-round chain."""
+    seen = set()
+    current = task
+    while current.get("constraints", {}).get("fix_round_for") and current["id"] not in seen:
+        seen.add(current["id"])
+        try:
+            current = bus.get(current["constraints"]["fix_round_for"])
+        except KeyError:
+            break
+    return current
+
+
+def lineage(task):
+    root_id = root(task)["id"]
+    return [t for t in bus.read() if root(t)["id"] == root_id]
+
+
+def _test_ids(failures):
+    if not isinstance(failures, str):
+        return None
+    ids = re.findall(r"^FAILED\s+(\S+)", failures, re.MULTILINE)
+    ids += re.findall(r"^(?:FAIL|ERROR):\s+[^\n]*\(([^)]+)\)", failures, re.MULTILINE)
+    return ids or None
+
+
+def _path_in_scope(path, scope):
+    return bool(path and any(fnmatch.fnmatch(path, p) or path.startswith(p.rstrip("/") + "/")
+                             for p in scope))
+
+
+def _rejecting_reviews(task):
+    reviews = [r for r in bus.read(role="review") if r.get("inputs", [])[:1] == [task["id"]]]
+    result = []
+    for review in reviews:
+        verdict = _review_verdict(review, task, len(reviews) == 1)
+        if verdict == "request_changes":
+            result.append((review, (review.get("result") or {}).get("comments") or []))
+    return result
+
+
+def _fix_round_spec(held, round_no, failed_ids, comments):
+    prompt = (Path(__file__).resolve().parents[1] / ".orchestrator" / "prompts" / "fix-round.md").read_text()
+    criteria = held.get("acceptance") or []
+    selected = [c for c in criteria if any(i in c for i in (failed_ids or []))] or criteria
+    failure_text = ((held.get("resume_hint") or {}).get("failures") or "")[:3000]
+    review_lines = [f"{c.get('path', '')}:{c.get('line', '')} {c.get('issue', '')}" for _, cs in comments for c in cs]
+    return prompt.format(root_id=root(held)["id"], root_title=root(held)["title"], held_id=held["id"],
+                         n=round_no, failed_acceptance="\n".join(f"- {c}" for c in selected),
+                         failure_text=failure_text, review_comments="\n".join(review_lines) or "(none)",
+                         branch=held.get("branch") or f"task/{held['id']}",
+                         head_sha=held.get("head_sha") or (held.get("resume_hint") or {}).get("commit", "unknown"),
+                         original_acceptance="\n".join(f"- {c}" for c in criteria))
+
+
+def auto_fix_round(pool):
+    cap = pool.cfg.get("daemon", {}).get("auto_fix_rounds", 2)
+    for held in bus.read(status="held", role="execute"):
+        if stale(held):
+            continue
+        held_at = planner_runs._held_at(held)
+        if held_at is None:
+            continue
+        key = str(held_at)
+        chain = lineage(held)
+        if any(t["id"] != held["id"] and t.get("status") != "failed" and
+               (t.get("constraints") or {}).get("fix_round_for") == held["id"] for t in chain):
+            continue
+        reason = held.get("hold_reason", "")
+        ids, comments, routine = None, [], False
+        if reason == "gate_red":
+            ids = _test_ids((held.get("resume_hint") or {}).get("failures"))
+            routine = ids is not None
+        elif reason.startswith("review request_changes"):
+            comments = _rejecting_reviews(held)
+            routine = bool(comments) and all(_path_in_scope(c.get("path"), held.get("scope") or [])
+                                             for _, cs in comments for c in cs)
+        rounds = sum(1 for t in chain if (t.get("constraints") or {}).get("auto_round") is not None)
+        if routine and rounds < cap:
+            with bus.locked():
+                current = bus.get(held["id"])
+                pipeline = dict(current.get("pipeline") or {})
+                if pipeline.get("auto_fix_hold_key") == key:
+                    continue
+                n = rounds + 1
+                bus.create_task(
+                    f"fix round {n}: {root(current)['title']}", _fix_round_spec(current, n, ids, comments),
+                    current["acceptance"], current["scope"], role="execute", parent=current.get("parent"),
+                    tier=current["tier"], complexity=current["complexity"],
+                    inputs=[current["id"]] + [r["id"] for r, _ in comments],
+                    constraints={**(current.get("constraints") or {}), "fix_round_for": current["id"],
+                                 "auto_round": n})
+                pipeline["auto_fix_hold_key"] = key
+                bus.update(current["id"], pipeline=pipeline)
+            continue
+        with bus.locked():
+            current = bus.get(held["id"])
+            pipeline = dict(current.get("pipeline") or {})
+            skipped = dict(pipeline.get("auto_fix_skipped") or {})
+            if key not in skipped:
+                skipped[key] = True
+                pipeline["auto_fix_skipped"] = skipped
+                bus.update(held["id"], pipeline=pipeline)
+                notify(f"{held['id']}: automatic fix round escalated")
 
 
 def _load_review_cfg(pool):
@@ -582,6 +688,16 @@ def gate(pool):
 
 def report_merge(task_id, r):
     if r.get("status") == "merged":
+        current = bus.get(task_id)
+        if (current.get("constraints") or {}).get("fix_round_for"):
+            fix_id = task_id
+            while (current.get("constraints") or {}).get("fix_round_for"):
+                ancestor = bus.get(current["constraints"]["fix_round_for"])
+                bus.update(ancestor["id"], status="done", merged_into=r["target"],
+                           merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
+                current = ancestor
+            bus.update(task_id, status="done", merged_into=r["target"],
+                       merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
         notify(f"{task_id} merged into {r['target']} ({r['sha'][:8]})")
     else:                                  # merge.merge already set the task failed with a resume_hint
         notify(f"{task_id} merge failed: {r.get('status')} {r.get('reason', '')}".strip())
@@ -810,6 +926,10 @@ def tick(pool=None):
             stage(pool)
         except Exception as e:
             print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
+    try:
+        auto_fix_round(pool)
+    except Exception as e:
+        print(f"[daemon] auto_fix_round failed: {e}", file=sys.stderr)
     if pool.cfg.get("planner", {}).get("autonomous", False):
         try:
             planner_runs.reconcile()

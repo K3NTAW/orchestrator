@@ -4,7 +4,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
-import http.server, os, shutil, subprocess, sys, tempfile, threading, time, unittest
+import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
@@ -90,6 +90,164 @@ class Daemon(unittest.TestCase):
         while len(self.workers) < want and time.time() < deadline:
             time.sleep(0.01)
         return self.workers
+
+    def held_for_fix(self, failures="FAILED tests/test_x.py::test_x - assertion", **fields):
+        tid = self.task("original", **fields)
+        bus.update(tid, status="held", hold_reason="gate_red", resume_hint={"failures": failures})
+        return tid
+
+    def fixes_for(self, tid):
+        return [t for t in bus.read() if t.get("constraints", {}).get("fix_round_for") == tid]
+
+    def test_auto_fix_round_on_gate_red_pytest_and_unittest_ids(self):
+        for output, test_id in (("FAILED tests/test_x.py::test_x - assertion", "tests/test_x.py::test_x"),
+                                ("FAIL: test_x (module.Class.test_x)", "module.Class.test_x"),
+                                ("ERROR: test_x (module.Class.test_x)", "module.Class.test_x")):
+            with self.subTest(output=output):
+                criteria = [f"{test_id} passes", "all original checks pass"]
+                held = bus.create_task("original", "spec", criteria, ["x.py"], role="execute",
+                                       parent="T-0043")
+                tid = held["id"]
+                bus.update(tid, status="held", hold_reason="gate_red", head_sha="abc123",
+                           resume_hint={"failures": output + "\n" + "z" * 4000})
+                daemon.auto_fix_round(P.Pool())
+                fix, = self.fixes_for(tid)
+                self.assertEqual(fix["acceptance"], criteria)
+                self.assertIn(f"root {tid}: original", fix["spec"])
+                self.assertIn(f"Branch: task/{tid}", fix["spec"])
+                self.assertIn("Head SHA: abc123", fix["spec"])
+                selected = fix["spec"].split("Failed acceptance criteria:\n", 1)[1].split("Failure text", 1)[0]
+                self.assertIn(criteria[0], selected)
+                self.assertNotIn(criteria[1], selected)
+                data = fix["spec"].split("```data\n", 1)[1].split("\n```", 1)[0]
+                self.assertEqual(len(data), 3000)
+                daemon.auto_fix_round(P.Pool())
+                self.assertEqual(len(self.fixes_for(tid)), 1)
+
+    def test_gate_red_unknown_runner_escalates(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        tid = self.held_for_fix("✗ custom runner test failed")
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(self.fixes_for(tid), [])
+        self.assertEqual(len(messages), 1)
+        self.assertTrue(bus.get(tid)["pipeline"]["auto_fix_skipped"])
+
+    def rejecting_review(self, tid, path="x.py", issue="correct the result"):
+        review = self.task("reject", role="review", inputs=[tid])
+        bus.update(review, status="done", result={"verdict": "request_changes", "comments": [
+            {"path": path, "line": 12, "issue": issue}]})
+        return review
+
+    def test_auto_fix_round_on_review_comments_in_scope(self):
+        tid = self.held_for_fix()
+        first = self.rejecting_review(tid)
+        second = self.rejecting_review(tid, issue="also fix this")
+        bus.update(tid, hold_reason=f"review request_changes: {first}")
+        daemon.auto_fix_round(P.Pool())
+        fix, = self.fixes_for(tid)
+        self.assertEqual(fix["inputs"], [tid, first, second])
+        self.assertIn("x.py:12 correct the result", fix["spec"])
+        self.assertIn("x.py:12 also fix this", fix["spec"])
+        self.assertIn("- works", fix["spec"])
+
+    def test_no_auto_fix_when_any_rejecting_review_has_out_of_scope_comment(self):
+        self.swap(daemon, "notify", lambda message: None)
+        tid = self.held_for_fix()
+        first = self.rejecting_review(tid)
+        self.rejecting_review(tid, "outside.py")
+        bus.update(tid, hold_reason=f"review request_changes: {first}")
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(self.fixes_for(tid), [])
+        self.assertTrue(bus.get(tid)["pipeline"]["auto_fix_skipped"])
+
+    def test_fix_task_carries_parent(self):
+        tid = self.held_for_fix(complexity=5, tier="opus", constraints={"budget_turns": 7})
+        daemon.auto_fix_round(P.Pool())
+        fix, = self.fixes_for(tid)
+        self.assertEqual((fix["parent"], fix["complexity"], fix["tier"], fix["scope"]),
+                         ("T-0043", 5, "opus", ["x.py"]))
+        self.assertEqual(fix["constraints"]["fix_round_for"], tid)
+        self.assertEqual(fix["constraints"]["auto_round"], 1)
+        self.assertEqual(fix["constraints"]["budget_turns"], 7)
+        hook = Path(__file__).resolve().parents[1] / ".claude/hooks/require-acceptance.sh"
+        result = REAL_RUN([str(hook)], input=json.dumps({"description": fix["spec"]}),
+                          text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_lineage_cap_across_chained_fix_rounds(self):
+        self.swap(daemon, "notify", lambda message: None)
+        tid = self.held_for_fix()
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {}).pop("auto_fix_rounds", None)
+        daemon.auto_fix_round(pool)
+        first, = self.fixes_for(tid)
+        bus.update(first["id"], status="held", hold_reason="gate_red", resume_hint={
+            "failures": "FAILED tests/test_x.py::test_x"})
+        daemon.auto_fix_round(pool)
+        second, = self.fixes_for(first["id"])
+        self.assertEqual(second["title"], "fix round 2: original")
+        self.assertEqual(second["constraints"]["auto_round"], 2)
+        bus.update(second["id"], status="held", hold_reason="gate_red", resume_hint={
+            "failures": "FAILED tests/test_x.py::test_x"})
+        daemon.auto_fix_round(pool)
+        self.assertEqual(self.fixes_for(second["id"]), [])
+        self.assertTrue(bus.get(second["id"])["pipeline"]["auto_fix_skipped"])
+
+    def test_escalation_notifies_once_per_hold_key(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        tid = self.held_for_fix("unknown runner")
+        daemon.auto_fix_round(P.Pool())
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(len(messages), 1)
+        bus.update(tid, status="done")
+        bus.update(tid, status="held")
+        daemon.auto_fix_round(P.Pool())
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(bus.get(tid)["pipeline"]["auto_fix_skipped"]), 2)
+
+    def test_skips_when_goal_done(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        goal = self.task("goal", role="triage")
+        bus.update(goal, status="done")
+        tid = self.held_for_fix()
+        bus.update(tid, parent=goal)
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(self.fixes_for(tid), [])
+        self.assertEqual(messages, [])
+
+    def test_reconciliation_via_sweep_leases_merge(self):
+        tid = self.held_for_fix()
+        fix = self.task("fix", constraints={"fix_round_for": tid, "auto_round": 1})
+        bus.update(fix, status="done")
+        self.expired(fix, "gated_at", reviews_expected=0, review_reason="none")
+        self.swap(daemon, "already_merged", lambda task: False)
+        self.swap(daemon, "notify", lambda message: None)
+        daemon.sweep_leases(P.Pool())
+        self.assertEqual(self.merged, [fix])
+        original = bus.get(tid)
+        self.assertEqual(original["status"], "done")
+        self.assertEqual(original["merged_into"], "goal/G")
+        self.assertEqual(original["merged_via"], f"fix round {fix} abc12345")
+        self.assertIsNone(original["hold_reason"])
+
+    def test_fix_round_merge_reconciles_chain(self):
+        self.swap(daemon, "notify", lambda message: None)
+        tid = self.held_for_fix()
+        first = self.held_for_fix(constraints={"fix_round_for": tid, "auto_round": 1})
+        second = self.task("fix 2", constraints={"fix_round_for": first, "auto_round": 2})
+        daemon.report_merge(second, {"status": "tests_red"})
+        self.assertEqual(bus.get(tid)["status"], "held")
+        daemon.report_merge(second, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
+        for ancestor in (tid, first):
+            task = bus.get(ancestor)
+            self.assertEqual(task["status"], "done")
+            self.assertEqual(task["merged_into"], "goal/G")
+            self.assertEqual(task["merged_via"], f"fix round {second} abc12345")
+            self.assertIsNone(task["hold_reason"])
 
     def settle_started(self, want, seconds=5):
         """dispatch() now runs executor.start on a background thread too; wait for it the same way."""
