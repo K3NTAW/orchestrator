@@ -142,13 +142,33 @@ def post_result(tid, result, status="done"):
     return update(tid, status=status, result=result)
 
 
-def read(tid=None, status=None, status_not=None, role=None):
+def _truncate(s, n):
+    return s[:n] if isinstance(s, str) else s
+
+
+def _compact_row(t):
+    """A skimmable summary of one task: no spec, events, acceptance or scope, which is most of what makes the
+    full shape big. See bus_mcp.bus_read for the field list."""
+    result = t.get("result") or {}
+    summary = result.get("summary")
+    return {
+        "id": t["id"], "parent": t.get("parent"), "role": t.get("role"), "status": t.get("status"),
+        "complexity": t.get("complexity"), "tier": t.get("tier"), "title": _truncate(t.get("title"), 90),
+        "depends_on": t.get("depends_on", []), "hold_reason": t.get("hold_reason"),
+        "reason": _truncate(t.get("reason"), 120), "merged_into": t.get("merged_into"),
+        "assigned_to": t.get("assigned_to"), "has_result": bool(t.get("result")),
+        "result_summary": _truncate(summary, 160) if summary else None,
+    }
+
+
+def read(tid=None, status=None, status_not=None, role=None, compact=False):
     if tid:
         return get(tid)
     rows = db().execute("select id from tasks order by id").fetchall()
     out = [get(r[0]) for r in rows]
-    return [t for t in out if (status is None or t["status"] == status)
-            and (status_not is None or t["status"] != status_not) and (role is None or t["role"] == role)]
+    filtered = [t for t in out if (status is None or t["status"] == status)
+                and (status_not is None or t["status"] != status_not) and (role is None or t["role"] == role)]
+    return [_compact_row(t) for t in filtered] if compact else filtered
 
 
 def events(since=0, limit=200):

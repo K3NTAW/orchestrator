@@ -84,6 +84,8 @@ Holds (`status="held"`) mean the daemon stopped and a human/Planner must act: `s
 request_changes`, or `gate_red` (tests failed at the gate). The `hold_reason` field and `resume_hint` on the task say
 which. The Planner clears a hold by writing a new spec with `depends_on=[held_task_id]`, never by editing the held
 task directly.
+A filtered `bus_read` (no `task_id`) returns compact rows by default — no spec, events, acceptance or scope — pass
+`full=True` or `bus_read(task_id=...)` for the full task.
 
 ### Autonomous decisions
 `pool.toml`'s `[planner] autonomous` (default `false`) lets `daemon.tick()` launch a short-lived headless Planner on
