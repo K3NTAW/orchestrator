@@ -223,3 +223,8 @@ type: decision · goal: T-0260 · tasks: T-0264,T-0265,T-0266,T-0267,T-0270,T-02
 - what cost the most: Codex (luna) five times reported acceptance-named tests as passing without writing them (T-0271, T-0326, T-0273, T-0277, T-0348), each caught by a review round or a Planner diff --stat check plus one codex_reply; the 22:50 session restart orphaned two Codex runs and leaked executor slot counters twice; plan.md carried one wrong merged claim (G3)
 - what worked: the Phase F daemon posted every Codex result it dispatched (T-0240 acceptance 3 verified on T-0273), gated, spawned reviews and merged serially without Planner posts; fix rounds cut from the held branch kept every chain linear; a Planner diff --stat check before the review saved review rounds on T-0273, T-0277 and T-0348
 outcome: Accepted: tests-green exit 0 on wt/goal-T-0260 at 2ca1517; PR 11 https://github.com/K3NTAW/orchestrator/pull/11 goal/T-0260 to main for the human after PR 10; T-0260 marked done 23:56. Backlog (c2-c3): derive executor running counters from bus state; codex/codex_reply tools post results; re-dispatch requeued reviews; gate checks acceptance-named test ids exist; consistent total_tokens for legacy rows. Revert path for the whole phase: close PR 11 unmerged
+
+## 2026-09-19 Planner checkpoint commit 93f0a7c: Phase G close in plan.md, retrospective and gotchas
+type: decision · goal: T-0260 · tasks: T-0260 · provenance: repo
+- plan.md rewritten for the closed goal and the docs.kentawaibel.com kickoff facts; decisions.md carries the Phase G retrospective; gotchas.md the slot-counter and review-redispatch rules
+outcome: revert path: git revert 93f0a7c (plan.md, decisions.md, gotchas.md only)
