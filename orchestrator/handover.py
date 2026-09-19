@@ -2,7 +2,7 @@
 while both Claude accounts and Codex are cooling) can pick up open goals without depending on the last manual save.
 write() replaces the trailing "## Auto-handover" section in place -- idempotent, never duplicated -- and leaves
 everything above it byte-identical."""
-import json, os, re, tempfile, time
+import json, os, re, sys, tempfile, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -90,7 +90,11 @@ def _prune_many(named_lists, goal_text, budget):
     if not _take_jev_budget(budget):
         return named_lists, 0
     items = [{"id": t["id"], "text": _task_ref(t)} for t in tasks]
-    ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
+    try:
+        ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
+    except Exception:
+        print("handover: ranking failed; keeping unpruned tasks", file=sys.stderr)
+        return named_lists, 0
     if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
         return named_lists, 0
     keep_ids = {it["id"] for it in ranked}
@@ -177,7 +181,11 @@ def _prune_events(events, goal_text, budget):
     if not _take_jev_budget(budget):
         return events, 0
     items = [{"id": str(e["seq"]), "text": f"{e['task']} {e['kind']} {json.dumps(e['data'])[:80]}"} for e in events]
-    ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
+    try:
+        ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
+    except Exception:
+        print("handover: ranking failed; keeping unpruned events", file=sys.stderr)
+        return events, 0
     if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
         return events, 0
     keep_ids = {it["id"] for it in ranked}

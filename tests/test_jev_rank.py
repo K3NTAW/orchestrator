@@ -1,7 +1,8 @@
 """orchestrator.jev_rank.rank: batching questions across multiple jev.ask() calls, threshold filtering +
 p-desc sort, and fail-open (jev.ask returns None -> items unchanged, p_relevant=None) -- all against a
 monkeypatched jev.ask, never real network."""
-import sys, unittest
+import io, sys, unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_jev_rank.py` doesn't add this dir itself
 from _harness import TMP  # noqa: F401
@@ -62,6 +63,28 @@ class JevRankTests(unittest.TestCase):
     def test_rank_empty_items(self):
         jev.ask = lambda *a, **k: (_ for _ in ()).throw(AssertionError("ask must not be called for no items"))
         self.assertEqual(jev_rank.rank([], "the goal"), [])
+
+    def test_ask_raising_returns_unranked(self):
+        items = [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}]
+        for fail_on in (1, 2):
+            with self.subTest(fail_on=fail_on):
+                calls = []
+
+                def fake_ask(state, questions):
+                    calls.append(questions)
+                    if len(calls) == fail_on:
+                        raise RuntimeError("jev endpoint exploded\nmore detail")
+                    return {"answers": {qid: {"noul": 0.1} for qid in questions}}
+
+                jev.ask = fake_ask
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    result = jev_rank.rank(items, "the goal", batch=1)
+
+                self.assertEqual(result, [{**item, "p_relevant": None} for item in items])
+                self.assertTrue(all("p_relevant" not in item for item in items))
+                self.assertEqual(len(calls), fail_on)
+                self.assertEqual(len(stderr.getvalue().splitlines()), 1)
 
     def test_missing_answer_kept(self):
         items = [{"id": "a", "text": "on topic"}, {"id": "b", "text": "no answer for me"}]

@@ -10,6 +10,7 @@ threshold is ever dropped. rank() itself never raises: a malformed response is t
 None.
 """
 import math
+import sys
 
 from . import jev
 
@@ -40,7 +41,7 @@ def _sort_key(item):
 def rank(items: list[dict], goal_text: str, *, threshold: float = DEFAULT_THRESHOLD, batch: int = DEFAULT_BATCH) -> list[dict]:
     """Score each {id, text} item for relevance to `goal_text`, attach p_relevant, and return items with
     p_relevant >= threshold (plus every item whose p_relevant is None) sorted by p_relevant desc, None last.
-    On jev.ask() returning None, or on any error parsing its response, returns all `items` unchanged (original
+    On jev.ask() returning None or raising, or on any error parsing its response, returns all `items` unchanged (original
     order) with p_relevant=None on each -- never raises, never drops anything itself."""
     if not items:
         return []
@@ -50,15 +51,16 @@ def rank(items: list[dict], goal_text: str, *, threshold: float = DEFAULT_THRESH
         chunk = items[start:start + batch]
         questions = {item["id"]: {"type": "noul", "instructions": INSTRUCTIONS, "criteria": item["text"]}
                      for item in chunk}
-        result = jev.ask(goal_text, questions)
-        if result is None:
-            return [{**item, "p_relevant": None} for item in items]
         try:
+            result = jev.ask(goal_text, questions)
+            if result is None:
+                return [{**item, "p_relevant": None} for item in items]
             answers = result.get("answers") or {}
             for item in chunk:
                 answer = answers.get(item["id"]) or {}
                 scored.append({**item, "p_relevant": _coerce_p(answer.get("noul"))})
         except Exception:
+            print("jev_rank: ranking failed; keeping unranked items", file=sys.stderr)
             return [{**item, "p_relevant": None} for item in items]
 
     kept = [item for item in scored if item["p_relevant"] is None or item["p_relevant"] >= threshold]

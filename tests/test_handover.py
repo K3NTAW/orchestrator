@@ -3,7 +3,8 @@ daemon.maybe_handover()'s 15-minute throttle.
 
 Each test gets its own sandbox for bus.STATE/TASKS/RUNS and handover.STATE/ROOT (handover.write() looks both up
 at call time, not import time, precisely so a test can swap them) so plan.md and wt/ never touch the real repo."""
-import fcntl, json, sys, tempfile, threading, time, unittest
+import fcntl, io, json, sys, tempfile, threading, time, unittest
+from contextlib import redirect_stderr
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
@@ -283,6 +284,34 @@ class Handover(unittest.TestCase):
         self.assertNotIn("pruned", lines[0])
         self.assertIn(f"- done (not merged): {done}", section)
         self.assertIn(f"- failed: {failed}", section)
+
+    def test_handover_survives_jev_exception(self):
+        g = self.goal("Ship indexing")
+        done = self.child(g, "Docs pass")
+        bus.post_result(done, {"summary": "ok"}, "done")
+        failed = self.child(g, "Migrate schema")
+        bus.update(failed, status="failed", reason="rebase_conflict")
+        events = handover._last_events(5)
+        plan = handover.STATE / "plan.md"
+        plan.write_text("# Planner notes\n")
+
+        for target in ("orchestrator.jev.ask", "orchestrator.handover.jev_rank.rank"):
+            with self.subTest(target=target):
+                stderr = io.StringIO()
+                with mock.patch(target, side_effect=RuntimeError("jev endpoint exploded\nmore detail")) as rank:
+                    with redirect_stderr(stderr):
+                        written = handover.write("test")
+
+                before, section = self.section(written.read_text())
+                self.assertEqual(before, "# Planner notes\n\n")
+                self.assertIn(f"- done (not merged): {done} Docs pass", section)
+                self.assertIn(f"- failed: {failed} Migrate schema", section)
+                self.assertNotIn("pruned", section.splitlines()[0])
+                for event in events:
+                    self.assertIn(f"{event['task']} {event['kind']} {json.dumps(event['data'])[:80]}", section)
+                self.assertIn(handover.RESUME_SENTENCE, section)
+                self.assertEqual(rank.call_count, 2)  # task groups and the events tail
+                self.assertEqual(len(stderr.getvalue().splitlines()), rank.call_count)
 
     def test_rank_not_called_under_lock(self):
         """write() must release the bus lock before placing any jev_rank/jev.ask request: a fake ask() probes
