@@ -113,6 +113,18 @@ the daemon) and `.orchestrator/planner_session.json` (written atomically by that
 named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
 interactive Planner session ever attaches -- leave it off anywhere one might.
 
+### Jev
+Jev (TypeSafe AI) answers typed questions about a piece of state with calibrated probabilities instead of free
+text -- `POST https://api.typesafe.ai/v1/systemone` (`orchestrator/jev.py`, stdlib `urllib` only). Off by default
+(`pool.toml [jev].enabled = false`); the API key comes from `[secrets.jev].TYPESAFE_API_KEY`, resolved through
+`spawn.resolve_secrets` and never logged. `ask(state, questions)` truncates `state` to `max_state_chars` and
+redacts token-like substrings (`jev.redact`, tested separately) before anything leaves the machine; a 429/529
+gets one 0.5s-backoff retry, and every other failure mode -- disabled, no key, timeout, HTTP error, invalid
+JSON, daily budget exhausted -- makes `ask()` return `None` (fail-open) instead of raising. Usage is logged to
+`.orchestrator/runs/jev-<date>.jsonl` and tallied against `daily_budget_tokens` in `.orchestrator/jev_state.json`.
+`noul()`, `choice()` and `score()` wrap `ask()` for yes/no, multiple-choice and leveled-score questions. Egress
+note: task specs, tool-call metadata and memory titles leave the machine; file contents never do.
+
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),
 `roles`, `complexity_min`/`max`, `max_parallel`, `daily_budget_tasks`, `quota_group`, `weight`, `enabled`.
