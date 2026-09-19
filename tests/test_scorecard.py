@@ -39,6 +39,34 @@ class Scorecard(unittest.TestCase):
         self.assertLess(tight["bad"], 1.0)                     # 0 merged / 1 failed -> success=0, score=0.5
         self.assertGreater(tight["good"], 1.0)                 # 1 merged / 0 failed -> success=1, score=1.5
 
+    def test_task_class_inference(self):
+        self.assertEqual(scorecard.task_class({"constraints": {"task_class": "security"}}), "security")
+        self.assertEqual(scorecard.task_class({"scope": ["docs/design.md"], "complexity": 7}), "architectural")
+        self.assertEqual(scorecard.task_class({"title": "Fix timeout", "complexity": 1}), "debugging")
+        self.assertEqual(scorecard.task_class({"title": "new", "complexity": 3}), "mechanical")
+        self.assertEqual(scorecard.task_class({"title": "new", "complexity": 4}), "unfamiliar")
+
+    def test_expected_cost_needs_samples(self):
+        for n in range(2):
+            self.write_task(f"T-ec{n}", executor="cheap", status="done", merged_into="goal/G")
+        self.write_runs(*[{"task": f"T-ec{n}", "role": "execute", "input_tokens": 100} for n in range(2)])
+        self.assertIsNone(scorecard.expected_cost("cheap", "mechanical", self.root, min_samples=3))
+
+    def test_expected_cost_includes_repairs(self):
+        for n in range(3):
+            self.write_task(f"T-base{n}", executor="cheap", status="done", merged_into="goal/G")
+        self.write_task("T-fix", executor="cheap", status="done", merged_into="goal/G",
+                        constraints={"fix_round_for": "T-base0"})
+        self.write_task("T-review", role="review", constraints={"review_for": "T-base0"})
+        self.write_task("T-spec", role="spec_review", constraints={"spec_review_for": "T-base0"})
+        self.write_runs(
+            *[{"task": f"T-base{n}", "role": "execute", "input_tokens": 100} for n in range(3)],
+            {"task": "T-fix", "role": "execute", "input_tokens": 60},
+            {"task": "T-review", "role": "review", "input_tokens": 10},
+            {"task": "T-spec", "role": "spec_review", "input_tokens": 20},
+        )
+        self.assertEqual(scorecard.expected_cost("cheap", "mechanical", self.root, min_samples=3), 150)
+
     def test_review_verdict_rolls_up(self):
         self.write_task("T-9003", executor="reviewed-by", status="done", review_verdict="request_changes")
         card = scorecard.build(root=self.root)

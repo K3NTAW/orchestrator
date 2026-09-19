@@ -163,7 +163,12 @@ in `~/.codex/models_cache.json`.
 `quota_group`: a usage-limit hit on one enabled member cools every other enabled row sharing the group (e.g. all
 `chatgpt` rows today). Whether the underlying limit is scoped per account or per model is unconfirmed (2026-09-17),
 so the whole group is treated as cooling either way.
-`pick_executor(role, complexity, scores)` ranks enabled, in-range rows by `weight × score`. `score` comes from
+`pick_executor(role, complexity, scores, task)` first uses the task's explicit `constraints.task_class`, or infers
+`security` for configured security paths, `architectural` at complexity 7+, `debugging` for fix tasks, `mechanical`
+at complexity 3 or below, and `unfamiliar` otherwise. Once an executor has at least `[models].min_samples` merged
+tasks in that class, routing selects the lowest local expected token cost that clears `[models].success_floor`:
+initial execution median plus repair probability times repair median, plus review and spec-review medians. Until then,
+it ranks enabled, in-range rows by `weight × score`. `score` comes from
 `orchestrator scorecard`: a live success rate (merged / (merged + failed)) once an executor has enough resolved
 tasks, halved if its quota group hit a usage limit 3+ times today. Below that sample size it falls back to a
 cold-start prior built from `orchestrator bench show` numbers — an executor's model coding (or intelligence) score,

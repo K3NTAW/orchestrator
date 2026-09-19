@@ -1,10 +1,13 @@
 """Per-executor outcome rollup: runs/*.jsonl + tasks/T-*.json, keyed by executor id. Feeds pick_executor's
 scores() so routing reacts to live merge/fail/usage-limit history instead of static weights alone."""
 import json
+import fnmatch
+import statistics
 from datetime import date, datetime
 from . import STATE, bench
 
 BANDS = ("1-3", "4-6", "7-10")
+TASK_CLASSES = ("mechanical", "unfamiliar", "debugging", "architectural", "security")
 
 _last_malformed_lines = 0
 
@@ -57,6 +60,97 @@ def _band(complexity):
     if complexity <= 6:
         return "4-6"
     return "7-10"
+
+
+def task_class(task):
+    """Return the routing class explicitly requested by a spec, or infer its durable fallback class."""
+    constraints = task.get("constraints") or {}
+    explicit = constraints.get("task_class") if isinstance(constraints, dict) else None
+    if explicit:
+        return explicit
+    try:
+        from .pool import config
+        security_paths = config().get("review", {}).get("security_paths", [])
+    except Exception:
+        security_paths = []
+    scope = task.get("scope") or []
+    if any(fnmatch.fnmatch(path, pattern) for path in scope for pattern in security_paths):
+        return "security"
+    if (task.get("complexity") or 0) >= 7:
+        return "architectural"
+    title = (task.get("title") or "").lower()
+    if title.startswith("fix") or (isinstance(constraints, dict) and constraints.get("fix_round_for")):
+        return "debugging"
+    if (task.get("complexity") or 0) <= 3:
+        return "mechanical"
+    return "unfamiliar"
+
+
+def _median(values):
+    return statistics.median(values) if values else 0
+
+
+def expected_cost(executor_id, task_class_name, root=STATE, min_samples=None):
+    """Expected token cost of routing a class to an executor, from local completed work only.
+
+    Initial execution, a probability-weighted repair, and review/spec-review overhead are deliberately
+    measured separately.  A class remains cold until it has the configured number of merged initial tasks.
+    """
+    if min_samples is None:
+        try:
+            from .pool import config
+            min_samples = config().get("models", {}).get("min_samples", 3)
+        except Exception:
+            min_samples = 3
+    tasks = {}
+    tasks_dir = root / "tasks"
+    for p in sorted(tasks_dir.glob("T-*.json")) if tasks_dir.exists() else []:
+        try:
+            task = json.loads(p.read_text())
+        except json.JSONDecodeError:
+            continue
+        tasks[task.get("id", p.stem)] = task
+
+    def constraints_of(task):
+        value = task.get("constraints") or {}
+        return value if isinstance(value, dict) else {}
+
+    def class_of(task):
+        # A repair inherits the class whose repair probability it is estimating, rather than making every
+        # repaired architectural/security task look like a debugging sample.
+        original = next((constraints_of(task).get(key) for key in
+                         ("fix_round_for", "review_for", "spec_review_for")
+                         if constraints_of(task).get(key)), None)
+        return task_class(tasks[original]) if original in tasks else task_class(task)
+
+    initial = [t for t in tasks.values() if t.get("role") == "execute" and t.get("executor") == executor_id
+               and not constraints_of(t).get("fix_round_for") and class_of(t) == task_class_name]
+    merged = [t for t in initial if t.get("merged_into")]
+    if len(merged) < min_samples:
+        return None
+
+    run_tokens = {}
+    for _, run in _read_jsonl_entries(root):
+        tid = run.get("task")
+        if tid and run.get("role"):
+            run_tokens.setdefault(tid, {}).setdefault(run["role"], 0)
+            run_tokens[tid][run["role"]] += _tokens_of(run)
+
+    execute_tokens = [run_tokens.get(t.get("id"), {}).get("execute", 0) for t in initial]
+    repairs = [t for t in tasks.values() if t.get("role") == "execute" and t.get("executor") == executor_id
+               and constraints_of(t).get("fix_round_for") and class_of(t) == task_class_name]
+    repair_tokens = [run_tokens.get(t.get("id"), {}).get("execute", 0) for t in repairs]
+    resolved = [t for t in initial if t.get("merged_into") or t.get("status") == "failed"]
+    repaired_ids = {constraints_of(t).get("fix_round_for") for t in repairs}
+    repair_probability = (sum(t.get("status") == "failed" or t.get("id") in repaired_ids for t in resolved)
+                          / len(resolved)) if resolved else 0
+
+    overhead = 0
+    for role in ("review", "spec_review"):
+        values = [roles.get(role, 0) for tid, roles in run_tokens.items()
+                  if tid in tasks and tasks[tid].get("role") == role and class_of(tasks[tid]) == task_class_name]
+        overhead += _median(values)
+    return _median(execute_tokens) + repair_probability * _median(repair_tokens) + overhead
 
 
 def _row():

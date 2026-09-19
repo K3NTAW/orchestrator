@@ -98,6 +98,24 @@ class Executors(unittest.TestCase):
         st = self.p.status()
         self.assertEqual((len(st["executors"]), sum(e["enabled"] for e in st["executors"])), (7, 4))
 
+    def test_pick_by_expected_cost_with_floor(self):
+        from orchestrator import scorecard
+        task = {"title": "small", "complexity": 3}
+        old_cost, old_build = scorecard.expected_cost, scorecard.build
+        scorecard.expected_cost = lambda eid, cls: {"luna": 10, "terra": 20, "sol": 30, "astra": 40}.get(eid)
+        scorecard.build = lambda: {"luna": {"merged": 1, "failed": 1}, "terra": {"merged": 3, "failed": 0},
+                                   "sol": {"merged": 3, "failed": 0}, "astra": {"merged": 3, "failed": 0}}
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.addCleanup(lambda: setattr(scorecard, "build", old_build))
+        self.assertEqual(self.p.pick_executor("execute", 3, task=task).id, "terra")
+
+    def test_pick_falls_back_without_samples(self):
+        from orchestrator import scorecard
+        old_cost = scorecard.expected_cost
+        scorecard.expected_cost = lambda *args, **kwargs: None
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.assertEqual(self.p.pick_executor("execute", 3, {"terra": 3.0}, {"complexity": 3}).id, "terra")
+
     def test_missing_table_synthesizes_legacy_row(self):
         cfg = {k: v for k, v in P.config().items() if k != "executors"}
         old = P.Pool(cfg)

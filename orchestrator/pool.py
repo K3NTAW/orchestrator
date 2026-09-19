@@ -313,8 +313,8 @@ class Pool:
                                    a.window_started, today)
 
     # executors ---------------------------------------------------------------------------------
-    def pick_executor(self, role, complexity, scores=None):
-        """Highest weight x score wins; ties to the fewest tasks today, then id. None -> caller holds the task."""
+    def pick_executor(self, role, complexity, scores=None, task=None):
+        """Choose the cheapest proven-safe executor, otherwise retain the established score ranking."""
         scores = scores or {}
         ok = []
         for ex in self.executors.values():
@@ -330,6 +330,25 @@ class Pool:
             ok.append(ex)
         if not ok:
             return None
+        if task is not None:
+            from . import scorecard
+            task_class_name = scorecard.task_class(task)
+            card = scorecard.build()
+            floor = self.cfg.get("models", {}).get("success_floor", 0.6)
+            measured = []
+            for ex in ok:
+                cost = scorecard.expected_cost(ex.id, task_class_name)
+                if cost is None:
+                    continue
+                row = card.get(ex.id, {})
+                total = row.get("merged", 0) + row.get("failed", 0)
+                success = row.get("merged", 0) / total if total else 0
+                measured.append((ex, cost, success))
+            if measured:
+                safe = [(ex, cost) for ex, cost, success in measured if success >= floor]
+                if not safe:
+                    return None
+                return sorted(safe, key=lambda item: (item[1], item[0].day_tasks, item[0].id))[0][0]
         return sorted(ok, key=lambda e: (-(e.weight * scores.get(e.id, 1.0)), e.day_tasks, e.id))[0]
 
     def cooldown_executor(self, ex_id, secs, reason=""):
@@ -392,10 +411,16 @@ class Pool:
                               "reason": a.hold_reason} for a in self.accounts],
                 "executors": [{"id": e.id, "model": e.model, "enabled": e.enabled,
                                "cooling_s": max(0, int(e.cooldown_until - time.time())), "running": e.running,
-                               "day_tasks": e.day_tasks} for e in self.executors.values()],
+                               "day_tasks": e.day_tasks,
+                               "expected_cost": self._expected_costs(e.id)} for e in self.executors.values()],
                 "codex": {"available": avail, "running": legacy.running, "day_tasks": legacy.day_tasks,
                           "cooling_s": max(0, int(legacy.cooldown_until - time.time())),
                           "on_exhausted": self.cfg["codex"]["on_exhausted"]}}
+
+    def _expected_costs(self, executor_id):
+        from . import scorecard
+        return {name: cost for name in scorecard.TASK_CLASSES
+                if (cost := scorecard.expected_cost(executor_id, name)) is not None}
 
 
 RATE_LIMIT = re.compile(r"rate.?limit|usage.?limit|hit your limit|limit reached|out of usage credits|too many requests|429", re.I)
