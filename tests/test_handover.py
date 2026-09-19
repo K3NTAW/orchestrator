@@ -3,7 +3,8 @@ daemon.maybe_handover()'s 15-minute throttle.
 
 Each test gets its own sandbox for bus.STATE/TASKS/RUNS and handover.STATE/ROOT (handover.write() looks both up
 at call time, not import time, precisely so a test can swap them) so plan.md and wt/ never touch the real repo."""
-import json, sys, tempfile, time, unittest
+import json, sys, tempfile, threading, time, unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_handover.py` doesn't add this dir itself
@@ -196,6 +197,62 @@ class Handover(unittest.TestCase):
         self.assertTrue(daemon.HANDOVER_STATE.exists())
         self.assertEqual(json.loads(daemon.HANDOVER_STATE.read_text())["handover_last_at"], now)
         self.assertFalse(P.PERSIST.exists())   # pool_state.json is untouched by the handover throttle
+
+    def test_throttle_under_lock(self):
+        """handover.maybe_write() checks and updates its last-written timestamp inside the same bus.locked()
+        acquisition used for the plan.md write itself (not a separate flock taken after the fact), so a second
+        caller racing the first blocks on that lock rather than also passing the throttle check and writing
+        plan.md a second time within the interval."""
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow_write(reason):
+            entered.set()
+            release.wait(2)
+            calls.append(reason)
+
+        self.swap(handover, "write", slow_write)
+        now = time.time()
+        results = []
+
+        def call():
+            results.append(handover.maybe_write("tick", now=now))
+
+        t1 = threading.Thread(target=call)
+        t1.start()
+        self.assertTrue(entered.wait(2))  # t1 is inside write(), holding the bus lock
+
+        t2 = threading.Thread(target=call)
+        t2.start()
+        time.sleep(0.05)  # give t2 a chance to block on the lock rather than race the entered check
+        release.set()
+        t1.join(2)
+        t2.join(2)
+
+        self.assertEqual(len(calls), 1)              # only one real write happened
+        self.assertEqual(sorted(results), [False, True])  # the blocked caller saw the fresh timestamp and skipped
+
+    def test_truncation_tail(self):
+        items = [f"item{i}" for i in range(11)]
+
+        text = handover._join_truncated(items)
+
+        self.assertEqual(text, ", ".join(items[:handover.MAX_ITEMS]) + ", … and 3 more")
+
+    def test_identical_section_does_not_rewrite(self):
+        fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=handover.TZ)
+        with mock.patch("orchestrator.handover.datetime") as dt:
+            dt.now.return_value = fixed
+
+            p1 = handover.write("test")
+            text1 = p1.read_text()
+
+            with mock.patch("orchestrator.handover.os.replace") as replace:
+                p2 = handover.write("test")
+                replace.assert_not_called()
+
+        self.assertEqual(p2.read_text(), text1)
 
 
 if __name__ == "__main__":

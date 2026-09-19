@@ -2,7 +2,7 @@
 while both Claude accounts and Codex are cooling) can pick up open goals without depending on the last manual save.
 write() replaces the trailing "## Auto-handover" section in place -- idempotent, never duplicated -- and leaves
 everything above it byte-identical."""
-import json, os, re, tempfile
+import json, os, re, tempfile, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,9 @@ MAX_GOALS = 12
 MAX_WORKTREES = 15
 RESUME_SENTENCE = ("Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand "
                     "while Codex cools.")
+
+HANDOVER_INTERVAL_S = 15 * 60  # matches daemon.HANDOVER_INTERVAL_S; kept in sync by hand, not imported (daemon
+                                # imports this module, so the reverse import would be circular)
 
 _HEADING_RE = re.compile(r"(?m)^## Auto-handover ")
 
@@ -182,7 +185,9 @@ def write(reason: str = "manual"):
     Matches the LAST "## Auto-handover " heading, not the first, so Planner prose that quotes the heading text
     earlier in the file (e.g. inside a fenced code block) is never mistaken for the real section and deleted.
     Writes to a sibling temp file and os.replace()s it over plan.md, so a failure mid-write (disk full, replace
-    raising) leaves the existing plan.md untouched instead of a half-written file."""
+    raising) leaves the existing plan.md untouched instead of a half-written file. When the freshly rendered
+    section is byte-identical to the one already on disk, skips the temp-file/os.replace dance entirely --
+    a no-op tick (same reason, same repo state) never dirties plan.md's mtime."""
     plan = STATE / "plan.md"   # looked up at call time, not import time, so tests can swap handover.STATE
     with bus.locked():
         STATE.mkdir(parents=True, exist_ok=True)
@@ -190,8 +195,11 @@ def write(reason: str = "manual"):
         matches = list(_HEADING_RE.finditer(existing))
         m = matches[-1] if matches else None
         head = existing[:m.start()] if m else existing
+        old_section = existing[m.start():].rstrip("\n") if m else None
         head = head.rstrip("\n")
         section = _render_section(reason)
+        if section == old_section:
+            return plan
         body = section if not head else f"{head}\n\n{section}"
         text = body + "\n"
 
@@ -204,3 +212,31 @@ def write(reason: str = "manual"):
             os.unlink(tmp_name)
             raise
     return plan
+
+
+def _handover_last_at():
+    try:
+        return json.loads((STATE / "handover_state.json").read_text()).get("handover_last_at", 0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return 0
+
+
+def _save_handover_last_at(now):
+    state = STATE / "handover_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"handover_last_at": now}, indent=1))
+
+
+def maybe_write(reason: str = "auto", now=None, interval=HANDOVER_INTERVAL_S):
+    """Throttled entry point for periodic callers (e.g. the daemon's tick loop): writes at most once every
+    `interval` seconds. The last-written timestamp is read, the write happens, and the timestamp is saved all
+    inside one bus.locked() acquisition -- the same flock write() itself takes for the plan.md write -- so a
+    second caller (another daemon process, or another thread here) racing this one blocks on that flock instead
+    of also passing the throttle check and writing plan.md a second time within the interval."""
+    now = now if now is not None else time.time()
+    with bus.locked():
+        if now - _handover_last_at() < interval:
+            return False
+        write(reason)
+        _save_handover_last_at(now)
+    return True
