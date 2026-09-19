@@ -214,11 +214,15 @@ class Scorecard(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             cli.main()
         lines = out.getvalue().splitlines()
-        self.assertEqual(lines[0], "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs")
+        self.assertEqual(
+            lines[0],
+            "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\tcalls\twaste_pct\tturns",
+        )
         row = next(l for l in lines[1:] if l.startswith("T-9600\t"))
         cells = row.split("\t")
-        self.assertEqual(len(cells), 8)
+        self.assertEqual(len(cells), 11)
         self.assertEqual(float(cells[1]), 2.5)                        # a real numeric cell, not just shape
+        self.assertEqual(cells[-3:], ["-", "-", "-"])
 
     def test_malformed_jsonl_line_skipped_and_counted(self):
         self.write_task("T-9800", executor="good", complexity=3, status="done", merged_into="goal/G")
