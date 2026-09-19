@@ -35,3 +35,19 @@ class RepoMapTest(unittest.TestCase):
     def test_header_has_sha(self):
         sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=self.root, capture_output=True, text=True, check=True).stdout.strip()
         self.assertTrue(build(self.root).startswith(f"repo map {sha} "))
+
+    def test_trim_spreads_across_modules(self):
+        for name, count in (("alpha", 12), ("beta", 12), ("gamma", 3), ("delta", 3)):
+            symbols = "\n".join(f"def {name}_{index}(): pass" for index in range(count))
+            (self.root / "orchestrator" / f"{name}.py").write_text(symbols + "\n")
+        result = build(self.root, budget_chars=500)
+        sections = {
+            name: result.split(f"## {name}.py", 1)[1].split("## ", 1)[0]
+            for name in ("alpha", "beta", "gamma", "delta")
+        }
+        counts = {name: section.count("- def ") for name, section in sections.items()}
+        self.assertTrue(all(count >= 3 for count in counts.values()))
+        self.assertLess(counts["alpha"], 12)
+        self.assertLess(counts["beta"], 12)
+        self.assertEqual(counts["gamma"], 3)
+        self.assertEqual(counts["delta"], 3)

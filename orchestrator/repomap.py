@@ -9,7 +9,8 @@ from pathlib import Path
 def _first_sentence(text):
     text = " ".join((text or "").split())
     match = re.match(r".*?[.!?](?:\s|$)", text)
-    return (match.group(0).strip() if match else text)
+    sentence = match.group(0).strip() if match else text
+    return sentence[:80].rstrip() + ("…" if len(sentence) > 80 else "")
 
 
 def _parameters(arguments):
@@ -66,6 +67,8 @@ def build(root, budget_chars=4000):
         tree = ast.parse(path.read_text(), filename=str(path))
         symbols = []
         for node in tree.body:
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("_"):
+                continue
             if isinstance(node, ast.ClassDef):
                 symbols.append(f"class {node.name}")
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -83,9 +86,17 @@ def build(root, budget_chars=4000):
     sha = revision.stdout.strip() or "unknown"
     date = dt.date.today().isoformat()
     modules = [{**module, "symbols": list(module["symbols"])} for module in parsed]
-    candidates = sorted((ranks[module["name"]], module["name"], symbol)
-                        for module in modules for symbol in module["symbols"])
-    while len(_render(sha, date, modules)) > budget_chars and candidates:
-        _, module_name, symbol = candidates.pop(0)
-        next(module for module in modules if module["name"] == module_name)["symbols"].remove(symbol)
+    while len(_render(sha, date, modules)) > budget_chars:
+        populated = [module for module in modules if module["symbols"]]
+        if not populated:
+            break
+        # Keep a useful public API sketch for every module until the larger
+        # modules have been reduced to the same three-symbol floor.
+        candidates = [module for module in populated if len(module["symbols"]) > 3]
+        if not candidates:
+            candidates = populated
+        module = min(candidates, key=lambda item: (
+            -len(item["symbols"]), ranks[item["name"]], item["name"]
+        ))
+        module["symbols"].pop(0)
     return _render(sha, date, modules)[:budget_chars]

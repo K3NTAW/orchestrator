@@ -9,14 +9,12 @@ TESTS_GREEN = ROOT / ".claude" / "hooks" / "tests-green.sh"
 IN_TESTS_GREEN = "ORCH_TESTS_GREEN"
 
 
-def _can_refresh_repomap(root):
-    """Only refresh a real orchestrator checkout, never a gate's scratch project."""
-    return (not os.environ.get(IN_TESTS_GREEN)
-            and not os.environ.get("TESTS_GREEN_DRY")
-            and (root / "orchestrator" / "repomap.py").is_file())
+def _can_refresh_repomap(root, refresh_repomap):
+    """Refresh only when requested and this checkout contains the generator."""
+    return refresh_repomap and (root / "orchestrator" / "repomap.py").is_file()
 
 
-def merge(task_id, target=None):
+def merge(task_id, target=None, *, refresh_repomap=True):
     t = bus.get(task_id)
     target = target or (f"goal/{t['parent']}" if t.get("parent") else "integration")
     wt = t.get("worktree") or str(ROOT / "wt" / task_id)
@@ -32,12 +30,15 @@ def merge(task_id, target=None):
             git("rebase", "--abort", cwd=wt, check=False)
             bus.update(task_id, status="failed", reason="rebase_conflict", resume_hint={"conflicts": conflicts, "hunks": hunks})
             return {"status": "conflict", "files": conflicts, "hunks": hunks}
-        if not os.environ.get(IN_TESTS_GREEN):
-            gate_env = {**os.environ, IN_TESTS_GREEN: "1"}
-            tg = subprocess.run([str(TESTS_GREEN), wt], capture_output=True, text=True, input="{}", env=gate_env)
-            if tg.returncode:
-                bus.update(task_id, status="failed", reason="tests_red", resume_hint={"failures": tg.stderr[-4000:]})
-                return {"status": "tests_red", "failures": tg.stderr[-4000:]}
+        gate_env = {**os.environ, IN_TESTS_GREEN: "1", "ORCH_ROOT": wt}
+        # A tests-green run can exercise merge() itself.  Pin the nested gate
+        # to the task worktree so that recursion validates its tiny scratch
+        # repository, rather than re-running this checkout's full suite.
+        tg = subprocess.run([str(TESTS_GREEN), wt], cwd=wt, capture_output=True,
+                            text=True, input="{}", env=gate_env)
+        if tg.returncode:
+            bus.update(task_id, status="failed", reason="tests_red", resume_hint={"failures": tg.stderr[-4000:]})
+            return {"status": "tests_red", "failures": tg.stderr[-4000:]}
         # fast-forward target without checking it out: safe because the task branch was just rebased onto it.
         # Exception: ROOT (the main checkout) has target checked out -> `git merge --ff-only` there instead, so
         # its HEAD, index and working tree move together (update-ref alone would leave them stale, see 2026-09-18).
@@ -64,7 +65,7 @@ def merge(task_id, target=None):
             result["checkout_synced"] = False
         try:
             changed = git("diff", "--name-only", previous_sha, sha, "--", "orchestrator", check=False).stdout.splitlines()
-            if (_can_refresh_repomap(ROOT)
+            if (_can_refresh_repomap(ROOT, refresh_repomap)
                     and any(path.startswith("orchestrator/") and path.endswith(".py") for path in changed)):
                 architecture = ROOT / ".orchestrator" / "memory" / "architecture.md"
                 architecture.parent.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,7 @@
 """Serial merge queue: rebase onto target -> tests-green -> fast-forward, conflict handling, orchestrator-state
 commit. Builds its own scratch git repo at TMP (harness scratch_repo) so it never depends on another test file
 having turned TMP into a repo first."""
-import json, sys, unittest
+import json, subprocess, sys, unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_merge.py` doesn't add this dir itself
@@ -120,6 +120,28 @@ class MergeQueue(unittest.TestCase):
             result = merge.merge(task["id"], target="goal/repomap")
         self.assertEqual(result["status"], "merged", result)
         mapped.assert_called_once_with(TMP)
+
+    def test_merge_gate_runs_even_with_marker_env(self):
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        task = bus.create_task("gate", "s", ["a"], ["gate.py"], role="execute")
+        wt = spawn.ensure_worktree(task["id"], base="HEAD"); bus.update(task["id"], worktree=str(wt))
+        (wt / "gate.py").write_text("VALUE = 1\n")
+        g("add", "-A", cwd=wt); g("commit", "-qm", "gate", cwd=wt)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        real_run = subprocess.run
+        def run_gate_only(*args, **kwargs):
+            if args[0][:1] == [str(merge.TESTS_GREEN)]:
+                return completed
+            return real_run(*args, **kwargs)
+        with patch.dict("orchestrator.merge.os.environ", {merge.IN_TESTS_GREEN: "1"}), \
+             patch("orchestrator.merge.subprocess.run", side_effect=run_gate_only) as gated:
+            result = merge.merge(task["id"], target="goal/gate")
+        self.assertEqual(result["status"], "merged", result)
+        gate_calls = [call for call in gated.call_args_list
+                      if call.args[0][:1] == [str(merge.TESTS_GREEN)]]
+        self.assertEqual(len(gate_calls), 1)
+        self.assertEqual(gate_calls[0].args[0], [str(merge.TESTS_GREEN), str(wt)])
 
 
 if __name__ == "__main__":
