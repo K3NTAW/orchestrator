@@ -6,7 +6,7 @@ other bus.*/spawn.* function, and never references orchestrator.ROOT/STATE. Ever
 the realpath'd repo_path argument, so the same code works against this repo or any target repo scaffolded by
 install.install.
 """
-import fcntl, json, os, re, signal, subprocess, sys, time, tomllib
+import fcntl, json, os, re, signal, subprocess, sys, time, tomllib, uuid
 from pathlib import Path
 from subprocess import Popen  # distinct from subprocess.run: tests fake this call without disturbing
                                # subprocess.run itself, which internally resolves Popen dynamically too
@@ -18,6 +18,9 @@ PACKAGE_REPO = Path(__file__).resolve().parents[1]  # this repo, regardless of t
 
 GOALS_LOCK_NAME = "goals.lock"  # dedicated lock file: bus.locked() is non-reentrant on the same fd,
                                  # and this module never shares state with the bus
+
+STALE_RESERVATION_S = 300  # a "starting" reservation older than this is treated as abandoned (the process that
+                            # made it died before finishing), so one crash can't permanently block goal starts
 
 SCAFFOLD_PATHS = [".orchestrator", ".claude", "skills", ".gitignore",
                    ".mcp.planner.json", ".mcp.review.json", ".mcp.scout.json", ".mcp.triage.json"]
@@ -255,22 +258,65 @@ def _read_all_tasks(repo_path):
     return out
 
 
-def _running_goal(repo_path):
-    """A record in this repo's goals.json whose status is "running" and whose pid identity still checks out --
-    i.e. a Planner session that's actually still alive, not just one nobody has reconciled yet."""
-    for r in _load_goal_records(repo_path):
-        if r.get("status") == "running" and identity(r):
-            return r
-    return None
-
-
 def _preview_cfg(pool_toml):
     """What [claude_accounts]/[models]/[limits] would look like once install() runs: the target's own pool.toml
     when it already has one (install() keeps it, "kept"), otherwise this repo's default pool.toml (install()
     would copy it verbatim since the target has none). Lets start() validate account/model/budget config before
-    install() writes a single file, so a refusal here leaves the target untouched."""
+    install() writes a single file, so a refusal here leaves the target untouched. Returns (cfg, None) or
+    (None, reason) -- the target's own pool.toml is untrusted content and a syntax error in it must refuse the
+    goal with a clear reason, never bubble up as an uncaught TOMLDecodeError traceback."""
     src = pool_toml if pool_toml.exists() else (PACKAGE_REPO / ".orchestrator" / "pool.toml")
-    return tomllib.loads(src.read_text())
+    try:
+        return tomllib.loads(src.read_text()), None
+    except tomllib.TOMLDecodeError as e:
+        return None, f"{src} is not valid TOML: {e}"
+
+
+def _reserve_running_slot(repo_path, requester):
+    """Atomically checks for a live running (or in-flight starting) goal and, if none, appends a "starting"
+    placeholder -- the check and the write happen inside one _with_goals_lock call, closing the check-then-act
+    race where two concurrent start() calls could otherwise both see no running goal before either had written
+    one (T-0202 review note). The placeholder's status is "starting", never "running", so identity()/_reconcile()
+    -- which only ever look at "running" records and dereference a real pid -- never touch it. A "starting"
+    placeholder older than STALE_RESERVATION_S is treated as abandoned (its owner crashed before finishing) so
+    it can't permanently wedge future starts on this repo. Returns (reservation_id, None) once reserved, or
+    (None, refusal_reason) when another goal is already running or starting."""
+    reservation_id = uuid.uuid4().hex
+    now = time.time()
+
+    def fn(records):
+        for r in records:
+            if r.get("status") == "running" and identity(r):
+                return (None, f"goal {r['goal_id']} is still running; stop it first"), None
+            if r.get("status") == "starting" and now - r.get("started_at", 0) < STALE_RESERVATION_S:
+                return (None, "another goal is starting on this repo; try again shortly"), None
+        records.append({"goal_id": None, "repo": str(repo_path), "pid": None, "pid_start": None,
+                         "started_at": now, "status": "starting", "reservation_id": reservation_id,
+                         "requester": requester})
+        return (reservation_id, None), records
+
+    return _with_goals_lock(repo_path, fn)
+
+
+def _finalize_running_slot(repo_path, reservation_id, updates):
+    """Replaces the "starting" placeholder made by _reserve_running_slot with real data (a live pid and
+    status="running", or status="failed" when the launch itself never got off the ground)."""
+    def fn(records):
+        for r in records:
+            if r.get("reservation_id") == reservation_id:
+                r.pop("reservation_id", None)
+                r.update(updates)
+        return None, records
+    _with_goals_lock(repo_path, fn)
+
+
+def _release_running_slot(repo_path, reservation_id):
+    """Drops a "starting" placeholder outright -- used when start() refuses after reserving the slot but before
+    a goal (successful or failed) exists to record in its place."""
+    def fn(records):
+        records[:] = [r for r in records if r.get("reservation_id") != reservation_id]
+        return None, records
+    _with_goals_lock(repo_path, fn)
 
 
 def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None):
@@ -309,10 +355,6 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
     repo_path = Path(os.path.realpath(repo_path))
     pool_toml = repo_path / ".orchestrator" / "pool.toml"
 
-    running = _running_goal(repo_path)
-    if running:
-        return {"launched": False, "reason": f"goal {running['goal_id']} is still running; stop it first"}
-
     reason = _precheck_git(repo_path)
     if reason:
         return {"launched": False, "reason": reason}
@@ -320,7 +362,9 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
     if _staged_changes_conflict(repo_path):
         return {"launched": False, "reason": "target index has staged changes; commit or unstage them first"}
 
-    cfg = _preview_cfg(pool_toml)
+    cfg, err = _preview_cfg(pool_toml)
+    if err:
+        return {"launched": False, "reason": err}
     accounts = {a["id"]: a for a in cfg.get("claude_accounts", [])}
     if account_id not in accounts:
         return {"launched": False, "reason": f"unknown account: {account_id}"}
@@ -358,8 +402,20 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
             err["install"] = report
         return err
 
+    # The single-goal-per-repo guard: checking for a running goal and reserving the slot for this one happen
+    # inside one _with_goals_lock call (T-0202 review note), so two concurrent start() calls can't both pass
+    # the check before either had written a record. Placed after the scaffold commit (never before) so the
+    # placeholder this writes to .orchestrator/runs/goals.json can't be swept into that commit.
+    reservation_id, refusal = _reserve_running_slot(repo_path, requester)
+    if refusal:
+        d = {"launched": False, "reason": refusal}
+        if report is not None:
+            d["install"] = report
+        return d
+
     goal_id, err = _create_goal_task(repo_path, goal_text)
     if err:
+        _release_running_slot(repo_path, reservation_id)
         if report is not None:
             err["install"] = report
         return err
@@ -368,12 +424,20 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
               "; use it as the parent of every task you create and post the PR url as its result before you finish.")
     runs_dir = repo_path / ".orchestrator" / "runs"
     log_path = runs_dir / f"planner-{goal_id}.log"
-    launched = launch_planner(repo_path, prompt, account_id, max_budget, log_path)
+    try:
+        launched = launch_planner(repo_path, prompt, account_id, max_budget, log_path)
+    except FileNotFoundError:
+        _finalize_running_slot(repo_path, reservation_id, {
+            "goal_id": goal_id, "text": goal_text, "pid": None, "pid_start": None, "account": account_id,
+            "commit": commit, "status": "failed", "reason": "claude CLI not found"})
+        d = {"launched": False, "reason": "claude CLI not found", "commit": commit, "goal_id": goal_id}
+        if report is not None:
+            d["install"] = report
+        return d
 
-    record = {"goal_id": goal_id, "repo": str(repo_path), "text": goal_text, "pid": launched["pid"],
-              "pid_start": launched["pid_start"], "started_at": time.time(), "account": account_id,
-              "commit": commit, "status": "running", "requester": requester}
-    _append_goal_record(repo_path, record)
+    _finalize_running_slot(repo_path, reservation_id, {
+        "goal_id": goal_id, "text": goal_text, "pid": launched["pid"], "pid_start": launched["pid_start"],
+        "account": account_id, "commit": commit, "status": "running"})
 
     return {"launched": True, "goal_id": goal_id, "pid": launched["pid"], "log": launched["log"], "commit": commit,
             "install": report,

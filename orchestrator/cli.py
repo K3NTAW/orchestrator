@@ -8,8 +8,11 @@ from .pool import Pool
 
 def _format_goal_line(e):
     counts = ",".join(f"{status}={len(items)}" for status, items in sorted(e["children"].items())) or "-"
-    return (f"{e['goal_id']}\tstatus={e['record_status']}\tplanner_alive={e['planner_alive']}\t"
+    line = (f"{e['goal_id']}\tstatus={e['record_status']}\tplanner_alive={e['planner_alive']}\t"
             f"children=[{counts}]\tpr_url={e['pr_url'] or '-'}")
+    if e.get("note"):
+        line += f"\tnote={e['note']}"
+    return line
 
 
 def cost(by):
