@@ -444,6 +444,18 @@ class Render(unittest.TestCase):
         self.assertTrue(text.startswith("## objective"))
         self.assertIn("Build widget", text)
 
+    def test_execute_prompt_names_gate_and_commit(self):
+        text = spawn.render("execute", packet="", spec="s", acceptance=["a"], scope=["widget.py"])
+        self.assertIn(".claude/hooks/tests-green.sh", text)
+        self.assertIn("git commit", text)
+        self.assertNotIn("scripts/tests_green.sh", text)
+
+    def test_fix_delta_prompt_names_gate_and_commit(self):
+        text = spawn.render("fix-delta", n=1, failing_tests="x", assertion_lines="y")
+        self.assertIn(".claude/hooks/tests-green.sh", text)
+        self.assertIn("git commit", text)
+        self.assertNotIn("scripts/tests_green.sh", text)
+
     def test_packet_gotcha_match_by_path(self):
         task = self.packet_fixture()
         memory = TMP / ".orchestrator" / "memory"
