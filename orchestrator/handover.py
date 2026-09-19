@@ -241,7 +241,8 @@ def _render_section(reason, all_tasks, events5):
             body.append(f"- {when} {e['task']} {e['kind']} {json.dumps(e['data'])[:80]}")
 
     note = f" — pruned {total_pruned} by jev" if total_pruned else ""
-    header = [f"## Auto-handover {ts} — {reason}{note}", ""]
+    threshold = "[planner].handover_context_tokens is the configured handover threshold."
+    header = [f"## Auto-handover {ts} — {reason}{note}", "", threshold]
 
     # The resume sentence must always survive: truncate the body only, never the header/footer, so a goal-heavy
     # snapshot loses list detail before it ever risks dropping the one line every resume depends on.

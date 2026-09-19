@@ -13,7 +13,7 @@ second early exit would push attempts to 2. failed_launch (an exception between 
 row reconcile() aged out because the process never got as far as recording "running") behaves like exited_early:
 it does not block, but counts toward the same attempts/gave_up-at-2 rule.
 """
-import json, os, re, sys, tempfile, time
+import json, os, re, sys, tempfile, time, tomllib
 from pathlib import Path
 from . import ROOT, STATE, bus, goals, handover, jev, spawn
 from .pool import Pool
@@ -22,6 +22,85 @@ _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 _STALE_CLAIM_S = 120
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 _JEV_TIMEOUT_S = 3.0
+
+
+def _fenced(label, value, limit=None):
+    value = str(value or "")
+    if limit is not None:
+        value = value[:limit]
+    value = re.sub(r"`{3,}", "[backticks elided]", value)
+    return [f"{label}:", "```data", value, "```"]
+
+
+def decision_packet(goal_id, kind, payload, repo_path=ROOT):
+    """Build a bounded decision packet, preserving its decision context before inventory."""
+    repo_path = Path(repo_path)
+    try:
+        cfg = tomllib.loads((repo_path / ".orchestrator" / "pool.toml").read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        cfg = {}
+    try:
+        cap = max(1, int(cfg.get("planner", {}).get("decision_packet_chars", 6000)))
+    except (TypeError, ValueError):
+        cap = 6000
+
+    expected = {"scouts_done": "write specs", "held": "write or approve a fix round",
+                "closable": "close the goal"}.get(kind, "make the requested decision")
+    try:
+        goal = bus.get(goal_id)
+    except KeyError:
+        goal = None
+    lines = [f"Decision: {kind} — expected to {expected}.", f"Goal id: {goal_id}", f"Payload id: {payload}"]
+    lines += _fenced("Goal title", goal.get("title", "") if goal else "")
+    if goal is None:
+        return "\n".join(lines)[:cap]
+
+    inventory = []
+    if kind == "held":
+        task_id = str(payload).split(":", 1)[0]
+        lines.append(f"Task id: {task_id}")
+        try:
+            task = bus.get(task_id)
+        except KeyError:
+            task = None
+        lines += _fenced("Task title", task.get("title", "") if task else "")
+        if task is not None:
+            lines += _fenced("Hold reason", task.get("hold_reason", ""))
+            failures = (task.get("resume_hint") or {}).get("failures")
+            if failures is None:
+                failures = (task.get("result") or {}).get("failures")
+            if failures:
+                lines += _fenced("Failures", failures, 1500)
+            comments = []
+            reviews = [r for r in bus.read(role="review") if (r.get("inputs") or [])[:1] == [task_id]]
+            for review in reviews:
+                for comment in (review.get("result") or {}).get("comments", []):
+                    comments.append(f"{comment.get('path', '?')}:{comment.get('line', '?')} "
+                                    f"{str(comment.get('issue', ''))[:200]}")
+            if comments:
+                lines += _fenced("Review comments", "\n".join(comments))
+            inventory = spawn.packet(task, repo_path).splitlines()
+    elif kind == "scouts_done":
+        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "scout"]
+        summaries = []
+        for scout in children:
+            summaries.append(f"{scout['id']}: " + str((scout.get("result") or {}).get("summary", ""))[:300])
+        if summaries:
+            lines += _fenced("Scout summaries", "\n".join(summaries))
+    elif kind == "closable":
+        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "execute"
+                    and t.get("merged_into")]
+        if children:
+            lines += _fenced("Merged tasks", "\n".join(f"{t['id']} {t.get('sha', '?')}" for t in children))
+
+    prefix = "\n".join(lines)
+    if inventory:
+        inventory_text = re.sub(r"`{3,}", "[backticks elided]", "\n".join(inventory))
+        empty_suffix = "\n" + "\n".join(_fenced("Spawn packet", ""))
+        room = cap - len(prefix) - len(empty_suffix)
+        suffix = empty_suffix if room < 0 else "\n" + "\n".join(_fenced("Spawn packet", inventory_text[:room]))
+        return prefix[:cap] if room < 0 else prefix + suffix
+    return prefix[:cap]
 
 # next_action options offered to Jev for a decision-point shadow triage (D3, T-0217). scouts_done gets its own
 # set (there is no held task/review to react to yet); held and closable share the fix_round/respec/escalate/noop
@@ -395,7 +474,7 @@ def run(goal_id, kind, payload_key):
 
         handover.write(f"decision {kind}")
 
-        prompt = spawn.render("planner-decision", packet=goals.decision_packet(goal_id, kind, payload_key))
+        prompt = spawn.render("planner-decision", packet=decision_packet(goal_id, kind, payload_key, ROOT))
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
 
@@ -438,14 +517,39 @@ def _bus_event_after(since, *task_ids):
 
 def _record_decision_usage(r):
     """Parse a completed headless Claude JSON response once and account for its usage."""
-    if r.get("usage_logged") or not r.get("log"):
+    if r.get("usage_logged"):
+        return
+    if not r.get("log"):
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print("[planner_runs] decision log missing; usage absent", file=sys.stderr)
         return
     try:
-        output = spawn.extract_json(Path(r["log"]).read_text(errors="replace"))
-    except (OSError, TypeError):
+        lines = Path(r["log"]).read_text(errors="replace").splitlines()
+    except OSError:
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print(f"[planner_runs] unable to read decision log {r['log']}; usage absent", file=sys.stderr)
+        return
+    output = None
+    for line in reversed(lines):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            output = candidate
+            break
+    if output is None:
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print(f"[planner_runs] no JSON usage record in {r['log']}", file=sys.stderr)
         return
     usage = output.get("usage") or {}
     if not usage:
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print(f"[planner_runs] usage absent in {r['log']}", file=sys.stderr)
         return
     normalized = bus.normalize_usage("claude", usage)
     tokens = normalized.get("total_tokens", 0)

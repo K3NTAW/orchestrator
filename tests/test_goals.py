@@ -1,11 +1,12 @@
 """orchestrator.goals: launch/track/stop a headless Planner session against a target repo. goals.py may only
 import install.install, spawn.trust_workspace and spawn.resolve_secrets from the package (T-0115); these tests
 exercise it against scratch git repos, never REPO itself."""
-import contextlib, io, json, os, re, subprocess, sys, threading, tomllib, unittest
+import contextlib, io, json, os, re, subprocess, sys, tempfile, threading, tomllib, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_goals.py` doesn't add this dir itself
 from _harness import REPO, TMP, scratch_repo
 from orchestrator import bus, cli, goals
+from orchestrator import planner_runs as PR
 from orchestrator.pool import Pool
 
 
@@ -612,7 +613,16 @@ class ScaffoldCommitAndSecrets(GoalsTestCase):
         self.assertFalse(os.path.exists("/tmp/T-0129-pwned-marker"))
 
 
-class DecisionPacket(unittest.TestCase):
+class DecisionPacket(GoalsTestCase):
+    def setUp(self):
+        super().setUp()
+        self.sandbox = Path(tempfile.mkdtemp(prefix="orch-goal-packet-"))
+        for name, value in (("STATE", self.sandbox), ("TASKS", self.sandbox / "tasks"),
+                            ("RUNS", self.sandbox / "runs")):
+            original = getattr(bus, name)
+            setattr(bus, name, value)
+            self.addCleanup(setattr, bus, name, original)
+
     def test_decision_packet_held_has_packet_and_failures_fenced(self):
         goal = bus.create_task("GOAL: held decision", "goal spec", ["Planner closes the goal with a PR"], ["**"],
                                role="triage", complexity=5)
@@ -627,11 +637,12 @@ class DecisionPacket(unittest.TestCase):
         bus.post_result(review["id"], {"comments": [{"path": "orchestrator/goals.py", "line": 42,
                                                       "issue": "missing null check"}]}, status="done")
 
-        packet = goals.decision_packet(goal_id, "held", f"{held_id}:123.456")
+        packet = PR.decision_packet(goal_id, "held", f"{held_id}:123.456")
 
-        self.assertIn(f"Held task: fix the thing ({held_id})", packet)
-        self.assertIn("Held task packet:", packet)
-        self.assertIn("Hold reason: gate_red", packet)
+        self.assertIn(f"Task id: {held_id}", packet)
+        self.assertIn("Task title:", packet)
+        self.assertIn("Hold reason:", packet)
+        self.assertIn("gate_red", packet)
         self.assertIn("```data", packet)
         self.assertIn("AssertionError: expected 1 got 2", packet)
         self.assertIn("orchestrator/goals.py:42 missing null check", packet)
@@ -647,9 +658,9 @@ class DecisionPacket(unittest.TestCase):
         s2 = bus.create_task("scout two", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
         bus.update(s2["id"], status="failed")
 
-        packet = goals.decision_packet(goal_id, "scouts_done", goal_id)
+        packet = PR.decision_packet(goal_id, "scouts_done", goal_id)
 
-        self.assertIn("Scouts:", packet)
+        self.assertIn("Scout summaries:", packet)
         self.assertIn(f"{s1['id']}: {'a' * 300}", packet)
         self.assertNotIn("a" * 301, packet)  # summary capped to the first 300 chars
         self.assertIn(f"{s2['id']}: ", packet)
@@ -665,8 +676,37 @@ class DecisionPacket(unittest.TestCase):
         cfg = tomllib.loads((goals.PACKAGE_REPO / ".orchestrator" / "pool.toml").read_text())
         cap = cfg["planner"]["decision_packet_chars"]
 
-        packet = goals.decision_packet(goal_id, "scouts_done", goal_id)
+        packet = PR.decision_packet(goal_id, "scouts_done", goal_id)
         self.assertEqual(len(packet), cap)
+
+    def test_held_packet_trims_inventory_before_context(self):
+        goal = bus.create_task("GOAL: five-file scope", "goal spec", ["close"], ["**"],
+                               role="triage", complexity=5)
+        held = bus.create_task("held title", "fix", ["x"], [f"scope_{i}.py" for i in range(5)],
+                               role="execute", parent=goal["id"], complexity=3)
+        bus.update(held["id"], status="held", hold_reason="keep this reason",
+                   resume_hint={"failures": "failure survives"})
+        for i in range(5):
+            (self.sandbox / f"scope_{i}.py").write_text("\n".join(f"def function_{j}(): pass" for j in range(60)))
+        cfg_dir = self.sandbox / ".orchestrator"
+        cfg_dir.mkdir()
+        (cfg_dir / "pool.toml").write_text("[planner]\ndecision_packet_chars = 900\n")
+
+        packet = PR.decision_packet(goal["id"], "held", f"{held['id']}:1", self.sandbox)
+        self.assertEqual(len(packet), 900)
+        self.assertIn("keep this reason", packet)
+        self.assertIn("failure survives", packet)
+        self.assertIn("Spawn packet:", packet)
+
+    def test_fenced_values_escape_backticks_and_missing_goal_is_minimal(self):
+        goal = bus.create_task("GOAL: fence", "goal spec", ["close"], ["**"], role="triage", complexity=5)
+        held = bus.create_task("held", "fix", ["x"], ["x"], role="execute", parent=goal["id"], complexity=3)
+        bus.update(held["id"], status="held", resume_hint={"failures": "bad ``` fence"})
+        packet = PR.decision_packet(goal["id"], "held", f"{held['id']}:1", self.sandbox)
+        self.assertIn("bad [backticks elided] fence", packet)
+        missing = PR.decision_packet("T-9999", "held", "T-9998:1", self.sandbox)
+        self.assertIn("Goal id: T-9999", missing)
+        self.assertIn("Payload id: T-9998:1", missing)
 
 
 class CliGoalOutput(GoalsTestCase):
