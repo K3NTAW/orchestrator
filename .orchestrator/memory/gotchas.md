@@ -222,3 +222,14 @@ outcome: G6 v4 (T-0290, merged on goal/T-0260) reconciles this window once a ser
 type: gotcha · goal: T-0260 · tasks: T-0276 · provenance: repo
 - status() at 22:33 showed astra running 7, luna 2, terra 2, sol 2 with zero codex exec processes alive; codex(T-0276) answered status fallback tier sonnet; the counters live in the MCP server's memory and only decrement when the executor thread posts the result itself, which the pre-F3 server never does
 outcome: Restart the session once no worker is alive; the new server starts with empty counters and F3 posts results itself. Check pgrep -f codex exec before trusting status().running
+
+## 2026-09-19 codex and codex_reply MCP tools return the Codex result but never post it to the bus, even on the Phase F server
+type: gotcha · goal: T-0260 · tasks: T-0326,T-0331 · provenance: repo
+- F3 made the daemon's executor thread post Codex results; the Planner-facing codex(task_id, prompt) and codex_reply(task_id, delta) tools still return {round, status, thread, message, usage} and leave the task running with no result (T-0326 at 22:57 after codex_reply committed 8262cd7)
+- tasks dispatched by a server that later died carry pid null, so daemon.tick's reconcile_dead (pid and not alive) never touches them: they stay running forever unless the Planner resumes them
+outcome: After every codex or codex_reply call, bus.post_result(tid, {summary, commit, executed_by, provenance:['repo'], usage}, 'done') by hand so the daemon gates it. Polish candidate (c3): the MCP tool posts the result itself when the task is running and assigned to codex; reconcile_dead also treats running tasks with pid null and claimed_at older than the server start as dead
+
+## 2026-09-19 plan.md task map listed G3 T-0271 as merged while the bus held it on review T-0309 with no fix round queued
+type: gotcha · goal: T-0260 · tasks: T-0271,T-0309,T-0336 · provenance: repo
+- session 4's handover map put T-0271 under Merged; git log goal/T-0260 had no G3 commit and the bus showed status held, hold_reason review request_changes T-0309, and no task with constraints.fix_round_for T-0271; the review found duplicated hunk headers in spawn.bounded_diff, render re-bounding an already bounded diff, and the three acceptance tests missing
+outcome: On resume, verify each 'merged' claim in plan.md against git log goal/<parent> and the task's merged_into before trusting it; for every held execute task check that a fix round exists (grep constraints.fix_round_for over tasks). Fix round T-0336 written 23:00
