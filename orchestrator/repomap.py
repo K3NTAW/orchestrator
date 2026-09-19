@@ -57,14 +57,31 @@ def _render(sha, date, modules):
     return "\n".join(lines) + "\n"
 
 
-def build(root, budget_chars=4000):
+def build(root, budget_chars=4000, rev=None):
     """Return a deterministic, AST-only markdown summary of ``orchestrator/*.py``."""
     root = Path(root)
-    files = sorted((root / "orchestrator").glob("*.py"))
+    if rev is None:
+        files = sorted((root / "orchestrator").glob("*.py"))
+        sources = [(path, path.read_text()) for path in files]
+        revision = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root,
+                                  capture_output=True, text=True, check=False)
+        sha = revision.stdout.strip() or "unknown"
+    else:
+        listed = subprocess.run(["git", "ls-tree", "-r", "--name-only", rev, "--", "orchestrator"],
+                                cwd=root, capture_output=True, text=True, check=True).stdout.splitlines()
+        paths = sorted(Path(path) for path in listed
+                       if path.startswith("orchestrator/") and Path(path).parent == Path("orchestrator")
+                       and Path(path).suffix == ".py")
+        sources = [(path, subprocess.run(["git", "show", f"{rev}:{path.as_posix()}"], cwd=root,
+                                         capture_output=True, text=True, check=True).stdout)
+                   for path in paths]
+        revision = subprocess.run(["git", "rev-parse", "--short", rev], cwd=root,
+                                  capture_output=True, text=True, check=True)
+        sha = revision.stdout.strip()
     parsed = []
-    names = {path.stem for path in files}
-    for path in files:
-        tree = ast.parse(path.read_text(), filename=str(path))
+    names = {path.stem for path, _ in sources}
+    for path, source in sources:
+        tree = ast.parse(source, filename=str(path))
         symbols = []
         for node in tree.body:
             if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("_"):
@@ -81,9 +98,6 @@ def build(root, budget_chars=4000):
     for module in parsed:
         for imported in module["imports"]:
             ranks[imported] += 1
-    revision = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root,
-                              capture_output=True, text=True, check=False)
-    sha = revision.stdout.strip() or "unknown"
     date = dt.date.today().isoformat()
     modules = [{**module, "symbols": list(module["symbols"])} for module in parsed]
     while len(_render(sha, date, modules)) > budget_chars:

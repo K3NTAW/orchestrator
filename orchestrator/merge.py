@@ -30,10 +30,7 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             git("rebase", "--abort", cwd=wt, check=False)
             bus.update(task_id, status="failed", reason="rebase_conflict", resume_hint={"conflicts": conflicts, "hunks": hunks})
             return {"status": "conflict", "files": conflicts, "hunks": hunks}
-        gate_env = {**os.environ, IN_TESTS_GREEN: "1", "ORCH_ROOT": wt}
-        # A tests-green run can exercise merge() itself.  Pin the nested gate
-        # to the task worktree so that recursion validates its tiny scratch
-        # repository, rather than re-running this checkout's full suite.
+        gate_env = {**os.environ, IN_TESTS_GREEN: "1"}
         tg = subprocess.run([str(TESTS_GREEN), wt], cwd=wt, capture_output=True,
                             text=True, input="{}", env=gate_env)
         if tg.returncode:
@@ -69,9 +66,10 @@ def merge(task_id, target=None, *, refresh_repomap=True):
                     and any(path.startswith("orchestrator/") and path.endswith(".py") for path in changed)):
                 architecture = ROOT / ".orchestrator" / "memory" / "architecture.md"
                 architecture.parent.mkdir(parents=True, exist_ok=True)
-                architecture.write_text(build(ROOT))
+                architecture.write_text(build(ROOT, rev=sha))
         except Exception as e:
-            print(f"[merge] repomap generation failed: {e}", file=sys.stderr)
+            result["repomap_error"] = str(e)[:200]
+            print(f"[merge] repomap refresh failed: {e}", file=sys.stderr)
         bus.update(task_id, status="done", merged_into=target, sha=sha)
         bus.commit_state()
         try:

@@ -36,6 +36,17 @@ class RepoMapTest(unittest.TestCase):
         sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=self.root, capture_output=True, text=True, check=True).stdout.strip()
         self.assertTrue(build(self.root).startswith(f"repo map {sha} "))
 
+    def test_build_from_rev_ignores_working_tree(self):
+        committed = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True,
+                                   text=True, check=True).stdout.strip()
+        (self.root / "orchestrator" / "one.py").write_text("def working_tree_only(): pass\n")
+        result = build(self.root, rev=committed)
+        short_sha = subprocess.run(["git", "rev-parse", "--short", committed], cwd=self.root,
+                                   capture_output=True, text=True, check=True).stdout.strip()
+        self.assertIn("def one(value)", result)
+        self.assertNotIn("def working_tree_only()", result)
+        self.assertTrue(result.startswith(f"repo map {short_sha} "))
+
     def test_trim_spreads_across_modules(self):
         for name, count in (("alpha", 12), ("beta", 12), ("gamma", 3), ("delta", 3)):
             symbols = "\n".join(f"def {name}_{index}(): pass" for index in range(count))

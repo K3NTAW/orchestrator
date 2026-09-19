@@ -108,7 +108,7 @@ class MergeQueue(unittest.TestCase):
     def test_merge_refreshes_repomap_on_py_change(self):
         scratch_repo(TMP)
         self._ensure_ci_fixture()
-        (TMP / "orchestrator").mkdir()
+        (TMP / "orchestrator").mkdir(exist_ok=True)
         (TMP / "orchestrator" / "repomap.py").write_text("\"\"\"repomap marker\"\"\"\n")
         (TMP / "orchestrator" / "changed.py").write_text("VALUE = 0\n")
         g("add", "-A"); g("commit", "-qm", "add orchestrator module")
@@ -119,7 +119,23 @@ class MergeQueue(unittest.TestCase):
         with patch("orchestrator.merge.build", return_value="repo map test\n") as mapped:
             result = merge.merge(task["id"], target="goal/repomap")
         self.assertEqual(result["status"], "merged", result)
-        mapped.assert_called_once_with(TMP)
+        mapped.assert_called_once_with(TMP, rev=result["sha"])
+
+    def test_merge_reports_repomap_error(self):
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        (TMP / "orchestrator").mkdir(exist_ok=True)
+        (TMP / "orchestrator" / "repomap.py").write_text("\"\"\"repomap marker\"\"\"\n")
+        (TMP / "orchestrator" / "changed.py").write_text("VALUE = 0\n")
+        g("add", "-A"); g("commit", "-qm", "add orchestrator module")
+        task = bus.create_task("repomap-error", "s", ["a"], ["orchestrator/changed.py"], role="execute")
+        wt = spawn.ensure_worktree(task["id"], base="HEAD"); bus.update(task["id"], worktree=str(wt))
+        (wt / "orchestrator" / "changed.py").write_text("VALUE = 1\n")
+        g("add", "-A", cwd=wt); g("commit", "-qm", "change orchestrator module", cwd=wt)
+        with patch("orchestrator.merge.build", side_effect=RuntimeError("refresh exploded")):
+            result = merge.merge(task["id"], target="goal/repomap-error")
+        self.assertEqual(result["status"], "merged", result)
+        self.assertEqual(result["repomap_error"], "refresh exploded")
 
     def test_merge_gate_runs_even_with_marker_env(self):
         scratch_repo(TMP)
