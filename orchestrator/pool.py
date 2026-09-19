@@ -381,7 +381,7 @@ class Pool:
         if self.codex.day == date.today().isoformat():
             ex.roll_day(); ex.day_tasks = max(ex.day_tasks, self.codex.day_tasks)
 
-    def codex_available(self, complexity: int = 1) -> bool:
+    def codex_available(self, complexity: int = 1, task=None) -> bool:
         """True iff some enabled executor can take an "execute" task at this complexity right now. Default
         complexity=1 keeps pre-B2 callers (mcp.status, cli, executor.start) working; B2 must pass the task's
         real complexity so a busy/exhausted high-complexity executor doesn't get masked by idle low-band ones."""
@@ -389,7 +389,7 @@ class Pool:
         if c.day != date.today().isoformat():
             c.day_tasks, c.day = 0, date.today().isoformat()
         self._sync_legacy_codex()
-        ex = self.pick_executor("execute", complexity)
+        ex = self.pick_executor("execute", complexity, task=task)
         return bool(ex and ex.provider == "codex")
 
     def both_cooling_minutes(self):

@@ -136,6 +136,21 @@ class Executors(unittest.TestCase):
         self.assertFalse(self.p.codex_available(8))   # only astra reaches band 8, and it's over budget
         self.assertTrue(self.p.codex_available(3))     # luna/terra/sol still have headroom at band 3
 
+    def test_codex_available_uses_task_routing(self):
+        from orchestrator import scorecard
+        task = {"title": "small", "complexity": 3}
+        old_cost, old_class_success = scorecard.expected_cost, scorecard.class_success
+        scorecard.expected_cost = lambda eid, cls: {"luna": 10, "terra": 20, "sol": 30, "astra": 40}.get(eid)
+        scorecard.class_success = lambda eid, cls: {"luna": 0.5, "terra": 1.0, "sol": 1.0, "astra": 1.0}.get(eid)
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.addCleanup(lambda: setattr(scorecard, "class_success", old_class_success))
+        old_provider = self.p.executors["terra"].provider
+        self.p.executors["terra"].provider = "claude"
+        self.addCleanup(lambda: setattr(self.p.executors["terra"], "provider", old_provider))
+        routed = self.p.pick_executor("execute", task["complexity"], task=task)
+        self.assertEqual(routed.id, "terra")
+        self.assertEqual(self.p.codex_available(task["complexity"], task=task), routed.provider == "codex")
+
     def test_legacy_running_syncs_down_not_just_up(self):
         self.p.codex.running = 2; self.p.save()
         fresh = P.Pool()
