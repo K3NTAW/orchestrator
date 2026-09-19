@@ -59,6 +59,17 @@ a running daemon.
 
 ## Pipeline
 Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
+
+### Routes
+
+| Goal type | Route |
+| --- | --- |
+| Clear, localized change | Brief spec, one executor, deterministic gates, human PR. |
+| Uncertain location or behaviour | One targeted investigation for a named uncertainty in plan.md, then spec. |
+| Independent changes | Separate workers with an explicit interface contract in each spec. |
+| High-risk or architectural | Detailed planning, spec review, execution, independent review. |
+
+The default is zero scouts: the Planner greps for what it needs first. Warn above five files; split by independently verifiable behaviour and dependency boundaries, never merely to satisfy the count.
 State machine per execute task: `queued` → (depends_on merged, complexity ≥ `spec_review_min` → `spec_review` first,
 on `spec_review_tier`) → dispatched to an executor → `done` → gated (`tests-green.sh` passing is the merge bar).
 By default (`[review].code_review = "security_paths"`) a task merges straight through unless its merged diff
