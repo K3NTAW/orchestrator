@@ -67,6 +67,7 @@ def _tokens(u):
     both providers uniformly; keep the Codex key for one release so older runs/*.jsonl readers keep working."""
     out = {k: u.get(k, 0) for k in ("input_tokens", "output_tokens", "cached_input_tokens")}
     out["cache_read_input_tokens"] = out["cached_input_tokens"]
+    out.update(bus.normalize_usage("codex", u))
     return out
 
 
@@ -113,7 +114,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
                     cooldown_s=secs, **log)
         return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
     u = ev["usage"]
-    bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex", duration_s=round(time.time() - t0, 1),
+    bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
                 outcome="error" if ev["error"] else "done", **log, **_tokens(u))
     if ev["error"] or r.returncode:
         return {"status": "failed", "reason": ev["error"] or r.stderr[-800:], "thread": ev["thread_id"]}

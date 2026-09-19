@@ -11,7 +11,7 @@ writes its own log to .orchestrator/runs/jev/gate.jsonl in that same subdirector
 """
 import fcntl, json, os, re, sys, tempfile, time, urllib.error, urllib.request
 from datetime import date
-from . import STATE, spawn
+from . import STATE, bus, spawn
 from . import pool as P
 
 URL = "https://api.typesafe.ai/v1/systemone"
@@ -148,10 +148,18 @@ def _add_day_tokens(input_tokens):
     _with_state_lock(op)
 
 
-def _log_usage(caller, input_tokens, model, latency_ms, ok, votes=1):
+def _log_usage(caller, input_tokens, model, latency_ms, ok, votes=1, task=None):
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    task = task or os.environ.get("ORCH_TASK_ID")
+    goal_id = None
+    if task:
+        try:
+            row = bus.get(task)
+            goal_id = row.get("parent") or task
+        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+            pass
     entry = {"ts": time.time(), "caller": caller, "input_tokens": input_tokens, "model": model,
-              "latency_ms": latency_ms, "ok": ok, "votes": votes}
+              "latency_ms": latency_ms, "ok": ok, "votes": votes, "task": task, "goal_id": goal_id}
     with open(RUNS_DIR / f"{_today()}.jsonl", "a") as fh:
         fh.write(json.dumps(entry) + "\n")
 
@@ -170,7 +178,7 @@ def _api_key():
     return value
 
 
-def ask(state, questions, *, model=None, timeout_s=None):
+def ask(state, questions, *, model=None, timeout_s=None, task=None):
     """POST typed `questions` about `state` to Jev, return the parsed {"answers", "usage"} dict, or None on any
     failure (fail-open by design: disabled, no key, timeout, HTTP error, invalid JSON, budget exhausted).
     One retry with a 0.5s backoff on 429/529; every other failure returns None immediately. timeout_s=None
@@ -209,14 +217,14 @@ def ask(state, questions, *, model=None, timeout_s=None):
             if e.code in RETRY_STATUS and attempt == 0:
                 time.sleep(RETRY_BACKOFF_S)
                 continue
-            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False, votes)
+            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False, votes, task)
             return None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False, votes)
+            _log_usage(caller, 0, model, (time.monotonic() - started) * 1000, False, votes, task)
             return None
         else:
             input_tokens = (body.get("usage") or {}).get("input_tokens", 0)
-            _log_usage(caller, input_tokens, model, (time.monotonic() - started) * 1000, True, votes)
+            _log_usage(caller, input_tokens, model, (time.monotonic() - started) * 1000, True, votes, task)
             _add_day_tokens(input_tokens)
             try:
                 answers = body.get("answers") or {}

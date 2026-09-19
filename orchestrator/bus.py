@@ -203,9 +203,40 @@ def events(since=0, limit=200):
     return [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)} for s, t, ts, k, d in rows]
 
 
+def normalize_usage(provider, usage):
+    """Return provider-independent token buckets.
+
+    Codex includes cached input in input_tokens. Its output_tokens is assumed to
+    already include reasoning, so reasoning_output_tokens is informational and
+    is deliberately not added to total_tokens a second time.
+    """
+    usage = usage or {}
+    if provider == "codex":
+        cache_read = usage.get("cached_input_tokens", 0) or 0
+        input_uncached = max(0, (usage.get("input_tokens", 0) or 0) - cache_read)
+        cache_write = 0
+        reasoning = usage.get("reasoning_output_tokens", 0) or 0
+    else:
+        input_uncached = usage.get("input_tokens", 0) or 0
+        cache_read = usage.get("cache_read_input_tokens", 0) or 0
+        cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+        reasoning = usage.get("reasoning_tokens", usage.get("reasoning_output_tokens", 0)) or 0
+    output = usage.get("output_tokens", 0) or 0
+    return {
+        "input_uncached_tokens": input_uncached, "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write, "output_tokens": output, "reasoning_tokens": reasoning,
+        "total_tokens": input_uncached + cache_read + cache_write + output,
+    }
+
+
 def log_run(**fields):
     """Append one line per event to runs/<date>.jsonl: tokens, role, tier, account, executor, complexity, duration,
     outcome. Callers normalize cached tokens to cache_read_input_tokens so cli.cost sums one key across providers."""
+    task_id = fields.get("task")
+    if task_id:
+        task = get(task_id)
+        fields.setdefault("goal_id", task.get("parent") or task_id)
+        fields.setdefault("provider", "codex" if fields.get("account") == "codex" else "claude")
     RUNS.mkdir(exist_ok=True)
     with open(RUNS / f"{date.today().isoformat()}.jsonl", "a") as f:
         f.write(json.dumps({"ts": time.time(), **fields}) + "\n")

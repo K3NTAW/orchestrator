@@ -7,6 +7,26 @@ from orchestrator import bus
 
 
 class Bus(unittest.TestCase):
+    def test_normalize_usage_claude(self):
+        self.assertEqual(bus.normalize_usage("claude", {"input_tokens": 10, "cache_read_input_tokens": 3,
+                         "cache_creation_input_tokens": 2, "output_tokens": 5}),
+                         {"input_uncached_tokens": 10, "cache_read_tokens": 3, "cache_write_tokens": 2,
+                          "output_tokens": 5, "reasoning_tokens": 0, "total_tokens": 20})
+
+    def test_normalize_usage_codex(self):
+        self.assertEqual(bus.normalize_usage("codex", {"input_tokens": 10, "cached_input_tokens": 4,
+                         "output_tokens": 5, "reasoning_output_tokens": 2}),
+                         {"input_uncached_tokens": 6, "cache_read_tokens": 4, "cache_write_tokens": 0,
+                          "output_tokens": 5, "reasoning_tokens": 2, "total_tokens": 15})
+
+    def test_log_run_adds_goal_id(self):
+        goal = bus.create_task("Goal", "spec", ["ok"], ["src/**"])
+        task = bus.create_task("Child", "spec", ["ok"], ["src/**"], parent=goal["id"])
+        bus.log_run(task=task["id"], account="codex")
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(row["goal_id"], goal["id"])
+        self.assertEqual(row["provider"], "codex")
+
     def test_db_leaves_no_unclosed_connection(self):
         gc.collect()
         with warnings.catch_warnings(record=True) as recorded:
