@@ -63,6 +63,48 @@ class JevRankTests(unittest.TestCase):
         jev.ask = lambda *a, **k: (_ for _ in ()).throw(AssertionError("ask must not be called for no items"))
         self.assertEqual(jev_rank.rank([], "the goal"), [])
 
+    def test_missing_answer_kept(self):
+        items = [{"id": "a", "text": "on topic"}, {"id": "b", "text": "no answer for me"}]
+
+        def fake_ask(state, questions, **kw):
+            return {"answers": {"a": {"noul": 0.9}}}  # "b" has no entry at all
+        jev.ask = fake_ask
+
+        result = jev_rank.rank(items, "the goal", threshold=0.5)
+
+        self.assertEqual({it["id"] for it in result}, {"a", "b"})  # "a" scores above threshold, "b" is unscored
+        by_id = {it["id"]: it for it in result}
+        self.assertEqual(by_id["a"]["p_relevant"], 0.9)
+        self.assertIsNone(by_id["b"]["p_relevant"])
+        self.assertEqual(result[-1]["id"], "b")  # None sorts after every numeric score
+
+    def test_non_numeric_kept_and_no_raise(self):
+        items = [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}, {"id": "c", "text": "three"},
+                  {"id": "d", "text": "four"}]
+        answers = {"a": "not a number", "b": {"nested": "dict"}, "c": float("nan"), "d": 1.5}
+
+        def fake_ask(state, questions, **kw):
+            return {"answers": {qid: {"noul": answers[qid]} for qid in questions}}
+        jev.ask = fake_ask
+
+        result = jev_rank.rank(items, "the goal")
+
+        self.assertEqual({it["id"] for it in result}, {"a", "b", "c", "d"})  # none dropped, no raise
+        by_id = {it["id"]: it for it in result}
+        self.assertIsNone(by_id["a"]["p_relevant"])   # non-numeric string
+        self.assertIsNone(by_id["b"]["p_relevant"])   # not a scalar at all
+        self.assertIsNone(by_id["c"]["p_relevant"])   # nan is not finite
+        self.assertIsNone(by_id["d"]["p_relevant"])   # 1.5 is numeric but out of [0, 1]
+
+    def test_empty_answers_returns_unranked(self):
+        items = [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}]
+        jev.ask = lambda state, questions, **kw: {"answers": {}}
+
+        result = jev_rank.rank(items, "the goal")
+
+        self.assertEqual([it["id"] for it in result], ["a", "b"])  # original order preserved
+        self.assertTrue(all(it["p_relevant"] is None for it in result))
+
 
 if __name__ == "__main__":
     unittest.main()

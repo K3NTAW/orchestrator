@@ -18,6 +18,8 @@ RESUME_SENTENCE = ("Resume: skill resume; re-spawn held spec reviews; dispatch r
 
 PRUNE_THRESHOLD = 0.5  # done/failed/last-events entries below this p_relevant are dropped; merged/held never are
 
+MAX_JEV_REQUESTS = 6  # per handover render: caps worst-case added latency at MAX_JEV_REQUESTS x jev timeout_s
+
 HANDOVER_INTERVAL_S = 15 * 60  # matches daemon.HANDOVER_INTERVAL_S; kept in sync by hand, not imported (daemon
                                 # imports this module, so the reverse import would be circular)
 
@@ -66,27 +68,41 @@ def _goal_text(goal):
     return f"{goal['title']}\n{goal.get('spec') or ''}"
 
 
-def _prune(tasks, goal_text):
-    """Score `tasks` for relevance to `goal_text` with jev_rank and drop the low ones (below PRUNE_THRESHOLD).
-    Returns (kept_tasks_in_original_order, pruned_count). Fail-open: when jev_rank can't score (Jev disabled/
-    unavailable -- every item comes back with p_relevant=None), nothing is dropped and pruned=0, so the section
-    stays byte-identical to the no-Jev output."""
+def _take_jev_budget(budget):
+    """budget is a single-key dict shared across one _render_section call. Returns False once MAX_JEV_REQUESTS
+    Jev requests have already been spent this handover, so the caller skips ranking (fail-open: keeps its
+    tasks/events unpruned) instead of placing another request -- the cap on latency matters more than a
+    thorough prune."""
+    if budget["n"] <= 0:
+        return False
+    budget["n"] -= 1
+    return True
+
+
+def _prune_many(named_lists, goal_text, budget):
+    """Score every task across all of `named_lists` (e.g. {"failed": [...], "done": [...]}) against goal_text in
+    a single jev_rank call -- one Jev request covers a whole goal's prunable groups instead of one request per
+    group, so more goals fit inside MAX_JEV_REQUESTS. Returns (named_lists_with_low-scoring items dropped,
+    pruned_count). Fail-open: no budget left, no tasks, or jev_rank can't score, leaves every list untouched."""
+    tasks = [t for lst in named_lists.values() for t in lst]
     if not tasks:
-        return tasks, 0
+        return named_lists, 0
+    if not _take_jev_budget(budget):
+        return named_lists, 0
     items = [{"id": t["id"], "text": _task_ref(t)} for t in tasks]
     ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
     if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
-        return tasks, 0
+        return named_lists, 0
     keep_ids = {it["id"] for it in ranked}
-    kept = [t for t in tasks if t["id"] in keep_ids]
-    return kept, len(tasks) - len(kept)
+    kept_lists = {name: [t for t in lst if t["id"] in keep_ids] for name, lst in named_lists.items()}
+    pruned = len(tasks) - sum(len(v) for v in kept_lists.values())
+    return kept_lists, pruned
 
 
-def _goal_lines(goal, children):
+def _goal_lines(goal, children, budget):
     groups = _status_groups(children)
     goal_text = _goal_text(goal)
     lines = [f"### {goal['id']} {goal['title']}"]
-    pruned = 0
     if groups["queued"]:
         refs = [_task_ref(t, f"depends_on={t.get('depends_on') or []}") for t in groups["queued"]]
         lines.append(f"- queued: {_join_truncated(refs)}")
@@ -99,20 +115,15 @@ def _goal_lines(goal, children):
                               f"resume_hint_keys={sorted((t.get('resume_hint') or {}).keys())}")
                 for t in groups["held"]]
         lines.append(f"- held: {_join_truncated(refs)}")
-    if groups["failed"]:
-        kept, p = _prune(groups["failed"], goal_text)
-        pruned += p
-        if kept:
-            refs = [_task_ref(t, f"reason={t.get('reason') or '?'}, "
-                                  f"resume_hint_keys={sorted((t.get('resume_hint') or {}).keys())}")
-                    for t in kept]
-            lines.append(f"- failed: {_join_truncated(refs)}")
-    if groups["done"]:
-        kept, p = _prune(groups["done"], goal_text)
-        pruned += p
-        if kept:
-            refs = [_task_ref(t) for t in kept]
-            lines.append(f"- done (not merged): {_join_truncated(refs)}")
+    pruned_groups, pruned = _prune_many({"failed": groups["failed"], "done": groups["done"]}, goal_text, budget)
+    if pruned_groups["failed"]:
+        refs = [_task_ref(t, f"reason={t.get('reason') or '?'}, "
+                              f"resume_hint_keys={sorted((t.get('resume_hint') or {}).keys())}")
+                for t in pruned_groups["failed"]]
+        lines.append(f"- failed: {_join_truncated(refs)}")
+    if pruned_groups["done"]:
+        refs = [_task_ref(t) for t in pruned_groups["done"]]
+        lines.append(f"- done (not merged): {_join_truncated(refs)}")
     if groups["merged"]:  # never pruned
         refs = [_task_ref(t, f"sha={(t.get('sha') or '?')[:8]}") for t in groups["merged"]]
         lines.append(f"- merged: {_join_truncated(refs)}")
@@ -160,8 +171,10 @@ def _last_events(limit=5):
     return [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)} for s, t, ts, k, d in rows]
 
 
-def _prune_events(events, goal_text):
+def _prune_events(events, goal_text, budget):
     if not events or not goal_text:
+        return events, 0
+    if not _take_jev_budget(budget):
         return events, 0
     items = [{"id": str(e["seq"]), "text": f"{e['task']} {e['kind']} {json.dumps(e['data'])[:80]}"} for e in events]
     ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
@@ -172,13 +185,15 @@ def _prune_events(events, goal_text):
     return kept, len(events) - len(kept)
 
 
-def _render_section(reason):
+def _render_section(reason, all_tasks, events5):
+    """Render the section from an already-fetched bus snapshot (`all_tasks`) and last-events tail (`events5`) --
+    no bus/db reads happen in here, only jev_rank calls (network) and pure formatting, so write() can call this
+    after releasing the bus lock. `budget` caps the number of Jev requests placed at MAX_JEV_REQUESTS for the
+    whole call, split across goals and the events tail."""
     ts = datetime.now(TZ).isoformat(timespec="seconds")
     footer = ["", RESUME_SENTENCE]
+    budget = {"n": MAX_JEV_REQUESTS}
 
-    # One bus.read() for the whole section: goals, their children and the worktree/task cross-check below all
-    # come out of this single snapshot instead of one bus.read per goal.
-    all_tasks = bus.read()
     tasks_by_id = {t["id"]: t for t in all_tasks}
     children_by_parent = {}
     for t in all_tasks:
@@ -194,7 +209,7 @@ def _render_section(reason):
     else:
         shown, extra = goals[:MAX_GOALS], len(goals) - min(len(goals), MAX_GOALS)
         for goal in shown:
-            lines, pruned = _goal_lines(goal, children_by_parent.get(goal["id"], []))
+            lines, pruned = _goal_lines(goal, children_by_parent.get(goal["id"], []), budget)
             body.extend(lines)
             total_pruned += pruned
         if extra:
@@ -208,7 +223,7 @@ def _render_section(reason):
     body.append("Last events:")
     # "The open goal": the primary open goal drives what's relevant for pruning the shared events tail. With no
     # open goal there's nothing to score events against, so they pass through unpruned.
-    events, events_pruned = _prune_events(_last_events(5), _goal_text(goals[0]) if goals else None)
+    events, events_pruned = _prune_events(events5, _goal_text(goals[0]) if goals else None, budget)
     total_pruned += events_pruned
     if not events:
         body.append("- none")
@@ -222,10 +237,10 @@ def _render_section(reason):
 
     # The resume sentence must always survive: truncate the body only, never the header/footer, so a goal-heavy
     # snapshot loses list detail before it ever risks dropping the one line every resume depends on.
-    budget = MAX_SECTION_LINES - len(header) - len(footer)
-    if len(body) > budget:
-        extra = len(body) - (budget - 1)
-        body = body[:budget - 1] + [f"… and {extra} more lines truncated"]
+    line_budget = MAX_SECTION_LINES - len(header) - len(footer)
+    if len(body) > line_budget:
+        extra = len(body) - (line_budget - 1)
+        body = body[:line_budget - 1] + [f"… and {extra} more lines truncated"]
     return "\n".join(header + body + footer)
 
 
@@ -237,17 +252,26 @@ def write(reason: str = "manual"):
     Writes to a sibling temp file and os.replace()s it over plan.md, so a failure mid-write (disk full, replace
     raising) leaves the existing plan.md untouched instead of a half-written file. When the freshly rendered
     section is byte-identical to the one already on disk, skips the temp-file/os.replace dance entirely --
-    a no-op tick (same reason, same repo state) never dirties plan.md's mtime."""
+    a no-op tick (same reason, same repo state) never dirties plan.md's mtime.
+
+    The bus lock is only held for the two things that actually need it: taking the bus snapshot up front, and
+    the plan.md compare-and-swap at the end. _render_section()'s jev_rank calls (network, up to MAX_JEV_REQUESTS
+    requests) run in between with no lock held, so a slow or unavailable Jev never blocks other bus writers."""
     plan = STATE / "plan.md"   # looked up at call time, not import time, so tests can swap handover.STATE
     with bus.locked():
         STATE.mkdir(parents=True, exist_ok=True)
+        all_tasks = bus.read()
+        events5 = _last_events(5)
+
+    section = _render_section(reason, all_tasks, events5)
+
+    with bus.locked():
         existing = plan.read_text() if plan.exists() else ""
         matches = list(_HEADING_RE.finditer(existing))
         m = matches[-1] if matches else None
         head = existing[:m.start()] if m else existing
         old_section = existing[m.start():].rstrip("\n") if m else None
         head = head.rstrip("\n")
-        section = _render_section(reason)
         if section == old_section:
             return plan
         body = section if not head else f"{head}\n\n{section}"
@@ -279,14 +303,16 @@ def _save_handover_last_at(now):
 
 def maybe_write(reason: str = "auto", now=None, interval=HANDOVER_INTERVAL_S):
     """Throttled entry point for periodic callers (e.g. the daemon's tick loop): writes at most once every
-    `interval` seconds. The last-written timestamp is read, the write happens, and the timestamp is saved all
-    inside one bus.locked() acquisition -- the same flock write() itself takes for the plan.md write -- so a
-    second caller (another daemon process, or another thread here) racing this one blocks on that flock instead
-    of also passing the throttle check and writing plan.md a second time within the interval."""
+    `interval` seconds. The throttle check and timestamp save happen inside one short bus.locked() acquisition
+    -- claiming the write slot before write() runs -- so a second caller (another daemon process, or another
+    thread here) racing this one sees the fresh timestamp and skips instead of also passing the throttle check.
+    write() itself then runs with the lock released, since it places the (network, potentially slow) jev_rank
+    requests and takes its own brief locks internally; holding this function's lock across that call would put
+    Jev requests back under the bus flock."""
     now = now if now is not None else time.time()
     with bus.locked():
         if now - _handover_last_at() < interval:
             return False
-        write(reason)
         _save_handover_last_at(now)
+    write(reason)
     return True

@@ -3,7 +3,7 @@ daemon.maybe_handover()'s 15-minute throttle.
 
 Each test gets its own sandbox for bus.STATE/TASKS/RUNS and handover.STATE/ROOT (handover.write() looks both up
 at call time, not import time, precisely so a test can swap them) so plan.md and wt/ never touch the real repo."""
-import json, sys, tempfile, threading, time, unittest
+import fcntl, json, sys, tempfile, threading, time, unittest
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
@@ -283,6 +283,52 @@ class Handover(unittest.TestCase):
         self.assertNotIn("pruned", lines[0])
         self.assertIn(f"- done (not merged): {done}", section)
         self.assertIn(f"- failed: {failed}", section)
+
+    def test_rank_not_called_under_lock(self):
+        """write() must release the bus lock before placing any jev_rank/jev.ask request: a fake ask() probes
+        for the lock with a non-blocking flock on a second fd. If write() still held the bus lock while calling
+        us, that probe would fail (EWOULDBLOCK) even though it's the same process/thread -- flock denies a
+        second lock attempt via a different fd while the first is held, per flock(2)."""
+        g = self.goal("Ship the feature")
+        done = self.child(g, "Docs pass")
+        bus.post_result(done, {"summary": "ok"}, "done")
+
+        lock_was_free = []
+
+        def fake_ask(state, questions, **kw):
+            with open(bus.LOCK, "a+") as fh:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_was_free.append(True)
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                except OSError:
+                    lock_was_free.append(False)
+            return {"answers": {qid: {"noul": 0.9} for qid in questions}}
+
+        self.swap(jev, "ask", fake_ask)
+
+        handover.write("test")
+
+        self.assertTrue(lock_was_free)         # jev.ask was actually called
+        self.assertTrue(all(lock_was_free))    # ...and never while write() held the bus lock
+
+    def test_handover_jev_request_cap(self):
+        for i in range(8):
+            g = self.goal(f"Ship feature {i}")
+            done = self.child(g, "Docs pass")
+            bus.post_result(done, {"summary": "ok"}, "done")
+
+        calls = []
+
+        def fake_ask(state, questions, **kw):
+            calls.append(questions)
+            return {"answers": {qid: {"noul": 0.9} for qid in questions}}
+
+        self.swap(jev, "ask", fake_ask)
+
+        handover.write("test")
+
+        self.assertEqual(len(calls), handover.MAX_JEV_REQUESTS)  # 8 goals + events would be 9 requests uncapped
 
     def test_identical_section_does_not_rewrite(self):
         fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=handover.TZ)
