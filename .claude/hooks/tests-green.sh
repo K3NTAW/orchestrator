@@ -4,8 +4,11 @@ set -u; . "$(dirname "$0")/_lib.sh"
 in=$(cat 2>/dev/null || true)
 cwd=$(jq -r '.cwd // empty' <<<"$in" 2>/dev/null); [ -n "${1:-}" ] && cwd=$1
 cd "${cwd:-$PWD}"
-root=$(orch_root); sid=$(jq -r '.session_id // "cli"' <<<"$in" 2>/dev/null); sid=${sid:-cli}
+root=${cwd:-$PWD}; sid=$(jq -r '.session_id // "cli"' <<<"$in" 2>/dev/null); sid=${sid:-cli}
+task=$(jq -r '.task_id // .task.id // empty' <<<"$in" 2>/dev/null)
+task=${task:-$(basename "$PWD")}; task=$(printf '%s' "$task" | tr '/ ' '__')
 out=$(mktemp); rc=0
+started=$(date +%s)
 run() { echo "## $*" >>"$out"; "$@" >>"$out" 2>&1 || rc=1; }
 if [ -x .orchestrator/tests.sh ]; then run .orchestrator/tests.sh
 elif [ -f package.json ]; then
@@ -21,8 +24,16 @@ elif [ -f pyproject.toml ] || ls tests/test_*.py >/dev/null 2>&1; then
   if [ "${TESTS_GREEN_DRY:-}" = "1" ]; then rm -f "$out"; echo "${cmd[*]}"; exit 0; fi
   run "${cmd[@]}"
 else echo "tests-green: no test runner detected in $PWD" >&2; exit 0; fi
-[ $rc -eq 0 ] && { rm -f "$out"; exit 0; }
+[ $rc -eq 0 ] && {
+  n=$(grep -Eo '[0-9]+ tests? (passed|run)|Ran [0-9]+ tests?' "$out" | grep -Eo '[0-9]+' | tail -1)
+  n=${n:-$(grep -Eo '[0-9]+ passed' "$out" | grep -Eo '[0-9]+' | tail -1)}; n=${n:--}
+  elapsed=$(( $(date +%s) - started )); sha=$(git rev-parse --short=7 HEAD 2>/dev/null || true); [ -n "$sha" ] || sha=-------
+  printf 'tests-green: OK %s %s %ss\n' "$n" "$sha" "$elapsed" >&2
+  rm -f "$out"; exit 0
+}
 fail=$(grep -E 'FAIL|ERROR|Error|error TS|✗|✕|AssertionError|assert |Traceback' "$out" | grep -v '^## ' | head -40)
-mkdir -p "$root/.orchestrator/runs"; printf '%s\n' "$fail" | shasum | cut -c1-12 >>"$root/.orchestrator/runs/loop-$sid.log"
-{ echo "tests-green: FAILED. Failures only:"; printf '%s\n' "${fail:-$(tail -40 "$out")}"; } >&2
+mkdir -p "$root/.orchestrator/runs/tests"
+log="$root/.orchestrator/runs/tests/$task-$(date +%Y%m%d-%H%M%S).log"
+cp "$out" "$log"
+{ echo "tests-green: FAILED. Failures only:"; printf '%s\n' "${fail:-$(tail -40 "$out")}"; echo "$log"; } >&2
 rm -f "$out"; exit 2

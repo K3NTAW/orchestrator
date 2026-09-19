@@ -65,6 +65,12 @@ evidence. The packet is capped at 4,800 characters, trimming the bottom sections
 
 Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
 
+Bounded outputs: review diffs are capped at `[limits].review_diff_chars` (12,000 by default; expand with the displayed
+`git -C <worktree> diff -- <paths>` command), spec-review code at `[limits].spec_review_code_chars` (8,000; expand with
+`git -C <worktree> show HEAD:<path>`), test failures retain the full log at the printed `.orchestrator/runs/tests/` path,
+and recall shows `[limits].recall_hits` (30; expand with `recall.sh index "<terms>" --limit N`). For bus state deltas,
+use `bus_events(since)`.
+
 ### Routes
 
 | Goal type | Route |

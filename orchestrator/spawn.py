@@ -78,8 +78,65 @@ def render(name, **kw):
         kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
     for k, v in kw.items():
+        if k == "diff":
+            v = bounded_diff(v, kw.get("_diff_cap", 12000), kw.get("_diff_hint", "git diff"))
+        elif k == "code":
+            v = bounded_text(v, kw.get("_code_cap", 8000), kw.get("_code_hint", "git show"))
         t = t.replace("{{" + k + "}}", v if isinstance(v, str) else json.dumps(v, indent=0))
     return t
+
+
+def bounded_text(text, cap_chars, expand_hint):
+    """Keep a prompt blob bounded while leaving an actionable expansion command."""
+    text = str(text)
+    if len(text) <= cap_chars:
+        return text
+    hint = f"<{len(text) - cap_chars} more chars; expand with: {expand_hint}>"
+    keep = max(0, cap_chars - len(hint) - 1)
+    return text[:keep].rstrip() + "\n" + hint
+
+
+def bounded_diff(diff_text, cap_chars=12000, expand_hint="git diff"):
+    """Put a compact diffstat before bounded unified-diff hunks."""
+    text = str(diff_text)
+    files = additions = deletions = 0
+    hunks = []
+    current = []
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            files += 1
+        elif line.startswith("@@"):
+            if current:
+                hunks.extend(current); current = []
+            hunks.append(line)
+        elif line.startswith("+++") or line.startswith("---"):
+            continue
+        elif line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+        if line.startswith(("diff --git ", "index ", "@@", "+", "-", " ")):
+            current.append(line)
+    hunks.extend(current)
+    summary = f"Diffstat: {files} files changed, {additions} insertions(+), {deletions} deletions(-)"
+    body_lines = [summary] + hunks
+    body = "\n".join(body_lines)
+    if len(body) <= cap_chars:
+        return body
+    marker_size = len(f"\n0 more lines; expand with: {expand_hint}")
+    kept = [summary]
+    for line in hunks:
+        candidate = "\n".join(kept + [line])
+        if len(candidate) + marker_size > cap_chars:
+            break
+        kept.append(line)
+    omitted = len(hunks) - (len(kept) - 1)
+    marker = f"{omitted} more lines; expand with: {expand_hint}"
+    while len("\n".join(kept) + "\n" + marker) > cap_chars and len(kept) > 1:
+        kept.pop()
+        omitted += 1
+        marker = f"{omitted} more lines; expand with: {expand_hint}"
+    return "\n".join(kept) + "\n" + marker
 
 
 def _memory_entries(path):
@@ -413,15 +470,21 @@ def run_worker(task_id):
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
     if role == "review":
-        prompt = render("review", complexity=str(t["complexity"]), acceptance=t["acceptance"], diff=scoped_diff(t),
+        wt = (bus.get(t["inputs"][0]) if t.get("inputs") else t).get("worktree") or ROOT
+        diff_hint = f"git -C {wt} diff -- {' '.join((bus.get(t['inputs'][0]) if t.get('inputs') else t)['scope'])}"
+        prompt = render("review", complexity=str(t["complexity"]), acceptance=t["acceptance"],
+                        diff=bounded_diff(scoped_diff(t), lim.get("review_diff_chars", 12000), diff_hint),
                         security="Apply skills/review/adversarial-review/references/security-checklist.md." if t["complexity"] >= 7 else "")
     elif role == "challenge":
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                         for k in ("claim", "evidence", "confidence")})
     elif role == "spec_review":
         src = bus.get(t["inputs"][0])
+        code_wt = src.get("worktree") or ROOT
+        code_hint = f"git -C {code_wt} show HEAD:<path>"
         prompt = render("spec-review", complexity=str(t["complexity"]), spec=src["spec"], acceptance=src["acceptance"],
-                        scope=src["scope"], code=code_excerpts(src["scope"], src.get("worktree") or ROOT))
+                        scope=src["scope"], code=bounded_text(code_excerpts(src["scope"], code_wt),
+                                                              lim.get("spec_review_code_chars", 8000), code_hint))
     elif role == "execute":
         t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
         bus.update(task_id, executor=t["executor"])

@@ -13,6 +13,22 @@ HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (.+)$")
 MAX_GET_CHARS = 6000  # same cap as a bus result; one `get` never exceeds it
 
 
+def configured_hits():
+    try:
+        import tomllib
+        with (ROOT / ".orchestrator" / "pool.toml").open("rb") as f:
+            return int(tomllib.load(f).get("limits", {}).get("recall_hits", 30))
+    except (OSError, ValueError, TypeError):
+        return 30
+
+
+def age(date):
+    try:
+        return f"{max(0, (datetime.date.today() - datetime.date.fromisoformat(date[:10])).days)}d"
+    except (ValueError, TypeError):
+        return "-"
+
+
 # ORCH_ROOT (above) is the *state* root -- any project's .orchestrator dir -- not necessarily this repo, so it's
 # not safe to import the orchestrator source package from it (an editable install elsewhere could shadow it).
 # Import from the repo recall.py itself lives in instead: skills/planner/memory/scripts/recall.py -> repo root.
@@ -105,7 +121,7 @@ def index_graph(terms):
 
 
 def cmd_index(argv):
-    q, project, limit, goal_text = "", None, 20, os.environ.get("ORCH_GOAL_TEXT")
+    q, project, limit, goal_text = "", None, configured_hits(), os.environ.get("ORCH_GOAL_TEXT")
     i = 0
     while i < len(argv):
         if argv[i] == "--project": project = argv[i + 1]; i += 2
@@ -120,9 +136,12 @@ def cmd_index(argv):
     if not hits:
         print(f"no hits for {terms} in notes/bus/cmem/graph"); return
     if not goal_text:
-        print(f"# {len(hits)} hits for {terms} (showing {min(len(hits), limit)}) — id · date · layer · title")
-        for s, id_, date, layer, title in hits[:limit]:
-            print(f"{id_} · {date or '-'} · {layer} · {title}")
+        shown = hits[:limit]
+        print(f"# {len(hits)} hits for {terms} (showing {len(shown)}) — id · date · provenance · age · title")
+        for s, id_, date, layer, title in shown:
+            print(f"{id_} · {date or '-'} · {layer} · {age(date)} · {title}")
+        if len(hits) > len(shown):
+            print(f"{len(hits) - len(shown)} more hits; use: recall.sh index \"{' '.join(terms)}\" --limit {len(hits)}")
         return
 
     shown = hits[:limit]
@@ -131,12 +150,14 @@ def cmd_index(argv):
     ranked = jev_rank.rank(items, goal_text)
     if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
         print("jev: off")
-    print(f"# {len(ranked)} hits for {terms} (showing {len(ranked)}) — id · date · layer · title · p")
+    print(f"# {len(ranked)} hits for {terms} (showing {len(ranked)}) — id · date · provenance · age · title · p")
     for it in ranked:
         s, id_, date, layer, title = by_id[it["id"]]
         p = it["p_relevant"]
-        print(f"{id_} · {date or '-'} · {layer} · {title} · {p:.2f}" if p is not None
-              else f"{id_} · {date or '-'} · {layer} · {title} · -")
+        print(f"{id_} · {date or '-'} · {layer} · {age(date)} · {title} · {p:.2f}" if p is not None
+              else f"{id_} · {date or '-'} · {layer} · {age(date)} · {title} · -")
+    if len(hits) > len(ranked):
+        print(f"{len(hits) - len(ranked)} more hits; use: recall.sh index \"{' '.join(terms)}\" --limit {len(hits)}")
 
 
 def _jl(s):
