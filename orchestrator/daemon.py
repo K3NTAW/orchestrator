@@ -586,6 +586,9 @@ def _matching_semantic_path(paths):
     return None
 
 
+_SEMANTIC_DIFF_UNAVAILABLE = object()
+
+
 def _added_diff_lines(t):
     worktree = t.get("worktree")
     if not worktree or not Path(worktree).is_dir():
@@ -602,7 +605,7 @@ def _added_diff_lines(t):
 def _matching_semantic_pattern(t):
     lines = _added_diff_lines(t)
     if lines is None:
-        return None
+        return _SEMANTIC_DIFF_UNAVAILABLE
     for name, pattern in SEMANTIC_PATTERNS.items():
         try:
             if any(re.search(pattern, line) for line in lines):
@@ -654,6 +657,8 @@ def _review_plan(t):
         if semantic_match:
             return 1, f"semantic_path:{semantic_match}"
         semantic_pattern = _matching_semantic_pattern(t)
+        if semantic_pattern is _SEMANTIC_DIFF_UNAVAILABLE:
+            return 1, "diff_unavailable"
         return (1, f"semantic_pattern:{semantic_pattern}") if semantic_pattern else (0, "none")
     # "always"
     if t["complexity"] <= DIRECT_MERGE_MAX:

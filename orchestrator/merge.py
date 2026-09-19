@@ -33,6 +33,10 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             git("branch", target, base)
         reviewed = (t.get("pipeline") or {}).get("reviewed_sha")
         before_diff = _diff_hash(target, wt) if reviewed else None
+        if reviewed and before_diff is None:
+            reason = "diff_unavailable: git diff --stat/--binary failed before rebase"
+            bus.update(task_id, status="failed", reason=reason)
+            return {"status": "failed", "reason": reason}
         r = git("rebase", target, cwd=wt, check=False)
         if r.returncode:
             conflicts = git("diff", "--name-only", "--diff-filter=U", cwd=wt, check=False).stdout.split()
@@ -41,7 +45,11 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             bus.update(task_id, status="failed", reason="rebase_conflict", resume_hint={"conflicts": conflicts, "hunks": hunks})
             return {"status": "conflict", "files": conflicts, "hunks": hunks}
         after_diff = _diff_hash(target, wt) if reviewed else None
-        if reviewed and before_diff is not None and after_diff is not None and before_diff != after_diff:
+        if reviewed and after_diff is None:
+            reason = "diff_unavailable: git diff --stat/--binary failed after rebase"
+            bus.update(task_id, status="failed", reason=reason)
+            return {"status": "failed", "reason": reason}
+        if reviewed and before_diff != after_diff:
             return {"status": "rebase_changed_diff"}
         tg = subprocess.run([str(TESTS_GREEN), wt], cwd=wt, capture_output=True,
                             text=True, input="{}")
