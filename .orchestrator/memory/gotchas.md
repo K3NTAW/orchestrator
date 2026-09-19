@@ -166,3 +166,13 @@ outcome: the human reinstalls the CLI (npm global package or the native setup); 
 type: gotcha · goal: T-0201 · tasks: T-0222,T-0223 · provenance: repo
 - spawn.base_for() ignores constraints.fix_round_for and inputs; the daemon dispatched T-0222 about 20 s after creation with a worktree on goal/T-0201 (6358799) instead of task/T-0220 (d8531a3); planner-mode.sh also stops the Planner from repointing a worktree
 outcome: workaround: the fix-round spec opens with a STEP 0 that puts the worktree on task/<parent task>, and the acceptance requires the parent commit in the log (T-0223). Fix candidate for a polish task: base_for() prefers constraints.fix_round_for's task branch
+
+## 2026-09-19 already_merged() stamps an uncommitted task as merged when its branch still equals the goal head
+type: gotcha · goal: T-0201 · tasks: T-0229 · provenance: repo
+- daemon.already_merged() (about line 225) treats task branch is-ancestor-of goal/<parent> as proof the work landed; an executor that finishes without committing leaves the branch at the goal head, so the check passes and bus.update(merged_into=..., merged_via=ancestor) fires with nothing merged and no gate. Seen on E3 v2 T-0229 at 18:20: three new files and two edits sat uncommitted in wt/T-0229 while the bus said merged
+outcome: Planner committed the worktree as found, cleared merged_into and gated_at so gate() reviews it. Fix candidate (polish): already_merged() must also require the branch head to differ from the merge base, or the worktree to be clean with a commit not on the target; a dirty worktree on a done task should hold with reason executor did not commit
+
+## 2026-09-19 a committed config toggle broke the gate for every open worktree: tests read the real pool.toml
+type: gotcha · goal: T-0201 · tasks: T-0229,T-0236 · provenance: repo
+- tests/test_jev.py::test_disabled_returns_none_without_network reads pool.toml through jev._cfg(); the Planner set [jev].enabled = true at 17:45 and every worktree cut afterwards fails tests-green with 'urlopen must not be called when jev is disabled' (E3 T-0229 held gate_red at 18:25; T-0230, T-0233, T-0234, T-0235 will follow)
+outcome: P10 T-0236 pins the config inside the tests; held tasks then go through merge() (rebase onto goal, tests, fast-forward) instead of a fresh gate. Rule: a test may never depend on a committed pool.toml value; a Planner config commit must run the test suite from ROOT first
