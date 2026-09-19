@@ -1,10 +1,11 @@
 """skills/planner/memory/scripts: record.sh (draft/add/set) and recall.sh (index/get) over the orchestrator's
 memory files, plus the retrospect-written hook accepting what record.sh writes."""
-import os, subprocess, sys, time, unittest
+import importlib.util, io, os, subprocess, sys, time, unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_memory_skill.py` doesn't add this dir itself
 from _harness import HOOKS, REPO, TMP, hook  # noqa: F401
-from orchestrator import bus
+from orchestrator import bus, jev
 
 
 class MemorySkill(unittest.TestCase):
@@ -13,6 +14,14 @@ class MemorySkill(unittest.TestCase):
     def run_s(self, name, *args, stdin=None):
         env = {**os.environ, "CLAUDE_MEM_DB": str(TMP / "no.db"), "GRAPHIFY_OUT": str(TMP / "no-graph")}
         return subprocess.run(["bash", str(self.S / name), *args], input=stdin, capture_output=True, text=True, cwd=REPO, env=env)
+
+    def load_recall(self):
+        """Import recall.py in-process (not via the recall.sh subprocess) so a test can monkeypatch
+        orchestrator.jev.ask and have jev_rank.rank see the patch -- a subprocess wouldn't."""
+        spec = importlib.util.spec_from_file_location(f"recall_mod_{id(self)}", self.S / "recall.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
 
     def test_record_then_recall(self):
         today = time.strftime("%Y-%m-%d")
@@ -50,6 +59,31 @@ class MemorySkill(unittest.TestCase):
         self.assertEqual(self.run_s("recall.sh", "index", "zzqx-nothing-matches").stdout.strip()[:7], "no hits")
         # the retrospect-written hook accepts what record.sh wrote
         self.assertEqual(hook("retrospect-written.sh", {"task_input": {"subject": "GOAL: memory"}}, cwd=TMP).returncode, 0)
+
+    def test_recall_goal_flag_ranks(self):
+        goal = bus.create_task("GOAL: jev rank flag", "spec", ["works"], ["skills/**"])
+        kid = bus.create_task("Map jev rank flag work", "where", ["cites"], ["skills/**"], parent=goal["id"])
+        bus.post_result(kid["id"], {"summary": "jev rank flag summary"})
+        recall = self.load_recall()
+
+        orig_ask = jev.ask
+        self.addCleanup(setattr, jev, "ask", orig_ask)
+
+        jev.ask = lambda state, questions, **kw: {"answers": {qid: {"noul": 0.9} for qid in questions}}
+        out = io.StringIO()
+        with redirect_stdout(out):
+            recall.cmd_index(["jev", "rank", "flag", "--goal", "ship the jev rank flag"])
+        text = out.getvalue()
+        self.assertIn("· p", text.splitlines()[0])
+        self.assertIn(f"bus:{kid['id']}", text)
+        self.assertIn("0.90", text)
+        self.assertNotIn("jev: off", text)
+
+        jev.ask = lambda state, questions, **kw: None  # jev disabled/unavailable
+        out = io.StringIO()
+        with redirect_stdout(out):
+            recall.cmd_index(["jev", "rank", "flag", "--goal", "ship the jev rank flag"])
+        self.assertIn("jev: off", out.getvalue())
 
 
 if __name__ == "__main__":

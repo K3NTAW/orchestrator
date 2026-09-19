@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_handover.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
-from orchestrator import bus, daemon, handover
+from orchestrator import bus, daemon, handover, jev
 from orchestrator import pool as P
 
 
@@ -239,6 +239,50 @@ class Handover(unittest.TestCase):
         text = handover._join_truncated(items)
 
         self.assertEqual(text, ", ".join(items[:handover.MAX_ITEMS]) + ", … and 3 more")
+
+    def test_handover_prunes_with_jev(self):
+        g = self.goal("Ship the feature")
+        kept_done = self.child(g, "Docs pass")
+        bus.post_result(kept_done, {"summary": "ok"}, "done")
+        dropped_done = self.child(g, "PRUNE_ME docs")
+        bus.post_result(dropped_done, {"summary": "ok"}, "done")
+        dropped_failed = self.child(g, "PRUNE_ME failure")
+        bus.update(dropped_failed, status="failed", reason="boom")
+        held = self.child(g, "PRUNE_ME held")
+        bus.update(held, status="held", hold_reason="gate_red", resume_hint={})
+        merged = self.child(g, "PRUNE_ME merged")
+        bus.update(merged, status="done", merged_into="goal/G", sha="abc12345")
+
+        def fake_ask(state, questions, **kw):
+            return {"answers": {qid: {"noul": 0.1 if "PRUNE_ME" in q["criteria"] else 0.9}
+                                for qid, q in questions.items()}}
+        self.swap(jev, "ask", fake_ask)
+
+        plan = handover.write("test")
+        _, section = self.section(plan.read_text())
+        lines = section.splitlines()
+
+        self.assertIn(f"- done (not merged): {kept_done} Docs pass", lines)
+        self.assertFalse(any(l.startswith("- failed:") for l in lines))  # its only failed child was pruned entirely
+        self.assertIn(f"- held: {held}", section)       # held is never pruned, even with a low score
+        self.assertIn(f"- merged: {merged}", section)   # merged is never pruned, even with a low score
+        self.assertIn("pruned 2 by jev", lines[0])       # dropped_done + dropped_failed
+
+    def test_handover_unchanged_without_jev(self):
+        self.swap(jev, "ask", lambda *a, **k: None)
+        g = self.goal("Ship indexing")
+        done = self.child(g, "Docs pass")
+        bus.post_result(done, {"summary": "ok"}, "done")
+        failed = self.child(g, "Migrate schema")
+        bus.update(failed, status="failed", reason="rebase_conflict")
+
+        plan = handover.write("test")
+        _, section = self.section(plan.read_text())
+        lines = section.splitlines()
+
+        self.assertNotIn("pruned", lines[0])
+        self.assertIn(f"- done (not merged): {done}", section)
+        self.assertIn(f"- failed: {failed}", section)
 
     def test_identical_section_does_not_rewrite(self):
         fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=handover.TZ)

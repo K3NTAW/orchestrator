@@ -6,7 +6,7 @@ import json, os, re, tempfile, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import ROOT, STATE, bus
+from . import ROOT, STATE, bus, jev_rank
 
 TZ = ZoneInfo("Europe/Zurich")
 MAX_SECTION_LINES = 120
@@ -15,6 +15,8 @@ MAX_GOALS = 12
 MAX_WORKTREES = 15
 RESUME_SENTENCE = ("Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand "
                     "while Codex cools.")
+
+PRUNE_THRESHOLD = 0.5  # done/failed/last-events entries below this p_relevant are dropped; merged/held never are
 
 HANDOVER_INTERVAL_S = 15 * 60  # matches daemon.HANDOVER_INTERVAL_S; kept in sync by hand, not imported (daemon
                                 # imports this module, so the reverse import would be circular)
@@ -60,9 +62,31 @@ def _status_groups(children):
     return groups
 
 
+def _goal_text(goal):
+    return f"{goal['title']}\n{goal.get('spec') or ''}"
+
+
+def _prune(tasks, goal_text):
+    """Score `tasks` for relevance to `goal_text` with jev_rank and drop the low ones (below PRUNE_THRESHOLD).
+    Returns (kept_tasks_in_original_order, pruned_count). Fail-open: when jev_rank can't score (Jev disabled/
+    unavailable -- every item comes back with p_relevant=None), nothing is dropped and pruned=0, so the section
+    stays byte-identical to the no-Jev output."""
+    if not tasks:
+        return tasks, 0
+    items = [{"id": t["id"], "text": _task_ref(t)} for t in tasks]
+    ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
+    if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
+        return tasks, 0
+    keep_ids = {it["id"] for it in ranked}
+    kept = [t for t in tasks if t["id"] in keep_ids]
+    return kept, len(tasks) - len(kept)
+
+
 def _goal_lines(goal, children):
     groups = _status_groups(children)
+    goal_text = _goal_text(goal)
     lines = [f"### {goal['id']} {goal['title']}"]
+    pruned = 0
     if groups["queued"]:
         refs = [_task_ref(t, f"depends_on={t.get('depends_on') or []}") for t in groups["queued"]]
         lines.append(f"- queued: {_join_truncated(refs)}")
@@ -70,20 +94,26 @@ def _goal_lines(goal, children):
         refs = [_task_ref(t, f"executor={t.get('executor') or '?'}, started={_fmt_ts(t.get('claimed_at'))}")
                 for t in groups["running"]]
         lines.append(f"- running: {_join_truncated(refs)}")
-    if groups["held"]:
+    if groups["held"]:  # never pruned
         refs = [_task_ref(t, f"hold_reason={t.get('hold_reason') or '?'}, "
                               f"resume_hint_keys={sorted((t.get('resume_hint') or {}).keys())}")
                 for t in groups["held"]]
         lines.append(f"- held: {_join_truncated(refs)}")
     if groups["failed"]:
-        refs = [_task_ref(t, f"reason={t.get('reason') or '?'}, "
-                              f"resume_hint_keys={sorted((t.get('resume_hint') or {}).keys())}")
-                for t in groups["failed"]]
-        lines.append(f"- failed: {_join_truncated(refs)}")
+        kept, p = _prune(groups["failed"], goal_text)
+        pruned += p
+        if kept:
+            refs = [_task_ref(t, f"reason={t.get('reason') or '?'}, "
+                                  f"resume_hint_keys={sorted((t.get('resume_hint') or {}).keys())}")
+                    for t in kept]
+            lines.append(f"- failed: {_join_truncated(refs)}")
     if groups["done"]:
-        refs = [_task_ref(t) for t in groups["done"]]
-        lines.append(f"- done (not merged): {_join_truncated(refs)}")
-    if groups["merged"]:
+        kept, p = _prune(groups["done"], goal_text)
+        pruned += p
+        if kept:
+            refs = [_task_ref(t) for t in kept]
+            lines.append(f"- done (not merged): {_join_truncated(refs)}")
+    if groups["merged"]:  # never pruned
         refs = [_task_ref(t, f"sha={(t.get('sha') or '?')[:8]}") for t in groups["merged"]]
         lines.append(f"- merged: {_join_truncated(refs)}")
     for status, ts in groups["other"].items():
@@ -91,7 +121,7 @@ def _goal_lines(goal, children):
         lines.append(f"- other ({status}): {_join_truncated(refs)}")
     if len(lines) == 1:
         lines.append("- no child tasks")
-    return lines
+    return lines, pruned
 
 
 def _fmt_ts(ts):
@@ -130,9 +160,20 @@ def _last_events(limit=5):
     return [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)} for s, t, ts, k, d in rows]
 
 
+def _prune_events(events, goal_text):
+    if not events or not goal_text:
+        return events, 0
+    items = [{"id": str(e["seq"]), "text": f"{e['task']} {e['kind']} {json.dumps(e['data'])[:80]}"} for e in events]
+    ranked = jev_rank.rank(items, goal_text, threshold=PRUNE_THRESHOLD)
+    if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
+        return events, 0
+    keep_ids = {it["id"] for it in ranked}
+    kept = [e for e in events if str(e["seq"]) in keep_ids]
+    return kept, len(events) - len(kept)
+
+
 def _render_section(reason):
     ts = datetime.now(TZ).isoformat(timespec="seconds")
-    header = [f"## Auto-handover {ts} — {reason}", ""]
     footer = ["", RESUME_SENTENCE]
 
     # One bus.read() for the whole section: goals, their children and the worktree/task cross-check below all
@@ -146,13 +187,16 @@ def _render_section(reason):
             children_by_parent.setdefault(parent, []).append(t)
 
     body = []
+    total_pruned = 0
     goals = _open_goals(all_tasks)
     if not goals:
         body.append("Open goals: none")
     else:
         shown, extra = goals[:MAX_GOALS], len(goals) - min(len(goals), MAX_GOALS)
         for goal in shown:
-            body.extend(_goal_lines(goal, children_by_parent.get(goal["id"], [])))
+            lines, pruned = _goal_lines(goal, children_by_parent.get(goal["id"], []))
+            body.extend(lines)
+            total_pruned += pruned
         if extra:
             body.append(f"… and {extra} more open goals")
     body.append("")
@@ -162,13 +206,19 @@ def _render_section(reason):
     body.append("")
 
     body.append("Last events:")
-    events = _last_events(5)
+    # "The open goal": the primary open goal drives what's relevant for pruning the shared events tail. With no
+    # open goal there's nothing to score events against, so they pass through unpruned.
+    events, events_pruned = _prune_events(_last_events(5), _goal_text(goals[0]) if goals else None)
+    total_pruned += events_pruned
     if not events:
         body.append("- none")
     else:
         for e in events:
             when = _fmt_ts(e["ts"])
             body.append(f"- {when} {e['task']} {e['kind']} {json.dumps(e['data'])[:80]}")
+
+    note = f" — pruned {total_pruned} by jev" if total_pruned else ""
+    header = [f"## Auto-handover {ts} — {reason}{note}", ""]
 
     # The resume sentence must always survive: truncate the body only, never the header/footer, so a goal-heavy
     # snapshot loses list detail before it ever risks dropping the one line every resume depends on.
