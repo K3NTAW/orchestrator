@@ -60,16 +60,21 @@ a running daemon.
 ## Pipeline
 Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
 State machine per execute task: `queued` → (depends_on merged, complexity ≥ `spec_review_min` → `spec_review` first,
-on `spec_review_tier`) → dispatched to an executor → `done` → gated (`tests-green.sh`) → complexity ≤
-`direct_merge_max` merges straight away; complexity between `direct_merge_max` and `two_reviews_from` spawns one
-`review` task, tiered to whichever model did not execute the task; complexity ≥ `two_reviews_from` spawns two,
-the second on a different model than the executor (both reviews may run on the same account; the model differs
-from the executor). A task with one review merges on its first `approve`; a task with two merges only once every
-review of it has approved, and any single `request_changes` holds it for the Planner to re-spec regardless of
-what the other review said. These four thresholds live in `pool.toml`'s `[review]` table (defaults:
-`spec_review_min = 6`, `direct_merge_max = 3`, `two_reviews_from = 7`, `spec_review_tier = "sonnet"`); policy and
-the cost measurement that motivated it are noted there. An orphaned result (executor died, daemon re-gated its
-commit) gets exactly one review whatever its complexity.
+on `spec_review_tier`) → dispatched to an executor → `done` → gated (`tests-green.sh` passing is the merge bar).
+By default (`[review].code_review = "security_paths"`) a task merges straight through unless its merged diff
+touches a `security_paths` glob, or the daemon couldn't diff it at all (fails closed, `pipeline.review_reason`
+`diff_unavailable`, or `security_paths_empty` if the glob list itself is missing) — either way that's exactly one
+review, on `security_review_tier`, never the model that executed the task, with the security checklist always
+forced on. `code_review = "never"` drops review entirely; `code_review = "always"` is the pre-2026-09-19
+complexity-driven split (`direct_merge_max`/`two_reviews_from` thresholds), still available but not the default.
+An orphaned result (executor died, daemon re-gated its commit) gets exactly one review whatever `code_review`
+says. `pipeline.review_reason` on the gated task records which branch fired (`none`, `security_paths:<glob>`,
+`security_paths_empty`, `diff_unavailable`, `orphaned`, or `always`) so a later change to `[review]` can't move the
+goalposts on a task already past this stage. A task with one review merges on its first `approve`; a task with two
+(only possible under `code_review = "always"`) merges once every review has approved, and any single
+`request_changes` holds it for the Planner to re-spec regardless of what the other review said. Policy and the
+cost measurement that motivated dropping code review by default are noted next to `[review]` in `pool.toml`. The
+human reviews every merged PR regardless of pipeline outcome.
 `daemon.tick()` drives every stage: `dispatch()` (spec review or executor), `gate()` (tests-green, then merge or
 review), `merge_reviewed()` (merge once every review of a task has approved). Each stage stamps `pipeline.<stage>_at`
 on the task json under the bus lock before acting, so a crash-and-retry never re-runs a stage.
