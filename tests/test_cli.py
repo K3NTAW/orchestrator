@@ -10,6 +10,74 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def _scorecard_fixture(self):
+        import test_scorecard
+        fixture = test_scorecard.Scorecard()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.write_task("T-0244", role="execute", parent="T-0240")
+        fixture.write_task("T-0245", role="review", parent="T-0241")
+        fixture.write_runs(
+            {"task": "T-0244", "role": "execute", "usd": 2, "turns": 11},
+            {"task": "T-0245", "role": "review", "usd": 1},
+        )
+        fixture.write_gate(
+            {"task": "T-0244", "scored": True, "p_needed": 0.1},
+            {"task": "T-0245", "scored": True, "p_needed": 0.9, "blocked": True},
+            {"task": "T-0245", "scored": True, "p_needed": 0.9},
+            {"task": "T-0245", "scored": False, "p_needed": 0.1},
+            {"task": "T-9999", "scored": True, "p_needed": 0.1},
+        )
+        return fixture
+
+    def _scorecard_output(self, *args):
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["orchestrator", "scorecard", *args]), contextlib.redirect_stdout(out):
+            cli.main()
+        return out.getvalue()
+
+    def _scorecard_text_rows(self, fixture, by):
+        build = getattr(cli.scorecard, "by_" + by)
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root), mock.patch.object(
+            cli.scorecard, "by_" + by, side_effect=lambda: build(root=fixture.root)
+        ), mock.patch.object(cli.scorecard, "planner_footer", return_value="planner: -"):
+            output = self._scorecard_output("--by", by)
+        lines = output.splitlines()
+        header = lines[0].split("\t")
+        return header, {line.split("\t")[0]: dict(zip(header, line.split("\t")))
+                        for line in lines[1:] if "\t" in line}
+
+    def test_scorecard_by_task_text_has_gate_columns(self):
+        fixture = self._scorecard_fixture()
+        header, rows = self._scorecard_text_rows(fixture, "task")
+        self.assertEqual(header[-4:], ["calls", "waste_pct", "blocked", "turns"])
+        self.assertEqual([rows["T-0244"][key] for key in header[-4:]], ["1", "100.0", "0", "11"])
+        self.assertEqual([rows["total"][key] for key in header[-4:]], ["3", "33.3", "1", "11"])
+        self.assertEqual(rows["T-0245"]["turns"], "-")
+        fixture.write_gate({"task": "T-0244", "scored": False, "blocked": True})
+        _, rows = self._scorecard_text_rows(fixture, "task")
+        self.assertEqual([rows["total"][key] for key in header[-4:]], ["0", "-", "1", "11"])
+        (fixture.root / "runs" / "jev" / "gate.jsonl").unlink()
+        _, rows = self._scorecard_text_rows(fixture, "task")
+        for tid in ("T-0244", "T-0245", "total"):
+            self.assertEqual([rows[tid][key] for key in header[-4:-1]], ["-", "-", "-"])
+
+    def test_scorecard_by_goal_text_has_waste_and_turns(self):
+        fixture = self._scorecard_fixture()
+        header, rows = self._scorecard_text_rows(fixture, "goal")
+        self.assertEqual(header[-3:], ["calls", "waste_pct", "turns"])
+        self.assertEqual([rows["T-0240"][key] for key in header[-3:]], ["1", "100.0", "11"])
+        self.assertEqual([rows["total"][key] for key in header[-3:]], ["3", "33.3", "11"])
+        self.assertEqual(rows["T-0241"]["turns"], "-")
+        (fixture.root / "runs" / "jev" / "gate.jsonl").unlink()
+        _, rows = self._scorecard_text_rows(fixture, "goal")
+        self.assertEqual([rows["T-0241"][key] for key in header[-3:]], ["-", "-", "-"])
+        self.assertEqual(rows["total"]["waste_pct"], "-")
+
+    def test_scorecard_default_output_unchanged(self):
+        with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):
+            self.assertEqual(self._scorecard_output(), "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore\n")
+
     def test_status_plain_and_json(self):
         sys.argv = ["orchestrator", "status", "--plain"]
         out = io.StringIO()
