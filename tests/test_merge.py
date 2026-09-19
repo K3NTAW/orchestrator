@@ -1,7 +1,7 @@
 """Serial merge queue: rebase onto target -> tests-green -> fast-forward, conflict handling, orchestrator-state
 commit. Builds its own scratch git repo at TMP (harness scratch_repo) so it never depends on another test file
 having turned TMP into a repo first."""
-import json, subprocess, sys, unittest
+import json, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_merge.py` doesn't add this dir itself
@@ -10,6 +10,59 @@ from orchestrator import STATE, bus, merge, spawn
 
 
 class MergeQueue(unittest.TestCase):
+    def reviewed_rebase(self, changed):
+        """Real local rebase: an upstream duplicate drops a reviewed hunk; an unrelated commit does not."""
+        with tempfile.TemporaryDirectory(prefix="orch-reviewed-rebase-") as directory:
+            repo = Path(directory)
+            scratch_repo(repo)
+            state = repo / ".orchestrator"
+            state.mkdir(exist_ok=True)
+            def git(*args, cwd=repo, check=True):
+                result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+                if check:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                return result
+            with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
+                    patch.multiple(merge, ROOT=repo, git=git):
+                task = bus.create_task("reviewed rebase", "s", ["a"], ["feature.py"], role="execute")
+                git("branch", "goal/reviewed")
+                wt = repo / "task-worktree"
+                git("worktree", "add", "-b", "task/reviewed", str(wt), "HEAD")
+                (wt / "feature.py").write_text("VALUE = 1\n")
+                git("add", "feature.py", cwd=wt)
+                git("commit", "-qm", "reviewed feature", cwd=wt)
+                reviewed_sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+                bus.update(task["id"], worktree=str(wt), pipeline={"reviewed_sha": reviewed_sha})
+                git("checkout", "goal/reviewed")
+                upstream_path = "feature.py" if changed else "unrelated.txt"
+                (repo / upstream_path).write_text("VALUE = 1\n" if changed else "upstream\n")
+                git("add", upstream_path)
+                git("commit", "-qm", "upstream change")
+                target_sha = git("rev-parse", "HEAD").stdout.strip()
+                gate = repo / "passing-gate.sh"
+                gate.write_text("#!/bin/sh\nexit 0\n")
+                gate.chmod(0o755)
+                with patch.object(merge, "TESTS_GREEN", gate), \
+                        patch.object(bus, "commit_state"), patch.object(merge.scorecard, "write"), \
+                        patch.object(merge.scorecard, "build", return_value={}):
+                    result = merge.merge(task["id"], target="goal/reviewed", refresh_repomap=False)
+                if changed:
+                    self.assertEqual(result["status"], "rebase_changed_diff", result)
+                    self.assertEqual(git("rev-parse", "goal/reviewed").stdout.strip(), target_sha)
+                    self.assertFalse(bus.get(task["id"]).get("merged_into"))
+                else:
+                    self.assertEqual(result["status"], "merged", result)
+                    self.assertNotEqual(result["sha"], reviewed_sha)
+                    self.assertEqual(git("rev-parse", "goal/reviewed").stdout.strip(), result["sha"])
+                    self.assertEqual((wt / "feature.py").read_text(), "VALUE = 1\n")
+                    self.assertEqual((wt / "unrelated.txt").read_text(), "upstream\n")
+
+    def test_rebase_changing_diff_returns_status(self):
+        self.reviewed_rebase(changed=True)
+
+    def test_clean_rebase_keeps_approval(self):
+        self.reviewed_rebase(changed=False)
+
     def _ensure_ci_fixture(self):
         """pyproject.toml + a passing test, committed on whatever branch TMP currently has checked out, so
         tests-green.sh has something to run regardless of which test method (in this file or another sharing

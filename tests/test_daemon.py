@@ -691,6 +691,69 @@ class Daemon(unittest.TestCase):
         self.assertIn(".claude/hooks/new-hook.sh", paths)
         self.assertEqual(daemon._matching_security_path(paths), ".claude/hooks/**")
 
+    def reviewed_change(self, path, content):
+        repo = self.real_repo()
+        self.commit_in(repo, "task/acceptance", path, content)
+        tid = self.task("review binding", complexity=2)
+        bus.update(tid, status="done", worktree=str(repo))
+        pool = self.review_pool("security_paths")
+        daemon._load_review_cfg(pool)
+        daemon.gate(pool)
+        return repo, tid, pool
+
+    def test_semantic_path_triggers_review(self):
+        _, tid, pool = self.reviewed_change("docker/service.conf", "workers = 2\n")
+        daemon.gate(pool)
+        review, = bus.read(role="review")
+        self.assertEqual(review["inputs"], [tid])
+        self.assertEqual(review["tier"], daemon.SECURITY_REVIEW_TIER)
+        self.assertGreaterEqual(review["complexity"], daemon.SECURITY_CHECKLIST_COMPLEXITY)
+        self.assertEqual(bus.get(tid)["pipeline"]["review_reason"], "semantic_path:docker/**")
+        self.assertEqual(self.merged, [])
+
+    def test_semantic_pattern_triggers_review(self):
+        _, tid, _ = self.reviewed_change("src/app.py", "token = 'example'\n")
+        review, = bus.read(role="review")
+        self.assertEqual(review["inputs"], [tid])
+        self.assertEqual(review["tier"], daemon.SECURITY_REVIEW_TIER)
+        self.assertGreaterEqual(review["complexity"], daemon.SECURITY_CHECKLIST_COMPLEXITY)
+        self.assertEqual(bus.get(tid)["pipeline"]["review_reason"], "semantic_pattern:authorization")
+        self.assertEqual(self.merged, [])
+
+    def test_review_records_reviewed_sha(self):
+        repo, tid, _ = self.reviewed_change("docker/service.conf", "workers = 2\n")
+        sha = g("rev-parse", "HEAD", cwd=repo).stdout.strip()
+        review, = bus.read(role="review")
+        self.assertEqual(review["reviewed_sha"], sha)
+        self.assertEqual(bus.get(tid)["pipeline"]["reviewed_sha"], sha)
+        self.assertEqual(self.workers, [review["id"]])
+
+    def test_head_moved_after_approval_spawns_new_review(self):
+        repo, tid, pool = self.reviewed_change("docker/service.conf", "workers = 2\n")
+        old, = bus.read(role="review")
+        bus.update(old["id"], status="done", review_verdict="approve")
+        bus.update(tid, review_verdict="approve")
+        (repo / "docker/service.conf").write_text("workers = 8\n")
+        g("add", "docker/service.conf", cwd=repo)
+        g("commit", "-qm", "change after approval", cwd=repo)
+        sha = g("rev-parse", "HEAD", cwd=repo).stdout.strip()
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        daemon.merge_reviewed(pool)
+        fresh, = [r for r in bus.read(role="review") if r["id"] != old["id"]]
+        self.assertNotEqual(old["reviewed_sha"], sha)
+        self.assertEqual(fresh["reviewed_sha"], sha)
+        self.assertEqual(bus.get(tid)["pipeline"]["reviewed_sha"], sha)
+        self.assertEqual(bus.get(tid)["pipeline"]["reviews_expected"], 1)
+        self.assertEqual(self.workers, [old["id"], fresh["id"]])
+        self.assertTrue(any("fresh review" in message for message in messages))
+        daemon.merge_reviewed(pool)
+        self.assertEqual(len(bus.read(role="review")), 2)
+        self.assertEqual(self.merged, [])
+        bus.update(fresh["id"], status="done", review_verdict="approve")
+        daemon.merge_reviewed(pool)
+        self.assertEqual(self.merged, [tid])
+
     def test_changed_paths_real_repo_source_no_match(self):
         """A change to a plain source file outside every security glob does not match."""
         repo = self.real_repo()
