@@ -313,13 +313,23 @@ def hold_failed(tid, error_key, stage_label, exc):
 
 def _dispatch_worker(task_id, prompt):
     try:
-        executor.start(task_id, prompt)
+        r = executor.start(task_id, prompt)
+        if r["status"] == "done":
+            bus.post_result(task_id, spawn.fit_result({
+                "summary": r["message"][:3000],
+                "executed_by": "codex:" + bus.get(task_id)["executor"],
+                "thread": r["thread"],
+                "usage": r.get("usage"),
+            }), "done")
+        elif r["status"] == "failed":
+            bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
     except Exception as e:
         with bus.locked():
             t = bus.get(task_id)
             pipeline = dict(t.get("pipeline") or {})
             pipeline["dispatch_error"] = str(e)[:300]
             bus.update(task_id, pipeline=pipeline)
+        bus.post_result(task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
 
 
 def dispatch(pool):

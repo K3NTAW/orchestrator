@@ -1302,3 +1302,76 @@ class DirtyScopePaths(unittest.TestCase):
                              ["src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
             self.assertEqual(daemon._dirty_scope_paths(root, ["*"]),
                              ["outside.py", "src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
+
+
+class DispatchWorker(unittest.TestCase):
+    def setUp(self):
+        from contextlib import nullcontext
+        from unittest.mock import patch
+
+        self.task_id = "T-dispatch"
+        self.state = {"id": self.task_id, "status": "running", "pid": None,
+                      "executor": "astra", "pipeline": {"dispatched_at": 123}}
+
+        def update(task_id, **fields):
+            self.assertEqual(task_id, self.task_id)
+            self.state.update(fields)
+            return dict(self.state)
+
+        for target, kwargs in (
+            (bus, {"get": lambda task_id: dict(self.state), "update": update,
+                   "locked": nullcontext}),
+        ):
+            p = patch.multiple(target, **kwargs)
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch.object(daemon.executor, "start")
+        self.start = p.start()
+        self.addCleanup(p.stop)
+
+    def test_dispatch_worker_posts_codex_done(self):
+        usage = {"input_tokens": 100, "output_tokens": 20}
+        self.start.return_value = {"status": "done", "message": "x" * 6000,
+                                   "thread": "thread-1", "usage": usage}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.start.assert_called_once_with(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "done")
+        result = self.state["result"]
+        self.assertEqual(result["summary"], "x" * 3000)
+        self.assertEqual(result["executed_by"], "codex:astra")
+        self.assertEqual(result["thread"], "thread-1")
+        self.assertEqual(result["usage"], usage)
+        self.assertEqual(self.state["pipeline"], {"dispatched_at": 123})
+
+    def test_dispatch_worker_posts_codex_failed(self):
+        self.start.return_value = {"status": "failed", "reason": "executor timeout"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "failed")
+        self.assertEqual(self.state["result"]["reason"], "executor timeout")
+
+    def test_dispatch_worker_leaves_held(self):
+        def held(*args):
+            bus.update(self.task_id, status="held", hold_reason="quota exhausted",
+                       resume_hint={"thread": "thread-1"})
+            return {"status": "held", "reason": "quota exhausted"}
+        self.start.side_effect = held
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "held")
+        self.assertEqual(self.state["hold_reason"], "quota exhausted")
+        self.assertEqual(self.state["resume_hint"], {"thread": "thread-1"})
+        self.assertNotIn("result", self.state)
+        self.assertEqual(self.state["pipeline"], {"dispatched_at": 123})
+
+    def test_dispatch_worker_exception_marks_failed(self):
+        self.start.side_effect = RuntimeError("launch failed")
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "failed")
+        self.assertEqual(self.state["result"]["reason"], "dispatch error: launch failed")
+        self.assertEqual(self.state["pipeline"],
+                         {"dispatched_at": 123, "dispatch_error": "launch failed"})
+
+    def test_dispatch_worker_leaves_claude_fallback(self):
+        self.start.return_value = {"status": "fallback", "tier": "sonnet"}
+        before = dict(self.state)
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state, before)
