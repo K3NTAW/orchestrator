@@ -60,6 +60,9 @@ class JevTests(unittest.TestCase):
         jev._tally_cache["tokens"] = 0
 
     def test_disabled_returns_none_without_network(self):
+        jev._cfg = lambda: {**ENABLED_CFG, "enabled": False}
+        jev._api_key = lambda: "fake-key"
+
         def boom(*a, **k):
             raise AssertionError("urlopen must not be called when jev is disabled")
         jev.urllib.request.urlopen = boom
