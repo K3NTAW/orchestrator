@@ -27,6 +27,9 @@ class Daemon(unittest.TestCase):
         P.PERSIST.unlink(missing_ok=True)                 # a cooldown another test persisted would zero free_slots
         self.addCleanup(P.PERSIST.unlink, True)
         self.started, self.workers, self.merged = [], [], []
+        # Keep daemon work inside the test that dispatched it.  A real daemon thread can outlive cleanup,
+        # after which the restored executor mock and the next test's bus sandbox make it post into the wrong bus.
+        self.swap(daemon, "spawn_async", lambda fn, *args: fn(*args))
         self.swap(executor, "start", lambda tid, prompt: self.started.append(tid))
         self.swap(spawn, "run_worker", lambda tid: self.workers.append(tid))
         self.swap(merge, "merge", lambda tid, target=None: (self.merged.append(tid),
@@ -803,6 +806,13 @@ class Daemon(unittest.TestCase):
 
     def test_dispatch_does_not_block(self):
         a = self.task("A")
+        threads = []
+        def async_for_test(fn, *args):
+            thread = threading.Thread(target=fn, args=args, daemon=True)
+            threads.append(thread)
+            thread.start()
+        self.swap(daemon, "spawn_async", async_for_test)
+        self.addCleanup(lambda: [thread.join() for thread in threads])
         self.swap(executor, "start", lambda tid, prompt: (time.sleep(2), self.started.append(tid)))
         t0 = time.time()
         daemon.tick()
