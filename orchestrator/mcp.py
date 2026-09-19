@@ -53,28 +53,38 @@ def _bg(task_id):
     return {"task": task_id, "status": "spawned; result arrives on the bus"}
 
 
+def _wrong_role(task_id, *allowed):
+    """None when task_id's role is one of `allowed`; else an {"error": ...} dict naming the mismatch, so a spawn_*
+    tool handed the wrong kind of task id (e.g. spawn_spec_review given an execute id, gotcha 2026-09-18) reports
+    it instead of silently running that task under the wrong role."""
+    t = bus.get(task_id)
+    if t["role"] not in allowed:
+        return {"error": f"task {task_id} has role {t['role']}; this tool takes {' or '.join(allowed)}"}
+    return None
+
+
 @srv.tool()
 def spawn_scout(task_id: str) -> dict:
     """Run a queued scout/triage task as a `claude -p` worker on whichever account has headroom (held if none)."""
-    return _bg(task_id)
+    return _wrong_role(task_id, "scout", "triage") or _bg(task_id)
 
 
 @srv.tool()
 def spawn_review(task_id: str) -> dict:
     """Run a review task. inputs[0] must be the task id whose diff is under review."""
-    return _bg(task_id)
+    return _wrong_role(task_id, "review") or _bg(task_id)
 
 
 @srv.tool()
 def spawn_challenge(task_id: str) -> dict:
     """Try to refute a low-confidence finding on the other account. inputs[0] = {claim, evidence, confidence}."""
-    return _bg(task_id)
+    return _wrong_role(task_id, "challenge") or _bg(task_id)
 
 
 @srv.tool()
 def spawn_spec_review(task_id: str) -> dict:
     """Review an execute task's spec before any code is written. inputs[0] = the execute task whose spec is under review."""
-    return _bg(task_id)
+    return _wrong_role(task_id, "spec_review") or _bg(task_id)
 
 
 @srv.tool()

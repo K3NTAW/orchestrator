@@ -130,6 +130,9 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
+    if shutil.which("claude") is None:
+        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
+        return {"status": "held", "reason": "claude CLI not found on PATH"}
     t0 = time.time()
     try:
         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -138,6 +141,11 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     except subprocess.TimeoutExpired:
         p.kill()
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
+    except FileNotFoundError:
+        # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never
+        # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.
+        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
+        return {"status": "held", "reason": "claude CLI not found on PATH"}
     text = stdout + stderr
     if p.returncode != 0 and is_rate_limited(text):
         secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])

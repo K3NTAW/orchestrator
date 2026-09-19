@@ -149,6 +149,47 @@ class RunClaudeBudgetExitReason(unittest.TestCase):
         self.assertIn("budget exceeded", r["reason"])
 
 
+class RunClaudeHoldsWhenCliMissing(unittest.TestCase):
+    def setUp(self):
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_run_claude_holds_when_cli_missing(self):
+        """Gotcha 2026-09-19: a missing `claude` binary must hold the task visibly (run logged with outcome
+        "no_cli"), not crash the worker thread with FileNotFoundError and leave the task stuck "running" until
+        something else requeues it as "process died" forever."""
+        orig_which = spawn.shutil.which
+        spawn.shutil.which = lambda name: None if name == "claude" else orig_which(name)
+        self.addCleanup(lambda: setattr(spawn.shutil, "which", orig_which))
+
+        popen_called = []
+        def fail_if_called(*a, **k):
+            popen_called.append(True)
+            raise AssertionError("Popen must not be called when the claude CLI is missing")
+        orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = fail_if_called
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", orig_popen))
+
+        t = bus.create_task("no-cli-test", "s", ["a"], ["x.py"], role="execute", tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", ["execute"])
+        pool = P.Pool()
+
+        runs_dir = TMP / ".orchestrator" / "runs"
+        before = len(list(runs_dir.glob("*.jsonl"))) if runs_dir.exists() else 0
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS["execute"], 2.0, 60)
+
+        self.assertEqual(popen_called, [])
+        self.assertEqual(r["status"], "held")
+        self.assertIn("claude CLI not found", r["reason"])
+
+        run_files = sorted(runs_dir.glob("*.jsonl"))
+        self.assertGreaterEqual(len(run_files), max(before, 1))
+        last_line = run_files[-1].read_text().strip().splitlines()[-1]
+        self.assertEqual(json.loads(last_line)["outcome"], "no_cli")
+
+
 class RunWorkerMissingReason(unittest.TestCase):
     """T-0134: run_worker must not KeyError when run_claude returns a failure dict without a "reason" key, and
     should preserve any partial output as a resume_hint for the next attempt."""
