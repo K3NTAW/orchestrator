@@ -5,8 +5,11 @@ logged to .orchestrator/runs/jev/gate.jsonl. Fails open on anything unusual: Jev
 (ask() returns None), a missing/corrupt transcript, or a malformed answer -- the caller never blocks on our
 account. destructive is logged only; guardrails.sh is the one hook that actually blocks destructive commands.
 """
-import json, os, re, sys, time
-from . import STATE, bus, jev
+import time
+_IMPORTED_AT = time.time()
+import json, os, re, sys
+from functools import cache
+from . import STATE
 from . import pool as P
 
 GATE_LOG = STATE / "runs" / "jev" / "gate.jsonl"
@@ -14,6 +17,9 @@ RECENT_LIMIT = 20
 NEEDED_LOW = 0.15
 REDUNDANT_HIGH = 0.85
 CONFIDENCE_MIN = 0.6
+GATED_ROLES = frozenset({"scout", "triage", "execute", "review", "challenge", "spec_review"})
+# Empty input on any tool, or a Glob containing only its pattern, needs no judgment.
+SKIP_RULES = ("empty_input", "bare_glob")
 
 QUESTIONS = {
     "needed": {"type": "noul", "instructions":
@@ -36,6 +42,7 @@ _PROTECTED_BASH_RES = [
 ]
 
 
+@cache
 def _cfg():
     try:
         raw = P.config()
@@ -46,6 +53,12 @@ def _cfg():
 
 def is_enabled():
     return bool(_cfg().get("enabled", False))
+
+
+def should_skip(tool_name, tool_input):
+    return (("empty_input" in SKIP_RULES and not tool_input)
+            or ("bare_glob" in SKIP_RULES and tool_name == "Glob"
+                and isinstance(tool_input, dict) and set(tool_input) == {"pattern"}))
 
 
 def is_protected(tool_name, tool_input):
@@ -61,6 +74,7 @@ def read_transcript(path, limit=RECENT_LIMIT):
     """Last `limit` tool_use blocks from a Claude Code transcript JSONL, as {name, input, error}. Missing,
     unreadable or partially malformed lines are skipped; this never raises, and returns [] rather than failing
     the caller open/closed on a bad transcript."""
+    from . import jev
     if not path:
         return []
     try:
@@ -104,6 +118,7 @@ def read_transcript(path, limit=RECENT_LIMIT):
 
 
 def load_task(task_id):
+    from . import bus
     try:
         return bus.get(task_id)
     except Exception:
@@ -121,6 +136,7 @@ def _target(tool_name, tool_input):
 
 
 def build_state(task, recent, tool_name, tool_input):
+    from . import jev
     task = task or {}
     return {
         "task": {
@@ -140,6 +156,7 @@ def build_state(task, recent, tool_name, tool_input):
 
 def ask_jev(state):
     """{"needed"|"redundant"|"destructive": {"p", "confidence"} or None}, or None if Jev is unavailable."""
+    from . import jev
     result = jev.ask(state, QUESTIONS)
     if result is None:
         return None
@@ -176,7 +193,7 @@ def _message(reason, tool_name, tool_input):
     return "jev-gate: not needed for the acceptance criteria; continue with the next criterion"
 
 
-def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency_ms):
+def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency_ms, startup_ms=0.0):
     answers = answers or {}
     needed = answers.get("needed") or {}
     entry = {
@@ -186,6 +203,7 @@ def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency
         "p_destructive": (answers.get("destructive") or {}).get("p"),
         "confidence": needed.get("confidence"),
         "mode": mode, "blocked": blocked, "latency_ms": latency_ms, "scored": scored,
+        "startup_ms": startup_ms,
     }
     GATE_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(GATE_LOG, "a") as fh:
@@ -205,24 +223,31 @@ def run(payload):
     if not task_id or not cfg.get("enabled", False):
         return 0
 
+    if should_skip(tool_name, tool_input):
+        return 0
+    task = load_task(task_id)
+    if not task or task.get("role") not in cfg.get("gate_roles", GATED_ROLES):
+        return 0
+
     if is_protected(tool_name, tool_input):
         _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=0.0)
         return 0
 
-    task = load_task(task_id)
+    from . import jev  # Network imports only after enabled, role and skip checks.
     recent = read_transcript(transcript_path)
     state = build_state(task, recent, tool_name, tool_input)
 
     started = time.monotonic()
+    startup_ms = max(0.0, (time.time() - float(os.environ.get("ORCH_JEV_STARTED_AT", _IMPORTED_AT))) * 1000)
     answers = ask_jev(state)
     latency_ms = (time.monotonic() - started) * 1000
 
     if answers is None:
-        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=latency_ms)
+        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=latency_ms, startup_ms=startup_ms)
         return 0
 
     blocked, reason = decide(answers, mode)
-    _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms)
+    _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms, startup_ms=startup_ms)
     if blocked:
         print(_message(reason, tool_name, tool_input), file=sys.stderr)
         return 2
@@ -230,15 +255,19 @@ def run(payload):
 
 
 def main(argv=None):
+    # This CLI handles one hook per process. Share its snapshot with Jev and secret resolution too.
+    P.config = cache(P.config)
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "--enabled":
         print("1" if is_enabled() else "0")
         return 0
     try:
+        if not is_enabled():
+            return 0
         payload = json.loads(sys.stdin.read())
+        return run(payload)
     except Exception:
         return 0
-    return run(payload)
 
 
 if __name__ == "__main__":
