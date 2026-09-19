@@ -246,11 +246,49 @@ class PlannerTally(unittest.TestCase):
         fresh.get("A").config_dir = self.a.config_dir
         fresh.tally_planner()
         self.assertEqual(fresh.get("A").planner_day_tokens, 10)
+        self.assertFalse(P.PERSIST.exists())                  # tally never touches pool_state.json
+        self.p.save()                                         # stale pool, loaded before the tally, saved after it
         st = json.loads(P.PERSIST.read_text())
         self.assertFalse(set(st["accounts"]["A"]) & P.PLANNER_ACCOUNT_FIELDS)
-        self.p.save()                                         # stale pool, loaded before the tally, saved after it
         pu = json.loads(P.PLANNER_USAGE.read_text())
         self.assertEqual(pu["A"]["day_tokens"], 10)            # not clobbered by the stale save
+
+    def test_missing_dir_still_rolls_over(self):
+        shutil.rmtree(self.proj_dir)
+        self.a.planner_window_tokens = 50
+        self.a.window_started = self.now - P.WINDOW_S - 10  # force a rollover
+        self.p.tally_planner(now=self.now)
+        self.assertEqual(self.a.planner_window_tokens, 0)      # rolled over despite the missing dir
+        pu = json.loads(P.PLANNER_USAGE.read_text())
+        self.assertEqual(pu["A"]["window_tokens"], 0)          # ...and the rollover was saved, not skipped
+
+    def test_tally_writes_only_planner_usage(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        self.p.tally_planner()
+        self.assertEqual(self.a.planner_window_tokens, 10)
+        self.assertFalse(P.PERSIST.exists())                   # only planner_usage.json changed, pool_state.json untouched
+
+    def test_tally_honours_now(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        with mock.patch.object(P.time, "time", side_effect=AssertionError("time.time() called despite now=")):
+            self.p.tally_planner(now=self.now)
+        self.assertEqual(self.a.planner_window_tokens, 10)
+        self.assertEqual(self.a.planner_day_tokens, 10)
+
+    def test_null_usage_counts_zero(self):
+        line = json.dumps({"type": "assistant", "timestamp": self.ts_in, "message": {"usage": {
+            "input_tokens": None, "output_tokens": 5, "cache_read_input_tokens": None}}}) + "\n"
+        self._write("a.jsonl", [line])
+        self.p.tally_planner()  # must not raise
+        self.assertEqual(self.a.planner_window_tokens, 5)
+
+    def test_planner_usage_has_anchors(self):
+        self._write("a.jsonl", [_assistant(self.ts_in, 10, 0, 0)])
+        self.p.tally_planner(now=self.now)
+        entry = json.loads(P.PLANNER_USAGE.read_text())["A"]
+        self.assertEqual(entry["day"], datetime.fromtimestamp(self.now, tz=P.TZ).date().isoformat())
+        self.assertEqual(entry["window_started_at"],
+                          datetime.fromtimestamp(self.a.window_started, tz=P.TZ).isoformat())
 
 
 class ScoutLimits(unittest.TestCase):

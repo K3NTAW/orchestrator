@@ -4,9 +4,11 @@ import fcntl, json, os, re, sys, time, tomllib
 from dataclasses import dataclass, field, asdict, fields
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from . import ROOT, STATE
 
 WINDOW_S = 5 * 3600
+TZ = ZoneInfo("Europe/Zurich")
 CFG = STATE / "pool.toml"
 PERSIST = STATE / "pool_state.json"
 PLANNER_USAGE = STATE / "planner_usage.json"
@@ -32,10 +34,16 @@ def _load_planner_usage():
         return {}
 
 
-def _save_planner_account(acct_id, window_tokens, day_tokens, offsets):
+def _save_planner_account(acct_id, window_tokens, day_tokens, offsets, window_started=None, day=None):
     """Read-modify-write .orchestrator/planner_usage.json under an flock on the file itself, so a concurrent
     tally (another account's loop iteration in this process, or another process entirely) can't clobber this
-    account's entry. Pool.save() never touches this file; only tally_planner writes it."""
+    account's entry. Pool.save() never touches this file; only tally_planner writes it. window_started_at/day
+    anchor the counters to the window/day they were accumulated in, so a reader doesn't have to guess; they
+    default to now when omitted (tally_planner always passes its own now-derived values explicitly)."""
+    if window_started is None or day is None:
+        now = time.time()
+        window_started = window_started if window_started is not None else now
+        day = day if day is not None else datetime.fromtimestamp(now, tz=TZ).date().isoformat()
     PLANNER_USAGE.parent.mkdir(parents=True, exist_ok=True)
     with open(PLANNER_USAGE, "a+") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -46,7 +54,9 @@ def _save_planner_account(acct_id, window_tokens, day_tokens, offsets):
                 data = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
                 data = {}
-            data[acct_id] = {"window_tokens": window_tokens, "day_tokens": day_tokens, "offsets": offsets}
+            data[acct_id] = {"window_tokens": window_tokens, "day_tokens": day_tokens, "offsets": offsets,
+                              "window_started_at": datetime.fromtimestamp(window_started, tz=TZ).isoformat(),
+                              "day": day}
             fh.seek(0)
             fh.truncate()
             fh.write(json.dumps(data, indent=1))
@@ -72,12 +82,14 @@ class Account:
     planner_day_tokens: int = 0
     planner_offsets: dict = field(default_factory=dict)
 
-    def utilization(self, cap):
-        if time.time() - self.window_started > WINDOW_S:
-            self.window_tokens, self.window_started = 0, time.time()
+    def utilization(self, cap, now=None):
+        now = now if now is not None else time.time()
+        if now - self.window_started > WINDOW_S:
+            self.window_tokens, self.window_started = 0, now
             self.planner_window_tokens = 0
-        if self.day != date.today().isoformat():
-            self.day_tokens, self.day = 0, date.today().isoformat()
+        today = datetime.fromtimestamp(now).astimezone().date().isoformat()
+        if self.day != today:
+            self.day_tokens, self.day = 0, today
             self.planner_day_tokens = 0
         return (self.window_tokens + self.planner_window_tokens) / cap
 
@@ -223,20 +235,25 @@ class Pool:
         transcript files for this project under each account's config_dir instead: assistant turns in the
         current day and 5h window, summed the same way run_claude sums a worker's usage. Day and window are
         gated independently per line (a same-day line outside the window still counts toward the day, and vice
-        versa). Incremental: each file's byte offset persists in planner_usage.json so a tick only reads what a
-        prior tick had not yet seen; a missing transcripts directory warns once per account per process rather
-        than on every tick."""
+        versa, both anchored to the Europe/Zurich calendar day). Incremental: each file's byte offset persists in
+        planner_usage.json so a tick only reads what a prior tick had not yet seen; a missing transcripts
+        directory warns once per account per process rather than on every tick, but the window/day rollover
+        (and its anchors) is still saved for that account before moving on. Only planner_usage.json is written
+        here -- pool_state.json is never touched, so a tally tick can't clobber another process's concurrent
+        cooldown/budget change with a stale full-pool save."""
         now = now if now is not None else time.time()
-        today = datetime.fromtimestamp(now).astimezone().date().isoformat()
+        today = datetime.fromtimestamp(now, tz=TZ).date().isoformat()
         for a in self.accounts:
             proj_dir = Path(os.path.expanduser(a.config_dir)) / "projects" / encode_project_dir(str(ROOT.resolve()))
+            a.utilization(self.cap, now)  # roll window/day (and the planner counters with it) before filtering
             if not proj_dir.exists():
                 key = str(proj_dir)
                 if key not in _WARNED_MISSING_DIRS:
                     print(f"planner transcripts not found for {a.id} at {proj_dir}", file=sys.stderr)
                     _WARNED_MISSING_DIRS.add(key)
+                _save_planner_account(a.id, a.planner_window_tokens, a.planner_day_tokens, a.planner_offsets,
+                                       a.window_started, today)
                 continue
-            a.utilization(self.cap)  # roll window/day (and the planner counters with it) before filtering
             window_lo, window_hi = a.window_started, a.window_started + WINDOW_S
             seen = set()
             for f in sorted(proj_dir.glob("*.jsonl")):
@@ -277,12 +294,13 @@ class Pool:
                             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                         except ValueError:
                             continue
-                        in_day = dt.astimezone().date().isoformat() == today
+                        in_day = dt.astimezone(TZ).date().isoformat() == today
                         in_window = window_lo <= dt.timestamp() < window_hi
                         if not in_day and not in_window:
                             continue
                         usage = ((rec.get("message") or {}).get("usage")) or {}
-                        n = usage.get("input_tokens", 0) + usage.get("output_tokens", 0) + usage.get("cache_read_input_tokens", 0) // 10
+                        n = ((usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+                             + (usage.get("cache_read_input_tokens") or 0) // 10)
                         if in_day:
                             a.planner_day_tokens += n
                         if in_window:
@@ -291,8 +309,8 @@ class Pool:
             for name in list(a.planner_offsets):
                 if name not in seen:
                     del a.planner_offsets[name]
-            _save_planner_account(a.id, a.planner_window_tokens, a.planner_day_tokens, a.planner_offsets)
-        self.save()
+            _save_planner_account(a.id, a.planner_window_tokens, a.planner_day_tokens, a.planner_offsets,
+                                   a.window_started, today)
 
     # executors ---------------------------------------------------------------------------------
     def pick_executor(self, role, complexity, scores=None):
