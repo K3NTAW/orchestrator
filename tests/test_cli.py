@@ -45,6 +45,20 @@ class Cli(unittest.TestCase):
             cli.main()
         json.loads(out.getvalue())  # valid JSON
 
+    def test_cost_ignores_jev_lines(self):
+        bus.RUNS.mkdir(parents=True, exist_ok=True)
+        marker = f"cli-cost-jev-{time.time()}"
+        with open(bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl", "a") as fh:
+            fh.write(json.dumps({"task": marker, "role": "execute", "input_tokens": 7, "output_tokens": 0,
+                                  "cache_read_input_tokens": 0}) + "\n")
+            # a jev usage line: no "role" key at all -- must not be counted anywhere, not even under "?"
+            fh.write(json.dumps({"ts": time.time(), "caller": "noul", "input_tokens": 999999,
+                                  "model": "jev-latest", "latency_ms": 1.0, "ok": True}) + "\n")
+        agg = cli.cost("task")
+        self.assertEqual(agg[marker]["input_tokens"], 7)
+        self.assertEqual(agg[marker]["runs"], 1)
+        self.assertNotIn(999999, [v.get("input_tokens") for v in agg.values()])
+
     def test_pick_tallies_then_prints_account_and_config_dir(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
         with mock.patch.object(cli.Pool, "tally_planner") as tally:

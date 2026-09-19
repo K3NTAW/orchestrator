@@ -25,9 +25,13 @@ def _read_jsonl_entries(root):
             if not line.strip():
                 continue
             try:
-                entries.append((p, json.loads(line)))
+                entry = json.loads(line)
             except json.JSONDecodeError:
                 malformed += 1
+                continue
+            if "role" not in entry:
+                continue  # e.g. jev usage lines -- not a worker run, counted nowhere
+            entries.append((p, entry))
     _last_malformed_lines = malformed
     return entries
 

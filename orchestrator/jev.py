@@ -2,15 +2,22 @@
 text. `POST https://api.typesafe.ai/v1/systemone`. Off by default (pool.toml [jev].enabled); every failure mode
 (disabled, no key, timeout, HTTP error, bad JSON, budget exhausted) makes ask() return None rather than raise,
 so a caller can always treat Jev as an optional signal. Stdlib only (urllib) -- no new dependency for one
-optional HTTP call."""
-import json, re, sys, time, urllib.error, urllib.request
+optional HTTP call.
+
+Usage lines go to .orchestrator/runs/jev/<date>.jsonl -- a subdirectory of runs/, not runs/<date>.jsonl itself,
+so they never collide with worker run lines that cli.cost() and scorecard.build()/by_task()/by_goal() glob
+non-recursively (root/runs/*.jsonl) and key on a "role" field jev lines don't carry. The E3 tool-call gate
+writes its own log to .orchestrator/runs/jev/gate.jsonl in that same subdirectory, for the same reason.
+"""
+import fcntl, json, os, re, sys, tempfile, time, urllib.error, urllib.request
 from datetime import date
 from . import STATE, spawn
 from . import pool as P
 
 URL = "https://api.typesafe.ai/v1/systemone"
 STATE_FILE = STATE / "jev_state.json"
-RUNS_DIR = STATE / "runs"
+STATE_LOCK_FILE = STATE / "jev_state.lock"
+RUNS_DIR = STATE / "runs" / "jev"
 
 DEFAULT_MODEL = "jev-latest"
 DEFAULT_TIMEOUT_S = 5.0
@@ -19,6 +26,8 @@ DEFAULT_MAX_STATE_CHARS = 100_000
 
 RETRY_STATUS = (429, 529)
 RETRY_BACKOFF_S = 0.5
+
+API_KEY_TTL_S = 600  # resolve TYPESAFE_API_KEY at most once per this window; never log the value
 
 # Order matters: the specific prefixes first, then KEY=VALUE (so the value half is caught even if it's short),
 # then the generic long hex/base64 runs last so they don't fight the more specific patterns above them.
@@ -30,6 +39,13 @@ _TOKEN_PATTERNS = [
     re.compile(r"\b[0-9a-fA-F]{32,}\b"),
     re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b"),
 ]
+
+# In-memory fallback tally for the current process: _add_day_tokens keeps this in sync with every successful
+# write so a corrupt on-disk state file degrades to "whatever this process last knew" instead of silently
+# resetting the count to 0 (which would let a caller blow through the daily budget after one bad write).
+_tally_cache = {"day": None, "tokens": 0}
+
+_api_key_cache = {"value": None, "resolved_at": None}
 
 
 def redact(text):
@@ -63,44 +79,101 @@ def _today():
     return date.today().isoformat()
 
 
-def _load_state():
+def _with_state_lock(fn):
+    """Serialize read-modify-write access to jev_state.json under an flock on a sidecar lock file (not the
+    state file itself) -- same critical-section discipline as pool._save_planner_account, but locking a stable
+    path that's never replaced, since _atomic_write_state below swaps jev_state.json's inode out from under
+    any lock that might be held on it directly."""
+    STATE_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_LOCK_FILE, "a+") as lockfh:
+        fcntl.flock(lockfh, fcntl.LOCK_EX)
+        try:
+            return fn()
+        finally:
+            fcntl.flock(lockfh, fcntl.LOCK_UN)
+
+
+def _atomic_write_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(STATE_FILE.parent), prefix=".jev_state.json.")
     try:
-        return json.loads(STATE_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(state))
+        os.replace(tmp_name, STATE_FILE)
+    except Exception:
+        os.unlink(tmp_name)
+        raise
+
+
+def _read_state_locked():
+    """Read+parse jev_state.json. Returns None (not {}) on a corrupt file so callers can tell "empty/missing"
+    apart from "unparseable" and fall back to the in-memory tally instead of treating corruption as a 0."""
+    try:
+        raw = STATE_FILE.read_text()
+    except FileNotFoundError:
         return {}
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[jev] {STATE_FILE} is corrupt; keeping in-process tally instead of resetting to 0", file=sys.stderr)
+        return None
 
 
 def _day_tokens_used():
-    state = _load_state()
-    return state.get("tokens", 0) if state.get("day") == _today() else 0
+    def op():
+        today = _today()
+        state = _read_state_locked()
+        if state is None:
+            return _tally_cache["tokens"] if _tally_cache["day"] == today else 0
+        return state.get("tokens", 0) if state.get("day") == today else 0
+    return _with_state_lock(op)
 
 
 def _add_day_tokens(input_tokens):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    today = _today()
-    state = _load_state()
-    if state.get("day") != today:
-        state = {"day": today, "tokens": 0}
-    state["tokens"] = state.get("tokens", 0) + input_tokens
-    STATE_FILE.write_text(json.dumps(state))
+    def op():
+        today = _today()
+        state = _read_state_locked()
+        if state is None:
+            base = _tally_cache["tokens"] if _tally_cache["day"] == today else 0
+            state = {"day": today, "tokens": base}
+        elif state.get("day") != today:
+            state = {"day": today, "tokens": 0}
+        state["tokens"] = state.get("tokens", 0) + input_tokens
+        _atomic_write_state(state)
+        _tally_cache["day"] = today
+        _tally_cache["tokens"] = state["tokens"]
+    _with_state_lock(op)
 
 
 def _log_usage(caller, input_tokens, model, latency_ms, ok):
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     entry = {"ts": time.time(), "caller": caller, "input_tokens": input_tokens, "model": model,
               "latency_ms": latency_ms, "ok": ok}
-    with open(RUNS_DIR / f"jev-{_today()}.jsonl", "a") as fh:
+    with open(RUNS_DIR / f"{_today()}.jsonl", "a") as fh:
         fh.write(json.dumps(entry) + "\n")
 
 
 def _api_key():
-    return spawn.secrets_for_role("jev").get("TYPESAFE_API_KEY")
+    """TYPESAFE_API_KEY, resolved at most once per API_KEY_TTL_S: spawn.secrets_for_role reads pool.toml +
+    the environment on every call, which is wasted work on Jev's hot path (ask() calls this every time).
+    Never logged -- only the resolved value is cached, never printed or included in _log_usage's entry."""
+    now = time.monotonic()
+    resolved_at = _api_key_cache["resolved_at"]
+    if resolved_at is not None and now - resolved_at < API_KEY_TTL_S:
+        return _api_key_cache["value"]
+    value = spawn.secrets_for_role("jev").get("TYPESAFE_API_KEY")
+    _api_key_cache["value"] = value
+    _api_key_cache["resolved_at"] = now
+    return value
 
 
-def ask(state, questions, *, model=None, timeout_s=5.0):
+def ask(state, questions, *, model=None, timeout_s=None):
     """POST typed `questions` about `state` to Jev, return the parsed {"answers", "usage"} dict, or None on any
     failure (fail-open by design: disabled, no key, timeout, HTTP error, invalid JSON, budget exhausted).
-    One retry with a 0.5s backoff on 429/529; every other failure returns None immediately."""
+    One retry with a 0.5s backoff on 429/529; every other failure returns None immediately. timeout_s=None
+    (the default) uses pool.toml [jev].timeout_s rather than hard-coding a value in the signature."""
     caller = sys._getframe(1).f_code.co_name
     cfg = _cfg()
     if not cfg["enabled"]:
@@ -108,12 +181,13 @@ def ask(state, questions, *, model=None, timeout_s=5.0):
     api_key = _api_key()
     if not api_key:
         return None
-    if _day_tokens_used() > cfg["daily_budget_tokens"]:
+    if _day_tokens_used() >= cfg["daily_budget_tokens"]:
         return None
 
     model = model or cfg["model"]
+    timeout_s = cfg["timeout_s"] if timeout_s is None else timeout_s
     state_text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
-    state_text = redact(state_text[:cfg["max_state_chars"]])
+    state_text = redact(state_text)[:cfg["max_state_chars"]]
 
     payload = json.dumps({"state": state_text, "model": model, "questions": questions}).encode()
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}

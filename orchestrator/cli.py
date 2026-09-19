@@ -19,7 +19,12 @@ def cost(by):
     agg = defaultdict(lambda: defaultdict(int))
     for f in sorted(RUNS.glob("*.jsonl")) if RUNS.exists() else []:
         for line in f.read_text().splitlines():
-            e = json.loads(line); k = e.get(by, "?")
+            if not line.strip():
+                continue
+            e = json.loads(line)
+            if "role" not in e:
+                continue  # e.g. jev usage lines -- not a worker run, counted nowhere
+            k = e.get(by, "?")
             for m in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
                 agg[k][m] += e.get(m, 0)
             agg[k]["runs"] += 1

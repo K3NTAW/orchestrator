@@ -82,6 +82,22 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(card["T-9010"]["role"], "execute")
         self.assertEqual(card["T-9010"]["tier"], "sonnet")
 
+    def test_jev_lines_ignored(self):
+        # a jev usage line (no "role" key) landing in a top-level runs/*.jsonl file must not be counted as a
+        # worker run by build() or by_task() -- it should contribute to neither an executor row nor a task total.
+        self.write_task("T-9011", executor="good", complexity=3, status="done", merged_into="goal/G", rounds=1)
+        self.write_runs(
+            {"task": "T-9011", "role": "execute", "executor": "good", "duration_s": 1.0, "usd": 1.0,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"ts": time.time(), "caller": "noul", "input_tokens": 999999, "model": "jev-latest",
+             "latency_ms": 12.0, "ok": True},
+        )
+        card = scorecard.build(root=self.root)
+        self.assertEqual(card["good"]["tokens"]["in"], 10)
+        by_task = scorecard.by_task(root=self.root)
+        self.assertEqual(by_task["T-9011"]["tokens"], 10)
+        self.assertEqual(scorecard.malformed_run_lines(), 0)  # the jev line is well-formed JSON, just role-less
+
     def test_by_goal_splits_by_role_and_includes_planner_runs(self):
         goal = "T-9100"
         self.write_task(goal, role="triage", parent=None)
