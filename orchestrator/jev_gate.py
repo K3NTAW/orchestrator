@@ -8,7 +8,7 @@ account. destructive is logged only; guardrails.sh is the one hook that actually
 import hashlib
 import time
 _IMPORTED_AT = time.time()
-import json, os, re, sys
+import json, os, re, sys, tempfile
 from functools import cache
 from . import STATE
 from . import pool as P
@@ -126,16 +126,20 @@ def load_task(task_id):
         return None
 
 
-def _target(tool_name, tool_input):
-    from . import jev
+def _target_path(tool_name, tool_input):
     ti = tool_input or {}
     if tool_name in {"Read", "Edit", "Write", "Grep", "Glob"}:
         for key in ("file_path", "path", "notebook_path"):
             if ti.get(key):
-                return jev.redact(str(ti[key]))
+                return str(ti[key])
     if tool_name == "Bash":
-        return jev.redact(str(ti.get("command") or "")[:80])
+        return str(ti.get("command") or "")[:80]
     return ""
+
+
+def _target(tool_name, tool_input):
+    from . import jev
+    return jev.redact(_target_path(tool_name, tool_input))
 
 
 def _input_hash(tool_name, tool_input):
@@ -147,9 +151,15 @@ def _session_state(session_id):
     path = STATE / "runs" / "jev" / f"session-{session_id}.json"
     try:
         data = json.loads(path.read_text())
-        return path, data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return path, {}
+    except (OSError, ValueError):
+        print(f"[jev-gate] corrupt session state {path}; starting over", file=sys.stderr)
+        return path, {}
+    if not isinstance(data, dict):
+        print(f"[jev-gate] corrupt session state {path}; starting over", file=sys.stderr)
+        return path, {}
+    return path, data
 
 
 def _target_mtime(target):
@@ -161,17 +171,32 @@ def _target_mtime(target):
 
 def _record_call(session_id, tool_name, tool_input):
     """Return (hash, target, repeat, zero-based call index), updating the per-session index."""
-    path, state = _session_state(session_id or "unknown")
-    input_hash = _input_hash(tool_name, tool_input)
-    target = _target(tool_name, tool_input)
-    mtime = _target_mtime(target)
-    previous = state.get(input_hash) or {}
-    repeat = input_hash in state and previous.get("mtime") == mtime
-    call_index = sum(int(v.get("count", 0)) for v in state.values() if isinstance(v, dict))
-    state[input_hash] = {"count": int(previous.get("count", 0)) + 1, "mtime": mtime}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, sort_keys=True))
-    return input_hash, target, repeat, call_index
+    from . import jev
+
+    def op():
+        path, state = _session_state(session_id or "unknown")
+        input_hash = _input_hash(tool_name, tool_input)
+        target = _target(tool_name, tool_input)
+        mtime = _target_mtime(_target_path(tool_name, tool_input))
+        previous = state.get(input_hash) or {}
+        repeat = input_hash in state and previous.get("mtime") == mtime
+        call_index = sum(int(v.get("count", 0)) for v in state.values() if isinstance(v, dict))
+        state[input_hash] = {"count": int(previous.get("count", 0)) + 1, "mtime": mtime}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+        try:
+            with os.fdopen(fd, "w") as tmp:
+                tmp.write(json.dumps(state, sort_keys=True))
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+            raise
+        return input_hash, target, repeat, call_index
+
+    return jev._with_state_lock(op)
 
 
 def build_state(task, recent, tool_name, tool_input):

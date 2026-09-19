@@ -3,7 +3,7 @@ needed/redundant/destructive. jev.ask() is monkeypatched throughout (same patter
 real network. Covers the transcript reader's error correlation, gate_mode="log" never blocking, gate_mode="block"
 blocking a confident redundant call and allowing a needed one, the protected-call allowlist, a missing
 transcript, and the shell hook exiting 0 for a Planner session (no task id)."""
-import contextlib, io, json, sys, unittest
+import contextlib, io, json, sys, threading, unittest
 import hashlib, os, subprocess, tempfile, tomllib
 from unittest.mock import patch
 from pathlib import Path
@@ -128,6 +128,51 @@ class JevGateTests(unittest.TestCase):
             self.assertEqual(self._run(payload, task), 0)
             self.assertEqual(self._run(payload, task), 0)
         self.assertEqual([r["repeat"] for r in self._log_lines()], [False, False, True])
+
+    def test_record_call_serialises_concurrent_writes(self):
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            target = root / "source.py"
+            target.write_text("original")
+            with patch.object(jev_gate, "STATE", root):
+                barrier = threading.Barrier(2)
+
+                def record():
+                    barrier.wait()
+                    return jev_gate._record_call("concurrent", "Read", {"file_path": str(target)})
+
+                threads = [threading.Thread(target=record) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                state = json.loads((root / "runs/jev/session-concurrent.json").read_text())
+            self.assertEqual(len(state), 1)
+            self.assertEqual(next(iter(state.values()))["count"], 2)
+
+    def test_corrupt_session_file_warns_and_recovers(self):
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            session = root / "runs/jev/session-corrupt.json"
+            session.parent.mkdir(parents=True)
+            session.write_text("{not json")
+            target = root / "source.py"
+            target.write_text("original")
+            with patch.object(jev_gate, "STATE", root), contextlib.redirect_stderr(io.StringIO()) as err:
+                jev_gate._record_call("corrupt", "Read", {"file_path": str(target)})
+            self.assertEqual(err.getvalue().count("corrupt session state"), 1)
+            state = json.loads(session.read_text())
+            self.assertEqual(next(iter(state.values()))["count"], 1)
+
+    def test_target_mtime_uses_unredacted_path(self):
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            target = Path(directory) / ("a" * 40)
+            target.write_text("original")
+            tool_input = {"file_path": str(target)}
+            logged_target = jev_gate._target("Read", tool_input)
+            self.assertNotEqual(logged_target, str(target))
+            self.assertEqual(jev_gate._target_mtime(jev_gate._target_path("Read", tool_input)),
+                             target.stat().st_mtime_ns)
 
     def test_rows_have_target_hash_and_flags(self):
         task, payload, target = self._sample_fixture(1.0)
