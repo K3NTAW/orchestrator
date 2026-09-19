@@ -485,9 +485,10 @@ class Render(unittest.TestCase):
 
     def test_review_prompt_diff_is_bounded(self):
         reviewed = bus.create_task("bounded review target", "s", ["a"], ["widget.py"], role="execute")
-        reviewed["worktree"] = str(TMP)
+        bus.update(reviewed["id"], worktree=str(TMP))
         review = bus.create_task("review bounded target", "s", ["a"], ["widget.py"],
                                  role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
         raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(5000))
         captured = {}
         orig_diff, orig_pick, orig_run = spawn.scoped_diff, P.Pool.pick, spawn.run_claude
@@ -635,7 +636,7 @@ class SpawnBase(unittest.TestCase):
         self.g("add", "-A", cwd=wt); self.g("commit", "-qm", "stack2 add B", cwd=wt)
 
         review = bus.create_task("review stack2", "s", ["a"], ["shared.py"], role="review", inputs=[t["id"]])
-        diff = spawn.scoped_diff(review)
+        diff = spawn.scoped_diff(bus.get(t["id"]))
         self.assertIn("+B = 1", diff)
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
 

@@ -467,10 +467,11 @@ def run_worker(task_id):
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
     if role == "review":
-        wt = (bus.get(t["inputs"][0]) if t.get("inputs") else t).get("worktree") or ROOT
-        diff_hint = f"git -C {wt} diff -- {' '.join((bus.get(t['inputs'][0]) if t.get('inputs') else t)['scope'])}"
+        src = reviewed if reviewed is not None else t
+        wt = src.get("worktree") or ROOT
+        diff_hint = f"git -C {wt} diff -- {' '.join(src['scope'])}"
         prompt = render("review", complexity=str(t["complexity"]), acceptance=t["acceptance"],
-                        diff=bounded_diff(scoped_diff(t), lim.get("review_diff_chars", 12000), diff_hint),
+                        diff=bounded_diff(scoped_diff(src), lim.get("review_diff_chars", 12000), diff_hint),
                         security="Apply skills/review/adversarial-review/references/security-checklist.md." if t["complexity"] >= 7 else "")
     elif role == "challenge":
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
@@ -561,11 +562,10 @@ def code_excerpts(scope, base_dir, cap=12000):
     return "".join(out) or "(no matching files)"
 
 
-def scoped_diff(t):
+def scoped_diff(src):
     """Reviewers see -U3 hunks for the scoped paths of the task under review, never the repo. Diffs against the
     reviewed task's goal branch (when it exists) instead of origin/main, so a stacked task's review doesn't
     include its predecessor's already-merged hunks."""
-    src = bus.get(t["inputs"][0]) if t.get("inputs") else t
     wt = src.get("worktree") or ROOT
     parent = src.get("parent")
     base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
