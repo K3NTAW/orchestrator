@@ -58,6 +58,11 @@ through to the pool's stored numbers rather than crashing pick) for callers that
 a running daemon.
 
 ## Pipeline
+Each execute or fix round starts with a **Worker packet** assembled from repository data. Its ordered sections are
+objective, acceptance, base, write scope, read scope, relevant tests, symbols, gotchas, decisions, verify, and
+evidence. The packet is capped at 4,800 characters, trimming the bottom sections first and pointing to
+`bus_read(task_id)` when the full task is needed.
+
 Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
 
 ### Routes

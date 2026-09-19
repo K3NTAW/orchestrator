@@ -1,6 +1,6 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
-import json, os, shutil, subprocess, sys, time
+import ast, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 from . import ROOT, STATE, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -77,6 +77,127 @@ def render(name, **kw):
     for k, v in kw.items():
         t = t.replace("{{" + k + "}}", v if isinstance(v, str) else json.dumps(v, indent=0))
     return t
+
+
+def _memory_entries(path):
+    """Return (line, title, body) tuples from a small, heading-based memory file."""
+    if not path.exists():
+        return []
+    lines = path.read_text(errors="replace").splitlines()
+    starts = [(i, line.lstrip("# ").strip()) for i, line in enumerate(lines)
+              if re.match(r"^#{1,3}\s+", line)]
+    return [(i + 1, title, "\n".join(lines[i + 1:starts[n + 1][0] if n + 1 < len(starts) else len(lines)]))
+            for n, (i, title) in enumerate(starts)]
+
+
+def packet(task, worktree) -> str:
+    """Build the executor's bounded, deterministic briefing solely from task/repository data."""
+    wt = Path(worktree)
+    scope = [str(p) for p in task.get("scope", [])]
+    scope_files = [wt / p for p in scope if (wt / p).is_file()]
+    py_files = [p for p in scope_files if p.suffix == ".py"]
+    symbols, symbol_names, imported_paths = [], set(), set()
+    for path in py_files:
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        rel = path.relative_to(wt)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                symbols.append(f"- {rel}:{node.lineno} {node.name}")
+                symbol_names.add(node.name)
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                for name in names:
+                    if not name:
+                        continue
+                    stem = Path(*name.split("."))
+                    for candidate in (wt / stem.with_suffix(".py"), wt / stem / "__init__.py"):
+                        if candidate.is_file():
+                            imported_paths.add(str(candidate.relative_to(wt)))
+
+    read_scope = {"tests/", *imported_paths}
+    read_scope.update(str(Path(p).parent) + ("/" if str(Path(p).parent) != "." else "") for p in scope)
+    tests = []
+    for path in py_files:
+        candidate = wt / "tests" / f"test_{path.stem}.py"
+        if candidate.is_file():
+            tests.append(str(candidate.relative_to(wt)))
+    for test_file in sorted((wt / "tests").glob("test_*.py")) if (wt / "tests").is_dir() else []:
+        try:
+            tree = ast.parse(test_file.read_text(errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_") and \
+                    any(re.search(rf"\b{re.escape(name)}\b", ast.get_source_segment(test_file.read_text(errors='replace'), node) or "")
+                        for name in symbol_names):
+                tests.append(f"{test_file.relative_to(wt)}::{node.name}")
+    tests = list(dict.fromkeys(tests))[:15]
+
+    parent = task.get("parent") or "(none)"
+    goal_branch = f"goal/{parent}" if task.get("parent") else "origin/main"
+    branch = git("branch", "--show-current", cwd=wt, check=False).stdout.strip() or "(detached)"
+    merge_base = git("merge-base", "HEAD", goal_branch, cwd=wt, check=False).stdout.strip() or "(unavailable)"
+    terms = {p.lower() for p in scope}
+    terms.update(Path(p).stem.lower() for p in scope)
+    gotchas = []
+    for candidate in (wt / ".orchestrator/memory/gotchas.md", wt / "gotchas.md"):
+        for line, title, body in _memory_entries(candidate):
+            if any(term and term in f"{title}\n{body}".lower() for term in terms):
+                gotchas.append(f"- mem:gotchas.md:{line} {title}")
+        if candidate.exists():
+            break
+    decisions = []
+    for candidate in (wt / ".orchestrator/memory/decisions.md", wt / "decisions.md"):
+        decisions = [f"- {title}" for _, title, body in _memory_entries(candidate)
+                     if parent != "(none)" and parent.lower() in f"{title}\n{body}".lower()][:3]
+        if candidate.exists():
+            break
+    evidence = []
+    for item in task.get("inputs", []):
+        value = item
+        if isinstance(item, str):
+            try:
+                value = bus.get(item).get("result") or {}
+            except KeyError:
+                value = {}
+        summary = value.get("summary", value) if isinstance(value, dict) else value
+        evidence.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
+
+    sections = [
+        ("objective", [str(task.get("title", ""))]),
+        ("acceptance", [f"- {x}" for x in task.get("acceptance", [])]),
+        ("base", [f"- branch: {branch}", f"- merge-base {goal_branch}: {merge_base}", f"- goal: {parent}"]),
+        ("write_scope", [f"- {p}" for p in scope]),
+        ("read_scope", [f"- {p or '.'}" for p in sorted(read_scope)]),
+        ("relevant_tests", [f"- {p}" for p in tests] or ["- (none found)"]),
+        ("symbols", symbols[:40] or ["- (none)"]),
+        ("gotchas", gotchas[:5] or ["- (none)"]),
+        ("decisions", decisions or ["- (none)"]),
+        ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
+        ("evidence", evidence or ["- (none)"]),
+    ]
+    def build():
+        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections)
+    original = build()
+    if len(original) < 4800:
+        return original
+    # Drop detail from the bottom-most section first, retaining the ordered headings.
+    while len(build()) + 80 >= 4800:
+        changed = False
+        for _, lines in reversed(sections):
+            if lines:
+                lines.pop()
+                changed = True
+                break
+        if not changed:
+            break
+    body = build()
+    dropped = len(original) - len(body)
+    trailer = f"\npacket truncated: {dropped} chars dropped; bus_read(task_id) has the full task"
+    return (body[:4799 - len(trailer)] + trailer)[:4799]
 
 
 def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:
@@ -256,7 +377,8 @@ def run_worker(task_id):
     elif role == "execute":
         t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
         bus.update(task_id, executor=t["executor"])
-        prompt = render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"]) + \
+        prompt = render("execute", packet=packet(t, t.get("worktree") or ROOT), spec=t["spec"],
+                        acceptance=t["acceptance"], scope=t["scope"]) + \
             "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
     else:
         prompt = render("scout", id=t["id"], title=t["title"], spec=t["spec"], acceptance=t["acceptance"],

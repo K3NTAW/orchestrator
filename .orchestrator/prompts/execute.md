@@ -1,3 +1,5 @@
+{{packet}}
+
 Implement this single task in the current worktree, then run `scripts/tests_green.sh`.
 Spec: {{spec}}
 Acceptance: {{acceptance}}

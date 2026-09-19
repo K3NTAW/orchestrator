@@ -367,6 +367,46 @@ class SpecReview(unittest.TestCase):
 
 
 class Render(unittest.TestCase):
+    def packet_fixture(self):
+        scratch_repo(TMP)
+        (TMP / "widget.py").write_text("import json\n\ndef build_widget():\n    return json.dumps({})\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_widget.py").write_text(
+            "from widget import build_widget\n\ndef test_build_widget():\n    assert build_widget()\n")
+        return {"id": "T-P", "title": "Build widget", "acceptance": ["works"],
+                "scope": ["widget.py"], "parent": "G", "inputs": []}
+
+    def test_packet_sections_in_order(self):
+        text = spawn.packet(self.packet_fixture(), TMP)
+        names = ["objective", "acceptance", "base", "write_scope", "read_scope", "relevant_tests",
+                 "symbols", "gotchas", "decisions", "verify", "evidence"]
+        positions = [text.index(f"## {name}") for name in names]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("tests/test_widget.py", text)
+        self.assertIn("widget.py:3 build_widget", text)
+
+    def test_packet_cap_trims_bottom_first(self):
+        task = self.packet_fixture()
+        task["acceptance"] = [f"criterion {i} " + "x" * 100 for i in range(100)]
+        text = spawn.packet(task, TMP)
+        self.assertLess(len(text), 4800)
+        self.assertIn("## objective\nBuild widget", text)
+        self.assertIn("packet truncated:", text)
+
+    def test_execute_prompt_contains_packet(self):
+        p = spawn.packet(self.packet_fixture(), TMP)
+        text = spawn.render("execute", packet=p, spec="s", acceptance=["a"], scope=["widget.py"])
+        self.assertTrue(text.startswith("## objective"))
+        self.assertIn("Build widget", text)
+
+    def test_packet_gotcha_match_by_path(self):
+        task = self.packet_fixture()
+        memory = TMP / ".orchestrator" / "memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "gotchas.md").write_text("## Widget cache\nFacts: changing widget.py needs a cache reset.\n")
+        text = spawn.packet(task, TMP)
+        self.assertRegex(text, r"mem:gotchas\.md:1 Widget cache")
+
     def test_templates_fill(self):
         s = spawn.render("scout", id="T-1", title="t", spec="q", acceptance=["a"], turns="20")
         self.assertIn("T-1", s); self.assertNotIn("{{", s)
