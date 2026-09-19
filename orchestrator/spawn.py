@@ -213,10 +213,26 @@ def packet(task, worktree) -> str:
     original = build()
     if len(original) < 4800:
         return original
-    # Drop detail from the bottom-most section first, retaining the ordered headings.
-    while len(build()) + 80 >= 4800:
+    # Retain the discovery information an executor needs before removing it.
+    # Acceptance criteria can be recovered from the task, so summarize those first.
+    acceptance = next(lines for name, lines in sections if name == "acceptance")
+    if len(acceptance) > 5:
+        omitted = len(acceptance) - 5
+        acceptance[:] = acceptance[:5] + [f"- {omitted} more in the task"]
+
+    def fits():
+        body = build()
+        trailer = f"\npacket truncated: {len(original) - len(body)} chars dropped; bus_read(task_id) has the full task"
+        return len(body) + len(trailer) < 4800
+
+    # Keep objective, base, write_scope, and verify intact.  Only drop discovery
+    # entries after the less useful contextual sections have been exhausted.
+    trimmable = ("evidence", "decisions", "gotchas", "read_scope", "symbols", "relevant_tests")
+    by_name = {name: lines for name, lines in sections}
+    while not fits():
         changed = False
-        for _, lines in reversed(sections):
+        for name in trimmable:
+            lines = by_name[name]
             if lines:
                 lines.pop()
                 changed = True
@@ -226,7 +242,7 @@ def packet(task, worktree) -> str:
     body = build()
     dropped = len(original) - len(body)
     trailer = f"\npacket truncated: {dropped} chars dropped; bus_read(task_id) has the full task"
-    return (body[:4799 - len(trailer)] + trailer)[:4799]
+    return body + trailer
 
 
 def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:

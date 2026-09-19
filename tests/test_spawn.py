@@ -385,13 +385,28 @@ class Render(unittest.TestCase):
         self.assertIn("tests/test_widget.py", text)
         self.assertIn("widget.py:3 build_widget", text)
 
-    def test_packet_cap_trims_bottom_first(self):
+    def test_packet_trims_acceptance_before_discovery(self):
         task = self.packet_fixture()
         task["acceptance"] = [f"criterion {i} " + "x" * 100 for i in range(100)]
         text = spawn.packet(task, TMP)
         self.assertLess(len(text), 4800)
-        self.assertIn("## objective\nBuild widget", text)
+        acceptance = text.split("## acceptance\n", 1)[1].split("\n## ", 1)[0]
+        self.assertEqual(acceptance.count("criterion "), 5)
+        self.assertIn("- 95 more in the task", acceptance)
+        self.assertIn("widget.py:3 build_widget", text)
+        relevant = text.split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("tests/test_widget.py", relevant)
         self.assertIn("packet truncated:", text)
+
+    def test_packet_never_trims_base_or_verify(self):
+        task = self.packet_fixture()
+        task["acceptance"] = [f"criterion {i} " + "x" * 100 for i in range(100)]
+        text = spawn.packet(task, TMP)
+        base = text.split("## base\n", 1)[1].split("\n## ", 1)[0]
+        verify = text.split("## verify\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("- branch:", base)
+        self.assertIn("- merge-base", base)
+        self.assertEqual(verify, "- .claude/hooks/tests-green.sh .\n- On failure, report only scripts/failures_only.sh output.")
 
     def test_relevant_tests_scope_files_first(self):
         scratch_repo(TMP)
