@@ -35,7 +35,9 @@ def base_for(task):
     absent), never a task id, so they always base on the goal branch (falling back to origin/main) rather than
     the review path's isinstance(str) check, which never fires for them (review T-0030). execute tasks with a
     parent whose goal branch already exists stack on it, so the Planner no longer has to pre-create worktrees
-    for stacked tasks."""
+    for stacked tasks. A fix-round execute task (constraints.fix_round_for names the task it's fixing) instead
+    cuts from that task's own task/<id> branch when it still exists, so the fix round starts on the code it is
+    fixing rather than the goal branch the original may have already been merged past (gotchas.md 2026-09-19)."""
     role, parent = task["role"], task.get("parent")
     if role == "review" and task.get("inputs") and isinstance(task["inputs"][0], str):
         try:
@@ -49,6 +51,9 @@ def base_for(task):
             src_parent = src.get("parent")
             if src_parent and branch_exists(f"goal/{src_parent}"):
                 return f"goal/{src_parent}"
+    elif role == "execute" and (task.get("constraints") or {}).get("fix_round_for") and \
+            branch_exists(f"task/{task['constraints']['fix_round_for']}"):
+        return f"task/{task['constraints']['fix_round_for']}"
     elif role in ("challenge", "execute", "spec_review") and parent and branch_exists(f"goal/{parent}"):
         return f"goal/{parent}"
     return "origin/main"

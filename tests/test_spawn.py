@@ -403,6 +403,28 @@ class SpawnBase(unittest.TestCase):
                                       inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
         self.assertEqual(spawn.base_for(challenge2), "origin/main")
 
+    def test_base_for_prefers_fix_round_parent(self):
+        """A fix-round execute task (constraints.fix_round_for names the task it's fixing) must cut its worktree
+        from that task's own task/<id> branch, not the goal branch -- the original task's commits may not have
+        landed on the goal branch yet (or ever, if the fix round replaces them)."""
+        original = bus.create_task("feat4", "s", ["a"], ["feat4.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(original["id"], base="HEAD")
+        bus.update(original["id"], worktree=str(wt))
+
+        (wt / "feat4.py").write_text("original = True\n")
+        self.g("add", "feat4.py", cwd=wt, check=True)
+        self.g("commit", "-qm", "original task work", cwd=wt, check=True)
+
+        fix = bus.create_task("fix feat4", "s", ["a"], ["feat4.py"], role="execute", parent="G",
+                              constraints={"fix_round_for": original["id"]})
+        self.assertEqual(spawn.base_for(fix), f"task/{original['id']}")
+        fix_wt = spawn.ensure_worktree(fix["id"])
+        self.assertEqual((fix_wt / "feat4.py").read_text(), "original = True\n")
+
+        fix_missing = bus.create_task("fix ghost", "s", ["a"], ["feat4.py"], role="execute", parent="G",
+                                      constraints={"fix_round_for": "T-9999"})
+        self.assertEqual(spawn.base_for(fix_missing), "goal/G")   # named branch doesn't exist: falls back
+
     def test_ensure_worktree_resolves_base_when_none_given(self):
         t = bus.create_task("stacked-exec", "s", ["a"], ["stacked.py"], role="execute", parent="G")
         wt = spawn.ensure_worktree(t["id"])

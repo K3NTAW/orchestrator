@@ -826,6 +826,49 @@ class Daemon(unittest.TestCase):
         self.assertTrue(held["hold_reason"].startswith("gate failed"), held["hold_reason"])
         self.assertIn("merge blew up", held["pipeline"]["gated_error"])
 
+    def test_gate_holds_dirty_worktree(self):
+        """A done execute task whose worktree still has uncommitted changes under its scope must not be gated
+        against a stale HEAD -- gate() must hold it for the Planner to commit or re-spec instead of running
+        tests-green against a commit that doesn't reflect the working tree."""
+        scratch_repo(TMP)
+        t = self.task("dirty", complexity=2)   # self.task's default scope is ["x.py"]
+        bus.update(t, status="done", worktree=str(TMP))
+        (TMP / "x.py").write_text("dirty = 1\n")
+        self.addCleanup(lambda: (TMP / "x.py").unlink(missing_ok=True))
+        tests_green_calls = []
+        already_faked = daemon.subprocess.run
+        def counting_run(*a, **k):
+            if a[0][:1] == [str(merge.TESTS_GREEN)]:
+                tests_green_calls.append(a)
+            return already_faked(*a, **k)
+        self.swap(daemon.subprocess, "run", counting_run)
+
+        daemon.tick()
+
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "executor did not commit"))
+        self.assertIn("x.py", held["resume_hint"]["dirty"])
+        self.assertEqual(self.merged, [])
+        self.assertEqual(tests_green_calls, [])          # never gated against the stale HEAD
+
+    def test_already_merged_ignores_branch_equal_to_target(self):
+        """A task/<id> branch cut from goal/<parent> but never committed to has a HEAD identical to the
+        merge-base with the target, so a plain `merge-base --is-ancestor` check would call it "merged" without
+        any work having landed. already_merged() must require the branch to have actually diverged too."""
+        scratch_repo(TMP)
+        self.addCleanup(g, "checkout", "main")
+        self.addCleanup(g, "branch", "-D", "goal/G")
+        t = self.task("not really merged", complexity=2)
+        bus.update(t, parent="G")
+        g("checkout", "-b", "goal/G")
+        self.addCleanup(g, "branch", "-D", f"task/{t}")
+        g("commit", "--allow-empty", "-qm", "earlier goal work")
+        g("checkout", "-b", f"task/{t}")   # no task commit, even though the goal is ahead of main
+        g("checkout", "main")
+
+        self.assertFalse(daemon.already_merged(bus.get(t)))
+        self.assertNotIn("merged_into", bus.get(t))
+
     def test_gate_missing_worktree_holds(self):
         t = self.task("nowt", complexity=2)
         bus.update(t, status="done", worktree=str(TMP / "does-not-exist"))
@@ -857,7 +900,7 @@ class Daemon(unittest.TestCase):
         g("add", "-A")
         g("commit", "-qm", "task work")
         g("checkout", "goal/G")
-        g("merge", "--ff-only", f"task/{merged_id}")
+        g("merge", "--no-ff", "-m", "merge landed task", f"task/{merged_id}")
         g("checkout", "main")
 
         pending_id = self.task("not landed yet", complexity=2)
@@ -1230,3 +1273,32 @@ class Background(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirtyScopePaths(unittest.TestCase):
+    def test_tracked_untracked_renamed_and_ignored_paths(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, check=True,
+                                      capture_output=True, text=True)
+            git("init")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "Test")
+            (root / "src").mkdir()
+            (root / "src/tracked.py").write_text("before")
+            (root / "src/renamed.py").write_text("rename")
+            git("add", ".")
+            git("commit", "-qm", "seed")
+            (root / "src/tracked.py").write_text("after")
+            (root / "src/new\nfile.py").write_text("new")
+            git("mv", "src/renamed.py", "outside.py")
+            for folder in (".orchestrator", ".venv"):
+                (root / folder).mkdir()
+                (root / folder / "state").write_text("ignored")
+            self.assertEqual(daemon._dirty_scope_paths(root, ["src"]),
+                             ["src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
+            self.assertEqual(daemon._dirty_scope_paths(root, ["*"]),
+                             ["outside.py", "src/new\nfile.py", "src/renamed.py", "src/tracked.py"])

@@ -222,11 +222,10 @@ def stale(t):
 
 
 def already_merged(t):
-    """True when a done execute task's work already landed in its goal branch even though merged_into is unset.
-    merge.merge() only stamps merged_into on whichever task_id it is called with, so a fix-round merge leaves the
-    original task done with merged_into unset while its commit is already an ancestor of goal/<parent> (the first
-    smoke run created T-0057..T-0062 this way). Detected here by ancestry so the gate and review stages do not
-    redo already-merged work; never raises, since a missing git binary or branch just means "not merged"."""
+    """Recognize landed task commits by ancestry, excluding an unchanged target head and
+    branches with no commits beyond trunk. A merge-base with the target itself cannot
+    prove work landed: it equals the task head for every ancestor, including real merges.
+    Missing refs or git errors leave the task available for normal gating."""
     if t.get("merged_into"):
         return True
     parent = t.get("parent")
@@ -237,6 +236,16 @@ def already_merged(t):
     try:
         if not spawn.branch_exists(branch):
             return False
+        head = spawn.git("rev-parse", branch, check=False)
+        target_head = spawn.git("rev-parse", target, check=False)
+        if head.returncode or target_head.returncode or head.stdout.strip() == target_head.stdout.strip():
+            return False
+        trunk = next((c for c in ("origin/main", "main")
+                      if spawn.git("rev-parse", "--verify", c, check=False).returncode == 0), None)
+        if trunk:
+            mb = spawn.git("merge-base", branch, trunk, check=False)
+            if mb.returncode == 0 and head.returncode == 0 and head.stdout.strip() == mb.stdout.strip():
+                return False
         r = spawn.git("merge-base", "--is-ancestor", branch, target, check=False)
     except Exception:
         return False
@@ -428,6 +437,31 @@ def _review_plan(t):
     return reviews_expected(t), "always"
 
 
+def _dirty_scope_paths(worktree, scope):
+    """Tracked or untracked paths under `scope` that git status sees as changed in `worktree`, ignoring the
+    orchestrator's own state dir and a venv -- neither is something an executor is expected to have committed.
+    Empty (never None) on a git error, so gate() can treat "can't tell" the same as "nothing to report" rather
+    than blocking merge on a status call that failed for an unrelated reason."""
+    r = _git_in(worktree, "status", "--porcelain", "-z", "--untracked-files=all")
+    if r.returncode != 0:
+        return []
+    dirty = set()
+    entries = iter(r.stdout.split("\0"))
+    for entry in entries:
+        if not entry:
+            continue
+        paths = [entry[3:]]
+        if "R" in entry[:2] or "C" in entry[:2]:
+            paths.append(next(entries, ""))  # -z reports destination, then source
+        for path in paths:
+            if not path or path.split("/", 1)[0] in (".orchestrator", ".venv"):
+                continue
+            if any(fnmatch.fnmatch(path, pattern) or path.startswith(pattern.rstrip("/") + "/")
+                   or pattern in (".", "./") for pattern in scope):
+                dirty.add(path)
+    return sorted(dirty)
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
@@ -446,11 +480,19 @@ def gate(pool):
     merge_reviewed() waits for on a task already past this stage. Filters run cheap-first, already_merged()
     (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree") or already_merged(t):
+        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree") or t.get("merged_into"):
             continue
         if not Path(t["worktree"]).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
                 notify(f"{t['id']}: worktree missing; held")
+            continue
+        dirty = _dirty_scope_paths(t["worktree"], t.get("scope") or [])
+        if dirty:
+            if stamp(t["id"], "gated_at", status="held", hold_reason="executor did not commit",
+                     resume_hint={"dirty": dirty}):
+                notify(f"{t['id']}: worktree has uncommitted scope changes; held")
+            continue
+        if already_merged(t):
             continue
         tg = subprocess.run([str(merge.TESTS_GREEN), t["worktree"]], capture_output=True, text=True, input="{}")
         if tg.returncode:
