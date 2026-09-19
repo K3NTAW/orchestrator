@@ -447,7 +447,7 @@ class Daemon(unittest.TestCase):
         self.assertEqual(reviews[0]["tier"], "sonnet")
         self.assertGreaterEqual(reviews[0]["complexity"], 7)
         gated = bus.get(t)
-        self.assertEqual(gated["pipeline"]["review_reason"], "security_paths:orchestrator/serve.py")
+        self.assertEqual(gated["pipeline"]["review_reason"], "security_paths:orchestrator/*.py")
         self.assertEqual(gated["pipeline"]["reviews_expected"], 1)
 
     def test_security_review_never_self_model(self):
@@ -541,6 +541,37 @@ class Daemon(unittest.TestCase):
         self.assertIn(f"skills/{fname}", paths)
         self.assertEqual(daemon._matching_security_path(paths), "skills/**")
 
+    def test_changed_paths_rename_matches_old_path(self):
+        """A renamed guarded file (git mv .claude/hooks/a.sh moved.sh) must still match the security glob:
+        --no-renames makes the diff report it as delete-old + add-new instead of collapsing it into one R100
+        rename entry, so the old, still-guarded path shows up in changed_paths() even though the new path is
+        outside every glob."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        hook = repo / ".claude" / "hooks" / "a.sh"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/sh\n")
+        run("add", "-A", "-f")
+        run("commit", "-qm", "add hook")
+        run("checkout", "-b", "task/rename-hook")
+        run("mv", ".claude/hooks/a.sh", "moved.sh")
+        run("commit", "-qm", "rename hook out of guarded dir")
+
+        t = self.task("rename hook out", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertIn(".claude/hooks/a.sh", paths)
+        self.assertIn("moved.sh", paths)
+        self.assertEqual(daemon._matching_security_path(paths), ".claude/hooks/**")
+
+    def test_security_glob_covers_cli(self):
+        """orchestrator/*.py (the single glob that replaced the enumerated per-module list) still matches a
+        module with no dedicated entry of its own, e.g. orchestrator/cli.py."""
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        self.assertEqual(daemon._matching_security_path(["orchestrator/cli.py"]), "orchestrator/*.py")
+
     def test_changed_paths_non_git_returns_none(self):
         """A worktree that isn't a git repo makes changed_paths() fail closed with None, never an empty list."""
         non_git = Path(tempfile.mkdtemp(prefix="orch-nongit-"))
@@ -573,6 +604,33 @@ class Daemon(unittest.TestCase):
         bus.update(t2, status="done", worktree=str(TMP))
         daemon.tick(pool)
         self.assertEqual(len(notified), 1)   # same empty list again: no repeat notification
+
+    def test_empty_security_paths_uses_security_tier_and_checklist(self):
+        """security_paths_empty takes the same branch in gate() as a security_paths:* match or a
+        diff_unavailable result: one review on _security_review_tier(t) (never review_tier(t)), with its
+        complexity bumped to SECURITY_CHECKLIST_COMPLEXITY so spawn.py's hardcoded checklist cutoff (complexity
+        >= 7) always fires -- and the self-review-avoidance swap to the other tier still applies here too."""
+        self.swap(daemon, "_security_paths_empty_warned", False)
+        pool = self.review_pool("security_paths")
+        pool.cfg["review"]["security_paths"] = []
+
+        t = self.task("empty security paths", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP))
+        daemon.tick(pool)
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["tier"], "sonnet")
+        self.assertGreaterEqual(reviews[0]["complexity"], daemon.SECURITY_CHECKLIST_COMPLEXITY)
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "security_paths_empty")
+
+        t2 = self.task("empty security paths self-review", complexity=2)
+        bus.update(t2, status="done", worktree=str(TMP), executor="claude:sonnet")
+        daemon.tick(pool)
+        reviews2 = [r for r in bus.read(role="review") if r["inputs"][:1] == [t2]]
+        self.assertEqual(len(reviews2), 1)
+        self.assertEqual(reviews2[0]["tier"], "opus")
+        self.assertGreaterEqual(reviews2[0]["complexity"], daemon.SECURITY_CHECKLIST_COMPLEXITY)
 
     def test_code_review_always_keeps_two_reviews(self):
         """code_review="always" reproduces the pre-2026-09-19 D1 policy exactly: a complexity-7, Codex-executed

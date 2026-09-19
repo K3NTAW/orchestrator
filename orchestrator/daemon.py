@@ -16,11 +16,7 @@ SPEC_REVIEW_TIER = "sonnet"  # tier the spec review worker runs on
 # a pool.toml missing [review] entirely (test_defaults_when_review_table_missing) still has something sane to
 # fall back to; the shipped pool.toml is the actual source of truth operators edit.
 DEFAULT_SECURITY_PATHS = [
-    "orchestrator/daemon.py", "orchestrator/merge.py", "orchestrator/bus.py", "orchestrator/executor.py",
-    "orchestrator/serve.py", "orchestrator/goals.py", "orchestrator/spawn.py", "orchestrator/pool.py",
-    "orchestrator/install.py", "orchestrator/planner_runs.py",
-    "orchestrator/jev*.py",  # no jev*.py files exist yet; T-0214 (E2) adds them, this glob is ready for that
-    "orchestrator/mcp.py", "orchestrator/bus_mcp.py",
+    "orchestrator/*.py",
     ".claude/hooks/**", ".claude/settings.json", ".orchestrator/pool.toml", ".orchestrator/protected-paths.txt",
     ".orchestrator/prompts/**", "skills/**", ".claude/skills/**",
     ".mcp*.json", ".mcp.worker.json", "Dockerfile", "docker-compose*.yml", "pyproject.toml", "uv.lock",
@@ -135,12 +131,14 @@ def _resolve_base(worktree, parent):
 
 
 def changed_paths(t):
-    """git diff --name-only -z <base>..HEAD in the task's worktree, repo-relative paths, base picked by
-    _resolve_base(). The -z / NUL split (rather than newline splitting on plain --name-only output) keeps a
-    quoted or non-ASCII path intact so it still matches the security globs. None on any failure -- a non-git
-    worktree, no base to diff against, or a git error -- so gate()'s security_paths policy can fail closed: a
-    diff it cannot inspect is treated as a security match (review_reason "diff_unavailable"), never as "nothing
-    changed"."""
+    """git diff --no-renames --name-only -z <base>..HEAD in the task's worktree, repo-relative paths, base
+    picked by _resolve_base(). --no-renames lists a rename as a plain delete-of-old-path + add-of-new-path
+    pair instead of collapsing it into one "R100 old\\tnew" entry, so a rename of a security-sensitive path
+    (e.g. a guarded .claude/hooks/x.sh moved somewhere outside the glob) still shows the old path and still
+    matches. The -z / NUL split (rather than newline splitting on plain --name-only output) keeps a quoted or
+    non-ASCII path intact so it still matches the security globs. None on any failure -- a non-git worktree, no
+    base to diff against, or a git error -- so gate()'s security_paths policy can fail closed: a diff it cannot
+    inspect is treated as a security match (review_reason "diff_unavailable"), never as "nothing changed"."""
     worktree = t.get("worktree")
     if not worktree or not Path(worktree).is_dir():
         return None
@@ -148,7 +146,7 @@ def changed_paths(t):
         base = _resolve_base(worktree, t.get("parent"))
         if base is None:
             return None
-        r = _git_in(worktree, "diff", "--name-only", "-z", f"{base}..HEAD")
+        r = _git_in(worktree, "diff", "--no-renames", "--name-only", "-z", f"{base}..HEAD")
         if r.returncode != 0:
             return None
         return [p for p in r.stdout.split("\0") if p]
@@ -437,10 +435,13 @@ def gate(pool):
     when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on review_tier(t)
     -- the non-executing tier (both reviews may land on the same account; only the model differs from the
     executor); when the executor is Codex, the second review runs on whichever tier the first one didn't get.
-    A security-path (or diff-unavailable) review always gets the security checklist, regardless of the source
-    task's own complexity: spawn.py's run_worker hardcodes that decision at complexity >= 7, so the review task
-    is created with complexity bumped to at least SECURITY_CHECKLIST_COMPLEXITY rather than inheriting the
-    source task's own (possibly much lower) complexity. The successful gate stamp also freezes
+    All three fail-closed review reasons -- a security-path match ("security_paths:*"), a diff gate() couldn't
+    inspect ("diff_unavailable"), and an empty/missing security_paths list ("security_paths_empty") -- take the
+    same branch: exactly one review, on _security_review_tier(t), with the security checklist always forced,
+    regardless of the source task's own complexity: spawn.py's run_worker hardcodes the checklist decision at
+    complexity >= 7, so the review task is created with complexity bumped to at least
+    SECURITY_CHECKLIST_COMPLEXITY rather than inheriting the source task's own (possibly much lower) complexity.
+    The successful gate stamp also freezes
     pipeline.reviews_expected/review_reason so a later change to [review] can't change how many approvals
     merge_reviewed() waits for on a task already past this stage. Filters run cheap-first, already_merged()
     (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call."""
@@ -462,7 +463,8 @@ def gate(pool):
                      pipeline_fields={"reviews_expected": n_reviews, "review_reason": review_reason}):
             continue
         orphaned = review_reason == "orphaned"
-        security = review_reason == "diff_unavailable" or review_reason.startswith("security_paths:")
+        security = (review_reason in ("diff_unavailable", "security_paths_empty")
+                    or review_reason.startswith("security_paths:"))
         try:
             if n_reviews == 0:
                 report_merge(t["id"], merge.merge(t["id"]))
@@ -481,8 +483,9 @@ def gate(pool):
                 spawn_async(spawn.run_worker, r["id"])
                 continue
             if security:
-                # a match or a diff the daemon couldn't inspect: exactly one review, on security_review_tier,
-                # complexity bumped so spawn.py's hardcoded checklist cutoff always fires here.
+                # a security-path match, a diff the daemon couldn't inspect, or an empty security_paths list:
+                # exactly one review, on _security_review_tier(t), complexity bumped so spawn.py's hardcoded
+                # checklist cutoff always fires here.
                 existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
                 if not existing:
                     r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
