@@ -86,11 +86,28 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
     prompt = (Path(__file__).resolve().parents[1] / ".orchestrator" / "prompts" / "fix-round.md").read_text()
     criteria = held.get("acceptance") or []
     selected = [c for c in criteria if any(i in c for i in (failed_ids or []))] or criteria
-    failure_text = ((held.get("resume_hint") or {}).get("failures") or "")[:3000]
+    def fence_data(value):
+        chunks = []
+        backticks = 0
+        for char in value:
+            if char == "`":
+                backticks += 1
+            else:
+                if backticks >= 3:
+                    chunks.append("[backticks omitted]")
+                chunks.append("`" * (backticks % 3))
+                backticks = 0
+                chunks.append(char)
+        if backticks >= 3:
+            chunks.append("[backticks omitted]")
+        chunks.append("`" * (backticks % 3))
+        return "".join(chunks)
+
+    failure_text = fence_data(((held.get("resume_hint") or {}).get("failures") or "")[:3000])
     review_lines = [f"{c.get('path', '')}:{c.get('line', '')} {c.get('issue', '')}" for _, cs in comments for c in cs]
     return prompt.format(root_id=root(held)["id"], root_title=root(held)["title"], held_id=held["id"],
                          n=round_no, failed_acceptance="\n".join(f"- {c}" for c in selected),
-                         failure_text=failure_text, review_comments="\n".join(review_lines) or "(none)",
+                         failure_text=failure_text, review_comments=fence_data("\n".join(review_lines) or "(none)"),
                          branch=held.get("branch") or f"task/{held['id']}",
                          head_sha=held.get("head_sha") or (held.get("resume_hint") or {}).get("commit", "unknown"),
                          original_acceptance="\n".join(f"- {c}" for c in criteria))
