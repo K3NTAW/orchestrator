@@ -101,13 +101,22 @@ class Executors(unittest.TestCase):
     def test_pick_by_expected_cost_with_floor(self):
         from orchestrator import scorecard
         task = {"title": "small", "complexity": 3}
-        old_cost, old_build = scorecard.expected_cost, scorecard.build
+        old_cost, old_class_success = scorecard.expected_cost, scorecard.class_success
         scorecard.expected_cost = lambda eid, cls: {"luna": 10, "terra": 20, "sol": 30, "astra": 40}.get(eid)
-        scorecard.build = lambda: {"luna": {"merged": 1, "failed": 1}, "terra": {"merged": 3, "failed": 0},
-                                   "sol": {"merged": 3, "failed": 0}, "astra": {"merged": 3, "failed": 0}}
+        scorecard.class_success = lambda eid, cls: {"luna": 0.5, "terra": 1.0, "sol": 1.0, "astra": 1.0}.get(eid)
         self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
-        self.addCleanup(lambda: setattr(scorecard, "build", old_build))
+        self.addCleanup(lambda: setattr(scorecard, "class_success", old_class_success))
         self.assertEqual(self.p.pick_executor("execute", 3, task=task).id, "terra")
+
+    def test_pick_falls_back_when_all_below_floor(self):
+        from orchestrator import scorecard
+        task = {"title": "small", "complexity": 3}
+        old_cost, old_class_success = scorecard.expected_cost, scorecard.class_success
+        scorecard.expected_cost = lambda eid, cls: {"luna": 10, "terra": 20}.get(eid)
+        scorecard.class_success = lambda eid, cls: 0.2
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.addCleanup(lambda: setattr(scorecard, "class_success", old_class_success))
+        self.assertEqual(self.p.pick_executor("execute", 3, {"luna": 5.0, "terra": 1.0}, task).id, "luna")
 
     def test_pick_falls_back_without_samples(self):
         from orchestrator import scorecard

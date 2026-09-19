@@ -333,21 +333,17 @@ class Pool:
         if task is not None:
             from . import scorecard
             task_class_name = scorecard.task_class(task)
-            card = scorecard.build()
             floor = self.cfg.get("models", {}).get("success_floor", 0.6)
             measured = []
             for ex in ok:
                 cost = scorecard.expected_cost(ex.id, task_class_name)
                 if cost is None:
                     continue
-                row = card.get(ex.id, {})
-                total = row.get("merged", 0) + row.get("failed", 0)
-                success = row.get("merged", 0) / total if total else 0
+                success = scorecard.class_success(ex.id, task_class_name)
                 measured.append((ex, cost, success))
-            if measured:
-                safe = [(ex, cost) for ex, cost, success in measured if success >= floor]
-                if not safe:
-                    return None
+            safe = [(ex, cost) for ex, cost, success in measured
+                    if success is not None and success >= floor]
+            if safe:
                 return sorted(safe, key=lambda item: (item[1], item[0].day_tasks, item[0].id))[0][0]
         return sorted(ok, key=lambda e: (-(e.weight * scores.get(e.id, 1.0)), e.day_tasks, e.id))[0]
 

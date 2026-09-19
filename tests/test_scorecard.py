@@ -46,6 +46,18 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(scorecard.task_class({"title": "new", "complexity": 3}), "mechanical")
         self.assertEqual(scorecard.task_class({"title": "new", "complexity": 4}), "unfamiliar")
 
+    def test_class_success_is_per_class(self):
+        for n in range(3):
+            self.write_task(f"T-mech{n}", executor="good", status="done", merged_into="goal/G",
+                            constraints={"task_class": "mechanical"})
+            self.write_task(f"T-sec{n}", executor="good", status="failed" if n else "done",
+                            merged_into="goal/G" if n == 0 else None,
+                            constraints={"task_class": "security"})
+        self.write_runs(*([{"task": f"T-mech{n}", "role": "execute"} for n in range(3)] +
+                          [{"task": f"T-sec{n}", "role": "execute"} for n in range(3)]))
+        self.assertEqual(scorecard.class_success("good", "mechanical", self.root), 1.0)
+        self.assertAlmostEqual(scorecard.class_success("good", "security", self.root), 1 / 3)
+
     def test_expected_cost_needs_samples(self):
         for n in range(2):
             self.write_task(f"T-ec{n}", executor="cheap", status="done", merged_into="goal/G")
