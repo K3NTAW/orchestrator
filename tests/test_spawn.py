@@ -520,6 +520,19 @@ class SpawnBase(unittest.TestCase):
                                       inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
         self.assertEqual(spawn.base_for(challenge2), "origin/main")
 
+    def test_scout_bases_on_goal_branch(self):
+        scout = bus.create_task("scout x", "s", ["a"], ["x.py"], role="scout", parent="G")
+        self.assertEqual(spawn.base_for(scout), "goal/G")
+
+    def test_scout_without_goal_branch_uses_origin_main(self):
+        scout = bus.create_task("scout y", "s", ["a"], ["y.py"], role="scout", parent="ghost")
+        self.assertEqual(spawn.base_for(scout), "origin/main")
+
+    def test_scout_prompt_names_base(self):
+        prompt = spawn.render("scout", id="T-1", title="scout", spec="q", acceptance=["a"], turns="20",
+                              base_branch="goal/G", base_sha="abc123")
+        self.assertEqual(prompt.splitlines()[0], "Base: abc123 on goal/G")
+
     def test_base_for_prefers_fix_round_parent(self):
         """A fix-round execute task (constraints.fix_round_for names the task it's fixing) must cut its worktree
         from that task's own task/<id> branch, not the goal branch -- the original task's commits may not have

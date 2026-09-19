@@ -54,7 +54,7 @@ def base_for(task):
     elif role == "execute" and (task.get("constraints") or {}).get("fix_round_for") and \
             branch_exists(f"task/{task['constraints']['fix_round_for']}"):
         return f"task/{task['constraints']['fix_round_for']}"
-    elif role in ("challenge", "execute", "spec_review") and parent and branch_exists(f"goal/{parent}"):
+    elif role in ("challenge", "execute", "spec_review", "scout", "triage") and parent and branch_exists(f"goal/{parent}"):
         return f"goal/{parent}"
     return "origin/main"
 
@@ -73,6 +73,9 @@ def ensure_worktree(task_id, base=None):
 
 
 def render(name, **kw):
+    if name == "scout":
+        kw.setdefault("base_branch", "origin/main")
+        kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
     for k, v in kw.items():
         t = t.replace("{{" + k + "}}", v if isinstance(v, str) else json.dumps(v, indent=0))
@@ -426,8 +429,10 @@ def run_worker(task_id):
                         acceptance=t["acceptance"], scope=t["scope"]) + \
             "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
     else:
+        base = base_for(t)
+        base_sha = git("rev-parse", base, check=False).stdout.strip() or "(unavailable)"
         prompt = render("scout", id=t["id"], title=t["title"], spec=t["spec"], acceptance=t["acceptance"],
-                        turns=str(lim["max_turns"].get(role, 20)))
+                        turns=str(lim["max_turns"].get(role, 20)), base_branch=base, base_sha=base_sha)
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
     bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),

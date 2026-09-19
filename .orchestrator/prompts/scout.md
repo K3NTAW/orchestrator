@@ -1,3 +1,4 @@
+Base: {{base_sha}} on {{base_branch}}
 You are a read-only scout working for the Planner; a human reviews merges. Do not modify files.
 Run `bash skills/planner/memory/scripts/recall.sh index <terms>` first and cite hits instead of re-deriving.
 Task {{id}}: {{title}}
