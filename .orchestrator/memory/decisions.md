@@ -210,3 +210,8 @@ outcome: Phase F code-complete 2026-09-19 20:20; PR goal/T-0240 to main opened a
 type: decision · goal: T-0260 · tasks: T-0326,T-0331,T-0336 · provenance: repo
 - plan.md rewritten at 23:02 with the corrected task map (G3 held, not merged; G2b, G11, G4 chains marked merged; T-0326 result posted by hand); two gotchas appended
 outcome: revert path: git revert 7297936 (touches only .orchestrator/plan.md and .orchestrator/memory/gotchas.md)
+
+## 2026-09-19 Planner checkpoint commit d12ae2c: plan.md task map at 23:20 and two gotchas
+type: decision · goal: T-0260 · tasks: T-0337,T-0331,T-0332 · provenance: repo
+- G7 v4 and G10 merged; fix rounds T-0341 (G5) and T-0344 (G3) written; review T-0332 re-spawned by hand
+outcome: revert path: git revert d12ae2c (plan.md and gotchas.md only)
