@@ -701,6 +701,36 @@ class Daemon(unittest.TestCase):
         daemon.gate(pool)
         return repo, tid, pool
 
+    def test_semantic_pattern_diff_failure_fails_closed(self):
+        git_in = daemon._git_in
+        failed_calls = []
+        name_only_results = []
+
+        def git_with_failed_unified_diff(worktree, *args):
+            if args[:3] == ("diff", "--no-renames", "--unified=0"):
+                failed_calls.append(args)
+                return subprocess.CompletedProcess(args, 1, "", "unified diff failed")
+            result = git_in(worktree, *args)
+            if "--name-only" in args:
+                name_only_results.append(result)
+            return result
+
+        self.swap(daemon, "_git_in", git_with_failed_unified_diff)
+        _, tid, _ = self.reviewed_change("src/app.py", "token = 'example'\n")
+        self.assertEqual(len(failed_calls), 1)
+        self.assertTrue(name_only_results)
+        self.assertTrue(all(result.returncode == 0 for result in name_only_results))
+        self.assertIn("src/app.py", name_only_results[-1].stdout)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertEqual(pipeline["review_reason"], "diff_unavailable")
+        self.assertEqual(pipeline["reviews_expected"], 1)
+        review, = bus.read(role="review")
+        self.assertEqual(review["inputs"], [tid])
+        self.assertEqual(review["tier"], daemon.SECURITY_REVIEW_TIER)
+        self.assertGreaterEqual(review["complexity"], daemon.SECURITY_CHECKLIST_COMPLEXITY)
+        self.assertEqual(self.workers, [review["id"]])
+        self.assertEqual(self.merged, [])
+
     def test_semantic_path_triggers_review(self):
         _, tid, pool = self.reviewed_change("docker/service.conf", "workers = 2\n")
         daemon.gate(pool)

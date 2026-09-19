@@ -10,6 +10,42 @@ from orchestrator import STATE, bus, merge, spawn
 
 
 class MergeQueue(unittest.TestCase):
+    def test_diff_hash_failure_blocks_merge(self):
+        for option in ("--stat", "--binary"):
+            for phase in ("before", "after"):
+                with self.subTest(option=option, phase=phase), \
+                        tempfile.TemporaryDirectory(prefix="orch-diff-failure-") as directory:
+                    repo = Path(directory)
+                    scratch_repo(repo)
+                    state = repo / ".orchestrator"
+                    state.mkdir(exist_ok=True)
+                    calls = []
+                    failed_calls = []
+
+                    def git(*args, **kwargs):
+                        calls.append(args)
+                        rebased = ("rebase", "goal/reviewed") in calls
+                        if args[:2] == ("diff", option) and rebased == (phase == "after"):
+                            failed_calls.append(args)
+                            return subprocess.CompletedProcess(args, 1, "", "git diff failed")
+                        return subprocess.CompletedProcess(args, 0, "unchanged", "")
+
+                    with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
+                            patch.multiple(merge, ROOT=repo, git=git):
+                        task = bus.create_task("diff failure", "s", ["a"], ["feature.py"], role="execute")
+                        bus.update(task["id"], worktree=str(repo), pipeline={"reviewed_sha": "reviewed"})
+                        with patch.object(merge.subprocess, "run") as gate:
+                            result = merge.merge(task["id"], target="goal/reviewed", refresh_repomap=False)
+                        self.assertEqual(len(failed_calls), 1)
+                        self.assertEqual(result["status"], "failed", result)
+                        self.assertIn("git diff", result["reason"])
+                        self.assertIn(option, result["reason"])
+                        self.assertIn(phase, result["reason"])
+                        self.assertEqual(bus.get(task["id"])["status"], "failed")
+                        self.assertFalse(bus.get(task["id"]).get("merged_into"))
+                        self.assertFalse(any(call[0] in ("merge", "update-ref") for call in calls))
+                        gate.assert_not_called()
+
     def reviewed_rebase(self, changed):
         """Real local rebase: an upstream duplicate drops a reviewed hunk; an unrelated commit does not."""
         with tempfile.TemporaryDirectory(prefix="orch-reviewed-rebase-") as directory:
