@@ -311,7 +311,11 @@ class Handover(unittest.TestCase):
                     self.assertIn(f"{event['task']} {event['kind']} {json.dumps(event['data'])[:80]}", section)
                 self.assertIn(handover.RESUME_SENTENCE, section)
                 self.assertEqual(rank.call_count, 2)  # task groups and the events tail
-                self.assertEqual(len(stderr.getvalue().splitlines()), rank.call_count)
+                lines = stderr.getvalue().splitlines()
+                expected_handover = rank.call_count if target.endswith(".rank") else 0
+                self.assertEqual(sum(line.startswith("handover:") for line in lines), expected_handover)
+                if target.endswith(".ask"):
+                    self.assertEqual(sum(line.startswith("jev_rank:") for line in lines), rank.call_count)
 
     def test_rank_not_called_under_lock(self):
         """write() must release the bus lock before placing any jev_rank/jev.ask request: a fake ask() probes

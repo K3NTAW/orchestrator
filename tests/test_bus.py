@@ -1,5 +1,5 @@
 """Bus rules: acceptance is required, immutable fields, oversize results rejected, events, id sequencing."""
-import json, sys, unittest
+import gc, json, sys, unittest, warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_bus.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401  (TMP/ORCH_ROOT must exist before the orchestrator import below)
@@ -7,6 +7,20 @@ from orchestrator import bus
 
 
 class Bus(unittest.TestCase):
+    def test_db_leaves_no_unclosed_connection(self):
+        gc.collect()
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always", ResourceWarning)
+            for i in range(3):
+                task = bus.create_task(f"Connection lifetime {i}", "spec", ["ok"], ["src/**"])
+                bus.update(task["id"], status="running")
+                bus.post_result(task["id"], {"summary": "ok"})
+            bus.read()
+            bus.events()
+            gc.collect()
+        self.assertEqual([str(w.message) for w in recorded
+                          if issubclass(w.category, ResourceWarning) and "sqlite3.Connection" in str(w.message)], [])
+
     def test_lifecycle_and_rules(self):
         with self.assertRaises(ValueError):
             bus.create_task("x", "spec", [], ["src/**"])            # no acceptance
