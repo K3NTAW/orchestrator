@@ -45,6 +45,18 @@ class Cli(unittest.TestCase):
             cli.main()
         json.loads(out.getvalue())  # valid JSON
 
+    def test_planner_runs_summary_prints_on_empty_ledger(self):
+        from orchestrator import planner_runs as PR
+        PR._runs_path().unlink(missing_ok=True)
+        sys.argv = ["orchestrator", "planner-runs", "--summary"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        line = out.getvalue().strip()
+        self.assertIn("decisions=0", line)
+        self.assertIn("jev_scored=0", line)
+        self.assertIn("agreement_rate=None", line)
+
     def test_cost_ignores_jev_lines(self):
         bus.RUNS.mkdir(parents=True, exist_ok=True)
         marker = f"cli-cost-jev-{time.time()}"

@@ -14,12 +14,29 @@ row reconcile() aged out because the process never got as far as recording "runn
 it does not block, but counts toward the same attempts/gave_up-at-2 rule.
 """
 import json, os, re, sys, tempfile, time
-from . import ROOT, STATE, bus, goals, handover, spawn
+from . import ROOT, STATE, bus, goals, handover, jev, spawn
 from .pool import Pool
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 _STALE_CLAIM_S = 120
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]+$")
+_JEV_TIMEOUT_S = 3.0
+
+# next_action options offered to Jev for a decision-point shadow triage (D3, T-0217). scouts_done gets its own
+# set (there is no held task/review to react to yet); held and closable share the fix_round/respec/escalate/noop
+# set, matching what an interactive decision Planner actually does with a held execute task (CLAUDE.md's "Never"
+# section: write a fix-round spec, never edit the held task).
+_SCOUTS_DONE_OPTIONS = {
+    "synthesize_now": "enough scouts have reported to synthesize the plan now",
+    "wait_for_more": "wait for more scouts to finish before synthesizing",
+    "drop_low_confidence": "drop the low-confidence scout findings and synthesize with what's left",
+}
+_NEXT_ACTION_OPTIONS = {
+    "fix_round": "write a fix-round task from the review comments",
+    "respec": "the spec itself is wrong; recreate the task",
+    "escalate": "a human must decide: auth, billing, data deletion, or three failed rounds",
+    "noop": "the hold is stale or already superseded; nothing to do",
+}
 
 
 def _runs_path():
@@ -199,9 +216,11 @@ def _record_skip(goal_id, kind, payload_key, reason):
         _save_records(records)
 
 
-def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts):
+def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts, jev_result=None):
     """Update the key's existing record in place on a retry (preserving attempts, set by reconcile()) rather
-    than appending a second one -- one record per key is what lets reconcile() track attempts across retries."""
+    than appending a second one -- one record per key is what lets reconcile() track attempts across retries.
+    jev_result (from jev_triage(), shadow mode only) is stored as-is -- {choice, probabilities, confidence,
+    latency_ms} or None -- and never influences anything else recorded here."""
     with bus.locked():
         records = _load_records()
         r = _find_record(records, goal_id, kind, payload_key)
@@ -209,7 +228,7 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts):
             r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
             records.append(r)
         r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
-                 account=acct_id, log=launched["log"], status="running")
+                 account=acct_id, log=launched["log"], status="running", jev=jev_result)
         _save_records(records)
 
 
@@ -232,6 +251,92 @@ def _record_failed_launch(goal_id, kind, payload_key, attempts, error):
     return status, new_attempts
 
 
+def _decision_task(goal_id, kind, payload_key):
+    """The task the decision is actually about: the held execute task itself for "held" (its id is the part of
+    payload_key before the first ":"), the goal (triage) task for "scouts_done"/"closable". None if it has since
+    been purged -- callers must treat that the same as Jev being unavailable, never raise."""
+    task_id = payload_key.split(":", 1)[0] if kind == "held" else goal_id
+    try:
+        return bus.get(task_id)
+    except KeyError:
+        return None
+
+
+def _review_comments_for(task_id, limit=10):
+    """Up to `limit` "path:line severity issue[:200]" lines from the most recent review(s) of task_id, newest
+    first -- the same {"comments": [{"path","line","issue","severity"}]} shape review.md's prompt asks reviewers
+    to return (bus_post_result's result.comments), read here as data, never rendered into any prompt."""
+    reviews = [r for r in bus.read(role="review") if (r.get("inputs") or [])[:1] == [task_id]]
+    reviews.sort(key=lambda r: (r.get("events") or [{}])[-1].get("ts", 0), reverse=True)
+    out = []
+    for r in reviews:
+        for c in ((r.get("result") or {}).get("comments") or []):
+            out.append(f"{c.get('path', '?')}:{c.get('line', '?')} {c.get('severity', '?')} "
+                       f"{str(c.get('issue', ''))[:200]}")
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _depends_on_statuses(task):
+    statuses = {}
+    for dep_id in task.get("depends_on") or []:
+        try:
+            statuses[dep_id] = bus.get(dep_id)["status"]
+        except KeyError:
+            statuses[dep_id] = None
+    return statuses
+
+
+def _jev_state(kind, task, attempts):
+    return {
+        "kind": kind,
+        "task_title": task.get("title"),
+        "spec": (task.get("spec") or "")[:1500],
+        "hold_reason": task.get("hold_reason"),
+        "review_comments": _review_comments_for(task["id"]),
+        "depends_on": _depends_on_statuses(task),
+        "attempts": attempts,
+    }
+
+
+def jev_triage(kind, task, attempts=0):
+    """Ask Jev what it would decide for this decision point, purely to record for later agreement measurement
+    (E2/T-0214's typed-question client) -- shadow mode only, never consulted by run()/launch_planner, and its
+    result changes nothing about whether or how the real headless Planner launches. Returns
+    {choice, probabilities, confidence, latency_ms} or None -- fail-open the same way jev.ask() itself is
+    fail-open (disabled, no key, budget exhausted, timeout, bad response all return None, never raise), with an
+    explicit 3s cap (jev.ask's own pool.toml timeout may be longer/shorter) so a slow Jev endpoint can never be
+    on the critical path to a real launch."""
+    if task is None:
+        return None
+    state = _jev_state(kind, task, attempts)
+    options = _SCOUTS_DONE_OPTIONS if kind == "scouts_done" else _NEXT_ACTION_OPTIONS
+    started = time.monotonic()
+    result = jev.ask(state, {"next_action": {"type": "choice",
+                     "instructions": "Given this decision-point state, what should the Planner do next?",
+                     "criteria": options}}, timeout_s=_JEV_TIMEOUT_S)
+    latency_ms = (time.monotonic() - started) * 1000
+    if result is None:
+        return None
+    try:
+        a = result["answers"]["next_action"]
+        return {"choice": a["choice"], "probabilities": a["probabilities"], "confidence": a["confidence"],
+                "latency_ms": latency_ms}
+    except (KeyError, TypeError):
+        return None
+
+
+def _safe_jev_triage(goal_id, kind, payload_key, attempts):
+    """jev_triage should never raise (jev.ask() is documented fail-open) -- this is defense in depth, the same
+    posture run() already takes around launch_planner itself, so a bug in state-building can never turn into a
+    launch failure for what is meant to be a pure side channel."""
+    try:
+        return jev_triage(kind, _decision_task(goal_id, kind, payload_key), attempts)
+    except Exception:
+        return None
+
+
 def run(goal_id, kind, payload_key):
     """Launch a headless Planner for one decision, guarded against attaching alongside an interactive session or
     a saturated pool. The already-decided check and the claim that follows it run inside one bus.locked() block
@@ -249,6 +354,8 @@ def run(goal_id, kind, payload_key):
             return {"launched": False, "reason": "already decided"}
         attempts = _existing_attempts(goal_id, kind, payload_key)
         _claim(goal_id, kind, payload_key, attempts)
+
+    jev_result = _safe_jev_triage(goal_id, kind, payload_key, attempts)
 
     try:
         if _session_attached():
@@ -285,7 +392,7 @@ def run(goal_id, kind, payload_key):
                           f"attempts (last: launch failed)")
         return {"launched": False, "reason": "failed_launch", "error": str(e)[:300]}
 
-    _record_running(goal_id, kind, payload_key, launched, acct.id, attempts)
+    _record_running(goal_id, kind, payload_key, launched, acct.id, attempts, jev_result)
     return {"launched": True, "pid": launched["pid"], "log": launched["log"]}
 
 
@@ -336,6 +443,41 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
     return True
 
 
+def _observed_outcome(r, tasks_by_id):
+    """Map a finished "held"/"closable" decision back to one of the four next_action choices Jev was offered
+    (_NEXT_ACTION_OPTIONS), purely so reconcile() can score jev_triage()'s shadow choice against what actually
+    happened -- this has no effect on run()/decision_points()/_condition_resolved. fix_round/respec key off the
+    same depends_on/fix_round_for convention _condition_resolved already uses for "a new task exists to handle
+    this", plus a parallel constraints.respec_for for a Planner that decided the spec itself was wrong and
+    recreated the task without tying the new one to the old. escalate is the held/goal task itself ending up
+    status "failed" (bus_post_result status="failed" is the one MCP-reachable, unambiguous way a decision
+    Planner can say "a human must decide"). noop is "nothing changed, but the Planner did look" (any bus event
+    after started_at, same signal _condition_resolved's held branch already treats as a legitimate conclusion).
+    None means genuinely unresolved -- scouts_done (no such mapping exists for it) or nothing observable yet."""
+    kind, goal_id, payload_key = r["kind"], r["goal_id"], r["payload_key"]
+    if kind not in ("held", "closable"):
+        return None
+    task_id = payload_key.split(":", 1)[0] if kind == "held" else goal_id
+    started_at = r.get("started_at", 0)
+    for other in tasks_by_id.values():
+        if other["id"] == task_id:
+            continue
+        fts = _first_event_ts(other["id"])
+        if fts is None or fts <= started_at:
+            continue
+        constraints = other.get("constraints") or {}
+        if task_id in (other.get("depends_on") or []) or constraints.get("fix_round_for") == task_id:
+            return "fix_round"
+        if constraints.get("respec_for") == task_id:
+            return "respec"
+    t = tasks_by_id.get(task_id)
+    if t is not None and t["status"] == "failed":
+        return "escalate"
+    if _bus_event_after(started_at, task_id, goal_id):
+        return "noop"
+    return None
+
+
 def reconcile():
     """For each running record whose process is gone: exited_ok if the decision's own condition already resolved
     (someone else, or a prior attempt, finished it), else exited_early with attempts += 1 -- gave_up (and one
@@ -343,8 +485,12 @@ def reconcile():
     process was killed, between _claim() and _record_running()) older than _STALE_CLAIM_S: without this, a claim
     whose process never got far enough to record "running" would block re-decision forever, since "claimed" is
     itself a blocking status. Aged-out claims go to failed_launch/gave_up via the same attempts-based rule as a
-    failed launch (T-0198 review item 1). Call at the start of the autonomous block every tick, before
-    decision_points()."""
+    failed launch (T-0198 review item 1). Also the one place agreement gets scored (T-0217 D3): the instant a
+    running record's process is found gone, _observed_outcome() maps what actually happened back to a
+    next_action choice and compares it against the row's own jev.choice (from jev_triage(), shadow mode only) --
+    True/False if both a jev choice and an outcome exist, else None. Scored once, here, never revisited: once a
+    record leaves "running" it is never seen by this branch again. Call at the start of the autonomous block
+    every tick, before decision_points()."""
     all_tasks = bus.read()
     tasks_by_id = {t["id"]: t for t in all_tasks}
     children_by_parent = {}
@@ -376,6 +522,8 @@ def reconcile():
             if goals.identity_of(r.get("pid"), r.get("pid_start")):
                 continue
             changed = True
+            outcome = _observed_outcome(r, tasks_by_id)
+            r["agreement"] = (outcome == r["jev"]["choice"]) if (outcome is not None and r.get("jev")) else None
             if _condition_resolved(r, tasks_by_id, children_by_parent):
                 r["status"] = "exited_ok"
                 continue
@@ -393,3 +541,21 @@ def reconcile():
         for r in gave_up:
             daemon.notify(f"{r['goal_id']}: planner decision {r['kind']} ({r['payload_key']}) "
                           f"gave up after {r['attempts']} attempts")
+
+
+def summary():
+    """{decisions, jev_scored, agreement_rate, mean_confidence} over the whole ledger, printed by
+    `orchestrator planner-runs --summary` (D3, T-0217). decisions is every row ever written; jev_scored counts
+    rows that got a Jev shadow choice (row["jev"] is not None); agreement_rate is the fraction of rows with a
+    computed agreement (True/False, set once by reconcile()) that agreed, or None with zero such rows;
+    mean_confidence averages jev.confidence over the jev_scored rows, or None with zero. An empty ledger returns
+    all-zero/None rather than raising, since the CLI must print cleanly with no decisions recorded yet."""
+    records = _load_records()
+    jev_rows = [r for r in records if r.get("jev")]
+    agreements = [r["agreement"] for r in records if r.get("agreement") is not None]
+    return {
+        "decisions": len(records),
+        "jev_scored": len(jev_rows),
+        "agreement_rate": (sum(1 for a in agreements if a) / len(agreements)) if agreements else None,
+        "mean_confidence": (sum(r["jev"]["confidence"] for r in jev_rows) / len(jev_rows)) if jev_rows else None,
+    }

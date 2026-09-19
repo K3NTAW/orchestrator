@@ -1,4 +1,4 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ... | planner-runs --summary"""
 import argparse, json, os, sys
 from collections import defaultdict
 from . import bus, scorecard
@@ -46,6 +46,7 @@ def main():
     sc = sub.add_parser("scorecard")
     sc.add_argument("--by", default="executor", choices=["executor", "tier", "task", "goal"])
     sc.add_argument("--json", action="store_true")
+    pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
     g = sub.add_parser("goal"); gsub = g.add_subparsers(dest="goal_cmd", required=True)
     gs = gsub.add_parser("start"); gs.add_argument("repo"); gs.add_argument("text")
     gs.add_argument("--account", default="A"); gs.add_argument("--reinstall", action="store_true")
@@ -168,6 +169,12 @@ def main():
                     total_usd += r["total_usd"]
                 print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-")
                 print(scorecard.planner_footer())
+    elif a.cmd == "planner-runs":
+        from . import planner_runs
+        if a.summary:
+            s = planner_runs.summary()
+            print(f"decisions={s['decisions']}\tjev_scored={s['jev_scored']}\t"
+                  f"agreement_rate={s['agreement_rate']}\tmean_confidence={s['mean_confidence']}")
     elif a.cmd == "bench":
         from . import bench
         if a.bench_cmd == "fetch":
