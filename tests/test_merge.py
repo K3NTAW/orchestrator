@@ -137,7 +137,7 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(result["status"], "merged", result)
         self.assertEqual(result["repomap_error"], "refresh exploded")
 
-    def test_merge_gate_runs_even_with_marker_env(self):
+    def test_merge_gate_runs(self):
         scratch_repo(TMP)
         self._ensure_ci_fixture()
         task = bus.create_task("gate", "s", ["a"], ["gate.py"], role="execute")
@@ -150,8 +150,7 @@ class MergeQueue(unittest.TestCase):
             if args[0][:1] == [str(merge.TESTS_GREEN)]:
                 return completed
             return real_run(*args, **kwargs)
-        with patch.dict("orchestrator.merge.os.environ", {merge.IN_TESTS_GREEN: "1"}), \
-             patch("orchestrator.merge.subprocess.run", side_effect=run_gate_only) as gated:
+        with patch("orchestrator.merge.subprocess.run", side_effect=run_gate_only) as gated:
             result = merge.merge(task["id"], target="goal/gate")
         self.assertEqual(result["status"], "merged", result)
         gate_calls = [call for call in gated.call_args_list

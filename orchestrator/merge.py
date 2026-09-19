@@ -1,12 +1,11 @@
 """Serial merge queue: one at a time, rebase onto target -> tests-green -> fast-forward the target branch.
 Target defaults to goal/<parent> (or 'integration'); main only ever moves via a human-approved PR."""
-import fcntl, os, subprocess, sys
+import fcntl, subprocess, sys
 from . import ROOT, bus, scorecard
 from .repomap import build
 from .spawn import git
 
 TESTS_GREEN = ROOT / ".claude" / "hooks" / "tests-green.sh"
-IN_TESTS_GREEN = "ORCH_TESTS_GREEN"
 
 
 def _can_refresh_repomap(root, refresh_repomap):
@@ -30,9 +29,8 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             git("rebase", "--abort", cwd=wt, check=False)
             bus.update(task_id, status="failed", reason="rebase_conflict", resume_hint={"conflicts": conflicts, "hunks": hunks})
             return {"status": "conflict", "files": conflicts, "hunks": hunks}
-        gate_env = {**os.environ, IN_TESTS_GREEN: "1"}
         tg = subprocess.run([str(TESTS_GREEN), wt], cwd=wt, capture_output=True,
-                            text=True, input="{}", env=gate_env)
+                            text=True, input="{}")
         if tg.returncode:
             bus.update(task_id, status="failed", reason="tests_red", resume_hint={"failures": tg.stderr[-4000:]})
             return {"status": "tests_red", "failures": tg.stderr[-4000:]}

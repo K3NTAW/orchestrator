@@ -1,12 +1,19 @@
+import sys
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _harness import TMP
+import orchestrator
 from orchestrator.repomap import build
 
 
 class RepoMapTest(unittest.TestCase):
+    def test_root_is_sandbox(self):
+        self.assertTrue(orchestrator.ROOT.is_relative_to(TMP))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
