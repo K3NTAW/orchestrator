@@ -652,7 +652,15 @@ def _merge_reviewed_one(t):
         # reviews attempts the merge exactly once no matter which review finishes last
         if stamp(t["id"], "merged_at"):
             try:
-                report_merge(t["id"], merge.merge(t["id"]))
+                result = report_merge(t["id"], merge.merge(t["id"]))
+                if result.get("status") != "merged":
+                    with bus.locked():
+                        current = bus.get(t["id"])
+                        pipeline = dict(current.get("pipeline") or {})
+                        if result.get("status") == "tests_red":
+                            pipeline.pop("merged_at", None)
+                        bus.update(t["id"], status="held",
+                                   hold_reason=f"merge {result.get('status')}", pipeline=pipeline)
             except Exception as e:
                 hold_failed(t["id"], "merged_error", "merge", e)
         return

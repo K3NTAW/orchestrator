@@ -688,6 +688,52 @@ class Daemon(unittest.TestCase):
         self.assertTrue(bus.get(ok)["pipeline"].get("merged_at"))
         self.assertFalse((bus.get(r_ok).get("pipeline") or {}).get("merged_at"))
 
+    def test_merge_tests_red_holds_task(self):
+        t = self.gated_execute("merge tests red")
+        review = self.task("review merge tests red", complexity=5, role="review", inputs=[t])
+        bus.update(review, status="done", review_verdict="approve")
+
+        def tests_red(tid, target=None):
+            bus.update(tid, status="failed", reason="rebased suite red",
+                       resume_hint={"failures": "flaky thread test"})
+            return {"status": "tests_red", "reason": "rebased suite red"}
+
+        self.swap(merge, "merge", tests_red)
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "merge tests_red"))
+        self.assertEqual(held["reason"], "rebased suite red")
+        self.assertEqual(held["resume_hint"], {"failures": "flaky thread test"})
+        self.assertNotIn("merged_at", held["pipeline"])
+
+    def test_merge_conflict_holds_and_keeps_merged_at(self):
+        t = self.gated_execute("merge conflict")
+        review = self.task("review merge conflict", complexity=5, role="review", inputs=[t])
+        bus.update(review, status="done", review_verdict="approve")
+
+        def conflict(tid, target=None):
+            bus.update(tid, status="failed", reason="merge conflict",
+                       resume_hint={"files": ["orchestrator/daemon.py"]})
+            return {"status": "conflict", "reason": "merge conflict"}
+
+        self.swap(merge, "merge", conflict)
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "merge conflict"))
+        self.assertEqual(held["reason"], "merge conflict")
+        self.assertEqual(held["resume_hint"], {"files": ["orchestrator/daemon.py"]})
+        self.assertTrue(held["pipeline"].get("merged_at"))
+
+    def test_merge_ok_unchanged(self):
+        t = self.gated_execute("merge ok")
+        review = self.task("review merge ok", complexity=5, role="review", inputs=[t])
+        bus.update(review, status="done", review_verdict="approve")
+        daemon.tick()
+        merged = bus.get(t)
+        self.assertEqual(merged["status"], "done")
+        self.assertNotIn("hold_reason", merged)
+        self.assertTrue(merged["pipeline"].get("merged_at"))
+
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")
         r_ok = self.task("review ok", complexity=5, role="review", inputs=[ok])
