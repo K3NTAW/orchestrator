@@ -273,6 +273,38 @@ class RunRecordHasTurns(unittest.TestCase):
         self.assertEqual(json.loads(last_line)["turns"], 7)
 
 
+class RunClaudeNormalisedUsage(unittest.TestCase):
+    class UsagePopen(FakePopen):
+        def communicate(self, timeout=None):
+            return json.dumps({"result": "ok", "usage": {"input_tokens": 10,
+                               "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2,
+                               "output_tokens": 5, "reasoning_tokens": 4}}), ""
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = self.UsagePopen
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_run_row_has_normalised_tokens(self):
+        goal = bus.create_task("usage-goal", "s", ["a"], ["x.py"])
+        task = bus.create_task("usage-task", "s", ["a"], ["x.py"], role="execute", parent=goal["id"])
+        task["worktree"] = str(TMP)
+        account = P.Account("A", "~/.claude-a", ["execute"])
+        result = spawn.run_claude(P.Pool(), account, task, "prompt", "claude-sonnet-5",
+                                  spawn.TOOLS["execute"], 2.0, 60)
+        self.assertEqual(result["status"], "done")
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(row["goal_id"], goal["id"])
+        self.assertEqual(row["provider"], "claude")
+        self.assertEqual({key: row[key] for key in ("input_uncached_tokens", "cache_read_tokens",
+                         "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens")},
+                         {"input_uncached_tokens": 10, "cache_read_tokens": 3, "cache_write_tokens": 2,
+                          "output_tokens": 5, "reasoning_tokens": 4, "total_tokens": 20})
+
+
 class RunWorkerMissingReason(unittest.TestCase):
     """T-0134: run_worker must not KeyError when run_claude returns a failure dict without a "reason" key, and
     should preserve any partial output as a resume_hint for the next attempt."""

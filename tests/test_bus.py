@@ -27,6 +27,23 @@ class Bus(unittest.TestCase):
         self.assertEqual(row["goal_id"], goal["id"])
         self.assertEqual(row["provider"], "codex")
 
+    def test_log_run_missing_task_still_appends(self):
+        bus.log_run(task="T-9999", account="codex")
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertIsNone(row["goal_id"])
+        self.assertEqual(row["provider"], "codex")
+
+    def test_log_run_corrupt_task_still_appends(self):
+        task = bus.create_task("Corrupt", "spec", ["ok"], ["src/**"])
+        task_path = bus.TASKS / f"{task['id']}.json"
+        original = task_path.read_text()
+        self.addCleanup(task_path.write_text, original)
+        task_path.write_text("{")
+        bus.log_run(task=task["id"], account="claude:A")
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertIsNone(row["goal_id"])
+        self.assertEqual(row["provider"], "claude")
+
     def test_db_leaves_no_unclosed_connection(self):
         gc.collect()
         with warnings.catch_warnings(record=True) as recorded:

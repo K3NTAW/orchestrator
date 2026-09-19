@@ -158,6 +158,12 @@ class Executor(unittest.TestCase):
         self.assertEqual((line["task"], line["complexity"], line["outcome"]), (tid, 4, "done"))
         self.assertIn(line["executor"], self.LIVE); self.assertEqual(line["tier"], line["executor"])
         self.assertEqual((line["cache_read_input_tokens"], line["cached_input_tokens"]), (7, 7))  # normalized + legacy key
+        self.assertEqual(line["goal_id"], tid)
+        self.assertEqual(line["provider"], "codex")
+        self.assertEqual({key: line[key] for key in ("input_uncached_tokens", "cache_read_tokens",
+                         "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens")},
+                         {"input_uncached_tokens": 0, "cache_read_tokens": 7, "cache_write_tokens": 0,
+                          "output_tokens": 1, "reasoning_tokens": 0, "total_tokens": 8})
 
 
 if __name__ == "__main__":

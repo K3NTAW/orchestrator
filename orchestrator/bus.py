@@ -234,8 +234,11 @@ def log_run(**fields):
     outcome. Callers normalize cached tokens to cache_read_input_tokens so cli.cost sums one key across providers."""
     task_id = fields.get("task")
     if task_id:
-        task = get(task_id)
-        fields.setdefault("goal_id", task.get("parent") or task_id)
+        try:
+            task = get(task_id)
+            fields.setdefault("goal_id", task.get("parent") or task_id)
+        except Exception:
+            fields.setdefault("goal_id", None)
         fields.setdefault("provider", "codex" if fields.get("account") == "codex" else "claude")
     RUNS.mkdir(exist_ok=True)
     with open(RUNS / f"{date.today().isoformat()}.jsonl", "a") as f:
