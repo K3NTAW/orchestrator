@@ -127,6 +127,24 @@ class DecisionPoints(PlannerRunsBase):
         self.assertNotEqual(key1, key2)
         self.assertIn((goal_id, "held", key2), list(PR.decision_points()))
 
+    def test_held_at_uses_newest_held_event(self):
+        """daemon.stamp's `if pipeline.get(stage): return False` guard means review_held_at/spec_review_held_at
+        are never refreshed on a second hold of the same task -- _held_at must prefer the event log's own
+        status=held entries (refreshed on every hold) over those stale pipeline stamps."""
+        goal_id = self.goal()
+        tid = self.execute_child(goal_id)
+        bus.update(tid, status="held", hold_reason="gate_red", pipeline={"review_held_at": 100.0})
+        held_at = PR._held_at(bus.get(tid))
+        self.assertGreater(held_at, 100.0)  # the real held event wins over the stale pipeline stamp
+        key1 = PR._held_key(bus.get(tid))
+
+        time.sleep(0.01)
+        bus.update(tid, status="queued")
+        # Simulate daemon.stamp refusing to re-stamp: pipeline.review_held_at stays 100.0 across this second hold.
+        bus.update(tid, status="held", hold_reason="gate_red again", pipeline={"review_held_at": 100.0})
+        key2 = PR._held_key(bus.get(tid))
+        self.assertNotEqual(key1, key2)  # a fresh held event still produces a fresh decision key
+
 
 class RunGuards(PlannerRunsBase):
     def test_run_skips_when_daemon_host_is_mcp(self):
@@ -287,6 +305,25 @@ class FailedLaunch(PlannerRunsBase):
         self.assertEqual(rec2["attempts"], 2)
         self.assertNotIn((goal_id, "scouts_done", goal_id), list(PR.decision_points()))
 
+    def test_keyboard_interrupt_releases_claim_and_reraises(self):
+        """KeyboardInterrupt/SystemExit are not ordinary launch failures -- run() must still release the claim
+        (failed_launch, attempts += 1) so the key isn't stuck "claimed" forever, but must re-raise afterward so
+        Ctrl-C actually stops `orchestrator daemon --once` instead of being swallowed."""
+        goal_id = self.goal()
+        self.scout_child(goal_id, "done")
+
+        def boom(*a, **k):
+            raise KeyboardInterrupt()
+        self.patch_launch_planner(boom)
+
+        with self.assertRaises(KeyboardInterrupt):
+            PR.run(goal_id, "scouts_done", goal_id)
+
+        rec = self.record(goal_id, "scouts_done", goal_id)
+        self.assertEqual(rec["status"], "failed_launch")
+        self.assertEqual(rec["attempts"], 1)
+        self.assertIn((goal_id, "scouts_done", goal_id), list(PR.decision_points()))  # not blocked
+
     def test_reconcile_ages_out_stale_claimed_row(self):
         goal_id = self.goal()
         self.scout_child(goal_id, "done")
@@ -371,6 +408,17 @@ class SessionAttachedPidValidation(PlannerRunsBase):
                     {}, {"pid": 12.5, "pid_start": None}):
             session_path.write_text(json.dumps(bad))
             self.assertFalse(PR._session_attached(), bad)  # never raises, even though goals.identity_of is untouched
+
+    def test_session_file_non_dict_is_not_attached(self):
+        """A body that parses as valid JSON but isn't a dict (list, null, string) must not raise from .get() --
+        the guard fails closed to "not attached" the same as a missing/non-int pid, and run() must not count it
+        as a failed launch (it never reaches the try/except at all)."""
+        session_path = PR.STATE / "planner_session.json"
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+
+        for bad in ([1, 2, 3], None, "a string", 42):
+            session_path.write_text(json.dumps(bad))
+            self.assertFalse(PR._session_attached(), bad)
 
 
 class Reconcile(PlannerRunsBase):
@@ -469,6 +517,25 @@ class Reconcile(PlannerRunsBase):
         rec = self.record(goal_id, "held", key)
         self.assertEqual(rec["status"], "exited_early")
         self.assertEqual(rec["attempts"], 1)
+
+    def test_bus_event_after_launch_resolves_held(self):
+        """A Planner that looks at a held task and legitimately concludes no fix round is needed may not write a
+        new task at all -- but it still posts something to the bus (a result, a status refresh) on the held task
+        or its goal. That event, if it lands after the decision run's launch timestamp, must resolve the record
+        to exited_ok rather than exited_early/gave_up, even though the task is still sitting in status held."""
+        goal_id = self.goal()
+        tid = self.execute_child(goal_id)
+        bus.update(tid, status="held", hold_reason="gate_red")
+        key = PR._held_key(bus.get(tid))
+        PR._record_running(goal_id, "held", key, {"pid": 900, "pid_start": None, "log": "x"}, "A", 0)
+
+        time.sleep(0.01)
+        bus.update(tid, hold_reason="still gate_red, no fix round needed")  # status unchanged, still "held"
+
+        self.patch_identity_of(lambda pid, pid_start: False)
+        PR.reconcile()
+        rec = self.record(goal_id, "held", key)
+        self.assertEqual(rec["status"], "exited_ok")
 
 
 class LedgerIO(PlannerRunsBase):

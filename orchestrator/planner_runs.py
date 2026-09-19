@@ -73,16 +73,20 @@ def _blocked(goal_id, kind, payload_key, records=None):
 
 
 def _held_at(t):
-    """review_held_at or spec_review_held_at (stamped by daemon.merge_reviewed/dispatch) at full float precision;
-    falls back to the latest status=held entry in the task's own event log (e.g. gate_red, worktree missing --
-    holds that stamp pipeline.gated_at, not a *_held_at field of their own)."""
+    """The latest status=held entry in the task's own event log, at full float precision, preferred over
+    review_held_at/spec_review_held_at (stamped once by daemon.stamp and never refreshed on a later hold of the
+    same task -- daemon.stamp's `if pipeline.get(stage): return False` guard means a second hold leaves those
+    stamps stale). Falls back to the pipeline stamps only when the event log has no held entry at all (e.g.
+    gate_red, worktree missing -- holds that stamp pipeline.gated_at, not a *_held_at field of their own)."""
+    held_ts = [e["ts"] for e in t.get("events", []) if e.get("status") == "held"]
+    if held_ts:
+        return max(held_ts)
     pipeline = t.get("pipeline") or {}
     if pipeline.get("review_held_at"):
         return pipeline["review_held_at"]
     if pipeline.get("spec_review_held_at"):
         return pipeline["spec_review_held_at"]
-    held_ts = [e["ts"] for e in t.get("events", []) if e.get("status") == "held"]
-    return max(held_ts) if held_ts else None
+    return None
 
 
 def _held_key(t):
@@ -139,8 +143,9 @@ def decision_points():
 def _session_attached():
     """True while an interactive Planner is already running against this repo: either this process is itself
     the MCP server backing that session (ORCH_DAEMON_HOST=mcp, set by mcp.register_planner_session at server
-    start), or .orchestrator/planner_session.json names a still-live pid. A stale file (dead pid, or a reused
-    one per goals.identity_of) is ignored, not treated as attached."""
+    start), or .orchestrator/planner_session.json names a still-live pid. A stale file (dead pid, a reused one
+    per goals.identity_of, a body that isn't a dict, or a dict lacking an int pid) is ignored, not treated as
+    attached -- the guard fails closed to "not attached" without raising."""
     if os.environ.get("ORCH_DAEMON_HOST") == "mcp":
         return True
     path = STATE / "planner_session.json"
@@ -149,6 +154,8 @@ def _session_attached():
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
         return False
     pid = data.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
@@ -232,9 +239,11 @@ def run(goal_id, kind, payload_key):
     loses the race to the lock sees the winner's "claimed" record and returns "already decided" immediately --
     before either guard or launch_planner runs on either thread. Guard skips are recorded (status "skipped", no
     pid) but never block a later decision_points() or run() call for the same key. Everything from here to the
-    launch itself is wrapped in try/except BaseException (T-0198 review item 1): any failure -- a guard raising,
+    launch itself is wrapped in try/except Exception (T-0198 review item 1): any failure -- a guard raising,
     render() rejecting an unsafe key, launch_planner itself throwing -- flips the claimed row to "failed_launch"
-    instead of leaving it stuck "claimed" forever, and is never re-raised."""
+    instead of leaving it stuck "claimed" forever, and is never re-raised. KeyboardInterrupt/SystemExit are
+    caught separately: the claim is released the same way, but the signal is re-raised afterward so Ctrl-C
+    still stops `orchestrator daemon --once` instead of being swallowed as a launch failure."""
     with bus.locked():
         if _blocked(goal_id, kind, payload_key):
             return {"launched": False, "reason": "already decided"}
@@ -265,7 +274,10 @@ def run(goal_id, kind, payload_key):
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
         launched = goals.launch_planner(ROOT, prompt, acct.id, budget, log)
-    except BaseException as e:
+    except (KeyboardInterrupt, SystemExit) as e:
+        _record_failed_launch(goal_id, kind, payload_key, attempts, e)
+        raise
+    except Exception as e:
         status, new_attempts = _record_failed_launch(goal_id, kind, payload_key, attempts, e)
         if status == "gave_up":
             from . import daemon  # deferred: daemon imports this module at load time
@@ -283,6 +295,14 @@ def _first_event_ts(task_id):
     unrelated, pre-existing task that happens to share a depends_on/fix_round_for reference."""
     row = bus.db().execute("select ts from events where task_id=? order by seq limit 1", (task_id,)).fetchone()
     return row[0] if row else None
+
+
+def _bus_event_after(since, *task_ids):
+    """True if any bus event exists for one of task_ids with ts > since."""
+    placeholders = ",".join("?" for _ in task_ids)
+    row = bus.db().execute(f"select 1 from events where task_id in ({placeholders}) and ts>? limit 1",
+                           (*task_ids, since)).fetchone()
+    return row is not None
 
 
 def _condition_resolved(r, tasks_by_id, children_by_parent):
@@ -309,7 +329,10 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
                 fts = _first_event_ts(other["id"])
                 if fts is not None and fts > started_at:
                     return True
-        return False
+        # No fix-round task, but the decision Planner may still have legitimately concluded no fix round was
+        # needed -- any bus event it posted on the held task or its goal after launch (a result, a status
+        # change) counts as that conclusion, so reconcile() scores exited_ok rather than exited_early/gave_up.
+        return _bus_event_after(started_at, task_id, goal_id)
     return True
 
 
