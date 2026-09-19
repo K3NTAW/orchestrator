@@ -1,11 +1,20 @@
 """Serial merge queue: one at a time, rebase onto target -> tests-green -> fast-forward the target branch.
 Target defaults to goal/<parent> (or 'integration'); main only ever moves via a human-approved PR."""
-import fcntl, subprocess, sys
+import fcntl, hashlib, subprocess, sys
 from . import ROOT, bus, scorecard
 from .repomap import build
 from .spawn import git
 
 TESTS_GREEN = ROOT / ".claude" / "hooks" / "tests-green.sh"
+
+
+def _diff_hash(target, wt):
+    """Hash the patch (including its stat) relative to the common base, so a clean rebase preserves approval."""
+    stat = git("diff", "--stat", f"{target}...HEAD", cwd=wt, check=False)
+    content = git("diff", "--binary", f"{target}...HEAD", cwd=wt, check=False)
+    if stat.returncode or content.returncode:
+        return None
+    return hashlib.sha256((stat.stdout + "\0" + content.stdout).encode()).hexdigest()
 
 
 def _can_refresh_repomap(root, refresh_repomap):
@@ -22,6 +31,8 @@ def merge(task_id, target=None, *, refresh_repomap=True):
         if git("rev-parse", "--verify", target, check=False).returncode:
             base = "origin/main" if not git("rev-parse", "--verify", "origin/main", check=False).returncode else "HEAD"
             git("branch", target, base)
+        reviewed = (t.get("pipeline") or {}).get("reviewed_sha")
+        before_diff = _diff_hash(target, wt) if reviewed else None
         r = git("rebase", target, cwd=wt, check=False)
         if r.returncode:
             conflicts = git("diff", "--name-only", "--diff-filter=U", cwd=wt, check=False).stdout.split()
@@ -29,6 +40,9 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             git("rebase", "--abort", cwd=wt, check=False)
             bus.update(task_id, status="failed", reason="rebase_conflict", resume_hint={"conflicts": conflicts, "hunks": hunks})
             return {"status": "conflict", "files": conflicts, "hunks": hunks}
+        after_diff = _diff_hash(target, wt) if reviewed else None
+        if reviewed and before_diff is not None and after_diff is not None and before_diff != after_diff:
+            return {"status": "rebase_changed_diff"}
         tg = subprocess.run([str(TESTS_GREEN), wt], cwd=wt, capture_output=True,
                             text=True, input="{}")
         if tg.returncode:

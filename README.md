@@ -84,15 +84,17 @@ The default is zero scouts: the Planner greps for what it needs first. Warn abov
 State machine per execute task: `queued` → (depends_on merged, complexity ≥ `spec_review_min` → `spec_review` first,
 on `spec_review_tier`) → dispatched to an executor → `done` → gated (`tests-green.sh` passing is the merge bar).
 By default (`[review].code_review = "security_paths"`) a task merges straight through unless its merged diff
-touches a `security_paths` glob, or the daemon couldn't diff it at all (fails closed, `pipeline.review_reason`
-`diff_unavailable`, or `security_paths_empty` if the glob list itself is missing) — either way that's exactly one
-review, on `security_review_tier`, never the model that executed the task, with the security checklist always
-forced on. `code_review = "never"` drops review entirely; `code_review = "always"` is the pre-2026-09-19
+touches a `security_paths` glob, a `semantic_paths` glob, or an added diff line matches a named
+`semantic_patterns` regex. Security paths are evaluated first, then semantic paths and semantic patterns; any
+match requires exactly one review on `security_review_tier`, never the model that executed the task, with the
+security checklist always forced on. `code_review = "never"` drops review entirely; `code_review = "always"` is the pre-2026-09-19
 complexity-driven split (`direct_merge_max`/`two_reviews_from` thresholds), still available but not the default.
 An orphaned result (executor died, daemon re-gated its commit) gets exactly one review whatever `code_review`
 says. `pipeline.review_reason` on the gated task records which branch fired (`none`, `security_paths:<glob>`,
-`security_paths_empty`, `diff_unavailable`, `orphaned`, or `always`) so a later change to `[review]` can't move the
-goalposts on a task already past this stage. A task with one review merges on its first `approve`; a task with two
+`semantic_path:<glob>`, `semantic_pattern:<name>`, `security_paths_empty`, `diff_unavailable`, `orphaned`, or
+`always`) so a later change to `[review]` can't move the goalposts on a task already past this stage. Approval is
+bound to the task branch head in `reviewed_sha`; if that head moves, the approval is void and the daemon opens a
+fresh review. A task with one review merges on its first `approve`; a task with two
 (only possible under `code_review = "always"`) merges once every review has approved, and any single
 `request_changes` holds it for the Planner to re-spec regardless of what the other review said. Policy and the
 cost measurement that motivated dropping code review by default are noted next to `[review]` in `pool.toml`. The

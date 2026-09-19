@@ -21,9 +21,21 @@ DEFAULT_SECURITY_PATHS = [
     ".orchestrator/prompts/**", "skills/**", ".claude/skills/**",
     ".mcp*.json", ".mcp.worker.json", "Dockerfile", "docker-compose*.yml", "pyproject.toml", "uv.lock",
 ]
+DEFAULT_SEMANTIC_PATHS = [
+    "pyproject.toml", "uv.lock", "Dockerfile*", "docker/**", "**/migrations/**",
+    "orchestrator/serve.py", "orchestrator/mcp.py", "orchestrator/bus_mcp.py", "orchestrator/cli.py",
+]
+DEFAULT_SEMANTIC_PATTERNS = {
+    "authorization": r"(?i)\b(?:bearer|token|authenticate|authorize|permission)\b",
+    "database": r"(?i)\b(?:ALTER TABLE|CREATE TABLE)\b",
+    "exports": r"^\s*__all__\s*=",
+    "mcp_or_cli": r"@mcp\.tool|add_parser\(",
+}
 CODE_REVIEW = "always"              # never | security_paths | always -- "always" is the safest default when
                                      # [review] is missing entirely, matching pre-2026-09-19 D1 behaviour
 SECURITY_PATHS = DEFAULT_SECURITY_PATHS
+SEMANTIC_PATHS = DEFAULT_SEMANTIC_PATHS
+SEMANTIC_PATTERNS = DEFAULT_SEMANTIC_PATTERNS
 SECURITY_REVIEW_TIER = "sonnet"
 SECURITY_CHECKLIST_COMPLEXITY = 7   # spawn.py's run_worker hardcodes the security-checklist cutoff at
                                      # complexity >= 7; a security-path review is stamped at least this
@@ -169,7 +181,7 @@ def _load_review_cfg(pool):
     the defaults set on the module above -- so a pool.toml without [review] behaves exactly as if it had one
     with these values (§review policy, 2026-09-18: reviews were costing as much as execution)."""
     global SPEC_REVIEW_MIN, DIRECT_MERGE_MAX, TWO_REVIEWS_FROM, SPEC_REVIEW_TIER
-    global CODE_REVIEW, SECURITY_PATHS, SECURITY_REVIEW_TIER, _code_review_warned, STAGE_LEASE_S
+    global CODE_REVIEW, SECURITY_PATHS, SEMANTIC_PATHS, SEMANTIC_PATTERNS, SECURITY_REVIEW_TIER, _code_review_warned, STAGE_LEASE_S
     review = pool.cfg.get("review", {})
     SPEC_REVIEW_MIN = review.get("spec_review_min", 6)
     DIRECT_MERGE_MAX = review.get("direct_merge_max", 3)
@@ -189,6 +201,18 @@ def _load_review_cfg(pool):
     if not isinstance(security_paths, list) or not all(isinstance(p, str) for p in security_paths):
         security_paths = DEFAULT_SECURITY_PATHS
     SECURITY_PATHS = security_paths
+
+    semantic_paths = review.get("semantic_paths", DEFAULT_SEMANTIC_PATHS)
+    if not isinstance(semantic_paths, list) or not all(isinstance(p, str) for p in semantic_paths):
+        semantic_paths = DEFAULT_SEMANTIC_PATHS
+    SEMANTIC_PATHS = semantic_paths
+    semantic_patterns = review.get("semantic_patterns", DEFAULT_SEMANTIC_PATTERNS)
+    if isinstance(semantic_patterns, list):
+        semantic_patterns = {str(i): p for i, p in enumerate(semantic_patterns)}
+    if not isinstance(semantic_patterns, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                          for k, v in semantic_patterns.items()):
+        semantic_patterns = DEFAULT_SEMANTIC_PATTERNS
+    SEMANTIC_PATTERNS = semantic_patterns
 
     SECURITY_REVIEW_TIER = review.get("security_review_tier", "sonnet")
     STAGE_LEASE_S = pool.cfg.get("daemon", {}).get("stage_lease_s", 900)
@@ -555,6 +579,39 @@ def _matching_security_path(paths):
     return None
 
 
+def _matching_semantic_path(paths):
+    for pattern in SEMANTIC_PATHS:
+        if any(fnmatch.fnmatch(path, pattern) for path in paths):
+            return pattern
+    return None
+
+
+def _added_diff_lines(t):
+    worktree = t.get("worktree")
+    if not worktree or not Path(worktree).is_dir():
+        return None
+    base = _resolve_base(worktree, t.get("parent"))
+    if base is None:
+        return None
+    r = _git_in(worktree, "diff", "--no-renames", "--unified=0", f"{base}..HEAD")
+    if r.returncode:
+        return None
+    return [line[1:] for line in r.stdout.splitlines() if line.startswith("+") and not line.startswith("+++")]
+
+
+def _matching_semantic_pattern(t):
+    lines = _added_diff_lines(t)
+    if lines is None:
+        return None
+    for name, pattern in SEMANTIC_PATTERNS.items():
+        try:
+            if any(re.search(pattern, line) for line in lines):
+                return name
+        except re.error:
+            continue
+    return None
+
+
 def _security_review_tier(t):
     """security_review_tier, unless the executor is a Claude tier that IS security_review_tier -- then the
     other Claude tier, so a security-path review is never self-reviewed by the model that executed it."""
@@ -591,7 +648,13 @@ def _review_plan(t):
         if paths is None:
             return 1, "diff_unavailable"
         match = _matching_security_path(paths)
-        return (1, f"security_paths:{match}") if match else (0, "none")
+        if match:
+            return 1, f"security_paths:{match}"
+        semantic_match = _matching_semantic_path(paths)
+        if semantic_match:
+            return 1, f"semantic_path:{semantic_match}"
+        semantic_pattern = _matching_semantic_pattern(t)
+        return (1, f"semantic_pattern:{semantic_pattern}") if semantic_pattern else (0, "none")
     # "always"
     if t["complexity"] <= DIRECT_MERGE_MAX:
         return 0, "always"
@@ -625,8 +688,20 @@ def _dirty_scope_paths(worktree, scope):
 
 def _open_reviews(t, n_reviews, review_reason):
     """Create exactly the missing review children and issue their workers."""
+    t = bus.get(t["id"])
     existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
-    security = review_reason in ("diff_unavailable", "security_paths_empty") or review_reason.startswith("security_paths:")
+    security = (review_reason in ("diff_unavailable", "security_paths_empty") or
+                review_reason.startswith("security_paths:") or review_reason.startswith("semantic_"))
+    reviewed_sha = None
+    if t.get("worktree"):
+        head = _git_in(t["worktree"], "rev-parse", "HEAD")
+        if head.returncode == 0:
+            reviewed_sha = head.stdout.strip()
+    if reviewed_sha:
+        pipeline = dict(t.get("pipeline") or {})
+        pipeline["reviewed_sha"] = reviewed_sha
+        bus.update(t["id"], pipeline=pipeline)
+        existing = [x for x in existing if x.get("reviewed_sha") == reviewed_sha]
     while len(existing) < n_reviews:
         number = len(existing)
         spec = t["spec"]
@@ -646,6 +721,8 @@ def _open_reviews(t, n_reviews, review_reason):
             tier = _other_tier(existing[0]["tier"])
         r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                             inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier)
+        if reviewed_sha:
+            bus.update(r["id"], reviewed_sha=reviewed_sha)
         spawn_async(spawn.run_worker, r["id"])
         existing.append(r)
     return existing
@@ -762,7 +839,19 @@ def merge_reviewed(pool):
 def _merge_reviewed_one(t):
     if stale(t):
         return
-    reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
+    all_reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
+    pipeline = dict(t.get("pipeline") or {})
+    reviewed_sha = pipeline.get("reviewed_sha")
+    if reviewed_sha and t.get("worktree"):
+        head = _git_in(t["worktree"], "rev-parse", "HEAD")
+        current_sha = head.stdout.strip() if head.returncode == 0 else None
+        if current_sha and current_sha != reviewed_sha:
+            pipeline.update(reviewed_sha=current_sha, reviews_expected=1)
+            bus.update(t["id"], pipeline=pipeline, status="done")
+            _open_reviews(bus.get(t["id"]), 1, pipeline.get("review_reason", "semantic_path:changed"))
+            notify(f"{t['id']}: approval void; branch head moved, fresh review opened")
+            return
+    reviews = [r for r in all_reviews if not reviewed_sha or r.get("reviewed_sha") == reviewed_sha]
     if not reviews:
         return  # gate() creates them; nothing to act on yet
     if already_merged(t):
