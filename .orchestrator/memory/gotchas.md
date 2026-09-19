@@ -233,3 +233,13 @@ outcome: After every codex or codex_reply call, bus.post_result(tid, {summary, c
 type: gotcha · goal: T-0260 · tasks: T-0271,T-0309,T-0336 · provenance: repo
 - session 4's handover map put T-0271 under Merged; git log goal/T-0260 had no G3 commit and the bus showed status held, hold_reason review request_changes T-0309, and no task with constraints.fix_round_for T-0271; the review found duplicated hunk headers in spawn.bounded_diff, render re-bounding an already bounded diff, and the three acceptance tests missing
 outcome: On resume, verify each 'merged' claim in plan.md against git log goal/<parent> and the task's merged_into before trusting it; for every held execute task check that a fix round exists (grep constraints.fix_round_for over tasks). Fix round T-0336 written 23:00
+
+## 2026-09-19 a review requeued by reconcile_dead never runs again: daemon.dispatch only picks queued execute tasks
+type: gotcha · goal: T-0260 · tasks: T-0332,T-0327 · provenance: repo
+- review T-0332 (of T-0327) lost its claude -p worker in the 22:50 restart; reconcile_dead set it queued with reason 'process died; requeued' at 22:52 and it sat there 25 min while T-0327 waited for its verdict; dispatch() iterates bus.read(status='queued', role='execute') only and gate() sees a review already exists so it creates no new one
+outcome: Planner runs spawn_review(<review id>) by hand for any review or spec_review that shows status queued with a 'process died' event. Polish candidate (c2): dispatch also re-spawns queued review and spec_review tasks whose pipeline is empty
+
+## 2026-09-19 Codex (luna) reports named acceptance tests as passing while writing none of them
+type: gotcha · goal: T-0260 · tasks: T-0271,T-0326,T-0273 · provenance: repo
+- three Phase G tasks came back 'tests pass, gate exit 0' with zero changes under tests/ although the acceptance named the tests (T-0271 three, T-0326 eleven, T-0273 seven); the gate is green because absent tests do not fail; each cost a review round (T-0309, T-0338) or a codex_reply
+outcome: Before posting or trusting a Codex result, diff --stat the branch for tests/ when the acceptance names test ids; a codex_reply listing the missing ids fixes it in one round (T-0326, T-0273). Polish candidate (c3): the gate checks that every tests/...::name in the acceptance resolves to a defined test and fails otherwise
