@@ -470,6 +470,56 @@ class Render(unittest.TestCase):
         self.assertEqual(spawn.extract_json('here: {"summary":"x"} bye')["summary"], "x")
         self.assertTrue(spawn.extract_json("no json")["summary"])
 
+    def test_bounded_diff_summary_first(self):
+        diff = "diff --git a/widget.py b/widget.py\nindex 1..2 100644\n--- a/widget.py\n+++ b/widget.py\n@@ -1 +1 @@\n-old\n+new\n"
+        bounded = spawn.bounded_diff(diff)
+        self.assertTrue(bounded.startswith("Diffstat: "))
+        self.assertLess(bounded.index("Diffstat: "), bounded.index("@@"))
+
+    def test_bounded_diff_expansion_hint(self):
+        diff = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(2000))
+        hint = f"git -C {TMP} diff -- widget.py"
+        bounded = spawn.bounded_diff(diff, 300, hint)
+        self.assertLessEqual(len(bounded), 300)
+        self.assertTrue(bounded.endswith(f"expand with: {hint}"))
+
+    def test_review_prompt_diff_is_bounded(self):
+        reviewed = bus.create_task("bounded review target", "s", ["a"], ["widget.py"], role="execute")
+        reviewed["worktree"] = str(TMP)
+        review = bus.create_task("review bounded target", "s", ["a"], ["widget.py"],
+                                 role="review", inputs=[reviewed["id"]])
+        raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(5000))
+        captured = {}
+        orig_diff, orig_pick, orig_run = spawn.scoped_diff, P.Pool.pick, spawn.run_claude
+        spawn.scoped_diff = lambda task: raw
+        P.Pool.pick = lambda pool, role, avoid=None: pool.get("A")
+        def fake_run_claude(*args, **kwargs):
+            captured["prompt"] = args[3]
+            return {"status": "done", "output": {"result": "{}"}}
+        spawn.run_claude = fake_run_claude
+        self.addCleanup(lambda: setattr(spawn, "scoped_diff", orig_diff))
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run))
+
+        spawn.run_worker(review["id"])
+        prompt = captured["prompt"]
+        hint = f"git -C {TMP} diff -- widget.py"
+        self.assertIn("Diffstat: ", prompt)
+        self.assertLessEqual(len(prompt), P.Pool().cfg["limits"].get("review_diff_chars", 12000) + 2000)
+        self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
+
+    def test_bounded_diff_hunk_header_once(self):
+        diff = "diff --git a/widget.py b/widget.py\n@@ -1 +1 @@\n-old\n+new\n"
+        self.assertEqual(sum(line.startswith("@@") for line in spawn.bounded_diff(diff).splitlines()), 1)
+
+    def test_render_does_not_rebound_diff(self):
+        hint = f"git -C {TMP} diff -- widget.py"
+        bounded = spawn.bounded_diff("diff --git a/widget.py b/widget.py\n" +
+                                     "\n".join(f"+line {i}" for i in range(100)), 100, hint)
+        prompt = spawn.render("review", complexity="1", acceptance=["a"], diff=bounded, security="")
+        self.assertEqual(prompt.count("Diffstat: "), 1)
+        self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
+
     def test_fit_result_shrinks_oversize(self):
         big = {"summary": "s" * 3000, "findings": [{"claim": "c" * 380, "confidence": 0.5} for _ in range(40)]}
         fitted = spawn.fit_result(big)

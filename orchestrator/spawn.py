@@ -78,10 +78,6 @@ def render(name, **kw):
         kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
     for k, v in kw.items():
-        if k == "diff":
-            v = bounded_diff(v, kw.get("_diff_cap", 12000), kw.get("_diff_hint", "git diff"))
-        elif k == "code":
-            v = bounded_text(v, kw.get("_code_cap", 8000), kw.get("_code_hint", "git show"))
         t = t.replace("{{" + k + "}}", v if isinstance(v, str) else json.dumps(v, indent=0))
     return t
 
@@ -105,15 +101,16 @@ def bounded_diff(diff_text, cap_chars=12000, expand_hint="git diff"):
     for line in text.splitlines():
         if line.startswith("diff --git "):
             files += 1
-        elif line.startswith("@@"):
+        if line.startswith("@@"):
             if current:
                 hunks.extend(current); current = []
-            hunks.append(line)
-        elif line.startswith("+++") or line.startswith("---"):
+            current.append(line)
             continue
-        elif line.startswith("+"):
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
             additions += 1
-        elif line.startswith("-"):
+        if line.startswith("-"):
             deletions += 1
         if line.startswith(("diff --git ", "index ", "@@", "+", "-", " ")):
             current.append(line)
