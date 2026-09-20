@@ -136,6 +136,7 @@ def main():
     sc = sub.add_parser("scorecard")
     sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role"])
     sc.add_argument("--efficiency", action="store_true")
+    sc.add_argument("--economics", action="store_true")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -161,9 +162,11 @@ def main():
     blcompare.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
+        if a.economics and a.by not in (None, "executor", "band", "class"):
+            ap.error("--economics supports --by executor|band|class")
         if a.efficiency and a.by in ("tier", "task"):
             ap.error("--efficiency supports --by goal|executor|band|class|role")
-        if not a.efficiency:
+        if not a.efficiency and not a.economics:
             a.by = a.by or "executor"
             if a.by in ("band", "class", "role"):
                 ap.error("this --by requires --efficiency")
@@ -267,7 +270,18 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.efficiency:
+        if a.economics:
+            grouping = a.by or "executor"
+            if grouping not in ("executor", "band", "class"):
+                ap.error("--economics --by must be executor, band, or class")
+            card = scorecard.executor_economics(root=scorecard.STATE, by=grouping)
+            if a.json:
+                serializable = {("/".join(key) if isinstance(key, tuple) else key): value
+                                for key, value in card.items()}
+                print(json.dumps(serializable, indent=1))
+            else:
+                print(scorecard.format_executor_economics(card))
+        elif a.efficiency:
             card = scorecard.efficiency(root=scorecard.STATE, by=a.by)
             print(json.dumps(card, indent=1) if a.json else scorecard.format_efficiency(card))
         elif a.planner:

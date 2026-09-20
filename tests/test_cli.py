@@ -140,6 +140,19 @@ class Cli(unittest.TestCase):
             self.assertEqual(card["tokens"], 0)
             self.assertIn("unknown", card["groups"])
 
+    def test_cli_scorecard_economics_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-econ", executor="cheap", status="done", merged_into="goal/G",
+                           pipeline={"first_green_at": "2026-01-01T00:00:00Z", "gate_reds": 0})
+        fixture.write_runs({"task": "T-econ", "role": "execute", "executor": "cheap",
+                            "input_tokens": 10, "usd": 1})
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            text = self._scorecard_output("--economics")
+            self.assertIn("cost_to_accepted", text)
+            self.assertIn("cheap", text)
+            card = json.loads(self._scorecard_output("--economics", "--by", "band", "--json"))
+            self.assertIn("cheap/1-3", card)
+
     def test_scorecard_default_output_unchanged(self):
         with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):
             self.assertEqual(self._scorecard_output(), "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore\n")

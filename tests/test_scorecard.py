@@ -188,6 +188,53 @@ class Scorecard(unittest.TestCase):
         card = scorecard.build(root=self.root)
         self.assertEqual(card["reviewed-by"]["review_request_changes"], 1)
 
+    def _economics_fixture(self):
+        self.write_task("T-root", executor="cheap", status="done", merged_into="goal/G", complexity=4,
+                        pipeline={"first_green_at": "2026-01-01T00:00:00Z", "gate_reds": 0})
+        self.write_task("T-failed", executor="cheap", status="failed", complexity=4,
+                        pipeline={"gate_reds": 1, "failure_kind": "lint"})
+        self.write_task("T-fix", executor="cheap", status="done", constraints={"fix_round_for": "T-failed"})
+        self.write_task("T-review", role="review", inputs=["T-root"], review_verdict="request_changes")
+        self.write_runs(
+            {"task": "T-root", "role": "execute", "executor": "cheap", "input_tokens": 100, "usd": 2},
+            {"task": "T-failed", "role": "execute", "executor": "cheap", "input_tokens": 200, "usd": 3},
+            {"task": "T-fix", "role": "execute", "executor": "cheap", "input_tokens": 50, "usd": 1},
+            {"task": "T-review", "role": "review", "input_tokens": 10, "usd": .5})
+        return scorecard.executor_economics(self.root)
+
+    def test_executor_economics_first_pass_and_fix_round_probability(self):
+        row = self._economics_fixture()["cheap"]
+        self.assertEqual(row["first_pass_green_rate"], 1)
+        self.assertEqual(row["first_pass_defined_count"], 1)
+        self.assertEqual(row["fix_round_probability"], .5)
+
+    def test_executor_economics_tokens_and_cost_to_accepted_median(self):
+        row = self._economics_fixture()["cheap"]
+        self.assertEqual(row["initial_execution_tokens"], {"median": 150.0, "mean": 150})
+        self.assertEqual((row["tokens_to_accepted"], row["cost_to_accepted"]), (110, 2.5))
+
+    def test_executor_economics_gate_failure_reasons_histogram(self):
+        self.assertEqual(self._economics_fixture()["cheap"]["gate_failure_reasons"], {"lint": 1})
+
+    def test_executor_economics_review_request_changes_rate(self):
+        row = self._economics_fixture()["cheap"]
+        self.assertEqual((row["review_request_changes_rate"], row["review_request_changes_defined_count"]), (1, 1))
+
+    def test_executor_economics_by_band_and_class(self):
+        self._economics_fixture()
+        self.assertIn(("cheap", "4-6"), scorecard.executor_economics(self.root, by="band"))
+        self.assertIn(("cheap", "unfamiliar"), scorecard.executor_economics(self.root, by="class"))
+
+    def test_scores_rank_by_cost_to_accepted_falls_back_below_min_samples(self):
+        card = {"cheap": {"merged": 1, "failed": 0, "cost_to_accepted": 2,
+                           "cost_to_accepted_defined_count": 2}}
+        self.assertEqual(scorecard.scores(card, min_runs=1, rank_by="cost_to_accepted")["cheap"],
+                         scorecard.scores(card, min_runs=1)["cheap"])
+
+    def test_scores_default_rank_unchanged(self):
+        card = {"x": {"merged": 3, "failed": 2}}
+        self.assertEqual(scorecard.scores(card), scorecard.scores(card, rank_by="success"))
+
     def test_review_task_does_not_double_count_verdict(self):
         # review T-0031: a review task has no executor and used to bucket under claude:<tier>, double-counting
         # the same request_changes verdict that spawn.run_worker already stamped on the reviewed execute task

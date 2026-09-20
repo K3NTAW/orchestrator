@@ -252,7 +252,7 @@ def prior_weights(executors):
     return {eid: (0.5 + values[eid] / max_v if eid in values and max_v else 1.0) for eid in executors}
 
 
-def scores(card, min_runs=5):
+def scores(card, min_runs=5, rank_by=None):
     """success = merged/(merged+failed) over resolved tasks; below min_runs samples an executor is cold, so
     fall back to its bench.json-derived prior_weights entry (1.0 if bench.json has nothing on it) instead of
     a flat 1.0 -- warm executors keep their live score regardless of prior. A hot quota group (>=3 usage-limit
@@ -267,7 +267,16 @@ def scores(card, min_runs=5):
     for eid in set(executors) | set(card):
         r = card.get(eid, {})
         total = r.get("merged", 0) + r.get("failed", 0)
-        score = 0.5 + r["merged"] / total if total >= min_runs and total > 0 else priors.get(eid, 1.0)
+        score = 0.5 + r.get("merged", 0) / total if total >= min_runs and total > 0 else priors.get(eid, 1.0)
+        if rank_by == "cost_to_accepted":
+            accepted_n = r.get("cost_to_accepted_defined_count", r.get("accepted_tasks", 0))
+            cost = r.get("cost_to_accepted")
+            try:
+                min_samples = Pool().cfg.get("models", {}).get("min_samples", 3)
+            except Exception:
+                min_samples = 3
+            if accepted_n >= min_samples and cost is not None and cost > 0:
+                score = 1.0 / cost
         if r.get("usage_limit_today", 0) >= 3:
             score *= 0.5
         out[eid] = score
@@ -899,6 +908,126 @@ def efficiency(root=STATE, by=None):
     summary["groups"] = {key: _efficiency_summary(grouped_rows.get(key, []), grouped_tasks.get(key, []))
                          for key in sorted(grouped_rows.keys() | grouped_tasks.keys())}
     return summary
+
+
+def _failure_reason(task):
+    """Return the stable economics bucket for a gate-red task."""
+    pipeline = task.get("pipeline") or {}
+    if pipeline.get("failure_kind"):
+        return pipeline["failure_kind"]
+    failures = (task.get("resume_hint") or {}).get("failures") or []
+    head = failures[0] if isinstance(failures, list) and failures else failures
+    text = str(head or "").lower()
+    if "missing" in text and ("test" in text or "coverage" in text):
+        return "missing_tests"
+    if any(word in text for word in ("pytest", "unittest", "test failed", "test_failure", "failure")):
+        return "test_failure"
+    if any(word in text for word in ("lint", "ruff", "flake", "format")):
+        return "lint"
+    if any(word in text for word in ("environment", "missing command", "not found", "permission", "timeout")):
+        return "environment"
+    return "unknown"
+
+
+def executor_economics(root=STATE, by="executor"):
+    """Measure accepted/failed execute lineages without embedding routing policy."""
+    if by not in ("executor", "band", "class"):
+        raise ValueError(f"unsupported economics grouping: {by}")
+    tasks = {}
+    for path in sorted((root / "tasks").glob("*.json")):
+        try:
+            task = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        tasks[task.get("id", path.stem)] = task
+    rows, _ = _efficiency_rows(root, tasks)
+    roots = []
+    for tid, task in tasks.items():
+        if task.get("role") != "execute" or _task_lineage(task, tasks)[0] != tid:
+            continue
+        accepted_flag = bool(task.get("merged_into"))
+        if not accepted_flag and task.get("status") != "failed":
+            continue
+        meta = _attributed({"task": tid, "role": "execute"}, tasks)
+        lineage_ids = {oid for oid, other in tasks.items() if _task_lineage(other, tasks)[0] == tid}
+        own = [row for row in rows if row.get("lineage_root") == tid]
+        initial = [row for row in own if row.get("task") == tid and row.get("bucket") == "execute"]
+        pipeline = task.get("pipeline") or {}
+        fixes = task.get("lineage_fix_rounds", pipeline.get("lineage_fix_rounds"))
+        if fixes is None:
+            fixes = sum(oid != tid and tasks[oid].get("role") == "execute" for oid in lineage_ids)
+        reds = pipeline.get("gate_reds", task.get("gate_reds"))
+        green = pipeline.get("first_green_at")
+        verdicts = []
+        for review in tasks.values():
+            inputs = review.get("inputs") or []
+            if review.get("role") == "review" and inputs and inputs[0] in lineage_ids:
+                verdict = review.get("review_verdict") or (review.get("result") or {}).get("verdict")
+                if verdict:
+                    verdicts.append(verdict)
+        reasons = {}
+        for member_id in lineage_ids:
+            member = tasks[member_id]
+            count = int((member.get("pipeline") or {}).get("gate_reds", member.get("gate_reds", 0)) or 0)
+            if count:
+                reason = _failure_reason(member)
+                reasons[reason] = reasons.get(reason, 0) + count
+        roots.append({"executor": meta.get("executor"), "band": meta.get("band"),
+                      "class": meta.get("task_class"), "accepted": accepted_flag,
+                      "initial_tokens": sum(_tokens_of(row) for row in initial),
+                      "tokens": sum(_tokens_of(row) for row in own),
+                      "usd": sum(row.get("usd") or 0 for row in own), "fix_rounds": fixes,
+                      "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None,
+                      "reasons": reasons, "verdicts": verdicts})
+    grouped = {}
+    for root_row in roots:
+        executor_id = root_row["executor"] or "unknown"
+        key = executor_id if by == "executor" else (executor_id, root_row[by] or "unknown")
+        grouped.setdefault(key, []).append(root_row)
+    result = {}
+    for key, members in grouped.items():
+        first = [m["first_pass"] for m in members if m["first_pass"] is not None]
+        accepted_rows = [m for m in members if m["accepted"]]
+        verdicts = [v for m in members for v in m["verdicts"]]
+        initial = [m["initial_tokens"] for m in members]
+        reasons = {}
+        for member in members:
+            for reason, count in member["reasons"].items():
+                reasons[reason] = reasons.get(reason, 0) + count
+        result[key] = {
+            "n_tasks": len(members),
+            "initial_execution_tokens": {"median": statistics.median(initial) if initial else None,
+                                         "mean": statistics.mean(initial) if initial else None},
+            "first_pass_green_rate": sum(first) / len(first) if first else None,
+            "first_pass_defined_count": len(first),
+            "fix_round_probability": sum(m["fix_rounds"] >= 1 for m in members) / len(members) if members else None,
+            "avg_fix_rounds": statistics.mean(m["fix_rounds"] for m in members) if members else None,
+            "tokens_to_accepted": statistics.median(m["tokens"] for m in accepted_rows) if accepted_rows else None,
+            "cost_to_accepted": statistics.median(m["usd"] for m in accepted_rows) if accepted_rows else None,
+            "cost_to_accepted_defined_count": len(accepted_rows),
+            "gate_failure_reasons": reasons,
+            "review_request_changes_rate": (sum(v == "request_changes" for v in verdicts) / len(verdicts)
+                                             if verdicts else None),
+            "review_request_changes_defined_count": len(verdicts),
+        }
+    return result
+
+
+def format_executor_economics(card):
+    def cell(value):
+        return "n/a" if value is None else str(round(value, 4) if isinstance(value, float) else value)
+    columns = ("n_tasks", "initial_execution_tokens_median", "initial_execution_tokens_mean",
+               "first_pass_green_rate", "first_pass_defined_count", "fix_round_probability", "avg_fix_rounds",
+               "tokens_to_accepted", "cost_to_accepted", "cost_to_accepted_defined_count",
+               "gate_failure_reasons", "review_request_changes_rate", "review_request_changes_defined_count")
+    lines = ["group\t" + "\t".join(columns)]
+    for key, row in sorted(card.items(), key=lambda item: str(item[0])):
+        name = "/".join(key) if isinstance(key, tuple) else key
+        flat = dict(row, initial_execution_tokens_median=row["initial_execution_tokens"]["median"],
+                    initial_execution_tokens_mean=row["initial_execution_tokens"]["mean"])
+        flat["gate_failure_reasons"] = json.dumps(flat["gate_failure_reasons"], sort_keys=True)
+        lines.append(str(name) + "\t" + "\t".join(cell(flat[column]) for column in columns))
+    return "\n".join(lines)
 
 
 def format_efficiency(card):
