@@ -279,12 +279,14 @@ def complete(tid, stage, **fields):
         bus.update(tid, pipeline=pipeline, **fields)
 
 
-def clear_stage(tid, stage, pipeline_fields=None, **fields):
+def clear_stage(tid, stage, pipeline_fields=None, clear_pipeline_keys=(), **fields):
     """Clear a claim and every marker that belongs to it, atomically, for a safe retry."""
     with bus.locked():
         t = bus.get(tid)
         pipeline = dict(t.get("pipeline") or {})
         for key in (stage, f"{stage}_lease", f"{stage}_done"):
+            pipeline.pop(key, None)
+        for key in clear_pipeline_keys:
             pipeline.pop(key, None)
         if pipeline_fields:
             pipeline.update(pipeline_fields)
@@ -337,12 +339,8 @@ def _requeue(tid, pipeline):
     """Put a task back in the queue for dispatch() to retry. Clearing pipeline.dispatched_at is what actually
     makes that retry happen: dispatch()'s stamp() no-ops when the stage is already stamped, so a requeue that
     left dispatched_at in place would leave the task queued forever without a live worker."""
-    clear_stage(tid, "dispatched_at", status="queued", pid=None, reason="process died; requeued")
-    with bus.locked():
-        task = bus.get(tid)
-        current = dict(task.get("pipeline") or {})
-        current.pop("respawned_at", None)
-        bus.update(tid, pipeline=current)
+    clear_stage(tid, "dispatched_at", clear_pipeline_keys=("respawned_at",),
+                status="queued", pid=None, reason="process died; requeued")
     return "requeued"
 
 
@@ -569,8 +567,12 @@ def dispatch(pool):
         if pipeline.get("respawned_at", 0) > requeued_at:
             continue
         died = any(event.get("reason") == "process died; requeued" for event in events)
-        bus_events = bus.events(limit=10000, task_ids=[task["id"]])
-        created_at = min((event["ts"] for event in bus_events), default=now)
+        created_at = min((event.get("ts", 0) for event in events), default=0)
+        if not created_at:
+            try:
+                created_at = (bus.TASKS / f"{task['id']}.json").stat().st_mtime
+            except OSError:
+                created_at = now
         if not died and now - created_at < respawn_after:
             continue
         with bus.locked():

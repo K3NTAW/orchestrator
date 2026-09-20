@@ -56,10 +56,10 @@ class Daemon(unittest.TestCase):
 
     def test_dispatch_respawns_unclaimed_spec_review_after_delay(self):
         now = time.time()
-        self.swap(daemon.time, "time", lambda: now - 31)
         old = self.task("abandoned spec review", role="spec_review")
-        self.swap(daemon.time, "time", lambda: now - 29)
         young = self.task("new spec review", role="spec_review")
+        os.utime(bus.TASKS / f"{old}.json", (now - 31, now - 31))
+        os.utime(bus.TASKS / f"{young}.json", (now - 29, now - 29))
         self.swap(daemon.time, "time", lambda: now)
         pool = P.Pool()
         pool.cfg.setdefault("daemon", {})["respawn_after_s"] = 30
@@ -70,6 +70,33 @@ class Daemon(unittest.TestCase):
         self.assertFalse(bus.get(young).get("pipeline"))
         self.assertFalse(bus.get(old).get("claimed_at"))
         self.assertFalse(bus.get(young).get("claimed_at"))
+
+    def test_respawn_age_uses_task_events_not_global_page(self):
+        now = time.time()
+        filler = self.task("event page filler", role="scout")
+        for _ in range(10_001):
+            bus._event(filler, "updated")
+        old = self.task("old unclaimed spec review", role="spec_review")
+        os.utime(bus.TASKS / f"{old}.json", (now - 31, now - 31))
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {})["respawn_after_s"] = 30
+
+        daemon.dispatch(pool)
+
+        self.assertEqual(self.workers, [old])
+
+    def test_requeue_appends_one_event(self):
+        task = self.task("dead worker")
+        bus.update(task, status="running", pipeline={"dispatched_at": time.time(), "respawned_at": time.time()})
+        before = len(bus.get(task)["events"])
+
+        daemon._requeue(task, bus.get(task)["pipeline"])
+
+        updated = bus.get(task)
+        self.assertEqual(len(updated["events"]), before + 1)
+        self.assertEqual(updated["status"], "queued")
+        self.assertNotIn("dispatched_at", updated["pipeline"])
+        self.assertNotIn("respawned_at", updated["pipeline"])
 
     def setUp(self):
         self.sandbox = Path(tempfile.mkdtemp(prefix="orch-daemon-"))
