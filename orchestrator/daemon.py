@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, fnmatch, json, os, re, subprocess, sys, threading, time, urllib.request
+import fcntl, fnmatch, hashlib, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, acceptance, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
@@ -96,6 +96,64 @@ def _rejecting_reviews(task):
     return result
 
 
+def _normal_issue(issue):
+    """Make review prose stable across line-number and incidental numeric changes."""
+    return re.sub(r"\s+", " ", re.sub(r"\d+", "", str(issue or ""))).strip().lower()
+
+
+def failure_signature(task):
+    """A stable, content-based identity for the failure that caused a hold."""
+    hint = task.get("resume_hint") or {}
+    ids = sorted(_test_ids(hint.get("failures")) or [])
+    comments = sorted((str(c.get("path") or ""), _normal_issue(c.get("issue")))
+                      for _, cs in _rejecting_reviews(task) for c in cs)
+    payload = json.dumps({"kind": (task.get("pipeline") or {}).get("failure_kind") or "unknown",
+                          "tests": ids, "comments": comments}, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+def _failure_text(task):
+    hint = task.get("resume_hint") or {}
+    return "\n".join(str(x) for x in (hint.get("failures") or "")) if isinstance(hint.get("failures"), list) \
+        else str(hint.get("failures") or "")
+
+
+def failure_kind(task, worktree):
+    """Classify a held execution failure without relying on an LLM judgment."""
+    reason = str(task.get("hold_reason") or "").lower()
+    text = (reason + "\n" + _failure_text(task)).lower()
+    if "conflict" in reason or "rebase_conflict" in text:
+        return "conflict"
+    if any(marker in text for marker in ("modulenotfounderror", "no module named", "enoent",
+                                          "missing venv", "missing .venv", "tools/")):
+        return "environment"
+    if any(marker in text for marker in ("eacces", "permission denied", "sandbox")):
+        return "permissions"
+    if any(marker in text for marker in ("cooling", "usage limit", "quota", "rate limit")):
+        return "quota"
+    comments = _rejecting_reviews(task)
+    issues = "\n".join(str(c.get("issue") or "").lower() for _, cs in comments for c in cs)
+    if ("spec" in issues and ("contradict" in issues or "impossible" in issues)) or "acceptance cannot" in issues:
+        return "invalid_spec"
+    ids = _test_ids((task.get("resume_hint") or {}).get("failures"))
+    # A rerun is deliberately restricted to the failing ids.  A missing worktree is not evidence of flakiness.
+    rerun_max = Pool().cfg.get("daemon", {}).get("flaky_rerun_max", 1)
+    if (reason == "gate_red" and ids and worktree and Path(worktree).is_dir()
+            and len((task.get("resume_hint") or {}).get("flaky_runs") or []) < rerun_max):
+        try:
+            rerun = subprocess.run(["pytest", "-q", *ids], cwd=worktree, capture_output=True, text=True)
+        except OSError:
+            return "code_defect"
+        hint = dict(task.get("resume_hint") or {})
+        runs = list(hint.get("flaky_runs") or [])
+        runs.append({"ids": ids, "returncode": rerun.returncode, "output": (rerun.stdout + rerun.stderr)[-4000:]})
+        hint["flaky_runs"] = runs
+        bus.update(task["id"], resume_hint=hint)
+        if rerun.returncode == 0:
+            return "flaky"
+    return "code_defect"
+
+
 def _fix_round_spec(held, round_no, failed_ids, comments):
     prompt = (Path(__file__).resolve().parents[1] / ".orchestrator" / "prompts" / "fix-round.md").read_text()
     criteria = held.get("acceptance") or []
@@ -127,6 +185,7 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
                          failure_text=failure_text, review_comments=fence_data("\n".join(review_lines) or "(none)"),
                          branch=held.get("branch") or f"task/{held['id']}",
                          head_sha=held.get("head_sha") or (held.get("resume_hint") or {}).get("commit", "unknown"),
+                         failure_kind=(held.get("pipeline") or {}).get("failure_kind", "unknown"),
                          original_acceptance="\n".join(f"- {c}" for c in criteria))
 
 
@@ -144,16 +203,26 @@ def auto_fix_round(pool):
                (t.get("constraints") or {}).get("fix_round_for") == held["id"] for t in chain):
             continue
         reason = held.get("hold_reason", "")
+        kind = failure_kind(held, held.get("worktree"))
+        with bus.locked():
+            current = bus.get(held["id"])
+            pipeline = dict(current.get("pipeline") or {})
+            pipeline["failure_kind"] = kind
+            bus.update(held["id"], pipeline=pipeline)
+            held = bus.get(held["id"])
+        signature = failure_signature(held)
         ids, comments, routine = None, [], False
-        if reason == "gate_red":
+        if kind == "code_defect" and reason == "gate_red":
             ids = _test_ids((held.get("resume_hint") or {}).get("failures"))
             routine = ids is not None
-        elif reason.startswith("review request_changes"):
+        elif kind == "code_defect" and reason.startswith("review request_changes"):
             comments = _rejecting_reviews(held)
             routine = bool(comments) and all(_path_in_scope(c.get("path"), held.get("scope") or [])
                                              for _, cs in comments for c in cs)
         rounds = sum(1 for t in chain if (t.get("constraints") or {}).get("auto_round") is not None)
-        if routine and rounds < cap:
+        repeated = any(t["id"] != held["id"] and
+                       (t.get("constraints") or {}).get("failure_signature") == signature for t in chain)
+        if routine and rounds < cap and not repeated:
             with bus.locked():
                 current = bus.get(held["id"])
                 pipeline = dict(current.get("pipeline") or {})
@@ -166,7 +235,7 @@ def auto_fix_round(pool):
                     tier=current["tier"], complexity=current["complexity"],
                     inputs=[current["id"]] + [r["id"] for r, _ in comments],
                     constraints={**(current.get("constraints") or {}), "fix_round_for": current["id"],
-                                 "auto_round": n})
+                                 "auto_round": n, "failure_signature": signature})
                 pipeline["auto_fix_hold_key"] = key
                 bus.update(current["id"], pipeline=pipeline)
             continue
@@ -174,11 +243,15 @@ def auto_fix_round(pool):
             current = bus.get(held["id"])
             pipeline = dict(current.get("pipeline") or {})
             skipped = dict(pipeline.get("auto_fix_skipped") or {})
+            if kind == "quota":
+                continue
             if key not in skipped:
                 skipped[key] = True
                 pipeline["auto_fix_skipped"] = skipped
                 bus.update(held["id"], pipeline=pipeline)
-                notify(f"{held['id']}: automatic fix round escalated")
+                detail = "unchanged failure repeated" if repeated else kind
+                hint = "; rebase-task hint (T-0258)" if kind == "conflict" else ""
+                notify(f"{held['id']}: automatic fix round escalated: {detail}{hint}")
 
 
 def _load_review_cfg(pool):

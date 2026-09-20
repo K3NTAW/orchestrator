@@ -95,7 +95,13 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         return {"status": "failed", "reason": reason}
     ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
     if ev["thread_id"]:
-        bus.update(task["id"], codex_thread=ev["thread_id"])
+        # The head is a resume boundary, not merely result metadata: later replies must not
+        # expose an old conversation to unrelated worktree changes.
+        fields = {"codex_thread": ev["thread_id"]}
+        head = _thread_head(cwd)
+        if head:
+            fields["codex_thread_head"] = head
+        bus.update(task["id"], **fields)
     if ev["error"] and is_rate_limited(ev["error"]):
         secs = parse_reset_hint(ev["error"], pool.cfg["limits"]["cooldown_default_s"])
         if ex:
@@ -116,6 +122,29 @@ def _run(pool, task, args, cwd, timeout, ex=None):
 
 def _diff_stat(cwd):
     return subprocess.run(["git", "diff", "--stat"], cwd=cwd, capture_output=True, text=True).stdout[-1500:]
+
+
+def _thread_head(cwd):
+    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _resume_compatible(task):
+    """A resumed thread may only see a clean descendant of its prior checkout head."""
+    expected = task.get("codex_thread_head")
+    cwd = task.get("worktree")
+    if not cwd:
+        return False, "worktree unavailable"
+    # Tasks created before thread heads were recorded retain their historical resume behaviour.
+    if not expected:
+        return True, "legacy thread has no recorded head"
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True)
+    if status.returncode or status.stdout.strip():
+        return False, "worktree is dirty"
+    head = _thread_head(cwd)
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"], cwd=cwd,
+                              capture_output=True, text=True)
+    return (bool(head and ancestor.returncode == 0), "worktree head moved" if head else "worktree HEAD unavailable")
 
 
 def _commit_from_message(message):
@@ -228,7 +257,15 @@ def reply(task_id, delta):
     if ex is None or ex.cooling() or ex.running > ex.max_parallel:
         bus.update(task_id, status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
         return {"status": "held", "codex": pool.status()["codex"]}
-    result = _run(pool, t, ["resume", t["codex_thread"], delta], t["worktree"],
+    compatible, reason = _resume_compatible(t)
+    if compatible:
+        args = ["resume", t["codex_thread"], delta]
+    else:
+        from .spawn import packet
+        repair = packet(t, t["worktree"]) + "\n\nRepair delta:\n" + delta
+        bus.update(task_id, resume_incompatible=reason)
+        args = ["-m", ex.model, repair]
+    result = _run(pool, t, args, t["worktree"],
                   t["constraints"].get("timeout_s", 1800), ex=ex)
     if not result.get("reason", "").startswith("codex argv error:"):
         bus.update(task_id, rounds=rounds)

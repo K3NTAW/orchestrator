@@ -3,6 +3,7 @@ Fix round {n} for root {root_id}: {root_title}
 Held task: {held_id}
 Branch: {branch}
 Head SHA: {head_sha}
+Failure kind: {failure_kind}
 
 Failed acceptance criteria:
 {failed_acceptance}
