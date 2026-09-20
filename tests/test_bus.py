@@ -1,5 +1,5 @@
 """Bus rules: acceptance is required, immutable fields, oversize results rejected, events, id sequencing."""
-import gc, json, sys, unittest, warnings
+import gc, json, sys, tempfile, unittest, warnings
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_bus.py` doesn't add this dir itself
@@ -8,6 +8,14 @@ from orchestrator import bus
 
 
 class Bus(unittest.TestCase):
+    def setUp(self):
+        # Each test's cursor starts at its own stream, not events from other tests.
+        state = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="bus-test-")))
+        for name, path in {"STATE": state, "TASKS": state / "tasks",
+                           "RUNS": state / "runs", "LOCK": state / bus.LOCK_NAME}.items():
+            self.enterContext(patch.object(bus, name, path))
+        self.addCleanup(bus._close_db)
+
     def test_log_run_carries_decision_identity_and_versions(self):
         import tempfile
         from unittest.mock import patch
@@ -54,6 +62,7 @@ class Bus(unittest.TestCase):
             self.assertEqual(bus.policy_version(), first)
             pool.unlink()
             self.assertIsNone(bus.policy_version())
+
 
     def test_normalize_usage_claude(self):
         self.assertEqual(bus.normalize_usage("claude", {"input_tokens": 10, "cache_read_input_tokens": 3,
@@ -162,6 +171,32 @@ class Bus(unittest.TestCase):
         self.assertTrue(reply["events"])
         self.assertTrue(all(event["seq"] <= reply["next_since"] for event in reply["events"]))
         self.assertNotIn("concurrent", [event["kind"] for event in reply["events"]])
+
+    def test_events_filters_preserve_unfiltered_page_metadata(self):
+        from orchestrator import bus_mcp
+        scout = bus.create_task("Scout", "s", ["a"], ["x"], role="scout")
+        execute = bus.create_task("Execute", "s", ["a"], ["x"], role="execute")
+        bus._event(execute["id"], "update")
+        page = bus.events(0, 2)
+        with patch.object(bus, "read", side_effect=AssertionError("use the task index")):
+            for filters, expected in [
+                ({"role": "execute"}, [page[1]]),
+                ({"task_ids": [execute["id"]]}, [page[1]]),
+                ({"role": "execute", "task_ids": [scout["id"]]}, []),
+                ({"task_ids": []}, []),
+            ]:
+                with self.subTest(filters=filters):
+                    self.assertEqual(bus.events(0, 2, **filters), expected)
+                    self.assertEqual(bus_mcp.bus_events(0, 2, **filters),
+                                     {"events": expected, "next_since": page[-1]["seq"], "truncated": True})
+            empty = bus_mcp.bus_events(0, 1, role="execute")
+            self.assertEqual(empty, {"events": [], "next_since": page[0]["seq"], "truncated": True})
+            tail = bus_mcp.bus_events(page[-1]["seq"], 2, role="execute")
+            self.assertEqual([event["kind"] for event in tail["events"]], ["update"])
+            self.assertFalse(tail["truncated"])
+            self.assertEqual(tail["next_since"], tail["events"][-1]["seq"])
+            self.assertEqual(bus_mcp.bus_events(tail["next_since"], 2, role="execute"),
+                             {"events": [], "next_since": tail["next_since"], "truncated": False})
 
     def test_depends_on(self):
         a = bus.create_task("A", "spec a", ["ok"], ["src/**"])
