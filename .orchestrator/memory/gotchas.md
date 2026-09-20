@@ -253,3 +253,8 @@ outcome: Planner reset the running fields in pool_state.json by hand to the coun
 type: gotcha · goal: T-0260 · tasks: T-0348,T-0277,T-0344 · provenance: repo
 - the 23:24 reset (codex 7 to 1) was undone by 23:38 (codex 6, astra 6, terra 2, sol 2): executor.py builds Pool() once at start and calls pool.save() in its finally after running -= 1, writing back the stale counters loaded minutes earlier; T-0277 and T-0344 were alive across the reset
 outcome: Reset only when pgrep shows no codex exec and no claude -p worker, then confirm the next tick dispatches. The c3 polish (derive running from bus state at Pool load) removes the whole class
+
+## 2026-09-20 spawn_scout answers spawned but never claims the task when a stray task branch exists without a worktree
+type: gotcha · goal: T-0353 · tasks: T-0354 · provenance: repo
+- the first spawn_scout(T-0354) at 12:35 created branch task/T-0354 and died before the worktree existed; every later spawn_scout returned status spawned while ensure_worktree (spawn.py:60-71) failed on git worktree add -b task/T-0354 (branch exists) inside the MCP thread, so the task stayed queued with zero events and no run row
+outcome: Diagnose with git branch --list task/T-xxxx plus git worktree list; fix without deleting anything: git worktree add wt/T-xxxx task/T-xxxx, then spawn again or run spawn.run_worker directly. Polish (c2): ensure_worktree reuses an existing task branch, and spawn_scout reports the spawn error instead of spawned
