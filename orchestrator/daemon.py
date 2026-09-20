@@ -565,6 +565,8 @@ def dispatch(pool):
             break
         if task.get("role") not in ("review", "spec_review"):
             continue
+        if stale(task):
+            continue
         pipeline = task.get("pipeline") or {}
         events = task.get("events") or []
         requeued_at = max((event.get("ts", 0) for event in events
@@ -588,12 +590,13 @@ def dispatch(pool):
             current_requeued_at = max((event.get("ts", 0) for event in current_events
                                        if event.get("reason") == "process died; requeued"),
                                       default=current.get("claimed_at") or 0)
-            if current_pipeline.get("respawned_at", 0) > current_requeued_at:
+            if (current.get("status") != "queued" or
+                    current_pipeline.get("respawned_at", 0) > current_requeued_at):
                 continue
             current_pipeline["respawned_at"] = now
             bus.update(task["id"], pipeline=current_pipeline)
+            spawn_async(spawn.run_worker, task["id"])
         review_slots -= 1
-        spawn_async(spawn.run_worker, task["id"])
 
 
 def review_tier(t):

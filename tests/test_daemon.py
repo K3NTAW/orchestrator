@@ -33,6 +33,37 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.workers, [review])
         self.assertEqual(bus.get(review)["pipeline"]["respawned_at"], stamp)
 
+    def test_respawn_skips_task_claimed_between_snapshot_and_lock(self):
+        review = self.task("claimed while respawning", role="review")
+        bus.claim(review, "claude:A")
+        daemon.reconcile_dead(bus.get(review))
+        get = bus.get
+
+        def claimed(task_id):
+            task = get(task_id)
+            if task_id == review:
+                task["status"] = "running"
+            return task
+
+        self.swap(bus, "get", claimed)
+        daemon.dispatch(P.Pool())
+
+        self.assertEqual(self.workers, [])
+        self.assertFalse(get(review).get("pipeline"))
+
+    def test_respawn_skips_stale_review(self):
+        closed_goal = bus.create_task("closed goal", "spec", ["ok"], ["x.py"], role="scout")["id"]
+        bus.update(closed_goal, status="done")
+        review = bus.create_task("stale review", "spec", ["works"], ["x.py"], role="review",
+                                 complexity=2, parent=closed_goal)["id"]
+        bus.claim(review, "claude:A")
+        daemon.reconcile_dead(bus.get(review))
+
+        daemon.dispatch(P.Pool())
+
+        self.assertEqual(self.workers, [])
+        self.assertFalse(bus.get(review).get("pipeline"))
+
     def test_respawn_ignores_unrelated_pipeline_keys(self):
         review = self.task("dead review", role="review")
         bus.claim(review, "claude:A")
