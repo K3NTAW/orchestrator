@@ -118,7 +118,7 @@ def _failure_text(task):
         else str(hint.get("failures") or "")
 
 
-def failure_kind(task, worktree):
+def failure_kind(task, worktree, *, rerun_max=1):
     """Classify a held execution failure without relying on an LLM judgment."""
     reason = str(task.get("hold_reason") or "").lower()
     text = (reason + "\n" + _failure_text(task)).lower()
@@ -129,7 +129,7 @@ def failure_kind(task, worktree):
         return "environment"
     if any(marker in text for marker in ("eacces", "permission denied", "sandbox")):
         return "permissions"
-    if any(marker in text for marker in ("cooling", "usage limit", "quota", "rate limit")):
+    if any(marker in text for marker in ("cooling", "usage limit", "usage-limit", "quota", "rate limit")):
         return "quota"
     comments = _rejecting_reviews(task)
     issues = "\n".join(str(c.get("issue") or "").lower() for _, cs in comments for c in cs)
@@ -137,9 +137,11 @@ def failure_kind(task, worktree):
         return "invalid_spec"
     ids = _test_ids((task.get("resume_hint") or {}).get("failures"))
     # A rerun is deliberately restricted to the failing ids.  A missing worktree is not evidence of flakiness.
-    rerun_max = Pool().cfg.get("daemon", {}).get("flaky_rerun_max", 1)
+    runs = (task.get("resume_hint") or {}).get("flaky_runs") or []
+    if reason == "gate_red" and any(run.get("returncode") == 0 and run.get("ids") == ids for run in runs):
+        return "flaky"
     if (reason == "gate_red" and ids and worktree and Path(worktree).is_dir()
-            and len((task.get("resume_hint") or {}).get("flaky_runs") or []) < rerun_max):
+            and len(runs) < min(1, rerun_max)):
         try:
             rerun = subprocess.run(["pytest", "-q", *ids], cwd=worktree, capture_output=True, text=True)
         except OSError:
@@ -203,7 +205,8 @@ def auto_fix_round(pool):
                (t.get("constraints") or {}).get("fix_round_for") == held["id"] for t in chain):
             continue
         reason = held.get("hold_reason", "")
-        kind = failure_kind(held, held.get("worktree"))
+        kind = failure_kind(held, held.get("worktree"),
+                            rerun_max=pool.cfg.get("daemon", {}).get("flaky_rerun_max", 1))
         with bus.locked():
             current = bus.get(held["id"])
             pipeline = dict(current.get("pipeline") or {})
@@ -220,8 +223,9 @@ def auto_fix_round(pool):
             routine = bool(comments) and all(_path_in_scope(c.get("path"), held.get("scope") or [])
                                              for _, cs in comments for c in cs)
         rounds = sum(1 for t in chain if (t.get("constraints") or {}).get("auto_round") is not None)
-        repeated = any(t["id"] != held["id"] and
-                       (t.get("constraints") or {}).get("failure_signature") == signature for t in chain)
+        # A fix task's own constraint records the failure it was created to repair.
+        # Matching it means the immediately preceding round did not change the failure.
+        repeated = any((t.get("constraints") or {}).get("failure_signature") == signature for t in chain)
         if routine and rounds < cap and not repeated:
             with bus.locked():
                 current = bus.get(held["id"])
@@ -251,7 +255,7 @@ def auto_fix_round(pool):
                 bus.update(held["id"], pipeline=pipeline)
                 detail = "unchanged failure repeated" if repeated else kind
                 hint = "; rebase-task hint (T-0258)" if kind == "conflict" else ""
-                notify(f"{held['id']}: automatic fix round escalated: {detail}{hint}")
+                notify(f"{held['id']}: automatic fix round escalated ({kind}): {detail}{hint}")
 
 
 def _load_review_cfg(pool):

@@ -244,6 +244,90 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertTrue(bus.get(tid)["pipeline"]["auto_fix_skipped"])
 
+    def test_unchanged_failure_signature_escalates_instead_of_new_round(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        tid = self.held_for_fix()
+        self.rejecting_review(tid, issue="wrong result at line 12")
+        pool = P.Pool()
+        daemon.auto_fix_round(pool)
+        first, = self.fixes_for(tid)
+        bus.update(first["id"], status="held", hold_reason="gate_red", resume_hint={
+            "failures": "FAILED tests/test_x.py::test_x - assertion (0.42s)"})
+        self.rejecting_review(first["id"], issue="wrong result at line 99")
+        daemon.auto_fix_round(pool)
+        daemon.auto_fix_round(pool)
+        self.assertEqual(self.fixes_for(first["id"]), [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("unchanged failure repeated", messages[0])
+        self.assertIn("code_defect", messages[0])
+
+    def test_changed_signature_gets_a_round(self):
+        tid = self.held_for_fix()
+        pool = P.Pool()
+        daemon.auto_fix_round(pool)
+        first, = self.fixes_for(tid)
+        bus.update(first["id"], status="held", hold_reason="gate_red", resume_hint={
+            "failures": "FAILED tests/test_x.py::test_other - assertion"})
+        daemon.auto_fix_round(pool)
+        second, = self.fixes_for(first["id"])
+        signature = second["constraints"]["failure_signature"]
+        self.assertRegex(signature, r"^[0-9a-f]{12}$")
+        self.assertNotEqual(signature, first["constraints"]["failure_signature"])
+        self.assertEqual(signature, daemon.failure_signature(bus.get(first["id"])))
+        self.assertEqual(bus.get(first["id"])["pipeline"]["failure_kind"], "code_defect")
+        self.assertIn("Failure kind: code_defect", second["spec"])
+
+    def test_failure_kind_environment_escalates_without_round(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        tid = self.held_for_fix("FAILED tests/test_x.py::test_x - ModuleNotFoundError: missing package")
+        daemon.auto_fix_round(P.Pool())
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(bus.get(tid)["pipeline"]["failure_kind"], "environment")
+        self.assertEqual(self.fixes_for(tid), [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("environment", messages[0])
+
+    def test_flaky_rerun_then_escalate(self):
+        messages, runs = [], []
+        self.swap(daemon, "notify", messages.append)
+        failures = "FAILED tests/test_x.py::test_x - assertion"
+        tid = self.held_for_fix(failures)
+        bus.update(tid, worktree=str(self.sandbox))
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {})["flaky_rerun_max"] = 1
+        def rerun(cmd, **kwargs):
+            runs.append((cmd, kwargs))
+            return FakeProc("1 passed", 0)
+        self.swap(daemon.subprocess, "run", rerun)
+        for _ in range(3):
+            daemon.auto_fix_round(pool)
+        task = bus.get(tid)
+        self.assertEqual(task["pipeline"]["failure_kind"], "flaky")
+        self.assertEqual(self.fixes_for(tid), [])
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0][0], ["pytest", "-q", "tests/test_x.py::test_x"])
+        self.assertEqual(runs[0][1]["cwd"], str(self.sandbox))
+        self.assertEqual(task["resume_hint"]["failures"], failures)
+        self.assertEqual(task["resume_hint"]["flaky_runs"], [{
+            "ids": ["tests/test_x.py::test_x"], "returncode": 0, "output": "1 passed"}])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("flaky", messages[0])
+
+    def test_quota_hold_creates_no_round(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        for reason in ("executor cooling", "codex usage-limit reached", "codex usage limit"):
+            with self.subTest(reason=reason):
+                tid = self.held_for_fix()
+                bus.update(tid, hold_reason=reason)
+                for _ in range(3):
+                    daemon.auto_fix_round(P.Pool())
+                self.assertEqual(bus.get(tid)["pipeline"]["failure_kind"], "quota")
+                self.assertEqual(self.fixes_for(tid), [])
+        self.assertEqual(messages, [])
+
     def rejecting_review(self, tid, path="x.py", issue="correct the result"):
         review = self.task("reject", role="review", inputs=[tid])
         bus.update(review, status="done", result={"verdict": "request_changes", "comments": [
@@ -313,13 +397,13 @@ class Daemon(unittest.TestCase):
         daemon.auto_fix_round(pool)
         first, = self.fixes_for(tid)
         bus.update(first["id"], status="held", hold_reason="gate_red", resume_hint={
-            "failures": "FAILED tests/test_x.py::test_x"})
+            "failures": "FAILED tests/test_x.py::test_second"})
         daemon.auto_fix_round(pool)
         second, = self.fixes_for(first["id"])
         self.assertEqual(second["title"], "fix round 2: original")
         self.assertEqual(second["constraints"]["auto_round"], 2)
         bus.update(second["id"], status="held", hold_reason="gate_red", resume_hint={
-            "failures": "FAILED tests/test_x.py::test_x"})
+            "failures": "FAILED tests/test_x.py::test_third"})
         daemon.auto_fix_round(pool)
         self.assertEqual(self.fixes_for(second["id"]), [])
         self.assertTrue(bus.get(second["id"])["pipeline"]["auto_fix_skipped"])

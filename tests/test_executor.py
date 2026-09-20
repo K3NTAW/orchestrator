@@ -1,5 +1,6 @@
 """orchestrator.executor: event-stream parsing, reply round caps, fallback-to-Claude routing, run logging."""
 import json, sys, time, unittest
+from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_executor.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, codex_stream  # noqa: F401
@@ -8,6 +9,59 @@ from orchestrator import bus, executor, pool as P, spawn
 
 class Executor(unittest.TestCase):
     LIVE = {"astra", "luna", "terra", "sol"}
+
+    def reply_checkout(self, head, dirty="", ancestor=True):
+        """Mock git and Codex independently, exercising the real reply and event parser."""
+        P.PERSIST.unlink(missing_ok=True)
+        self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(title="resume-check")
+        bus.update(tid, codex_thread="old-thread", codex_thread_head="a" * 40,
+                   executor="astra", rounds=0)
+        calls = []
+        def run(cmd, **kwargs):
+            if cmd[0] == "git":
+                self.assertEqual(kwargs["cwd"], str(TMP))
+                if cmd[1:] == ["status", "--porcelain"]:
+                    return FakeProc(dirty, 0)
+                if cmd[1:] == ["rev-parse", "HEAD"]:
+                    return FakeProc(head + "\n", 0)
+                if cmd[1:] == ["merge-base", "--is-ancestor", "a" * 40, "HEAD"]:
+                    return FakeProc("", 0 if ancestor else 1)
+                self.fail(f"Unexpected git command: {cmd}")
+            self.assertEqual(cmd[:2], ["codex", "exec"])
+            calls.append(cmd)
+            thread = "old-thread" if cmd[2] == "resume" else "fresh-thread"
+            return FakeProc(codex_stream({"type": "thread.started", "thread_id": thread},
+                {"type": "turn.completed", "usage": {}}), 0)
+        with patch.object(executor.subprocess, "run", side_effect=run), \
+                patch.object(spawn, "packet", return_value="compact task packet") as packet:
+            result = executor.reply(tid, "repair failing assertion")
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(bus.get(tid)["codex_thread_head"], head)
+        self.assertEqual(len(calls), 1)
+        return bus.get(tid), calls[0], packet
+
+    def test_codex_reply_fresh_thread_when_worktree_moved(self):
+        for head, dirty, ancestor, reason in (
+                ("b" * 40, "", False, "worktree head moved"),
+                ("a" * 40, " M x.py\n", True, "worktree is dirty")):
+            with self.subTest(reason=reason):
+                task, cmd, packet = self.reply_checkout(head, dirty, ancestor)
+                self.assertEqual(cmd[2], "-m")
+                self.assertNotIn("old-thread", cmd)
+                self.assertIn("compact task packet\n\nRepair delta:\nrepair failing assertion", cmd)
+                self.assertEqual(task["resume_incompatible"], reason)
+                self.assertEqual(task["codex_thread"], "fresh-thread")
+                packet.assert_called_once()
+
+    def test_codex_reply_resumes_when_compatible(self):
+        for head in ("a" * 40, "b" * 40):
+            with self.subTest(head=head):
+                task, cmd, packet = self.reply_checkout(head)
+                self.assertEqual(cmd[:5], ["codex", "exec", "resume", "old-thread", "repair failing assertion"])
+                self.assertNotIn("resume_incompatible", task)
+                self.assertEqual(task["codex_thread"], "old-thread")
+                packet.assert_not_called()
 
     def exec_task(self, complexity=3, title="exec"):
         """An execute task with a worktree already set, so start() never has to create one."""
