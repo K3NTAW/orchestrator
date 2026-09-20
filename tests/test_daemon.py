@@ -2237,7 +2237,7 @@ class DispatchWorker(unittest.TestCase):
         self.start.return_value = {"status": "done", "message": "x" * 6000,
                                    "thread": "thread-1", "usage": usage}
         daemon._dispatch_worker(self.task_id, "prompt")
-        self.start.assert_called_once_with(self.task_id, "prompt", None)
+        self.start.assert_called_once_with(self.task_id, "prompt")
         self.assertEqual(self.state["status"], "done")
         result = self.state["result"]
         self.assertEqual(result["summary"], "x" * 3000)

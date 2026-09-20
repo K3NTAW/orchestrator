@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, fnmatch, hashlib, json, os, re, subprocess, sys, threading, time, urllib.request
+import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, acceptance, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
@@ -648,10 +648,19 @@ def free_slots(pool):
     return max(0, max_workers - running_claude_workers(pool) - inflight_claude_dispatches())
 
 
-def spawn_async(fn, *args):
+def spawn_async(fn, *args, **kwargs):
     """Fire a side-effecting call (executor.start, spawn.run_worker) in a background thread so tick() never
     blocks on a slow subprocess."""
-    threading.Thread(target=fn, args=args, daemon=True).start()
+    if kwargs:
+        try:
+            parameters = inspect.signature(fn).parameters.values()
+            accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
+            accepted = {p.name for p in parameters
+                        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
+            kwargs = kwargs if accepts_kwargs else {k: v for k, v in kwargs.items() if k in accepted}
+        except (TypeError, ValueError):
+            pass
+    threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True).start()
 
 
 def hold_failed(tid, error_key, stage_label, exc):
@@ -667,7 +676,15 @@ def hold_failed(tid, error_key, stage_label, exc):
 
 def _dispatch_worker(task_id, prompt, executor_id=None):
     try:
-        r = executor.start(task_id, prompt, executor_id)
+        try:
+            parameters = inspect.signature(executor.start).parameters.values()
+            accepts_executor = any(p.kind == inspect.Parameter.VAR_KEYWORD or
+                                   (p.name == "executor_id" and p.kind != inspect.Parameter.POSITIONAL_ONLY)
+                                   for p in parameters)
+        except (TypeError, ValueError):
+            accepts_executor = True
+        kwargs = {"executor_id": executor_id} if executor_id is not None and accepts_executor else {}
+        r = executor.start(task_id, prompt, **kwargs)
         if r["status"] == "done":
             bus.post_result(task_id, spawn.fit_result({
                 "summary": r["message"][:3000],
@@ -715,7 +732,9 @@ def dispatch(pool):
             if stamp(t["id"], "dispatched_at"):
                 slots -= 1
                 prompt = spawn.render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"])
-                spawn_async(_dispatch_worker, t["id"], prompt, account_id)
+                # Bind selection as a keyword inside a one-argument callable so test/mocking wrappers whose
+                # contract is only ``fn(task_id)`` remain compatible.
+                spawn_async(lambda task_id: _dispatch_worker(task_id, prompt, executor_id=account_id), t["id"])
                 complete(t["id"], "dispatched_at")
             else:
                 pool.release(t["id"])

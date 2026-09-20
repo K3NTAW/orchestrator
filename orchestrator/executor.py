@@ -7,7 +7,7 @@ Observed ``codex exec resume --help`` options (2026-09-19): ``--config``, ``--la
 Notably, resume accepts ``--json`` and the access flags, but not ``-C``; its process cwd selects the worktree.
 Usage-limit errors cool Codex down and hold the task (§4.10).
 """
-import json, re, subprocess, time
+import inspect, json, re, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
@@ -249,7 +249,16 @@ def _exhausted(pool, t, run=None, account_id=None):
         return {"status": "held", "policy": pol, "codex": pool.status()["codex"]}
     from .spawn import run_worker
     bus.update(t["id"], tier=tier, fallback="claude", review_rule="same-family-review: other account, different model")
-    threading.Thread(target=run or run_worker, args=(t["id"], acct.id), daemon=True).start()
+    worker = run or run_worker
+    try:
+        parameters = inspect.signature(worker).parameters.values()
+        accepts_account = any(p.kind == inspect.Parameter.VAR_KEYWORD or
+                              (p.name == "account_id" and p.kind != inspect.Parameter.POSITIONAL_ONLY)
+                              for p in parameters)
+    except (TypeError, ValueError):
+        accepts_account = True
+    kwargs = {"account_id": acct.id} if accepts_account else {}
+    threading.Thread(target=worker, args=(t["id"],), kwargs=kwargs, daemon=True).start()
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 
