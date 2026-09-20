@@ -68,7 +68,7 @@ def review_facts(review_task):
             "findings_by_severity": severities,
             "reviewer_role": constraints.get("reviewer_role") or "general",
             "checklist_used": pipeline.get("review_reason") in _SECURITY_REASONS or (task.get("complexity") or 0) >= 7,
-            "reviewed_sha": constraints.get("reviewed_sha") or pipeline.get("reviewed_sha"),
+            "reviewed_sha": task.get("reviewed_sha") or constraints.get("reviewed_sha") or pipeline.get("reviewed_sha"),
             "packet_version": packet_version,
             "review_pass_index": pass_index,
             "reviews_expected": reviews_expected,

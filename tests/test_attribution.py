@@ -43,6 +43,13 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(facts["reviewer_role"], "general")
         self.assertIsNone(facts["packet_version"])
 
+    def test_review_facts_uses_top_level_reviewed_sha(self):
+        task = {"id": "R", "role": "review", "reviewed_sha": "top-level",
+                "constraints": {"reviewed_sha": "constraint"},
+                "pipeline": {"reviewed_sha": "pipeline"}}
+        self.assertEqual(attribution.review_facts(task)["reviewed_sha"], "top-level")
+        self.assertIsNone(attribution.review_facts({"id": "old", "role": "review"})["reviewed_sha"])
+
     def test_review_facts_pass_index_orders_sibling_reviews(self):
         reviewed = bus.create_task("attribution target", "s", ["a"], ["x.py"], role="execute")
         bus.update(reviewed["id"], pipeline={"reviews_expected": 2})

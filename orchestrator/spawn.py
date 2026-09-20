@@ -779,8 +779,11 @@ def run_worker(task_id, account_id=None):
                     if role == "spec_review" else {"review_verdict": result["verdict"]}
                 bus.update(task_id, **verdict_fields)
                 if role == "review":
-                    facts = attribution.review_facts(bus.get(task_id))
-                    bus.update(task_id, review_facts=facts, **facts)
+                    completed_task = bus.get(task_id)
+                    facts = attribution.review_facts(completed_task)
+                    fact_fields = {key: value for key, value in facts.items()
+                                   if value is not None or completed_task.get(key) is None}
+                    bus.update(task_id, review_facts=facts, **fact_fields)
                 if t.get("inputs") and isinstance(t["inputs"][0], str):
                     try:
                         bus.update(t["inputs"][0], **verdict_fields)
