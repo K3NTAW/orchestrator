@@ -58,17 +58,27 @@ class CodexResultPosting(unittest.TestCase):
         self.assertTrue(reply["posted"])
         self.assertEqual((posted["commit"], posted["executed_by"]), ("deadbeef", "codex:astra"))
 
-    def test_codex_reply_does_not_overwrite_existing_result(self):
+    def test_codex_reply_replaces_previous_round_result(self):
         task_id = self._running()
-        original = {"summary": "already posted"}
-        bus.post_result(task_id, original)
-        bus.update(task_id, status="running")
-        result = {"status": "done", "message": "new result", "usage": {}}
+        original = {"summary": "round one", "commit": "1111111", "thread": "thread-one", "rounds": 1}
+        bus.post_result(task_id, original, "done")
+        result = {"status": "done", "message": "round two; commit 2222222", "usage": {}, "thread": "thread-one"}
         with mock.patch.object(mcp.executor, "reply", return_value=result):
             reply = mcp.codex_reply(task_id, "fix")
+        posted = bus.get(task_id)["result"]
+        self.assertTrue(reply["posted"])
+        self.assertEqual((posted["summary"], posted["commit"], posted["rounds"], posted["previous_commits"]),
+                         ("round two; commit 2222222", "2222222", 2, ["1111111"]))
+
+    def test_codex_fresh_thread_does_not_overwrite_done_task(self):
+        task_id = self._running()
+        bus.post_result(task_id, {"summary": "old", "commit": "1111111", "thread": "thread-one"}, "done")
+        result = {"status": "done", "message": "new; commit 2222222", "usage": {}, "thread": "thread-two"}
+        with mock.patch.object(mcp.executor, "start", return_value=result):
+            reply = mcp.codex(task_id, "go")
         self.assertFalse(reply["posted"])
-        self.assertEqual(reply["posted_reason"], "result already exists")
-        self.assertEqual(bus.get(task_id)["result"]["summary"], "already posted")
+        self.assertEqual(reply["posted_reason"], "result exists from thread thread-one")
+        self.assertEqual(bus.get(task_id)["result"]["commit"], "1111111")
 
 
 if __name__ == "__main__":

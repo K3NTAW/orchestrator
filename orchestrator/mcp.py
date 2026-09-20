@@ -99,7 +99,7 @@ def codex(task_id: str, prompt: str) -> dict:
 def codex_reply(task_id: str, delta: str) -> dict:
     """Fix-loop round on the task's existing thread (`codex exec resume`). Send deltas only: failing test names + assertion lines. Max 5 rounds."""
     result = executor.reply(task_id, delta)
-    posted, reason = executor.post_tool_result(task_id, result)
+    posted, reason = executor.post_tool_result(task_id, result, replace_result=True)
     return {**result, "posted": posted, "posted_reason": reason}
 
 

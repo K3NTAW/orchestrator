@@ -118,29 +118,52 @@ def _diff_stat(cwd):
     return subprocess.run(["git", "diff", "--stat"], cwd=cwd, capture_output=True, text=True).stdout[-1500:]
 
 
-def post_tool_result(task_id, result):
-    """Post a successful synchronous Codex tool result once, using the daemon worker's result shape."""
+def _commit_from_message(message):
+    """Extract an explicitly reported commit, avoiding incidental short hexadecimal text."""
+    full = re.search(r"\b[0-9a-f]{40}\b", message, re.I)
+    if full:
+        return full.group(0)
+    labelled = re.search(
+        r"\b(?:commit\s+sha|committed|commit|sha|HEAD\s+is\s+now\s+at)\b(?:\s*[:=]\s*|\s+)([0-9a-f]{7,40})\b",
+        message, re.I,
+    )
+    if labelled:
+        return labelled.group(1)
+    backticked = re.search(r"\bCommit\b[^\n`]*`([0-9a-f]{7,40})`", message, re.I)
+    return backticked.group(1) if backticked else None
+
+
+def post_tool_result(task_id, result, replace_result=False):
+    """Post a Codex result; fix-loop replies replace an unmerged task's prior round."""
     task = bus.get(task_id)
-    if task.get("result") is not None:
-        return False, "result already exists"
-    if task.get("status") != "running":
-        return False, f"task status is {task.get('status')}, not running"
     if task.get("assigned_to") != "codex":
         return False, f"task is assigned to {task.get('assigned_to')}, not codex"
     if result.get("status") != "done":
         return False, f"codex result status is {result.get('status')}, not done"
+    previous = task.get("result")
+    if replace_result:
+        if task.get("merged_into") is not None:
+            return False, f"task is merged into {task.get('merged_into')}"
+    elif previous is not None and task.get("status") != "running":
+        return False, f"result exists from thread {previous.get('thread', 'unknown')}"
+    elif task.get("status") != "running":
+        return False, f"task status is {task.get('status')}, not running"
     message = result.get("message", "")
-    match = re.search(r"\b(?:commit(?:ted)?(?:\s+sha)?[:\s]+)?([0-9a-f]{7,40})\b", message, re.I)
-    commit = match.group(1) if match else subprocess.run(
+    commit = _commit_from_message(message) or subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=task["worktree"], capture_output=True, text=True, check=True
     ).stdout.strip()
-    bus.post_result(task_id, {
+    posted = {
         "summary": message[:3000],
         "commit": commit,
         "executed_by": "codex:" + task["executor"],
         "provenance": ["repo"],
         "usage": result.get("usage"),
-    }, "done")
+        "thread": result.get("thread") or task.get("codex_thread"),
+        "rounds": (previous.get("rounds", 1) + 1) if replace_result and previous else 1,
+    }
+    if replace_result and previous:
+        posted["previous_commits"] = [*previous.get("previous_commits", []), previous.get("commit")]
+    bus.post_result(task_id, posted, "done")
     return True, "result posted"
 
 

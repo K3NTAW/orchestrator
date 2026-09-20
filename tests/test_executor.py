@@ -59,6 +59,12 @@ class Executor(unittest.TestCase):
         self.assertEqual(executor.argv_for("exec", args, TMP, access),
                          ["codex", "exec", *args, "--json", "-C", str(TMP), *access])
 
+    def test_commit_sha_parse_requires_label_or_full_sha(self):
+        self.assertIsNone(executor._commit_from_message("Completed 1234567-row migration."))
+        self.assertEqual(executor._commit_from_message("commit: deadbeef"), "deadbeef")
+        self.assertEqual(executor._commit_from_message("HEAD is now at cafe123"), "cafe123")
+        self.assertEqual(executor._commit_from_message("Commit `abcdef0`: implement fix"), "abcdef0")
+
     def test_usage_error_does_not_count_round(self):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
         tid = self.exec_task(title="argv-error")
