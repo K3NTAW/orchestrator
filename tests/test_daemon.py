@@ -322,6 +322,37 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("flaky", messages[0])
 
+    def test_flaky_rerun_max_two_reruns_twice_then_escalates(self):
+        failures = "FAILED tests/test_x.py::test_x - assertion"
+        tid = self.held_for_fix(failures)
+        bus.update(tid, worktree=str(self.sandbox))
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {})["flaky_rerun_max"] = 2
+        runs = []
+
+        def rerun(cmd, **kwargs):
+            runs.append((cmd, kwargs))
+            return FakeProc("still failing", 1)
+
+        self.swap(daemon.subprocess, "run", rerun)
+        self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox), rerun_max=2), "code_defect")
+        self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox), rerun_max=2), "code_defect")
+        daemon.auto_fix_round(pool)
+        task = bus.get(tid)
+        self.assertEqual(task["pipeline"]["failure_kind"], "code_defect")
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(task["resume_hint"]["flaky_runs"], [{
+            "ids": ["tests/test_x.py::test_x"], "returncode": 1, "output": "still failing"}, {
+            "ids": ["tests/test_x.py::test_x"], "returncode": 1, "output": "still failing"}])
+        self.assertEqual(len(self.fixes_for(tid)), 1)
+
+        no_rerun = self.held_for_fix(failures)
+        bus.update(no_rerun, worktree=str(self.sandbox))
+        pool.cfg["daemon"]["flaky_rerun_max"] = 0
+        daemon.auto_fix_round(pool)
+        self.assertEqual(len(runs), 2)
+        self.assertNotIn("flaky_runs", bus.get(no_rerun)["resume_hint"])
+
     def test_flaky_rerun_has_timeout_and_timeout_is_not_flaky(self):
         tid = self.held_for_fix()
         bus.update(tid, worktree=str(self.sandbox))

@@ -148,7 +148,7 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     if reason == "gate_red" and any(run.get("returncode") == 0 and run.get("ids") == ids for run in runs):
         return "flaky"
     if (reason == "gate_red" and ids and worktree and Path(worktree).is_dir()
-            and len(runs) < min(1, rerun_max)):
+            and len(runs) < rerun_max):
         try:
             rerun = subprocess.run(_flaky_rerun_command(ids), cwd=worktree, capture_output=True, text=True,
                                    timeout=rerun_timeout)
