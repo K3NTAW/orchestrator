@@ -306,3 +306,16 @@ type: decision · goal: T-0445 · tasks: T-0471,T-0485,T-0486 · provenance: rep
 - review T-0486 reported the diff as a no-op because it compared the branch head against itself; commit 416b97f (per-key route cache with TTL and cap, jev.routing table moved next to jev) exists on task/T-0485 with its three named tests; external tests-green green
 - its one code finding is low: cache_max_entries = 0 does not disable caching (slice [-0:]); backlog item, no fix round
 outcome: revert path: git revert the T-0485 merge on goal/T-0445; re-review by spawning a review with inputs T-0485 if the human wants one
+
+## 2026-09-20 P4 T-0472 merged after review T-0487's single test-only finding was fixed by one codex_reply round
+type: decision · goal: T-0445 · tasks: T-0472,T-0487 · provenance: repo
+- T-0487 found the CLI test matched 'agree' inside 'disagree' and never checked the agree group; commit 4149f67 adds an agreeing fixture row and line-anchored assertions; full gate green externally (733 tests)
+outcome: revert path: git revert the T-0472 merge on goal/T-0445
+
+## 2026-09-20 Phase I closed on goal/T-0445 at 4149f67: P0 telemetry, P1 packets, P2 economics and resume, P3 Jev shadow, P4 evaluation merged; P5 to P7 deferred to live evidence
+type: decision · goal: T-0445 · tasks: T-0449,T-0450,T-0454,T-0455,T-0461,T-0462,T-0463,T-0465,T-0466,T-0471,T-0472 · provenance: repo
+- 23 commits over Phase H head 0d7bf09; external tests-green exit 0 on 4149f67 (733 tests); 11 increments merged through 9 fix rounds, 1 combine round, 3 codex_reply rounds for missing tests; every review found a real defect except T-0486 which diffed HEAD against itself
+- cost of T-0445 so far 11.5 USD API-equivalent, 31.9M tokens, 178 calls, 339 turns; review share 80.9 percent, scouts 19.1 (Codex rows carry no usd on the Phase F server)
+- baseline p0-p4-code vs phase-h-code over bus history: tokens per accepted task 1.15M to 1.26M (+9.6), fix_round_rate 0.315 to 0.328, amplification 1.93 to 1.92; this measures Phase I's own execution on the old server code, not the effect of the merged changes, which are not live until PRs 6-13 merge; routing evidence insufficient (no shadow rows yet)
+- first executor economics (small n, Codex usd estimated from tokens): astra fix_round_probability 0.38, cost_to_accepted 0.48 USD, tokens_to_accepted 1.14M; sol 0.63, 0.85 USD, 2.55M; terra 0.78, 1.00 USD, 2.46M; luna 0.36, 162k tokens; claude sonnet 0.45, 2.14 USD; supports measuring cost per accepted task before any ranking change
+outcome: revert path: git branch -f goal/T-0445 0d7bf09 or revert PR 13; baselines are data files under .orchestrator/baselines; [jev.routing].mode = off disables shadow rows; P5 active ranking, P6 review optimisation and P7 experiments start only after the server runs this code and routing_eval says collected
