@@ -260,3 +260,9 @@ type: decision · goal: T-0353 · tasks: T-0361,T-0384,T-0365 · provenance: rep
 - review T-0384 (request_changes, one high) says daemon.tick never computes a route so every launch records route escalate, reason legacy:autonomous; the T-0361 spec states exactly that default until H3b wires decision.route, and T-0365 depends on T-0361, so a fix round would duplicate H3b
 - merge(T-0361, goal/T-0353) via the MCP merge tool: rebase, tests-green, fast-forward to 68ff495; tests of T-0361 and T-0370 green
 outcome: revert path: git revert 68ff495 on goal/T-0353; if H3b does not land, the legacy default stays labelled in scorecard --planner and this decision must be revisited
+
+## 2026-09-20 Two Planner sessions on one bus after the 16:36 restart: session 6410 yields Phase H to the registered session (server pid 7181), T-0435 superseded by its T-0437
+type: decision · goal: T-0353 · tasks: T-0435,T-0437,T-0436,T-0438 · provenance: repo
+- after the Claude Code process ended at 16:36 two sessions attached to this repo: 6410 (resumed, this transcript) and 7155 (Planner launcher, registered in planner_session.json as pid 7181); both wrote an H3b v3 spec within two minutes (T-0435 and T-0437) and both daemons ran; the registered session's spec derives gate_state from merge records instead of an off-tick suite run, a cheaper resolution of spec review risk 3
+- rule applied: never two Planners on one bus; the session registered in planner_session.json owns the goal; the other stops creating tasks and marking chains
+outcome: T-0435 marked superseded; plan.md carries the handover (what remains: T-0437 spec review T-0438, then H9 T-0366 after marking T-0365, T-0433, T-0435 merged, retrospective, PR 12, then the docs.kentawaibel.com HTML artifact request). Revert path: none needed; if the registered session is gone, the surviving session resumes from plan.md via skill resume
