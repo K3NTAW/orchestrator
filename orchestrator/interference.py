@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
+from itertools import chain
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping
 
@@ -115,15 +116,19 @@ def classify(
 
     for path in sorted(set(literals_a) & set(literals_b)):
         reasons.add(f"same_file:{path}")
-    for glob, path in ((*((glob, path) for glob in globs_a for path in literals_b),),
-                       *((glob, path) for glob in globs_b for path in literals_a)):
+    for glob, path in chain(
+        ((glob, path) for glob in globs_a for path in literals_b),
+        ((glob, path) for glob in globs_b for path in literals_a),
+    ):
         if fnmatchcase(path, glob):
             reasons.add(f"glob_covers:{glob}->{path}")
     for glob in sorted(set(globs_a) & set(globs_b)):
         reasons.add(f"same_glob:{glob}")
 
-    for prefix, entries in ((*((entry, second_scope) for entry in dirs_a),),
-                            *((entry, first_scope) for entry in dirs_b)):
+    for prefix, entries in chain(
+        ((entry, second_scope) for entry in dirs_a),
+        ((entry, first_scope) for entry in dirs_b),
+    ):
         normalized = _dir_prefix(prefix)
         for entry in entries:
             if entry == prefix or entry.startswith(normalized):
