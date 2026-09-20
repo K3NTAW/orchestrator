@@ -108,6 +108,33 @@ class Reservations(unittest.TestCase):
         self.assertEqual(usd, 0.6)
         self.assertEqual(tokens, 150000)
 
+    def test_estimate_uses_token_derived_usd_for_codex_rows(self):
+        self.cfg["limits"]["default_tokens_per_usd"] = 250000
+        self.cfg["limits"]["goal_budget_usd"] = {"execute": 0.25}
+        self.cfg["executors"] = [{"id": "codex-test", "provider": "codex",
+                                  "model": "test", "roles": ["execute"]}]
+        usage = {"input_tokens": 20000, "output_tokens": 5000}
+        for i in range(5):
+            task = P.bus.create_task(f"completed execute {i}", "spec", ["works"], ["x.py"],
+                                     role="execute", parent="G-history")
+            P.bus.update(task["id"], status="done", executor="codex-test", result={"usage": usage})
+
+        pool = P.Pool(self.cfg)
+        tokens, usd = pool._reservation_estimate("codex-test", "execute")
+        self.assertEqual(tokens, 25000)
+        self.assertAlmostEqual(usd, 0.1)
+        tasks = [P.bus.create_task(f"new execute {i}", "spec", ["works"], ["x.py"],
+                                   role="execute", parent="G-budget") for i in range(3)]
+        first = pool.reserve("run-1", "codex-test", "execute", tasks[0])
+        self.assertIsNotNone(first)
+        self.assertAlmostEqual(first["est_usd"], usd)
+        self.assertEqual(P.Pool(self.cfg).live_reservations()["run-1"]["est_usd_source"], "tokens")
+        pool.release("run-1", dict(usage))
+        self.assertAlmostEqual(pool.reservation_history()["goals"]["G-budget"]["execute"]["usd"], usd)
+        self.assertIsNotNone(pool.reserve("run-2", "codex-test", "execute", tasks[1]))
+        self.assertIsNone(P.Pool(self.cfg).reserve("run-3", "codex-test", "execute", tasks[2]))
+        self.assertEqual(set(pool.live_reservations()), {"run-2"})
+
     def test_expired_lease_with_live_pid_still_counts(self):
         first, second = self.task(), self.task()
         self.p.reserve("run-1", "A", "scout", first)

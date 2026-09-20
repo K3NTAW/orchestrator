@@ -20,6 +20,25 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_reconcile_dead_release_keeps_top_level_cost(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(P, "PLANNER_USAGE", self.sandbox / "planner_usage.json")
+        pool = P.Pool()
+        tid = self.task("dead worker with recorded cost")
+        self.assertIsNotNone(pool.reserve(tid, "astra", "execute", bus.get(tid)))
+        bus.update(tid, status="running", result={
+            "usage": {"input_tokens": 12, "output_tokens": 8}, "usd": 0.37})
+
+        self.assertEqual(daemon.reconcile_dead(bus.get(tid), pool), "requeued")
+
+        fresh = P.Pool()
+        self.assertNotIn(tid, fresh.live_reservations())
+        history = fresh.reservation_history()
+        self.assertEqual(history["tokens"], 20)
+        self.assertAlmostEqual(history["usd"], 0.37)
+        self.assertEqual(history["roles"]["execute"], {"tokens": 20, "usd": 0.37})
+        self.assertEqual(history["goals"]["T-0043"]["execute"], {"tokens": 20, "usd": 0.37})
+
     def test_dispatch_respawns_requeued_review_once(self):
         review = self.task("dead review", role="review")
         bus.claim(review, "claude:A")
