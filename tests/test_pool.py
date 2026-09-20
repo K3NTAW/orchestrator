@@ -1,6 +1,6 @@
 """Account pool selection (PoolSel), the [[executors]] routing table (Executors), and Planner-transcript token
 tallying (PlannerTally): bands, quota groups, cooldowns, budgets, scored ranking."""
-import io, json, shutil, sys, time, unittest
+import io, json, os, shutil, sys, tempfile, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -62,6 +62,76 @@ class PoolSel(unittest.TestCase):
     def test_trust_workspace(self):
         cfg = TMP / "prof"; spawn.trust_workspace(str(cfg), TMP / "wt" / "T-0099")
         self.assertTrue(json.loads((cfg / ".claude.json").read_text())["projects"][str(TMP / "wt" / "T-0099")]["hasTrustDialogAccepted"])
+
+
+class Reservations(unittest.TestCase):
+    """Each run gets an isolated bus and ledger, including across fresh Pool instances."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="orch-reservations-")
+        self.addCleanup(directory.cleanup)
+        self.sandbox = Path(directory.name)
+        for module, name, value in (
+            (P.bus, "STATE", self.sandbox),
+            (P.bus, "TASKS", self.sandbox / "tasks"),
+            (P.bus, "RUNS", self.sandbox / "runs"),
+            (P, "PERSIST", self.sandbox / "pool_state.json"),
+            (P, "PLANNER_USAGE", self.sandbox / "planner_usage.json"),
+        ):
+            patcher = mock.patch.object(module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.cfg = P.config()
+        self.cfg["limits"]["reservations"] = True
+        self.cfg["limits"]["max_budget_usd"]["scout"] = 0.6
+        self.cfg["claude_accounts"][0].update(daily_budget_tokens=100, usd_per_token=0.01)
+        self.p = P.Pool(self.cfg)
+
+    def task(self):
+        return P.bus.create_task("reservation", "spec", ["works"], ["x.py"],
+                                 role="scout", parent="G-budget")
+
+    def test_parallel_reservations_cannot_exceed_daily_budget(self):
+        # Both callers loaded their pool before either claimed its share of the budget.
+        other = P.Pool(self.cfg)
+        first, second = self.task(), self.task()
+        reservation = self.p.reserve("run-1", "A", "scout", first)
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation["est_tokens"], 60)
+        self.assertIsNone(other.reserve("run-2", "A", "scout", second))
+        self.assertEqual(set(P.Pool(self.cfg).reservations), {"run-1"})
+
+    def test_expired_lease_with_live_pid_still_counts(self):
+        first, second = self.task(), self.task()
+        self.p.reserve("run-1", "A", "scout", first)
+        P.bus.update(first["id"], status="running", pid=os.getpid())
+        expiry = self.p.reservations["run-1"]["lease_until"]
+        with mock.patch.object(P.time, "time", return_value=expiry + 1):
+            self.assertEqual(self.p.sweep_reservations(), [])
+            self.assertIsNone(self.p.reserve("run-2", "A", "scout", second))
+            with mock.patch.object(P.os, "kill", side_effect=ProcessLookupError):
+                self.assertEqual(self.p.sweep_reservations(), ["run-1"])
+            self.assertIsNotNone(self.p.reserve("run-2", "A", "scout", second))
+            # A dead worker alone is insufficient: its unexpired lease still counts.
+            P.bus.update(second["id"], status="running", pid=os.getpid())
+            with mock.patch.object(P.os, "kill", side_effect=ProcessLookupError):
+                self.assertEqual(self.p.sweep_reservations(), [])
+        self.assertEqual(set(P.Pool(self.cfg).reservations), {"run-2"})
+
+    def test_release_reconciles_estimate_with_actual(self):
+        self.p.reserve("run-1", "A", "scout", self.task())
+        self.assertEqual(self.p.reservations["run-1"]["est_tokens"], 60)
+        self.p.release("run-1", {"input_tokens": 12, "output_tokens": 8, "usd": 0.2})
+        fresh = P.Pool(self.cfg)
+        self.assertEqual(fresh.reservations, {})
+        history = fresh.reservation_history
+        self.assertEqual(history["tokens"], 20)
+        self.assertAlmostEqual(history["usd"], 0.2)
+        self.assertEqual(history["roles"]["scout"], {"tokens": 20, "usd": 0.2})
+        self.assertEqual(history["goals"]["G-budget"]["scout"], {"tokens": 20, "usd": 0.2})
+        # Cleanup retries must not count the same actual usage a second time.
+        fresh.release("run-1", {"input_tokens": 12, "output_tokens": 8, "usd": 0.2})
+        self.assertEqual(P.Pool(self.cfg).reservation_history, history)
 
 
 class Executors(unittest.TestCase):

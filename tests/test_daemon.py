@@ -210,6 +210,62 @@ class Daemon(unittest.TestCase):
     def fixes_for(self, tid):
         return [t for t in bus.read() if t.get("constraints", {}).get("fix_round_for") == tid]
 
+    def test_budget_refusal_leaves_task_queued_without_repair(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(P, "PLANNER_USAGE", self.sandbox / "planner_usage.json")
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.swap(daemon, "maybe_handover", lambda *args: None)
+        self.swap(P.Pool, "tally_planner", lambda pool: None)
+        tid = self.task("budget refused")
+        before = bus.get(tid)
+        reservations = []
+
+        def refuse(pool, run_key, account_id, role, task):
+            reservations.append((run_key, role, task["id"]))
+            return None
+
+        self.swap(P.Pool, "reserve", refuse)
+        daemon.tick()
+        after = bus.get(tid)
+        self.assertEqual(reservations, [(tid, "execute", tid)])
+        self.assertEqual(after["status"], "queued")
+        self.assertEqual(after["pipeline"]["hold_note"], "budget")
+        self.assertEqual(after.get("hold_reason"), before.get("hold_reason"))
+        self.assertNotIn("dispatched_at", after["pipeline"])
+        self.assertEqual(self.started, [])
+        self.assertEqual(self.workers, [])
+        self.assertEqual(self.fixes_for(tid), [])
+        self.assertEqual([task["id"] for task in bus.read()], [tid])
+
+    def test_notify_once_per_transition(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        self.swap(P, "PLANNER_USAGE", self.sandbox / "planner_usage.json")
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.swap(daemon, "maybe_handover", lambda *args: None)
+        self.swap(P.Pool, "tally_planner", lambda pool: None)
+        pool = P.Pool()
+        account = pool.get("A")
+        account.day_tokens = account.daily_budget
+        pool.save()
+        for _ in range(3):
+            daemon.tick(P.Pool())  # restart-equivalent: reload the persisted notification state
+        self.assertEqual(messages, ["account A hit its daily budget; tasks held"])
+        self.assertTrue(P.Pool().notified_state["daily_budget:A"])
+
+        pool = P.Pool()
+        pool.get("A").day_tokens = 0
+        pool.save()
+        daemon.tick(P.Pool())
+        self.assertFalse(P.Pool().notified_state["daily_budget:A"])
+        pool = P.Pool()
+        pool.get("A").day_tokens = pool.get("A").daily_budget
+        pool.save()
+        for _ in range(3):
+            daemon.tick(P.Pool())
+        self.assertEqual(messages.count("account A hit its daily budget; tasks held"), 2)
+
     def test_auto_fix_round_on_gate_red_pytest_and_unittest_ids(self):
         for output, test_id in (("FAILED tests/test_x.py::test_x - assertion", "tests/test_x.py::test_x"),
                                 ("FAIL: test_x (module.Class.test_x)", "module.Class.test_x"),
