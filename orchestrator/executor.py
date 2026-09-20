@@ -202,6 +202,7 @@ def start(task_id, prompt, executor_id=None):
     scores() is B3's ranking input; absent, every executor scores 1.0."""
     pool = Pool()
     result = None
+    handed_off = False
     try:
         t = bus.get(task_id)
         previous = t.get("result")
@@ -221,7 +222,9 @@ def start(task_id, prompt, executor_id=None):
                 scores = {}
             ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
         if ex is None or ex.provider != "codex":
-            return _exhausted(pool, t, account_id=executor_id)
+            result = _exhausted(pool, t, account_id=executor_id)
+            handed_off = result.get("status") == "fallback"
+            return result
         if pool.reserve(task_id, ex.id, "execute", t) is None:
             pipeline = dict(t.get("pipeline") or {})
             pipeline["hold_note"] = "budget"
@@ -235,7 +238,11 @@ def start(task_id, prompt, executor_id=None):
         result = _run(pool, t, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
         return result
     finally:
-        pool.release(task_id, (result or {}).get("usage", {}))
+        # A Claude fallback inherits this run key's existing dispatch reservation.
+        # Its run_worker() finally owns the matching release, so do not create the
+        # gap where start() has returned but the worker has not yet claimed it.
+        if not handed_off:
+            pool.release(task_id, (result or {}).get("usage", {}))
 
 
 def _exhausted(pool, t, run=None, account_id=None):

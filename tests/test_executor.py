@@ -229,6 +229,59 @@ class Executor(unittest.TestCase):
         self.assertEqual(executor.start(tid, "do it")["status"], "held")
         self.assertNotIn(tid, P.Pool().reservations)
 
+    def test_fallback_handoff_keeps_reservation_until_worker_finishes(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(complexity=5, title="fallback-keeps-reservation")
+        self.assertIsNotNone(P.Pool().reserve(tid, "A", "execute", bus.get(tid)))
+        original_pick, original_worker, original_release = P.Pool.pick_executor, spawn.run_worker, P.Pool.release
+        started, finish, releases = executor.threading.Event(), executor.threading.Event(), []
+
+        def worker(task_id, account_id=None):
+            started.set(); finish.wait(2)
+            P.Pool().release(task_id)
+
+        def capture_release(pool, run_key, usage=None):
+            releases.append(run_key)
+            return original_release(pool, run_key, usage)
+
+        P.Pool.pick_executor = lambda *args, **kwargs: None
+        spawn.run_worker = worker
+        P.Pool.release = capture_release
+        self.addCleanup(lambda: setattr(P.Pool, "pick_executor", original_pick))
+        self.addCleanup(lambda: setattr(spawn, "run_worker", original_worker))
+        self.addCleanup(lambda: setattr(P.Pool, "release", original_release))
+
+        self.assertEqual(executor.start(tid, "do it")["status"], "fallback")
+        self.assertTrue(started.wait(1))
+        self.assertIn(tid, P.Pool().reservations)
+        finish.set()
+        for _ in range(100):
+            if tid not in P.Pool().reservations:
+                break
+            time.sleep(.01)
+        self.assertNotIn(tid, P.Pool().reservations)
+        self.assertEqual(releases, [tid])
+
+    def test_refused_or_exception_path_releases_immediately(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        refused = self.exec_task(title="refused-releases-reservation")
+        self.assertIsNotNone(P.Pool().reserve(refused, "A", "execute", bus.get(refused)))
+        bus.update(refused, status="failed")
+        self.assertEqual(executor.start(refused, "do it")["status"], "refused")
+        self.assertNotIn(refused, P.Pool().reservations)
+
+        failed = self.exec_task(title="exception-releases-reservation")
+        self.assertIsNotNone(P.Pool().reserve(failed, "A", "execute", bus.get(failed)))
+        original = executor._exhausted
+        executor._exhausted = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
+        self.addCleanup(lambda: setattr(executor, "_exhausted", original))
+        original_pick = P.Pool.pick_executor
+        P.Pool.pick_executor = lambda *args, **kwargs: None
+        self.addCleanup(lambda: setattr(P.Pool, "pick_executor", original_pick))
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            executor.start(failed, "do it")
+        self.assertNotIn(failed, P.Pool().reservations)
+
     def test_usage_limit_cools_the_whole_quota_group(self):
         self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "th-limit"},
                                      {"type": "error", "message": "You've hit your usage limit. Try again in 30 minutes."}), 1)
