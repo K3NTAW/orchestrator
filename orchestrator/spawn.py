@@ -61,6 +61,13 @@ def base_for(task):
 
 def ensure_worktree(task_id, base=None):
     wt = ROOT / "wt" / task_id
+    registered = {
+        Path(line[9:]).resolve()
+        for line in git("worktree", "list", "--porcelain", check=False).stdout.splitlines()
+        if line.startswith("worktree ")
+    }
+    if wt.exists() and wt.resolve() not in registered:
+        git("worktree", "prune")
     if not wt.exists():
         wt.parent.mkdir(exist_ok=True)
         git("fetch", "origin", check=False)
@@ -68,7 +75,11 @@ def ensure_worktree(task_id, base=None):
             base = base_for(bus.get(task_id))
         if git("rev-parse", "--verify", base, check=False).returncode:
             base = "HEAD"  # no remote yet
-        git("worktree", "add", str(wt), "-b", f"task/{task_id}", base)
+        branch = f"task/{task_id}"
+        if branch_exists(branch):
+            git("worktree", "add", str(wt), branch)
+        else:
+            git("worktree", "add", str(wt), "-b", branch, base)
     return wt
 
 

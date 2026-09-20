@@ -338,6 +338,11 @@ def _requeue(tid, pipeline):
     makes that retry happen: dispatch()'s stamp() no-ops when the stage is already stamped, so a requeue that
     left dispatched_at in place would leave the task queued forever without a live worker."""
     clear_stage(tid, "dispatched_at", status="queued", pid=None, reason="process died; requeued")
+    with bus.locked():
+        task = bus.get(tid)
+        current = dict(task.get("pipeline") or {})
+        current.pop("respawned_at", None)
+        bus.update(tid, pipeline=current)
     return "requeued"
 
 
@@ -541,6 +546,39 @@ def dispatch(pool):
                     complete(t["id"], "spec_review_at")
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
+
+    # Reviews are normally spawned when they are created, so they are not part of the execute loop above.
+    # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread
+    # that vanished before bus.claim.  The per-requeue stamp prevents every daemon tick spawning another copy.
+    max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
+    running = sum(1 for task in bus.read(status="running")
+                  if (task.get("assigned_to") or "").startswith("claude:"))
+    review_slots = max(0, max_workers - running)
+    respawn_after = pool.cfg.get("daemon", {}).get("respawn_after_s", 120)
+    now = time.time()
+    for task in bus.read(status="queued"):
+        if review_slots <= 0:
+            break
+        if task.get("role") not in ("review", "spec_review"):
+            continue
+        pipeline = task.get("pipeline") or {}
+        if pipeline or pipeline.get("respawned_at"):
+            continue
+        events = task.get("events") or []
+        died = any(event.get("reason") == "process died; requeued" for event in events)
+        bus_events = bus.events(limit=10000, task_ids=[task["id"]])
+        created_at = min((event["ts"] for event in bus_events), default=now)
+        if not died and now - created_at < respawn_after:
+            continue
+        with bus.locked():
+            current = bus.get(task["id"])
+            current_pipeline = dict(current.get("pipeline") or {})
+            if current_pipeline:
+                continue
+            current_pipeline["respawned_at"] = now
+            bus.update(task["id"], pipeline=current_pipeline)
+        review_slots -= 1
+        spawn_async(spawn.run_worker, task["id"])
 
 
 def review_tier(t):

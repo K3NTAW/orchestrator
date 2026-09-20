@@ -2,7 +2,7 @@
 while both Claude accounts and Codex are cooling) can pick up open goals without depending on the last manual save.
 write() replaces the trailing "## Auto-handover" section in place -- idempotent, never duplicated -- and leaves
 everything above it byte-identical."""
-import json, os, re, sys, tempfile, time
+import hashlib, json, os, re, sys, tempfile, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -272,6 +272,17 @@ def write(reason: str = "manual"):
         all_tasks = bus.read()
         events5 = _last_events(5)
 
+    snapshot = [{key: task.get(key) for key in ("id", "status", "hold_reason", "merged_into")}
+                for task in sorted(all_tasks, key=lambda item: item["id"])]
+    snapshot_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+    state_path = STATE / "handover_state.json"
+    try:
+        handover_state = json.loads(state_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        handover_state = {}
+    if plan.exists() and handover_state.get("snapshot_hash") == snapshot_hash:
+        return plan
+
     section = _render_section(reason, all_tasks, events5)
 
     with bus.locked():
@@ -291,6 +302,8 @@ def write(reason: str = "manual"):
             with os.fdopen(fd, "w") as f:
                 f.write(text)
             os.replace(tmp_name, plan)
+            handover_state["snapshot_hash"] = snapshot_hash
+            state_path.write_text(json.dumps(handover_state, indent=1))
         except Exception:
             os.unlink(tmp_name)
             raise
@@ -307,7 +320,12 @@ def _handover_last_at():
 def _save_handover_last_at(now):
     state = STATE / "handover_state.json"
     state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text(json.dumps({"handover_last_at": now}, indent=1))
+    try:
+        data = json.loads(state.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    data["handover_last_at"] = now
+    state.write_text(json.dumps(data, indent=1))
 
 
 def maybe_write(reason: str = "auto", now=None, interval=HANDOVER_INTERVAL_S):

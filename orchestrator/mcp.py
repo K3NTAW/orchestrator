@@ -49,6 +49,14 @@ def deregister_planner_session():
 
 
 def _bg(task_id):
+    try:
+        spawn.ensure_worktree(task_id)
+    except Exception as exc:
+        reason = str(exc)
+        task = bus.get(task_id)
+        bus.log_run(task=task_id, role=task["role"], tier=task.get("tier"),
+                    complexity=task.get("complexity"), outcome="spawn_error", reason=reason)
+        return {"status": "error", "reason": reason}
     threading.Thread(target=spawn.run_worker, args=(task_id,), daemon=True).start()
     return {"task": task_id, "status": "spawned; result arrives on the bus"}
 

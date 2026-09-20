@@ -173,8 +173,7 @@ class Handover(unittest.TestCase):
         self.assertEqual(text2.count("## Auto-handover "), 1)
         self.assertEqual(before1, before2)                 # everything above the section is byte-identical
         self.assertIn("first pass", section1.splitlines()[0])
-        self.assertIn("second pass", section2.splitlines()[0])
-        self.assertNotIn("first pass", text2)
+        self.assertEqual(section2, section1)               # reason alone is not a goal-state change
 
     def test_daemon_throttles_to_15_min(self):
         calls = []
@@ -297,6 +296,7 @@ class Handover(unittest.TestCase):
 
         for target in ("orchestrator.jev.ask", "orchestrator.handover.jev_rank.rank"):
             with self.subTest(target=target):
+                (handover.STATE / "handover_state.json").unlink(missing_ok=True)
                 stderr = io.StringIO()
                 with mock.patch(target, side_effect=RuntimeError("jev endpoint exploded\nmore detail")) as rank:
                     with redirect_stderr(stderr):
