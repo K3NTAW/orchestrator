@@ -53,6 +53,86 @@ summary whose `tokens` ratio is `null` when no goals are accepted; text displays
 `.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
 calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.
 
+## Phase H: efficiency
+
+### Accounting
+
+Run rows add `attempt` (default 1), `decision_kind`, `payload_key`, `route`, `route_reason`, `client_version`, and
+`policy_version`. `orchestrator scorecard --planner` reports Planner decision kinds, routes, reasons, premium
+exceptions, and token totals. Goal accounting sums retries per task: five or more tasks report the median, while
+smaller samples report `n=<count> range <min>-<max>`. Tokens per accepted goal are undefined when zero goals were
+accepted (`null` in JSON and `undefined (0 accepted goals)` in text), never zero or a division error.
+
+Rollback: set no flag; revert merged accounting commit `6d2824e`.
+
+### Decision routes
+
+`[planner.routes]` has `enabled = true`, `auto_open_pr = false`, `escalate_tier = "fable"`,
+`investigate_tier = "sonnet"`, `investigate_max_complexity = 4`, and
+`premium_launches_soft_per_goal = 2`. `routine` performs deterministic daemon work without a Planner;
+`investigate` launches the cheaper tier for a small, low-risk uncertainty; `escalate` launches the Planner tier
+for risk or incomplete evidence. The premium limit is soft: crossing it records a justified exception in the run
+ledger instead of blocking work. One launch coalesces all decision points for a goal and records its bus cursor;
+the child-state `state_version` prevents a second launch until state changes. Auth, quota, or availability failures
+cool the affected account, restore the prior cursor/state guard, and retry after infrastructure backoff. Set
+`enabled = false` to restore the per-point, always-escalate path.
+
+Rollback: set `[planner.routes] enabled = false`, or revert merged routing commits `e3b2b36`, `68ff495`, and `f2a1cf1`.
+
+### Budget reservations
+
+`[limits] reservations = true` atomically reserves daily tokens and optional per-goal role USD before a launch.
+Estimates use the role's last 20 runs once at least five exist (median tokens and USD); before that they use the
+role's `max_budget_usd` ceiling and `default_tokens_per_usd`. A reservation uses `[daemon].stage_lease_s` (default
+900 seconds), workers heartbeat it while alive, and completion releases it with actual usage. Refusal is `None`,
+so dispatch leaves the task queued and emits the budget notification rather than starting an unbudgeted worker.
+
+Rollback: set `[limits] reservations = false`, or revert merged reservation commit `668a9c1`.
+
+### Failure kinds and signatures
+
+`[daemon] flaky_rerun_max = 1` and `flaky_rerun_timeout_s = 600` bound evidence-only reruns. Kinds are
+`code_defect`, `invalid_spec`, `flaky`, `environment`, `conflict`, `quota`, `permissions`, and `unknown`.
+Signatures hash the kind, validated failing test ids, and normalized rejecting review comments. The automatic
+fix loop stops and escalates when a signature repeats, the lineage reaches `auto_fix_rounds`, evidence is unknown,
+or the failure is infrastructure/spec/risk work that requires intervention.
+
+Rollback: revert merged failure-classification commit `b9c2972`.
+
+### Gate checks acceptance-named tests
+
+The gate extracts `tests/path.py::test_name` references (and same-criterion `::test_name` shorthand) from each
+acceptance criterion and verifies that every named test function exists before accepting the result. A missing
+file or function makes the gate red, so a result cannot pass merely by omitting its promised regression test.
+
+Rollback: revert merged acceptance-gate commit `06b7ce4`.
+
+### Packet header and acceptance never dropped
+
+Every worker packet starts with `packet v<hash> base <sha> sources pool.toml@<policy> gotchas@<hash>` so its exact
+body, base, and policy inputs are auditable. Size trimming removes lower-priority evidence first; the complete
+acceptance section, base, and verification command are never dropped, even when that makes the packet exceed its
+nominal cap.
+
+Rollback: revert merged packet-contract commit `2868122`.
+
+### bus_events filters, ensure_worktree reuse and review re-spawn
+
+`bus_events(since, limit, role, task_ids)` filters by role and task id while `next_since` advances over every
+examined event, preventing filtered readers from looping over irrelevant rows. `ensure_worktree` reattaches an
+existing `task/<id>` branch after a stale worktree is pruned. Reconciliation re-spawns a missing review worker
+after its lease expires, but reuses the review task/branch and does not duplicate a live or completed review.
+
+Rollback: revert merged recovery commits `2868122` and `ec54196`.
+
+### Handover snapshot hash
+
+Handover hashes the sorted task id/status/hold/merge snapshot and stores it in `handover_state.json`. An unchanged
+snapshot skips rendering and leaves `plan.md` untouched; a changed snapshot is still written atomically under the
+bus compare-and-swap lock.
+
+Rollback: revert merged handover-recovery commit `ec54196`.
+
 ## Planner usage is counted from transcripts
 The Planner itself is an interactive `claude` session, not a worker spawned by `run_claude`, so it never posts a JSON
 result carrying a `usage` block — without `tally_planner()` the pool would only ever see the workers it spawns and
