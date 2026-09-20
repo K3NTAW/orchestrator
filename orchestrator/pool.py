@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict, fields
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from . import ROOT, STATE
+from . import ROOT, STATE, bus
 
 WINDOW_S = 5 * 3600
 TZ = ZoneInfo("Europe/Zurich")
@@ -138,7 +138,7 @@ class Executor:
 
 
 EXEC_FIELDS = {f.name for f in fields(Executor)}
-EXEC_STATE_FIELDS = {"cooldown_until", "day_tasks", "running", "day", "hold_reason"}
+EXEC_STATE_FIELDS = {"cooldown_until", "day_tasks", "day", "hold_reason"}
 LEGACY_EXECUTOR_ID = "astra"
 
 
@@ -179,6 +179,9 @@ class Pool:
             self.codex.__dict__.update(st.get("codex", {}))
             for eid, ex in self.executors.items():
                 ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
+        for ex in self.executors.values():
+            ex.running = sum(1 for task in bus.read(status="running", role="execute")
+                             if task.get("executor", task.get("tier")) == ex.id)
         pu = _load_planner_usage()
         for a in self.accounts:
             entry = pu.get(a.id, {})
@@ -190,7 +193,7 @@ class Pool:
         PERSIST.write_text(json.dumps({"accounts": {a.id: {k: v for k, v in asdict(a).items()
                                                             if k not in PLANNER_ACCOUNT_FIELDS}
                                                      for a in self.accounts},
-                                       "codex": asdict(self.codex),
+                                       "codex": {k: v for k, v in asdict(self.codex).items() if k != "running"},
                                        "executors": {eid: {k: getattr(ex, k) for k in sorted(EXEC_STATE_FIELDS)}
                                                      for eid, ex in self.executors.items()}}, indent=1))
 
@@ -367,17 +370,12 @@ class Pool:
                     self.executors.get(LEGACY_EXECUTOR_ID))
 
     def _sync_legacy_codex(self):
-        """Bridge until executor.py routes through executors (B2): it still writes self.codex, so fold that
-        state into the row it belongs to. running is mirrored, not maxed, because executor.py builds a fresh
-        Pool() per call and its decrements must be able to bring the row back down. day_tasks stays a max
-        (monotonic within a day) and only applies when the legacy day matches today. This whole method goes
-        away once B2 routes executor.py through the executors table directly."""
+        """Bridge legacy Codex cooldown and daily usage into its executor row."""
         ex = self._legacy_executor()
         if ex is None:
             return
         if self.codex.cooldown_until > ex.cooldown_until:
             self._cool_group(ex, self.codex.cooldown_until, "codex usage limit")
-        ex.running = self.codex.running
         if self.codex.day == date.today().isoformat():
             ex.roll_day(); ex.day_tasks = max(ex.day_tasks, self.codex.day_tasks)
 

@@ -90,13 +90,17 @@ def spawn_spec_review(task_id: str) -> dict:
 @srv.tool()
 def codex(task_id: str, prompt: str) -> dict:
     """Executor: start a fresh GPT-6 Astra thread (`codex exec`) for one atomic execute task in its worktree. Returns thread id + final message; held if Codex is cooling."""
-    return executor.start(task_id, prompt)
+    result = executor.start(task_id, prompt)
+    posted, reason = executor.post_tool_result(task_id, result)
+    return {**result, "posted": posted, "posted_reason": reason}
 
 
 @srv.tool()
 def codex_reply(task_id: str, delta: str) -> dict:
     """Fix-loop round on the task's existing thread (`codex exec resume`). Send deltas only: failing test names + assertion lines. Max 5 rounds."""
-    return executor.reply(task_id, delta)
+    result = executor.reply(task_id, delta)
+    posted, reason = executor.post_tool_result(task_id, result)
+    return {**result, "posted": posted, "posted_reason": reason}
 
 
 @srv.tool()

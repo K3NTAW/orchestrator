@@ -7,7 +7,7 @@ Observed ``codex exec resume --help`` options (2026-09-19): ``--config``, ``--la
 Notably, resume accepts ``--json`` and the access flags, but not ``-C``; its process cwd selects the worktree.
 Usage-limit errors cool Codex down and hold the task (§4.10).
 """
-import json, subprocess, time
+import json, re, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
@@ -80,9 +80,6 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     cmd = argv_for(kind, command_args, cwd, access)
     log = {"executor": ex.id if ex else "codex", "complexity": task["complexity"]}
     t0 = time.time()
-    if ex:
-        ex.running += 1
-    pool.codex.running += 1; pool.save()          # legacy mirror, until B3 drops pool.codex
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
         if kind == "resume":
@@ -90,10 +87,6 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         r = subprocess.run(cmd, **run_kwargs)
     except subprocess.TimeoutExpired:
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
-    finally:
-        if ex:
-            ex.running -= 1
-        pool.codex.running -= 1; pool.save()
     if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
         reason = f"codex argv error: {r.stderr[-800:]}"
         bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex",
@@ -123,6 +116,32 @@ def _run(pool, task, args, cwd, timeout, ex=None):
 
 def _diff_stat(cwd):
     return subprocess.run(["git", "diff", "--stat"], cwd=cwd, capture_output=True, text=True).stdout[-1500:]
+
+
+def post_tool_result(task_id, result):
+    """Post a successful synchronous Codex tool result once, using the daemon worker's result shape."""
+    task = bus.get(task_id)
+    if task.get("result") is not None:
+        return False, "result already exists"
+    if task.get("status") != "running":
+        return False, f"task status is {task.get('status')}, not running"
+    if task.get("assigned_to") != "codex":
+        return False, f"task is assigned to {task.get('assigned_to')}, not codex"
+    if result.get("status") != "done":
+        return False, f"codex result status is {result.get('status')}, not done"
+    message = result.get("message", "")
+    match = re.search(r"\b(?:commit(?:ted)?(?:\s+sha)?[:\s]+)?([0-9a-f]{7,40})\b", message, re.I)
+    commit = match.group(1) if match else subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=task["worktree"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    bus.post_result(task_id, {
+        "summary": message[:3000],
+        "commit": commit,
+        "executed_by": "codex:" + task["executor"],
+        "provenance": ["repo"],
+        "usage": result.get("usage"),
+    }, "done")
+    return True, "result posted"
 
 
 def start(task_id, prompt):
@@ -170,7 +189,8 @@ def reply(task_id, delta):
         bus.update(task_id, status="failed", reason=f"fix loop exceeded {MAX_ROUNDS} rounds; escalate or re-spec")
         return {"status": "failed", "reason": "round budget exhausted"}
     ex = pool.executors.get(t.get("executor") or "") or pool._legacy_executor()  # pre-B2 tasks have no executor field
-    if ex is None or ex.cooling() or ex.running >= ex.max_parallel:
+    # The task being resumed is itself one of the bus-derived running slots.
+    if ex is None or ex.cooling() or ex.running > ex.max_parallel:
         bus.update(task_id, status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
         return {"status": "held", "codex": pool.status()["codex"]}
     result = _run(pool, t, ["resume", t["codex_thread"], delta], t["worktree"],

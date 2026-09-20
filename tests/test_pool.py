@@ -69,7 +69,10 @@ class Executors(unittest.TestCase):
     LIVE = {"astra", "luna", "terra", "sol"}
 
     def setUp(self):
-        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
+        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
+        for task in P.bus.read(status="running", role="execute"):
+            P.bus.update(task["id"], status="done")
+        self.p = P.Pool()
 
     def test_bands_and_enabled(self):
         self.assertIn(self.p.pick_executor("execute", 3).id, self.LIVE)
@@ -151,13 +154,19 @@ class Executors(unittest.TestCase):
         self.assertEqual(routed.id, "terra")
         self.assertEqual(self.p.codex_available(task["complexity"], task=task), routed.provider == "codex")
 
-    def test_legacy_running_syncs_down_not_just_up(self):
-        self.p.codex.running = 2; self.p.save()
-        fresh = P.Pool()
-        self.assertEqual(fresh.executors["astra"].running, 2)
-        fresh.codex.running = 0; fresh.save()
-        fresher = P.Pool()
-        self.assertEqual(fresher.executors["astra"].running, 0)  # regression: used to ratchet up only
+    def test_running_counts_come_from_bus_not_state_file(self):
+        P.PERSIST.write_text(json.dumps({"executors": {"astra": {"running": 7}}}))
+        tasks = [{"status": "running", "role": "execute", "executor": "astra"}]
+        with mock.patch.object(P.bus, "read", return_value=tasks):
+            fresh = P.Pool()
+        self.assertEqual(fresh.executors["astra"].running, 1)
+
+    def test_restart_killed_process_leaks_no_slot(self):
+        P.PERSIST.write_text(json.dumps({"executors": {"astra": {"running": 7}}}))
+        with mock.patch.object(P.bus, "read", return_value=[]):
+            fresh = P.Pool()
+        self.assertEqual(fresh.executors["astra"].running, 0)
+        self.assertIsNotNone(fresh.pick_executor("execute", 8))
 
     def test_every_executor_row_has_a_quota_group(self):
         # enabling a disabled placeholder later must not silently drop it out of its cooldown group (review T-0030)
