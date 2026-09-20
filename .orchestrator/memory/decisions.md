@@ -300,3 +300,9 @@ type: decision · goal: T-0445 · tasks: T-0449,T-0450,T-0454,T-0458,T-0455 · p
 - baseline phase-h-code over all history: 127 accepted tasks, 152.7M tokens, 230.7 USD, median 308k tokens per accepted task, fix_round_rate 0.315, amplification 1.93, fix rounds 56.7M vs execution 79.2M
 - Codex shipped P0b without its six named tests (tenth instance); P0c review found phantom goals from pr_url on non-goal tasks
 outcome: revert path: git branch -f goal/T-0445 0d7bf09 (before P0) or git revert the four merge commits; baseline file is data, delete .orchestrator/baselines/phase-h-code.json
+
+## 2026-09-20 P3 fix round T-0485 merged by Planner decision over review T-0486
+type: decision · goal: T-0445 · tasks: T-0471,T-0485,T-0486 · provenance: repo
+- review T-0486 reported the diff as a no-op because it compared the branch head against itself; commit 416b97f (per-key route cache with TTL and cap, jev.routing table moved next to jev) exists on task/T-0485 with its three named tests; external tests-green green
+- its one code finding is low: cache_max_entries = 0 does not disable caching (slice [-0:]); backlog item, no fix round
+outcome: revert path: git revert the T-0485 merge on goal/T-0445; re-review by spawning a review with inputs T-0485 if the human wants one
