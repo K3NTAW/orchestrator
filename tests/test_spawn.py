@@ -418,18 +418,28 @@ class Render(unittest.TestCase):
         self.assertIn("tests/test_widget.py", text)
         self.assertIn("widget.py:3 build_widget", text)
 
-    def test_packet_trims_acceptance_before_discovery(self):
+    def test_packet_over_cap_keeps_every_acceptance_criterion(self):
         task = self.packet_fixture()
         task["acceptance"] = [f"criterion {i} " + "x" * 100 for i in range(100)]
         text = spawn.packet(task, TMP)
-        self.assertLess(len(text), 4800)
         acceptance = text.split("## acceptance\n", 1)[1].split("\n## ", 1)[0]
-        self.assertEqual(acceptance.count("criterion "), 5)
-        self.assertIn("- 95 more in the task", acceptance)
-        self.assertIn("widget.py:3 build_widget", text)
-        relevant = text.split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0]
-        self.assertIn("tests/test_widget.py", relevant)
-        self.assertIn("packet truncated:", text)
+        self.assertEqual(acceptance.count("criterion "), 100)
+        self.assertNotIn("more" + " in task", acceptance)
+        self.assertIn("over cap by", text.splitlines()[0])
+        self.assertNotIn("widget.py:3 build_widget", text)
+
+    def test_packet_header_has_hash_base_and_sources(self):
+        text = spawn.packet(self.packet_fixture(), TMP)
+        meta = spawn.packet_meta(self.packet_fixture(), TMP)
+        self.assertEqual(text.splitlines()[0],
+                         f"packet v{meta['hash']} base {meta['base']} sources "
+                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']}")
+
+    def test_packet_hash_changes_when_body_changes(self):
+        task = self.packet_fixture()
+        first = spawn.packet_meta(task, TMP)["hash"]
+        task["acceptance"].append("another criterion")
+        self.assertNotEqual(first, spawn.packet_meta(task, TMP)["hash"])
 
     def test_packet_never_trims_base_or_verify(self):
         task = self.packet_fixture()
@@ -474,7 +484,7 @@ class Render(unittest.TestCase):
     def test_execute_prompt_contains_packet(self):
         p = spawn.packet(self.packet_fixture(), TMP)
         text = spawn.render("execute", packet=p, spec="s", acceptance=["a"], scope=["widget.py"])
-        self.assertTrue(text.startswith("## objective"))
+        self.assertTrue(text.startswith("packet v"))
         self.assertIn("Build widget", text)
 
     def test_execute_prompt_names_gate_and_commit(self):

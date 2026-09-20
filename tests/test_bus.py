@@ -124,6 +124,25 @@ class Bus(unittest.TestCase):
         self.assertEqual(t["id"], n0)
         self.assertEqual(bus.next_id(), f"T-{int(n0.split('-')[1]) + 1:04d}")
 
+    def test_events_role_filter_keeps_seq_and_cursor(self):
+        scout = bus.create_task("Scout", "s", ["a"], ["x"], role="scout")
+        execute = bus.create_task("Execute", "s", ["a"], ["x"], role="execute")
+        all_events = bus.events(0, 200)
+        filtered = bus.events(0, 200, role="execute")
+        self.assertTrue(filtered)
+        self.assertTrue(all(event["task"] == execute["id"] for event in filtered))
+        self.assertEqual([event["seq"] for event in filtered],
+                         [event["seq"] for event in all_events if event["task"] == execute["id"]])
+        self.assertNotIn(scout["id"], [event["task"] for event in filtered])
+
+    def test_events_truncated_flag_and_next_since(self):
+        bus.create_task("A", "s", ["a"], ["x"])
+        bus.create_task("B", "s", ["a"], ["x"])
+        from orchestrator import bus_mcp
+        reply = bus_mcp.bus_events(0, 1)
+        self.assertTrue(reply["truncated"])
+        self.assertEqual(reply["next_since"], reply["events"][-1]["seq"])
+
     def test_depends_on(self):
         a = bus.create_task("A", "spec a", ["ok"], ["src/**"])
         b = bus.create_task("B", "spec b", ["ok"], ["src/**"], depends_on=[a["id"]])

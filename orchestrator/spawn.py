@@ -1,6 +1,6 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
-import ast, json, os, re, shutil, subprocess, sys, time
+import ast, hashlib, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 from . import ROOT, STATE, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -147,7 +147,7 @@ def _memory_entries(path):
             for n, (i, title) in enumerate(starts)]
 
 
-def packet(task, worktree) -> str:
+def _packet_body(task, worktree) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
     scope = [str(p) for p in task.get("scope", [])]
@@ -225,7 +225,9 @@ def packet(task, worktree) -> str:
     parent = task.get("parent") or "(none)"
     goal_branch = f"goal/{parent}" if task.get("parent") else "origin/main"
     branch = git("branch", "--show-current", cwd=wt, check=False).stdout.strip() or "(detached)"
-    merge_base = git("merge-base", "HEAD", goal_branch, cwd=wt, check=False).stdout.strip() or "(unavailable)"
+    merge_base = git("merge-base", "HEAD", goal_branch, cwd=wt, check=False).stdout.strip()
+    if not merge_base:
+        merge_base = git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip() or "(unavailable)"
     terms = {p.lower() for p in scope}
     terms.update(Path(p).stem.lower() for p in scope)
     gotchas = []
@@ -235,6 +237,7 @@ def packet(task, worktree) -> str:
                 gotchas.append(f"- mem:gotchas.md:{line} {title}")
         if candidate.exists():
             break
+    matched_gotchas = list(gotchas)
     decisions = []
     for candidate in (wt / ".orchestrator/memory/decisions.md", wt / "decisions.md"):
         decisions = [f"- {title}" for _, title, body in _memory_entries(candidate)
@@ -252,12 +255,17 @@ def packet(task, worktree) -> str:
         summary = value.get("summary", value) if isinstance(value, dict) else value
         evidence.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
 
+    objective = [str(task.get("title", ""))]
+    if task.get("spec"):
+        objective.append(f"- discovery: {task['spec']}")
     sections = [
-        ("objective", [str(task.get("title", ""))]),
+        ("objective", objective),
         ("acceptance", [f"- {x}" for x in task.get("acceptance", [])]),
         ("base", [f"- branch: {branch}", f"- merge-base {goal_branch}: {merge_base}", f"- goal: {parent}"]),
         ("write_scope", [f"- {p}" for p in scope]),
         ("read_scope", [f"- {p or '.'}" for p in sorted(read_scope)]),
+        ("constraints", [f"- {key}: {json.dumps(value, sort_keys=True)}"
+                         for key, value in sorted((task.get("constraints") or {}).items())] or ["- (none)"]),
         ("relevant_tests", [f"- {p}" for p in tests] or ["- (none found)"]),
         ("symbols", symbols[:40] or ["- (none)"]),
         ("gotchas", gotchas[:5] or ["- (none)"]),
@@ -267,26 +275,12 @@ def packet(task, worktree) -> str:
     ]
     def build():
         return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections)
-    original = build()
-    if len(original) < 4800:
-        return original
-    # Retain the discovery information an executor needs before removing it.
-    # Acceptance criteria can be recovered from the task, so summarize those first.
-    acceptance = next(lines for name, lines in sections if name == "acceptance")
-    if len(acceptance) > 5:
-        omitted = len(acceptance) - 5
-        acceptance[:] = acceptance[:5] + [f"- {omitted} more in the task"]
-
-    def fits():
-        body = build()
-        trailer = f"\npacket truncated: {len(original) - len(body)} chars dropped; bus_read(task_id) has the full task"
-        return len(body) + len(trailer) < 4800
-
-    # Keep objective, base, write_scope, and verify intact.  Only drop discovery
-    # entries after the less useful contextual sections have been exhausted.
-    trimmable = ("evidence", "decisions", "gotchas", "read_scope", "symbols", "relevant_tests")
+    # The task contract is more valuable than discovery hints.  In particular,
+    # acceptance criteria are never summarized: an over-cap packet says so in
+    # its provenance header instead.
+    trimmable = ("evidence", "decisions", "gotchas", "symbols", "relevant_tests")
     by_name = {name: lines for name, lines in sections}
-    while not fits():
+    while len(build()) >= 4800:
         changed = False
         for name in trimmable:
             lines = by_name[name]
@@ -294,12 +288,49 @@ def packet(task, worktree) -> str:
                 lines.pop()
                 changed = True
                 break
-        if not changed:
-            break
+        if changed:
+            continue
+        # Keep the objective title, but trim any supplemental discovery text.
+        if len(objective) > 1:
+            objective.pop()
+            continue
+        break
     body = build()
-    dropped = len(original) - len(body)
-    trailer = f"\npacket truncated: {dropped} chars dropped; bus_read(task_id) has the full task"
-    return body + trailer
+    gotchas_sha = hashlib.sha256("\n".join(matched_gotchas).encode()).hexdigest()[:12]
+    policy_version = getattr(bus, "policy_version", lambda: None)()
+    if not policy_version:
+        pool_path = wt / "pool.toml"
+        if not pool_path.is_file():
+            pool_path = ROOT / "pool.toml"
+        try:
+            policy_version = hashlib.sha256(pool_path.read_bytes()).hexdigest()[:12]
+        except OSError:
+            policy_version = "(unavailable)"
+    return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
+                  "policy_version": str(policy_version), "gotchas": gotchas_sha}
+
+
+def packet_meta(task, worktree) -> dict:
+    """Provenance values for the packet and its corresponding run record."""
+    return _packet_body(task, worktree)[1]
+
+
+def packet(task, worktree) -> str:
+    """Build a bounded executor briefing with a verifiable provenance header."""
+    body, meta = _packet_body(task, worktree)
+    header = (f"packet v{meta['hash']} base {meta['base']} sources "
+              f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']}")
+    # Account for the header itself, including a possible extra digit in n.
+    over = len(header) + 1 + len(body) - 4800
+    if over > 0:
+        while True:
+            extended = f"{header} over cap by {over} chars: acceptance kept whole"
+            actual = len(extended) + 1 + len(body) - 4800
+            if actual == over:
+                header = extended
+                break
+            over = actual
+    return header + "\n" + body
 
 
 def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:
@@ -361,6 +392,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
+    if task.get("packet_meta"):
+        log["packet_meta"] = task["packet_meta"]
     if shutil.which("claude") is None:
         bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
@@ -487,7 +520,9 @@ def run_worker(task_id):
     elif role == "execute":
         t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
         bus.update(task_id, executor=t["executor"])
-        prompt = render("execute", packet=packet(t, t.get("worktree") or ROOT), spec=t["spec"],
+        packet_worktree = t.get("worktree") or ROOT
+        t["packet_meta"] = packet_meta(t, packet_worktree)
+        prompt = render("execute", packet=packet(t, packet_worktree), spec=t["spec"],
                         acceptance=t["acceptance"], scope=t["scope"]) + \
             "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
     else:

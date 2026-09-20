@@ -198,9 +198,16 @@ def read(tid=None, status=None, status_not=None, role=None, compact=False):
     return [_compact_row(t) for t in filtered] if compact else filtered
 
 
-def events(since=0, limit=200):
-    rows = db().execute("select seq,task_id,ts,kind,data from events where seq>? order by seq limit ?", (since, limit)).fetchall()
-    return [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)} for s, t, ts, k, d in rows]
+def events(since=0, limit=200, role=None, task_ids=None):
+    """Events in sequence order, optionally filtered without changing their cursor."""
+    rows = db().execute("select seq,task_id,ts,kind,data from events where seq>? order by seq limit ?",
+                        (since, limit)).fetchall()
+    ids = set(task_ids) if task_ids is not None else None
+    roles = {t[0]: t[1] for t in db().execute("select id,role from tasks").fetchall()} if role is not None else {}
+    selected = [(s, t, ts, k, d) for s, t, ts, k, d in rows
+                if (role is None or roles.get(t) == role) and (ids is None or t in ids)]
+    return [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)}
+            for s, t, ts, k, d in selected[:limit]]
 
 
 def normalize_usage(provider, usage):
