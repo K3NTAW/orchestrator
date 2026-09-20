@@ -177,6 +177,21 @@ def _resume_compatible(task):
     return (bool(head and ancestor.returncode == 0), "worktree head moved" if head else "worktree HEAD unavailable")
 
 
+def resume_plan(parent, fix_task):
+    """Return the single authoritative routing decision for a fix round."""
+    if not parent.get("codex_thread"):
+        return {"mode": "fresh", "reason": "no_thread"}
+    if parent.get("rounds", 0) >= MAX_ROUNDS:
+        return {"mode": "fresh", "reason": "rounds_exhausted"}
+    ex = Pool().executors.get(parent.get("executor") or "")
+    if ex is None or ex.provider != "codex":
+        return {"mode": "fresh", "reason": "executor_not_codex"}
+    compatible, _ = _resume_compatible(parent)
+    if not compatible:
+        return {"mode": "fresh", "reason": "incompatible_worktree"}
+    return {"mode": "resume", "reason": None}
+
+
 def _commit_from_message(message):
     """Extract an explicitly reported commit, avoiding incidental short hexadecimal text."""
     full = re.search(r"\b[0-9a-f]{40}\b", message, re.I)
@@ -316,7 +331,7 @@ def _exhausted(pool, t, run=None):
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 
-def reply(task_id, delta, packet_meta=None, fix_round_task_id=None):
+def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):
     """Fix-loop round: resume the task's thread with a delta (failing tests + assertion lines) on the executor that
     started it — same thread, same model, never a re-pick mid-task. Capped at MAX_ROUNDS."""
     t = bus.get(task_id)
@@ -328,6 +343,9 @@ def reply(task_id, delta, packet_meta=None, fix_round_task_id=None):
         t["packet_meta"] = packet_meta
     if t.get("merged_into") is not None:
         return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
+    current_plan = resume_plan(bus.get(task_id), fix if fix_round_task_id is not None else t)
+    if plan is not None and current_plan != plan:
+        return {"status": "incompatible", "reason": current_plan["reason"]}
     pool = Pool()
     if not t.get("codex_thread"):
         return {"status": "failed", "reason": "task has no codex_thread; call codex() first"}
@@ -340,15 +358,18 @@ def reply(task_id, delta, packet_meta=None, fix_round_task_id=None):
     if ex is None or ex.cooling() or ex.running > ex.max_parallel:
         bus.update(task_id, status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
         return {"status": "held", "codex": pool.status()["codex"]}
-    compatible, reason = _resume_compatible(t)
-    if compatible:
+    if current_plan["mode"] == "resume":
         args = ["resume", t["codex_thread"], delta]
+    elif plan is not None or fix_round_task_id is not None:
+        return {"status": "incompatible", "reason": current_plan["reason"]}
     else:
+        # Preserve the public direct-reply fallback for callers that did not
+        # pre-plan a fix task; daemon fix rounds never execute on the parent.
         from .spawn import packet, packet_run_meta
         briefing = packet(t, t["worktree"])
         t["packet_meta"] = packet_run_meta(briefing)
         repair = briefing + "\n\nRepair delta:\n" + delta
-        bus.update(task_id, resume_incompatible=reason)
+        bus.update(task_id, resume_incompatible=current_plan["reason"])
         args = ["-m", ex.model, repair]
     if t.get("packet_meta"):
         bus.update(task_id, packet_meta=t["packet_meta"])

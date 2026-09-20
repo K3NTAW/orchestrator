@@ -91,7 +91,7 @@ class Executor(unittest.TestCase):
                 self.assertEqual(cmd[2], "-m")
                 self.assertNotIn("old-thread", cmd)
                 self.assertIn("compact task packet\n\nRepair delta:\nrepair failing assertion", cmd)
-                self.assertEqual(task["resume_incompatible"], reason)
+                self.assertEqual(task["resume_incompatible"], "incompatible_worktree")
                 self.assertEqual(task["codex_thread"], "fresh-thread")
                 packet.assert_called_once()
 

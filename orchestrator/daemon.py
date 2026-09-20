@@ -540,9 +540,21 @@ def _fix_round_delta(parent, fix):
         f"- {criterion}" for criterion in (selected or fix.get("acceptance") or []))
 
 
-def _dispatch_reply_worker(task_id, parent_id, delta):
+def _dispatch_fresh_fix(task_id, reason):
+    fix = bus.get(task_id)
+    pipeline = dict(fix.get("pipeline") or {})
+    pipeline["resume"] = {"mode": "fresh", "reason": reason}
+    bus.update(task_id, pipeline=pipeline, worktree=None, branch=f"task/{task_id}")
+    fix = bus.get(task_id)
+    packet = spawn.packet(fix, spawn.ROOT)
+    prompt = spawn.render("execute", packet=packet, spec=fix["spec"],
+                          acceptance=fix["acceptance"], scope=fix["scope"])
+    _dispatch_worker(task_id, prompt, None, spawn.packet_run_meta(packet))
+
+
+def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
     try:
-        r = executor.reply(parent_id, delta, fix_round_task_id=task_id)
+        r = executor.reply(parent_id, delta, fix_round_task_id=task_id, plan=plan)
         if r["status"] == "done":
             bus.post_result(task_id, spawn.fit_result({
                 "summary": r["message"][:3000], "executed_by": "codex:" + bus.get(parent_id)["executor"],
@@ -550,15 +562,30 @@ def _dispatch_reply_worker(task_id, parent_id, delta):
             }), "done")
         elif r["status"] == "failed":
             bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+        elif r["status"] == "held":
+            bus.post_result(task_id, spawn.fit_result({"reason": "budget"}), "held")
+            clear_stage(task_id, "dispatched_at", status="held", hold_reason="budget")
+        elif r["status"] == "refused":
+            pipeline = dict(bus.get(task_id).get("pipeline") or {})
+            pipeline["resume"] = {"mode": "fresh", "reason": "parent_merged"}
+            bus.update(task_id, pipeline=pipeline)
+            bus.post_result(task_id, spawn.fit_result({"reason": "parent_merged"}), "failed")
+        elif r["status"] == "incompatible":
+            _dispatch_fresh_fix(task_id, f"compat_changed:{r['reason']}")
+        else:
+            bus.post_result(task_id, spawn.fit_result({"reason": f"unexpected reply status: {r.get('status')}"}), "failed")
     except Exception as e:
-        bus.post_result(task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
+        head = str(e).splitlines()[0] if str(e) else type(e).__name__
+        bus.post_result(task_id, spawn.fit_result({"reason": head[:3000]}), "failed")
 
 
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
-    for t in bus.read(status="queued", role="execute"):
+    retry_held = [t for t in bus.read(status="held", role="execute")
+                  if t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")]
+    for t in bus.read(status="queued", role="execute") + retry_held:
         if stale(t) or not bus.ready(t):
             continue
         verdict = t.get("spec_review_verdict")
@@ -567,28 +594,20 @@ def dispatch(pool):
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if slots <= 0:
                 break
-            if stamp(t["id"], "dispatched_at"):
+            if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
                 slots -= 1
                 fix_parent_id = (t.get("constraints") or {}).get("fix_round_for")
                 if fix_parent_id:
                     parent = bus.get(fix_parent_id)
-                    if not parent.get("codex_thread"):
-                        reason = "no_thread"
-                    elif parent.get("rounds", 0) >= executor.MAX_ROUNDS:
-                        reason = "rounds_exhausted"
-                    elif not parent.get("executor") or parent.get("executor") not in pool.executors or \
-                            pool.executors[parent["executor"]].provider != "codex":
-                        reason = "executor_not_codex"
-                    else:
-                        compatible, _ = executor._resume_compatible(parent)
-                        reason = None if compatible else "incompatible_worktree"
+                    plan = executor.resume_plan(parent, t)
+                    reason = plan["reason"]
                     pipeline = dict(bus.get(t["id"]).get("pipeline") or {})
-                    if reason is None:
+                    if plan["mode"] == "resume":
                         pipeline["resume"] = {"mode": "resume", "thread": parent["codex_thread"],
                                               "parent": parent["id"]}
                         bus.update(t["id"], pipeline=pipeline, worktree=parent.get("worktree"),
                                    branch=parent.get("branch") or f"task/{parent['id']}")
-                        spawn_async(_dispatch_reply_worker, t["id"], parent["id"], _fix_round_delta(parent, t))
+                        spawn_async(_dispatch_reply_worker, t["id"], parent["id"], _fix_round_delta(parent, t), plan)
                         complete(t["id"], "dispatched_at")
                         continue
                     pipeline["resume"] = {"mode": "fresh", "reason": reason}
