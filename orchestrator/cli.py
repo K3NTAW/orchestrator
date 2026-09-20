@@ -136,6 +136,7 @@ def main():
     sc = sub.add_parser("scorecard")
     sc.add_argument("--by", default="executor", choices=["executor", "tier", "task", "goal"])
     sc.add_argument("--json", action="store_true")
+    sc.add_argument("--planner", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
     j = sub.add_parser("jev"); jsub = j.add_subparsers(dest="jev_cmd", required=True)
     jd = jsub.add_parser("diagnose"); jd.add_argument("--since"); jd.add_argument("--export"); jd.add_argument("--n", type=int, default=10)
@@ -234,7 +235,11 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.by in ("executor", "tier"):
+        if a.planner:
+            from . import planner_runs
+            summary = planner_runs.premium_summary(root=scorecard.STATE)
+            print(json.dumps(summary, indent=1) if a.json else scorecard.format_premium_summary(summary))
+        elif a.by in ("executor", "tier"):
             card = scorecard.build(by=a.by)
             sc = scorecard.scores(card)
             if a.json:
@@ -265,20 +270,21 @@ def main():
             if a.json:
                 print(json.dumps({**card, "tokens_per_accepted_goal": accepted_tokens}, indent=1))
             else:
-                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\tcalls\twaste_pct\tturns")
+                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\troute\tcalls\twaste_pct\tturns")
                 total_usd = 0.0
                 for gid, r in sorted(card.items(), key=lambda kv: kv[1]["total_usd"], reverse=True):
                     pct = scorecard.goal_percentages(r)
                     runs_cell = scorecard.format_planner_runs_cell(r)
+                    route_cell = ", ".join(f"{name}={count}" for name, count in sorted(r.get("routes", {}).items())) or "-"
                     print(f"{gid}\t{round(r['total_usd'], 2)}\t{round(pct['execute'], 1)}%\t"
                           f"{round(pct['review'], 1)}%\t{round(pct['spec_review'], 1)}%\t{round(pct['scout'], 1)}%\t"
                           f"{round(pct['other'], 1)}%\t{runs_cell}\t{r['total_tokens']}\t{r['tokens_uncached']}\t"
                           f"{r['tokens_cache_read']}\t{r['tokens_output']}\t{r['jev_tokens']}\t{r['planner_tokens']}\t"
-                          f"{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
+                          f"{route_cell}\t{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
                     total_usd += r["total_usd"]
                 totals = _scorecard_measurement_totals(card, "goal")
                 print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t"
-                      f"{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
+                      f"-\t{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
                 for gid, r in sorted(card.items()):
                     print(f"tokens per task ({gid}): {scorecard.format_task_tokens_cell(r)}")
                 print(scorecard.planner_footer())

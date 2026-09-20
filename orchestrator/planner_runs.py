@@ -13,7 +13,9 @@ second early exit would push attempts to 2. failed_launch (an exception between 
 row reconcile() aged out because the process never got as far as recording "running") behaves like exited_early:
 it does not block, but counts toward the same attempts/gave_up-at-2 rule.
 """
-import json, os, re, sys, tempfile, time, tomllib
+import hashlib, json, os, re, sys, tempfile, time, tomllib, uuid
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from . import ROOT, STATE, bus, goals, handover, jev, spawn
 from .pool import Pool
@@ -268,7 +270,7 @@ def _existing_attempts(goal_id, kind, payload_key):
     return r.get("attempts", 0) if r else 0
 
 
-def _claim(goal_id, kind, payload_key, attempts):
+def _claim(goal_id, kind, payload_key, attempts, route=None):
     """Write/refresh this key's record to status "claimed" (pid None) -- called only from inside run()'s own
     bus.locked() block, immediately after _blocked() found nothing there yet, so the check and the claim are
     atomic together. "claimed" is itself a blocking status (_BLOCKING_STATUSES), so a concurrent run() for the
@@ -279,7 +281,16 @@ def _claim(goal_id, kind, payload_key, attempts):
     if r is None:
         r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
         records.append(r)
-    r.update(status="claimed", pid=None, started_at=time.time())
+    r.update(status="claimed", pid=None, started_at=time.time(),
+             launch_id=uuid.uuid4().hex, policy_version=bus.policy_version(), prompt_hash=None,
+             route=route.name if route is not None else "escalate",
+             reason=route.reason if route is not None else "legacy:autonomous",
+             evidence=list(route.evidence) if route is not None else [goal_id, payload_key],
+             cheaper_steps=list(route.cheaper_steps) if route is not None else [],
+             decision_requested={"held": "write or approve a fix round", "scouts_done": "write specs",
+                                 "closable": "close the goal"}.get(kind, "make the requested decision"))
+    for field in ("usage_logged", "tokens", "usd", "session_id"):
+        r.pop(field, None)
     _save_records(records)
 
 
@@ -314,6 +325,7 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts, jev
             records.append(r)
         r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
                  account=acct_id, log=launched["log"], status="running", jev=jev_result, agreement=None)
+        r.setdefault("launches", []).append({k: v for k, v in r.items() if k != "launches"})
         _save_records(records)
 
 
@@ -439,7 +451,7 @@ def _safe_jev_triage(goal_id, kind, payload_key, attempts):
         return None
 
 
-def run(goal_id, kind, payload_key):
+def run(goal_id, kind, payload_key, route=None):
     """Launch a headless Planner for one decision, guarded against attaching alongside an interactive session or
     a saturated pool. The already-decided check and the claim that follows it run inside one bus.locked() block
     (T-0196 review item 2): two concurrent callers for the same key can never both pass the check, since whichever
@@ -455,7 +467,7 @@ def run(goal_id, kind, payload_key):
         if _blocked(goal_id, kind, payload_key):
             return {"launched": False, "reason": "already decided"}
         attempts = _existing_attempts(goal_id, kind, payload_key)
-        _claim(goal_id, kind, payload_key, attempts)
+        _claim(goal_id, kind, payload_key, attempts, route)
 
     try:
         if _session_attached():
@@ -478,6 +490,11 @@ def run(goal_id, kind, payload_key):
         handover.write(f"decision {kind}")
 
         prompt = spawn.render("planner-decision", packet=decision_packet(goal_id, kind, payload_key, ROOT))
+        with bus.locked():
+            records = _load_records()
+            record = _find_record(records, goal_id, kind, payload_key)
+            record["prompt_hash"] = hashlib.sha256(prompt.encode()).hexdigest()[:12]
+            _save_records(records)
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
 
@@ -560,10 +577,18 @@ def _record_decision_usage(r):
     bus.log_run(task=r["goal_id"], goal_id=r["goal_id"], role="planner_decision",
                 tier="planner", account=r.get("account"), provider="claude",
                 outcome="done" if not output.get("is_error") else "error", usd=usd,
-                tokens=tokens, **{**usage, **normalized})
+                tokens=tokens, **{**usage, **normalized,
+                    **{key: r.get(key) for key in ("launch_id", "route", "reason", "evidence",
+                       "cheaper_steps", "decision_requested", "policy_version", "prompt_hash", "payload_key")},
+                    "route_reason": r.get("reason"), "decision_kind": r["kind"],
+                    "attempt": r.get("attempts", 0) + 1, "started_at": r.get("started_at"),
+                    "session_id": output.get("session_id")})
     r["tokens"] = tokens
     r["usd"] = usd
     r["usage_logged"] = True
+    r["session_id"] = output.get("session_id")
+    if r.get("launches"):
+        r["launches"][-1].update(usd=usd, **normalized, session_id=r["session_id"])
 
 
 def _condition_resolved(r, tasks_by_id, children_by_parent):
@@ -719,3 +744,140 @@ def summary():
         "agreement_rate": (sum(1 for r in scored if r["agreement"]) / len(scored)) if scored else None,
         "mean_confidence": (sum(confidences) / len(confidences)) if confidences else None,
     }
+
+
+def _read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def _usage_buckets(row):
+    return {"input_tokens": int(row.get("input_uncached_tokens", row.get("input_tokens")) or 0),
+            "output_tokens": int(row.get("output_tokens") or 0),
+            "cache_read_tokens": int(row.get("cache_read_tokens", row.get("cache_read_input_tokens")) or 0),
+            "cache_write_tokens": int(row.get("cache_write_tokens", row.get("cache_creation_input_tokens")) or 0)}
+
+
+def _interactive_summary(root, cfg, cutoff, now, headless):
+    """Read only transcript bytes already accounted by Pool.tally_planner, without mutating offsets."""
+    from .pool import TZ, encode_project_dir
+    usage = _read_json(root / "planner_usage.json", {})
+    sessions, day_totals = [], {}
+    known = {r.get("session_id") for r in headless if r.get("session_id")}
+    for account in cfg.get("claude_accounts", []):
+        account_id = account["id"]
+        project = Path(account["config_dir"]).expanduser() / "projects" / encode_project_dir(str(ROOT.resolve()))
+        for name, offset in usage.get(account_id, {}).get("offsets", {}).items():
+            if Path(name).name != name or Path(name).stem in known:
+                continue
+            totals = _usage_buckets({})
+            daily = {}
+            try:
+                with (project / name).open("rb") as stream:
+                    raw = stream.read(max(0, int(offset)))
+            except (OSError, TypeError, ValueError):
+                continue
+            for line in raw.splitlines(keepends=True):
+                if not line.endswith(b"\n"):
+                    continue
+                try:
+                    row = json.loads(line)
+                    if row.get("type") != "assistant" or row.get("sessionId") in known:
+                        continue
+                    dt = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+                    if not cutoff <= dt.timestamp() <= now:
+                        continue
+                except (ValueError, KeyError, TypeError):
+                    continue
+                buckets = _usage_buckets((row.get("message") or {}).get("usage") or {})
+                day = dt.astimezone(TZ).date().isoformat()
+                day_row = daily.setdefault(day, _usage_buckets({}))
+                for key, value in buckets.items():
+                    totals[key] += value
+                    day_row[key] += value
+            if daily:
+                sessions.append({"label": "interactive", "account": account_id,
+                                 "session": Path(name).stem, **totals})
+                for day, buckets in daily.items():
+                    target = day_totals.setdefault((day, account_id), _usage_buckets({}))
+                    for key, value in buckets.items():
+                        target[key] += value
+    return {"label": "interactive", "sessions_count": len(sessions), "sessions": sessions,
+            "day_totals": [{"day": day, "account": account, **totals}
+                           for (day, account), totals in sorted(day_totals.items())]}
+
+
+def premium_summary(days=7, root=None):
+    """Rolling launch audit. Limits are advisory; this function never schedules or blocks work.
+
+    Ledger launch snapshots include unfinished/unmetered invocations. Finished run rows
+    supply usage and replace matching snapshots, so retries count without double counting.
+    Input means uncached input; cache share includes read and write input in its denominator.
+    """
+    root = Path(root) if root is not None else STATE
+    now = time.time()
+    cutoff = now - days * 86400
+    records = _read_json(root / "runs" / "planner_runs.json", [])
+    try:
+        cfg = tomllib.loads((root / "pool.toml").read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    launches = []
+    for record in records:
+        if "launches" in record:
+            launches.extend(dict(r) for r in record["launches"])
+        elif record.get("pid") or record.get("status") in ("running", "exited_ok", "exited_early", "gave_up"):
+            launches.append(dict(record))
+    for path in sorted((root / "runs").glob("*.jsonl")):
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("role") != "planner_decision":
+                continue
+            match = next((r for r in launches if
+                          (row.get("launch_id") and r.get("launch_id") == row["launch_id"]) or
+                          (not row.get("launch_id") and not r.get("_matched") and
+                           r.get("goal_id") == row.get("goal_id", row.get("task")) and
+                           (not row.get("payload_key") or r.get("payload_key") == row["payload_key"]))), None)
+            if match is None:
+                match = {}
+                launches.append(match)
+            match.update(row, _matched=True)
+    recent = [r for r in launches if cutoff <= (r.get("started_at") or r.get("ts") or 0) <= now]
+    kinds, routes, reasons = Counter(), Counter(), Counter()
+    totals = _usage_buckets({})
+    inputs, per_goal = [], {}
+    for row in recent:
+        kind = row.get("decision_kind", row.get("kind", "unknown"))
+        route = row.get("route") or "escalate"
+        reason = row.get("reason") or row.get("route_reason") or "legacy:autonomous"
+        kinds[kind] += 1
+        routes[route] += 1
+        reasons[reason] += 1
+        buckets = _usage_buckets(row)
+        # Missing usage is unknown, not a zero-token invocation.
+        if any(key in row for key in ("input_tokens", "input_uncached_tokens")):
+            inputs.append(buckets["input_tokens"])
+        for key, value in buckets.items():
+            totals[key] += value
+        if route == "escalate":
+            goal = row.get("goal_id", row.get("task"))
+            per_goal.setdefault(goal, []).append(reason)
+    limit = cfg.get("planner", {}).get("routes", {}).get("premium_launches_soft_per_goal", 2)
+    exceptions = [{"goal_id": goal, "launches": len(why), "limit": limit,
+                   "reasons": dict(Counter(why))} for goal, why in per_goal.items() if len(why) > limit]
+    input_total = totals["input_tokens"] + totals["cache_read_tokens"] + totals["cache_write_tokens"]
+    return {"days": days, "headless": {"count": len(recent), "by_kind": dict(kinds),
+            "by_route": dict(routes), "top_reasons": dict(reasons.most_common(5)),
+            "mean_input_tokens": sum(inputs) / len(inputs) if inputs else None,
+            "max_input_tokens": max(inputs) if inputs else None, **totals,
+            "cache_read_share": totals["cache_read_tokens"] / input_total if input_total else 0,
+            "usd": sum(r.get("usd") or 0 for r in recent),
+            "gave_up": sum(r.get("status") == "gave_up" and
+                           cutoff <= r.get("started_at", 0) <= now for r in records)},
+            "interactive": _interactive_summary(root, cfg, cutoff, now, launches),
+            "exceptions": exceptions}

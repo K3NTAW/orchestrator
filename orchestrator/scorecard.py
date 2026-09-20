@@ -591,7 +591,15 @@ def by_goal(root=STATE):
         jev = jev_by_goal.get(gid, {"gate": 0, "rank": 0})
         # total_tokens keeps the established discounted cache-read convention.
         total_tokens = worker_tokens + jev["gate"] + jev["rank"] + planner_tokens
+        route_counts = {}
+        for record in _planner_runs_for_goal(root, gid):
+            for launch in record.get("launches", [record]):
+                if launch.get("status") in ("skipped", "claimed", "failed_launch"):
+                    continue
+                route = launch.get("route") or "escalate"
+                route_counts[route] = route_counts.get(route, 0) + 1
         card[gid] = {"roles": roles, "total_usd": total_usd, "total_tokens": total_tokens, "planner": planner,
+                      "routes": route_counts,
                       "n_tasks": len(task_tokens),
                       "tokens_median_per_task": statistics.median(task_tokens) if task_tokens else None,
                       "tokens_min_per_task": min(task_tokens) if task_tokens else None,
@@ -671,3 +679,25 @@ def format_planner_runs_cell(entry):
         return "0 runs"
     usd = planner.get("usd")
     return f"{n} runs (${round(usd, 2)})" if usd is not None else f"{n} runs"
+
+
+def format_premium_summary(summary):
+    headless = summary["headless"]
+    lines = [f"headless: {headless['count']} invocations; mean input {headless['mean_input_tokens']}; "
+             f"max input {headless['max_input_tokens']}; output {headless['output_tokens']}; "
+             f"cache share {headless['cache_read_share']:.1%}; usd {headless['usd']:.2f}; "
+             f"gave_up {headless['gave_up']}"]
+    for key, label in (("by_kind", "kinds"), ("by_route", "routes"), ("top_reasons", "top reasons")):
+        lines.append(label + ": " + (", ".join(f"{k}={v}" for k, v in headless[key].items()) or "-"))
+    interactive = summary["interactive"]
+    lines.append(f"interactive: {interactive['sessions_count']} sessions")
+    for row in interactive["sessions"]:
+        lines.append(f"interactive {row['account']} {row['session']}: in={row['input_tokens']} "
+                     f"out={row['output_tokens']} cache read={row['cache_read_tokens']}")
+    for row in interactive["day_totals"]:
+        lines.append(f"interactive day {row['day']} {row['account']}: in={row['input_tokens']} "
+                     f"out={row['output_tokens']} cache read={row['cache_read_tokens']}")
+    for row in summary["exceptions"]:
+        lines.append(f"soft-budget exception {row['goal_id']}: {row['launches']}>{row['limit']} "
+                     f"(advisory); reasons: {row['reasons']}")
+    return "\n".join(lines)

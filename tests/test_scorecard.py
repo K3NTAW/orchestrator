@@ -20,6 +20,47 @@ class Scorecard(unittest.TestCase):
                 "acceptance": ["a"], "scope": ["x"], "spec": "s", "title": tid}
         (self.root / "tasks" / f"{tid}.json").write_text(json.dumps({**base, **fields}))
 
+    def test_scorecard_planner_text_and_json(self):
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        from orchestrator import planner_runs as PR
+        config_dir = self.root / "claude"
+        project = config_dir / "projects" / P.encode_project_dir(str(PR.ROOT.resolve()))
+        project.mkdir(parents=True)
+        self.root.joinpath("pool.toml").write_text(
+            '[[claude_accounts]]\nid = "A"\nconfig_dir = ' + json.dumps(str(config_dir)) + '\n')
+        transcript = json.dumps({"type": "assistant", "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "message": {"usage": {"input_tokens": 50, "output_tokens": 10,
+                                                      "cache_read_input_tokens": 100}}}) + "\n"
+        (project / "session.jsonl").write_text(transcript + transcript)
+        (self.root / "planner_usage.json").write_text(json.dumps({"A": {"offsets": {
+            "session.jsonl": len(transcript.encode())}}}))
+        rows = [{"goal_id": "G", "kind": "held", "route": "escalate", "reason": "review",
+                 "status": "exited_ok", "started_at": time.time(), "input_tokens": 100,
+                 "output_tokens": 20, "cache_read_input_tokens": 100, "usd": 1} for _ in range(3)]
+        (self.root / "runs" / "planner_runs.json").write_text(json.dumps(rows))
+        for json_output in (False, True):
+            output = io.StringIO()
+            argv = ["orchestrator", "scorecard", "--planner"] + (["--json"] if json_output else [])
+            with patch.object(sys, "argv", argv), patch.object(scorecard, "STATE", self.root), \
+                    contextlib.redirect_stdout(output):
+                cli.main()
+            if json_output:
+                summary = json.loads(output.getvalue())
+                self.assertEqual(summary["headless"]["count"], 3)
+                self.assertEqual(summary["interactive"]["sessions_count"], 1)
+                self.assertEqual(summary["interactive"]["sessions"][0]["input_tokens"], 50)
+                self.assertEqual(summary["interactive"]["day_totals"][0]["cache_read_tokens"], 100)
+                self.assertEqual(summary["exceptions"][0]["goal_id"], "G")
+            else:
+                for value in ("3 invocations", "mean input 100", "output 60", "cache share 50.0%",
+                              "usd 3.00", "top reasons: review=3", "interactive A session",
+                              "soft-budget exception G", "advisory"):
+                    self.assertIn(value, output.getvalue())
+        self.write_task("T-child", parent="G")
+        card = scorecard.by_goal(self.root)
+        self.assertEqual(card["G"]["routes"], {"escalate": 3})
+
     def write_runs(self, *lines):
         (self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl").write_text(
             "\n".join(json.dumps(l) for l in lines) + "\n")
@@ -315,11 +356,11 @@ class Scorecard(unittest.TestCase):
         lines = out.getvalue().splitlines()
         self.assertEqual(
             lines[0],
-            "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\tcalls\twaste_pct\tturns",
+                "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\troute\tcalls\twaste_pct\tturns",
         )
         row = next(l for l in lines[1:] if l.startswith("T-9600\t"))
         cells = row.split("\t")
-        self.assertEqual(len(cells), 17)
+        self.assertEqual(len(cells), 18)
         self.assertEqual(float(cells[1]), 2.5)                        # a real numeric cell, not just shape
         self.assertEqual(cells[-3:], ["-", "-", "-"])
 

@@ -955,3 +955,76 @@ class Summary(PlannerRunsBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PremiumAudit(PlannerRunsBase):
+    def launch(self, goal, route=None):
+        from unittest.mock import patch
+        log = PR.STATE / "decision.log"
+        log.write_text(json.dumps({"usage": {"input_tokens": 100, "output_tokens": 20,
+                                            "cache_read_input_tokens": 300}, "total_cost_usd": 1.25}))
+        with patch.object(handover, "write"), patch.object(PR.spawn, "render", return_value="exact prompt"), \
+                patch.object(PR, "_safe_jev_triage", return_value=None), \
+                patch.object(goals, "launch_planner", return_value={"pid": 123, "pid_start": "start", "log": str(log)}):
+            self.assertTrue(PR.run(goal, "scouts_done", goal, route=route)["launched"])
+        return self.record(goal, "scouts_done", goal)
+
+    def test_claim_persists_route_reason_evidence_and_versions(self):
+        import hashlib
+        from orchestrator.decision import Route
+        (PR.STATE / "pool.toml").write_text('[planner]\nautonomous = true\n')
+        goal = self.goal()
+        route = Route("investigate", "small_goal", [goal, "failure:test_x"], ["scout:T-1"], "sonnet")
+        row = self.launch(goal, route)
+        self.assertEqual((row["route"], row["reason"], row["evidence"], row["cheaper_steps"]),
+                         (route.name, route.reason, route.evidence, route.cheaper_steps))
+        self.assertEqual(row["decision_requested"], "write specs")
+        self.assertEqual(row["policy_version"], bus.policy_version())
+        self.assertEqual(row["prompt_hash"], hashlib.sha256(b"exact prompt").hexdigest()[:12])
+        self.patch_identity_of(lambda *args: False)
+        PR.reconcile()
+        logged = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        for key in ("route", "reason", "evidence", "cheaper_steps", "policy_version", "prompt_hash", "decision_requested"):
+            self.assertEqual(logged[key], row[key])
+
+    def test_policy_edit_during_run_does_not_change_recorded_version(self):
+        config = PR.STATE / "pool.toml"
+        config.write_text('[planner]\nautonomous = true\n')
+        goal = self.goal()
+        before = self.launch(goal)
+        config.write_text('[planner]\nautonomous = false\n')
+        self.assertNotEqual(bus.policy_version(), before["policy_version"])
+        self.patch_identity_of(lambda *args: False)
+        PR.reconcile()
+        logged = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(logged["policy_version"], before["policy_version"])
+        self.assertEqual(logged["prompt_hash"], before["prompt_hash"])
+        self.assertEqual(logged["reason"], "legacy:autonomous")
+        self.launch(goal)
+        PR.reconcile()
+        summary = PR.premium_summary()
+        self.assertEqual(summary["headless"]["count"], 2)
+        self.assertEqual(summary["headless"]["usd"], 2.5)
+
+    def test_premium_summary_counts_routes_reasons_and_exceptions(self):
+        now = time.time()
+        rows = [{"goal_id": "G", "kind": "held", "payload_key": str(i), "launch_id": str(i),
+                 "route": "escalate" if i < 3 else "investigate", "reason": "review", "pid": i + 1,
+                 "status": "gave_up" if i == 0 else "exited_ok", "started_at": now,
+                 "input_tokens": 100 * (i + 1), "output_tokens": 20, "cache_read_input_tokens": 250,
+                 "usd": 1} for i in range(4)]
+        PR._save_records(rows + [{"goal_id": "G", "status": "skipped", "started_at": now},
+                                {**rows[0], "started_at": now - 8 * 86400}])
+        bus.RUNS.mkdir(exist_ok=True)
+        (bus.RUNS / "2026-09-20.jsonl").write_text(json.dumps({**rows[0], "role": "planner_decision"}) + "\n")
+        summary = PR.premium_summary()
+        h = summary["headless"]
+        self.assertEqual(h["count"], 4)
+        self.assertEqual(h["by_route"], {"escalate": 3, "investigate": 1})
+        self.assertEqual(h["top_reasons"], {"review": 4})
+        self.assertEqual((h["mean_input_tokens"], h["max_input_tokens"], h["output_tokens"]), (250, 400, 80))
+        self.assertEqual((h["cache_read_share"], h["usd"], h["gave_up"]), (.5, 4, 1))
+        self.assertEqual(summary["exceptions"], [{"goal_id": "G", "launches": 3, "limit": 2,
+                                                   "reasons": {"review": 3}}])
+        (PR.STATE / "pool.toml").write_text('[planner.routes]\npremium_launches_soft_per_goal = 4\n')
+        self.assertEqual(PR.premium_summary()["exceptions"], [])
