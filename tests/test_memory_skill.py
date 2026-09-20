@@ -88,10 +88,10 @@ class MemorySkill(unittest.TestCase):
     def test_recall_stops_after_budget_hits_in_notes_layer(self):
         recall = self.load_recall()
         calls = {"bus": 0, "cmem": 0, "graph": 0}
-        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "one"), (1, "mem:x:2", "", "mem", "two")]
-        recall.index_bus = lambda terms: calls.__setitem__("bus", calls["bus"] + 1) or []
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "one"), (1, "mem:x:2", "", "mem", "two")]
+        recall.index_bus = lambda terms, tasks=None: calls.__setitem__("bus", calls["bus"] + 1) or []
         recall.index_cmem = lambda *args: calls.__setitem__("cmem", calls["cmem"] + 1) or []
-        recall.index_graph = lambda terms: calls.__setitem__("graph", calls["graph"] + 1) or []
+        recall.index_graph = lambda terms, lessons=None: calls.__setitem__("graph", calls["graph"] + 1) or []
         result = recall.recall("one two", budget_hits=2)
         self.assertEqual(result["layers_consulted"], ["notes"])
         self.assertEqual(result["stopped_at"], "notes")
@@ -99,8 +99,8 @@ class MemorySkill(unittest.TestCase):
 
     def test_recall_skips_unavailable_layer_and_names_it(self):
         recall = self.load_recall()
-        recall.index_notes = lambda terms: []
-        recall.index_bus = lambda terms: []
+        recall.index_notes = lambda terms, memory=None: []
+        recall.index_bus = lambda terms, tasks=None: []
         recall.CMEM = TMP / "missing.db"
         recall.LESSONS = TMP / "missing-lessons.md"
         result = recall.recall("nothing")
@@ -109,7 +109,7 @@ class MemorySkill(unittest.TestCase):
     def test_recall_logs_memory_run_row_with_task_and_layers(self):
         task = bus.create_task("memory recall row", "s", ["a"], ["x.py"])
         recall = self.load_recall()
-        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "memory")]
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "memory")]
         result = recall.recall("memory", layers=("notes",), task=task["id"])
         row = json.loads(sorted(bus.RUNS.glob("*.jsonl"))[-1].read_text().splitlines()[-1])
         self.assertEqual(row["role"], "memory")
@@ -119,7 +119,7 @@ class MemorySkill(unittest.TestCase):
 
     def test_recall_progressive_cli_header(self):
         recall = self.load_recall()
-        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "memory")]
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "memory")]
         out = io.StringIO()
         with redirect_stdout(out):
             recall.cmd_index(["--progressive", "memory"])
@@ -154,9 +154,9 @@ class MemorySkill(unittest.TestCase):
     def test_recall_budget_from_root_pool_toml(self):
         recall = self.load_recall()
         calls = {"bus": 0}
-        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "one"),
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "one"),
                                             (1, "mem:x:2", "", "mem", "two")]
-        recall.index_bus = lambda terms: calls.__setitem__("bus", calls["bus"] + 1) or []
+        recall.index_bus = lambda terms, tasks=None: calls.__setitem__("bus", calls["bus"] + 1) or []
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pool = root / ".orchestrator" / "pool.toml"
@@ -174,11 +174,11 @@ class MemorySkill(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             memory = root / ".orchestrator" / "memory"
-            memory.mkdir()
+            memory.mkdir(parents=True)
             unrelated = "\n".join(f"## 2026-01-01 unrelated entry {n}\nnoise" for n in range(20))
             (memory / "index.md").write_text(unrelated + "\n## 2026-01-01 cache timeout gotcha\ncache timeout\n")
             calls = {"bus": 0}
-            recall.index_bus = lambda terms: calls.__setitem__("bus", calls["bus"] + 1) or [
+            recall.index_bus = lambda terms, tasks=None: calls.__setitem__("bus", calls["bus"] + 1) or [
                 (1, "bus:T-1", "", "bus", "timeout workaround")]
             result = recall.recall("cache timeout", root=root, layers=("notes", "bus"),
                                    budget_hits=2, min_score=1)

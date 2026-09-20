@@ -205,6 +205,9 @@ def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), 
 
 def cmd_index(argv):
     root = resolve_root()
+    memory_dir = root / ".orchestrator" / "memory"
+    tasks_dir = root / ".orchestrator" / "tasks"
+    lessons = Path(os.environ.get("GRAPHIFY_OUT") or root / "graphify-out") / "reflections" / "LESSONS.md"
     q, project, limit, goal_text, progressive = "", None, configured_hits(root), os.environ.get("ORCH_GOAL_TEXT"), False
     i = 0
     while i < len(argv):
@@ -223,7 +226,9 @@ def cmd_index(argv):
         for hit in hits:
             print(f"{hit['id']} · {hit['date'] or '-'} · {hit['layer']} · {age(hit['date'])} · {hit['title']}")
         return
-    hits = index_notes(terms) + index_bus(terms) + index_cmem(terms, project, limit) + index_graph(terms)
+    hits = (index_notes(terms, memory_dir) + index_bus(terms, tasks_dir) +
+            index_cmem(terms, project, limit) + index_graph(terms, lessons))
+    hits = [hit for hit in hits if hit[0] > 0]
     hits.sort(key=lambda h: (-h[0], h[2]))
     if not hits:
         print(f"no hits for {terms} in notes/bus/cmem/graph"); return
