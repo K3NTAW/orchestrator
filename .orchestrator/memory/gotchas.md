@@ -264,3 +264,9 @@ type: gotcha · goal: T-0353 · tasks: T-0374,T-0379,T-0382,T-0385 · provenance
 - T-0385 (Codex, in scope, no commit) bisected the ordered run: tests.test_cli Background.test_autostart_true_starts_thread_and_holds_the_lock then tests.test_daemon.Daemon.test_all_reviews_failed_holds_without_merge fails with failed != held; the autostarted daemon thread keeps ticking against the later sandbox and merge_reviewed marks the task failed first
 - the H8 chain burned three fix rounds (T-0374, T-0379, T-0382) because Codex reported the gate green while that test failed, and the Planner's bisect of the failing test in isolation (OK on every worktree) pointed at bus tests first; the ordered-module run was the decisive diagnostic
 outcome: Fix round T-0386 stops and joins the thread in the test (and adds a stop hook to the autostart loop if none exists). Rule: when a full-suite failure passes in isolation, run python -m unittest with the suspect module followed by the failing module before writing a fix round; the 2026-09-19 gotcha about test_handover flakiness has the same root
+
+## 2026-09-20 test_planner_runs RunGuards and TickAutonomous fail intermittently in a full-suite run and pass alone
+type: gotcha · goal: T-0445 · provenance: repo
+- external tests-green on goal/T-0445 head d7b942a: FAIL test_run_claims_before_launch_so_concurrent_callers_launch_once and test_tick_autonomous_launches_at_most_one_decision_per_tick; the two alone, the module alone and a second full run were all green; the merge queue's gate on the same sha was green
+- treat as flaky under full-suite timing (thread or shared-state leak from an earlier module, same family as the tests.test_cli autostart leak); rerun once before writing any fix round; candidate for the H7 flaky rerun list
+outcome: no fix round; if it recurs twice more, spec an isolation fix in tests/test_planner_runs.py setUp
