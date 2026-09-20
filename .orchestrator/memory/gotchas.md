@@ -276,3 +276,9 @@ type: gotcha · goal: T-0445 · tasks: T-0463,T-0473,T-0475,T-0476 · provenance
 - T-0473 committed 62d26f1 on its own branch (cut from the parent); T-0475 committed e5e1689 directly on the parent branch and left its own worktree at the stale base 9e4257e, so the second fix lacked the first
 - compare the parent and fix branch heads after every fix round; when they diverge, spec one combine task that cherry-picks the other commit before any merge
 outcome: T-0476 combines both; the merge target is the combined branch
+
+## 2026-09-20 Fix-round specs must say 'commit in your own worktree on your own branch'; 'commit on the parent branch' makes Codex commit inside the parent worktree and leaves the fix worktree empty
+type: gotcha · goal: T-0445 · tasks: T-0475,T-0479 · provenance: repo
+- T-0475 and T-0479 both put their commits on the parent task branch; the daemon would have gated and merged the empty fix worktree (the parent's original commit) had the tasks not been marked failed first
+- codex_reply on a marked-failed fix task still works and lands in the same checkout Codex used before
+outcome: specs for T-0482 onward carry the own-worktree sentence; check git rev-parse of both branches after every fix round
