@@ -7,14 +7,20 @@ from _harness import REPO, TMP  # noqa: F401  (TMP/ORCH_ROOT must exist before t
 from orchestrator import bus
 
 
-class Bus(unittest.TestCase):
+class BusSandbox(unittest.TestCase):
     def setUp(self):
         # Each test's cursor starts at its own stream, not events from other tests.
         state = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="bus-test-")))
         for name, path in {"STATE": state, "TASKS": state / "tasks",
                            "RUNS": state / "runs", "LOCK": state / bus.LOCK_NAME}.items():
             self.enterContext(patch.object(bus, name, path))
-        self.addCleanup(bus._close_db)
+
+    def tearDown(self):
+        # Close the per-test singleton before unittest restores the patched paths.
+        bus._close_db()
+
+
+class Bus(BusSandbox):
 
     def test_log_run_carries_decision_identity_and_versions(self):
         import tempfile

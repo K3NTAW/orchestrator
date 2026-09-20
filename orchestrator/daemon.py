@@ -1030,7 +1030,7 @@ def maybe_handover(reason, now=None):
     return True
 
 
-def tick(pool=None):
+def tick(pool=None, stop_event=None):
     pool = pool or Pool()
     try:
         pool.tally_planner()
@@ -1042,6 +1042,8 @@ def tick(pool=None):
     except Exception as e:
         print(f"[daemon] sweep_leases failed: {e}", file=sys.stderr)
     for t in bus.read(status="running"):
+        if stop_event and stop_event.is_set():
+            return
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:
                 reconcile_dead(t)
@@ -1049,6 +1051,8 @@ def tick(pool=None):
                 print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
                 continue
     for stage in (dispatch, gate, merge_reviewed):
+        if stop_event and stop_event.is_set():
+            return
         try:
             stage(pool)
         except Exception as e:
@@ -1096,7 +1100,7 @@ def _loop(interval, stop_event):
     instead of blocking for a full interval."""
     while True:
         try:
-            tick(Pool())
+            tick(Pool(), stop_event)
         except Exception as e:
             print(f"[daemon] tick failed: {e}", file=sys.stderr)
         if stop_event.wait(interval):
