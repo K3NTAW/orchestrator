@@ -36,6 +36,7 @@ class Daemon(unittest.TestCase):
         self.assertEqual(held["result"]["reason"], "budget")
         for key in ("dispatched_at", "dispatched_at_done", "dispatched_at_lease"):
             self.assertNotIn(key, held["pipeline"])
+        self.assertEqual((bus.get(parent)["status"], bus.get(parent)["hold_reason"]), ("held", "gate_red"))
         self.assertEqual(len(calls), 1)
         daemon.dispatch(P.Pool())  # the next daemon tick can retry the same fix
         self.assertEqual(len(calls), 2)

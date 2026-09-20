@@ -232,6 +232,54 @@ class Executor(unittest.TestCase):
         self.assertEqual(task["resume_hint"], {"argv_error": reason[:300]})
         self.assertEqual(task.get("rounds"), 0)
 
+    def test_reply_usage_limit_holds_fix_task_not_parent(self):
+        self.fake_codex(codex_stream(
+            {"type": "thread.started", "thread_id": "fix-limit"},
+            {"type": "error", "message": "You've hit your usage limit. Try again in 30 minutes."}), 1)
+        parent = self.exec_task(title="usage parent")
+        bus.update(parent, status="held", hold_reason="gate_red", codex_thread="parent-thread",
+                   rounds=0, executor="astra")
+        fix = bus.create_task("usage fix", "repair", ["a"], ["x.py"], role="execute",
+                              constraints={"fix_round_for": parent})
+        before = bus.get(parent)
+        result = executor.reply(parent, "repair", fix_round_task_id=fix["id"])
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(bus.get(fix["id"])["hold_reason"], "codex usage limit; resets in 30 min")
+        self.assertEqual((bus.get(parent)["status"], bus.get(parent)["hold_reason"]),
+                         (before["status"], before["hold_reason"]))
+
+    def test_reply_rounds_exhausted_fails_fix_task_not_parent(self):
+        parent = self.exec_task(title="rounds parent")
+        bus.update(parent, status="held", hold_reason="gate_red", codex_thread="parent-thread",
+                   rounds=executor.MAX_ROUNDS, executor="astra")
+        fix = bus.create_task("rounds fix", "repair", ["a"], ["x.py"], role="execute",
+                              constraints={"fix_round_for": parent})
+        before = bus.get(parent)
+        result = executor.reply(parent, "repair", fix_round_task_id=fix["id"])
+        self.assertEqual(result["reason"], "round budget exhausted")
+        self.assertEqual((bus.get(fix["id"])["status"], bus.get(fix["id"])["reason"]),
+                         ("failed", f"fix loop exceeded {executor.MAX_ROUNDS} rounds; escalate or re-spec"))
+        self.assertEqual((bus.get(parent)["status"], bus.get(parent)["hold_reason"]),
+                         (before["status"], before["hold_reason"]))
+
+    def test_reply_argv_error_resume_hint_on_fix_task(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        parent = self.exec_task(title="argv parent")
+        bus.update(parent, status="held", hold_reason="gate_red", codex_thread="parent-thread",
+                   rounds=0, executor="astra")
+        fix = bus.create_task("argv fix", "repair", ["a"], ["x.py"], role="execute",
+                              constraints={"fix_round_for": parent})
+        original = executor.subprocess.run
+        def argv_error(cmd, **kwargs):
+            return type("Proc", (), {"stdout": "", "stderr": "error: unexpected argument '-s' found\nUsage: codex exec resume",
+                                      "returncode": 2})()
+        executor.subprocess.run = argv_error
+        self.addCleanup(lambda: setattr(executor.subprocess, "run", original))
+        result = executor.reply(parent, "repair", fix_round_task_id=fix["id"])
+        self.assertTrue(result["reason"].startswith("codex argv error:"))
+        self.assertEqual(bus.get(fix["id"])["resume_hint"], {"argv_error": result["reason"][:300]})
+        self.assertEqual((bus.get(parent)["status"], bus.get(parent)["hold_reason"]), ("held", "gate_red"))
+
     def test_reply_requires_thread_and_caps_rounds(self):
         t = bus.create_task("exec", "s", ["a"], ["x.py"], role="execute")
         self.assertEqual(executor.reply(t["id"], "d")["status"], "failed")

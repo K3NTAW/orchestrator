@@ -94,6 +94,11 @@ def _tokens(u):
     return out
 
 
+def _state_target(task):
+    """Return the task whose execution state belongs to this run."""
+    return task.get("_run_task_id", task["id"])
+
+
 def _run(pool, task, args, cwd, timeout, ex=None):
     cfg = pool.cfg["codex"]
     # dangerous_full_access (pool.toml): user decision 2026-09-16; otherwise workspace-write sandbox (container-safe default)
@@ -101,7 +106,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     kind = "resume" if args and args[0] == "resume" else "exec"
     command_args = args[1:] if kind == "resume" else args
     cmd = argv_for(kind, command_args, cwd, access)
-    log_task = task.get("_run_task_id", task["id"])
+    log_task = _state_target(task)
     log = {"executor": ex.id if ex else "codex", "complexity": task["complexity"]}
     constraints = task.get("_run_constraints", task.get("constraints") or {})
     if constraints.get("fix_round_for"):
@@ -121,7 +126,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         reason = f"codex argv error: {r.stderr[-800:]}"
         bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex",
                     duration_s=round(time.time() - t0, 1), outcome="failed", reason=reason, **log)
-        bus.update(task["id"], resume_hint={"argv_error": reason[:300]})
+        bus.update(_state_target(task), resume_hint={"argv_error": reason[:300]})
         return {"status": "failed", "reason": reason}
     ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
     if ev["thread_id"]:
@@ -137,7 +142,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         if ex:
             pool.cooldown_executor(ex.id, secs, "codex usage limit")   # a usage limit is the quota group's, not one model's
         pool.codex.cooldown_until = time.time() + secs; pool.save()
-        bus.update(task["id"], status="held", hold_reason=f"codex usage limit; resets in {secs // 60} min",
+        bus.update(_state_target(task), status="held", hold_reason=f"codex usage limit; resets in {secs // 60} min",
                    resume_hint={"thread": ev["thread_id"], "diff_stat": _diff_stat(cwd)})
         bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
                     cooldown_s=secs, **log)
@@ -332,8 +337,11 @@ def _exhausted(pool, t, run=None):
 
 
 def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):
-    """Fix-loop round: resume the task's thread with a delta (failing tests + assertion lines) on the executor that
-    started it — same thread, same model, never a re-pick mid-task. Capped at MAX_ROUNDS."""
+    """Run one bounded fix round and return its execution outcome.
+
+    The parent owns the Codex thread and round counter; when ``fix_round_task_id``
+    is supplied, the fix task owns execution status, reasons, holds, and hints.
+    """
     t = bus.get(task_id)
     if fix_round_task_id is not None:
         fix = bus.get(fix_round_task_id)
@@ -351,12 +359,12 @@ def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):
         return {"status": "failed", "reason": "task has no codex_thread; call codex() first"}
     rounds = t.get("rounds", 0) + 1
     if rounds > MAX_ROUNDS:
-        bus.update(task_id, status="failed", reason=f"fix loop exceeded {MAX_ROUNDS} rounds; escalate or re-spec")
+        bus.update(_state_target(t), status="failed", reason=f"fix loop exceeded {MAX_ROUNDS} rounds; escalate or re-spec")
         return {"status": "failed", "reason": "round budget exhausted"}
     ex = pool.executors.get(t.get("executor") or "") or pool._legacy_executor()  # pre-B2 tasks have no executor field
     # The task being resumed is itself one of the bus-derived running slots.
     if ex is None or ex.cooling() or ex.running > ex.max_parallel:
-        bus.update(task_id, status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
+        bus.update(_state_target(t), status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
         return {"status": "held", "codex": pool.status()["codex"]}
     if current_plan["mode"] == "resume":
         args = ["resume", t["codex_thread"], delta]
@@ -369,10 +377,10 @@ def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):
         briefing = packet(t, t["worktree"])
         t["packet_meta"] = packet_run_meta(briefing)
         repair = briefing + "\n\nRepair delta:\n" + delta
-        bus.update(task_id, resume_incompatible=current_plan["reason"])
+        bus.update(_state_target(t), resume_incompatible=current_plan["reason"])
         args = ["-m", ex.model, repair]
     if t.get("packet_meta"):
-        bus.update(task_id, packet_meta=t["packet_meta"])
+        bus.update(_state_target(t), packet_meta=t["packet_meta"])
     result = _run(pool, t, args, t["worktree"],
                   t["constraints"].get("timeout_s", 1800), ex=ex)
     if not result.get("reason", "").startswith("codex argv error:"):
