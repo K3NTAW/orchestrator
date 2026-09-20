@@ -137,6 +137,7 @@ def main():
     sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role"])
     sc.add_argument("--efficiency", action="store_true")
     sc.add_argument("--economics", action="store_true")
+    sc.add_argument("--routing", action="store_true")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -166,7 +167,7 @@ def main():
             ap.error("--economics supports --by executor|band|class")
         if a.efficiency and a.by in ("tier", "task"):
             ap.error("--efficiency supports --by goal|executor|band|class|role")
-        if not a.efficiency and not a.economics:
+        if not a.efficiency and not a.economics and not a.routing:
             a.by = a.by or "executor"
             if a.by in ("band", "class", "role"):
                 ap.error("this --by requires --efficiency")
@@ -270,7 +271,10 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.economics:
+        if a.routing:
+            card = scorecard.routing_eval(root=scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_routing_eval(card))
+        elif a.economics:
             grouping = a.by or "executor"
             if grouping not in ("executor", "band", "class"):
                 ap.error("--economics --by must be executor, band, or class")

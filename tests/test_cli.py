@@ -153,6 +153,22 @@ class Cli(unittest.TestCase):
             card = json.loads(self._scorecard_output("--economics", "--by", "band", "--json"))
             self.assertIn("cheap/1-3", card)
 
+    def test_cli_scorecard_routing_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-route", executor="worker", merged_into="main",
+                           pipeline={"first_green_at": 1, "gate_reds": 0}, lineage_fix_rounds=0)
+        fixture.write_runs({"task": "T-route", "role": "execute"},
+                           {"task": "T-route", "role": "jev_route", "baseline": "worker",
+                            "hypothetical": "other", "signals": {"fit": .7}, "latency_ms": 5,
+                            "usage": {"tokens": 3, "usd": .001}})
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            text = self._scorecard_output("--routing")
+            self.assertIn("agree\t1", text)
+            self.assertIn("disagree\t1", text)
+            self.assertIn("evidence verdict: insufficient", text)
+            card = json.loads(self._scorecard_output("--routing", "--json"))
+            self.assertEqual(card["groups"]["disagree"]["n"], 1)
+
     def test_scorecard_default_output_unchanged(self):
         with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):
             self.assertEqual(self._scorecard_output(), "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore\n")

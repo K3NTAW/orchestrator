@@ -57,7 +57,7 @@ def test_save_writes_metrics_and_fingerprint():
         path = baseline.save('phase-h-code', root)
         saved = baseline.load('phase-h-code', root)
         assert path == root / 'baselines' / 'phase-h-code.json'
-        assert set(saved['efficiency']) == {'all', 'goal', 'executor', 'band', 'class', 'role'}
+        assert set(saved['efficiency']) == {'all', 'goal', 'executor', 'band', 'class', 'role', 'routing'}
         for by in baseline.GROUPS:
             assert saved['efficiency'][by or 'all'] == scorecard.efficiency(root, by=by)
         assert saved['metrics']['tokens_per_accepted_task'] == 120
@@ -132,6 +132,20 @@ def test_fingerprint_diff_lists_changed_keys():
     assert baseline.compare(a, b)['fingerprint_diff'] == ['jev.mode']
     b['fingerprint']['new'] = None
     assert baseline.compare(a, b)['fingerprint_diff'] == ['jev.mode', 'new']
+
+
+def test_baseline_includes_routing_eval_and_compare_reports_it():
+    with state() as root:
+        with (root / 'runs' / 'usage.jsonl').open('a') as handle:
+            handle.write(json.dumps({'task': 'T-0001', 'role': 'jev_route', 'baseline': 'test',
+                                     'hypothetical': 'other', 'signals': {'fit': .8}}) + '\n')
+        baseline.save('before', root)
+        baseline.save('after', root)
+        saved = baseline.load('after', root)
+        assert saved['efficiency']['routing']['groups']['disagree']['n'] == 1
+        result = baseline.compare('before', 'after', root)
+        assert result['routing']['after_verdict'] == 'insufficient'
+        assert 'routing disagree deltas:' in baseline.format_comparison(result)
 
 
 def test_cli_baseline_save_show_list_compare():

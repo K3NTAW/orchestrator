@@ -188,6 +188,58 @@ class Scorecard(unittest.TestCase):
         card = scorecard.build(root=self.root)
         self.assertEqual(card["reviewed-by"]["review_request_changes"], 1)
 
+    def _routing_fixture(self):
+        self.write_task("T-route-a", executor="worker-a", merged_into="main", complexity=2,
+                        accepted_at=200, pipeline={"first_green_at": 150, "gate_reds": 0},
+                        lineage_fix_rounds=0, constraints={"task_class": "mechanical"})
+        self.write_task("T-route-b", executor="worker-b", status="failed", complexity=7,
+                        pipeline={"gate_reds": 2}, lineage_fix_rounds=1,
+                        constraints={"task_class": "architectural"})
+        self.write_task("T-route-review", role="review", inputs=["T-route-b"],
+                        review_verdict="request_changes")
+        self.write_runs(
+            {"task": "T-route-a", "role": "execute", "input_tokens": 100, "usd": 1},
+            {"task": "T-route-b", "role": "execute", "input_tokens": 200, "usd": 2},
+            {"task": "T-route-a", "goal_id": "G", "role": "jev_route", "mode": "shadow",
+             "eligible": ["worker-a", "worker-b"], "baseline": "worker-a", "hypothetical": "worker-a",
+             "signals": {"risk": {"p": .8}}, "latency_ms": 10, "usage": {"tokens": 5, "usd": .01}},
+            {"task": "T-route-b", "goal_id": "G", "role": "jev_route", "mode": "shadow",
+             "eligible": ["worker-a", "worker-b"], "baseline": "worker-b", "hypothetical": "worker-a",
+             "signals": {"risk": {"p": .4}}, "latency_ms": 30, "usage": {"tokens": 7, "usd": .02},
+             "reason": "budget"})
+        return scorecard.routing_eval(self.root, min_samples=2)
+
+    def test_routing_eval_joins_rows_to_outcomes_by_lineage_root(self):
+        card = self._routing_fixture()
+        rows = {row["task"]: row for row in card["rows"]}
+        self.assertTrue(rows["T-route-a"]["accepted"])
+        self.assertEqual((rows["T-route-a"]["executor"], rows["T-route-a"]["tokens"]), ("worker-a", 100))
+        self.assertEqual(rows["T-route-b"]["review_request_changes"], 1)
+
+    def test_routing_eval_agree_vs_disagree_groups_and_defined_counts(self):
+        groups = self._routing_fixture()["groups"]
+        self.assertEqual((groups["agree"]["n"], groups["disagree"]["n"]), (1, 1))
+        self.assertEqual(groups["agree"]["first_pass_defined_count"], 1)
+        self.assertEqual(groups["disagree"]["gate_red_defined_count"], 1)
+
+    def test_routing_eval_per_signal_threshold_split(self):
+        signal = self._routing_fixture()["groups"]["signals"]["risk"]
+        self.assertEqual((signal["p>=0.6"]["n"], signal["p<0.6"]["n"]), (1, 1))
+
+    def test_routing_eval_coverage_and_skip_reasons(self):
+        card = self._routing_fixture()
+        self.assertEqual(card["coverage"], {"classified": 2, "execute_dispatches": 2, "share": 1})
+        self.assertEqual(card["skip_reasons"], {"budget": 1})
+        self.assertEqual((card["jev_latency_ms"]["median"], card["jev_usage"]["tokens"]), (20, 12))
+
+    def test_routing_eval_insufficient_below_min_samples(self):
+        self.assertEqual(self._routing_fixture()["evidence_verdict"], "insufficient")
+
+    def test_routing_eval_none_when_no_rows(self):
+        self.write_task("T-no-route", executor="worker")
+        self.write_runs({"task": "T-no-route", "role": "execute"})
+        self.assertIsNone(scorecard.routing_eval(self.root))
+
     def _economics_fixture(self):
         self.write_task("T-root", executor="cheap", status="done", merged_into="goal/G", complexity=4,
                         pipeline={"first_green_at": "2026-01-01T00:00:00Z", "gate_reds": 0})

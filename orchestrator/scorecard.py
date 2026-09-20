@@ -2,7 +2,9 @@
 scores() so routing reacts to live merge/fail/usage-limit history instead of static weights alone."""
 import json
 import statistics
+import tomllib
 from datetime import date, datetime
+from pathlib import Path
 from . import STATE, bench, attribution
 
 BANDS = ("1-3", "4-6", "7-10")
@@ -908,6 +910,179 @@ def efficiency(root=STATE, by=None):
     summary["groups"] = {key: _efficiency_summary(grouped_rows.get(key, []), grouped_tasks.get(key, []))
                          for key in sorted(grouped_rows.keys() | grouped_tasks.keys())}
     return summary
+
+
+def _routing_group(rows):
+    """Descriptive outcome summary for a set of shadow routing decisions."""
+    first = [row["first_pass"] for row in rows if row.get("first_pass") is not None]
+    fixes = [row["fix_rounds"] for row in rows if row.get("fix_rounds") is not None]
+    gate_reds = [row["gate_reds"] for row in rows if row.get("gate_reds") is not None]
+    reviews = [row["review_request_changes"] for row in rows
+               if row.get("review_request_changes") is not None]
+    accepted = [row for row in rows if row.get("accepted")]
+    token_values = [row["tokens"] for row in accepted if row.get("tokens") is not None]
+    cost_values = [row["cost"] for row in accepted if row.get("cost") is not None]
+    return {
+        "n": len(rows), "accepted_share": sum(bool(r.get("accepted")) for r in rows) / len(rows) if rows else None,
+        "accepted_defined_count": len(rows),
+        "first_pass_rate": sum(first) / len(first) if first else None,
+        "first_pass_defined_count": len(first),
+        "fix_round_rate": sum(value >= 1 for value in fixes) / len(fixes) if fixes else None,
+        "fix_round_defined_count": len(fixes),
+        "avg_fix_rounds": statistics.mean(fixes) if fixes else None,
+        "median_tokens_to_accepted": statistics.median(token_values) if token_values else None,
+        "tokens_to_accepted_defined_count": len(token_values),
+        "median_cost_to_accepted": statistics.median(cost_values) if cost_values else None,
+        "cost_to_accepted_defined_count": len(cost_values),
+        "gate_red_share": sum(value > 0 for value in gate_reds) / len(gate_reds) if gate_reds else None,
+        "gate_red_defined_count": len(gate_reds),
+        "review_request_changes_share": sum(reviews) / len(reviews) if reviews else None,
+        "review_request_changes_defined_count": len(reviews),
+    }
+
+
+def routing_eval(root=STATE, min_samples=None):
+    """Compare shadow Jev routing classifications with observed lineage-root outcomes.
+
+    This deliberately reports side-by-side descriptive evidence only.  In particular, disagreement is
+    not treated as improvement: deciding whether a hypothetical route predicts better downstream outcomes
+    belongs to the later snapshot decision.
+    """
+    root = Path(root) if not hasattr(root, "glob") else root
+    tasks = {}
+    for path in sorted((root / "tasks").glob("*.json")):
+        try:
+            task = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        tasks[task.get("id", path.stem)] = task
+    all_rows, _ = _efficiency_rows(root, tasks)
+    route_rows = [row for row in all_rows if row.get("role") == "jev_route"]
+    if not route_rows:
+        return None
+    if min_samples is None:
+        min_samples = 20
+        try:
+            cfg = tomllib.loads((root / "pool.toml").read_text())
+            min_samples = int(cfg.get("jev", {}).get("routing", {}).get("min_eval_samples", 20))
+        except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError):
+            pass
+
+    usage_rows = [row for row in all_rows if row.get("role") != "jev_route"]
+    joined = []
+    for route in route_rows:
+        attributed = _attributed(route, tasks)
+        tid = attributed.get("lineage_root") or route.get("task")
+        task = tasks.get(tid, {})
+        lineage_ids = {oid for oid, other in tasks.items() if _task_lineage(other, tasks)[0] == tid}
+        own = [row for row in usage_rows if row.get("lineage_root") == tid]
+        pipeline = task.get("pipeline") or {}
+        fixes = task.get("lineage_fix_rounds", pipeline.get("lineage_fix_rounds"))
+        if fixes is None and task:
+            fixes = sum(oid != tid and tasks[oid].get("role") == "execute" for oid in lineage_ids)
+        reds = pipeline.get("gate_reds", task.get("gate_reds"))
+        green = pipeline.get("first_green_at")
+        verdicts = []
+        for review in tasks.values():
+            inputs = review.get("inputs") or []
+            constraints = review.get("constraints") or {}
+            target = constraints.get("review_for") or (inputs[0] if inputs else None)
+            if review.get("role") == "review" and target in lineage_ids:
+                verdict = review.get("review_verdict") or (review.get("result") or {}).get("verdict")
+                if verdict in ("approve", "request_changes"):
+                    verdicts.append(verdict)
+        accepted = bool(task.get("merged_into"))
+        joined.append({**route, "lineage_root": tid, "accepted": accepted,
+                       "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None,
+                       "fix_rounds": fixes, "gate_reds": reds,
+                       "tokens": sum(_tokens_of(row) for row in own),
+                       "cost": sum(row.get("usd") or 0 for row in own),
+                       "review_request_changes": (sum(v == "request_changes" for v in verdicts) / len(verdicts)
+                                                  if verdicts else None),
+                       "executor": attributed.get("executor"), "band": attributed.get("band"),
+                       "task_class": attributed.get("task_class")})
+
+    def split(key):
+        values = {}
+        for row in joined:
+            values.setdefault(str(row.get(key) or "unknown"), []).append(row)
+        return {name: _routing_group(members) for name, members in sorted(values.items())}
+
+    agree = [row for row in joined if row.get("baseline") == row.get("hypothetical")]
+    disagree = [row for row in joined if row.get("baseline") != row.get("hypothetical")]
+    signal_keys = sorted({key for row in joined for key in (row.get("signals") or {})})
+    signals = {}
+    for key in signal_keys:
+        high, low = [], []
+        for row in joined:
+            value = (row.get("signals") or {}).get(key)
+            probability = value.get("p") if isinstance(value, dict) else value
+            (high if isinstance(probability, (int, float)) and probability >= .6 else low).append(row)
+        signals[key] = {"p>=0.6": _routing_group(high), "p<0.6": _routing_group(low)}
+
+    execute_tasks = {row.get("task") for row in all_rows if row.get("role") == "execute" and row.get("task")}
+    classified = {row.get("task") for row in route_rows if row.get("task") in execute_tasks}
+    skips = {}
+    for row in route_rows:
+        reason = row.get("skip_reason") or row.get("reason")
+        if not reason:
+            reason = "error" if row.get("error") else "cache hit" if row.get("cache") else None
+        if reason:
+            normalized = str(reason).replace("_", " ")
+            skips[normalized] = skips.get(normalized, 0) + 1
+    latencies = [row.get("latency_ms") for row in route_rows if isinstance(row.get("latency_ms"), (int, float))]
+    usage = [row.get("usage") or {} for row in route_rows]
+    result = {"rows": joined, "groups": {"overall": _routing_group(joined),
+              "agree": _routing_group(agree), "disagree": _routing_group(disagree),
+              "by_band": split("band"), "by_task_class": split("task_class"),
+              "by_baseline_executor": split("baseline"), "signals": signals},
+              "coverage": {"classified": len(classified), "execute_dispatches": len(execute_tasks),
+                           "share": len(classified) / len(execute_tasks) if execute_tasks else None},
+              "skip_reasons": skips,
+              "jev_latency_ms": {"median": statistics.median(latencies) if latencies else None,
+                                  "p95": _percentile_value(latencies, 95)},
+              "jev_usage": {"tokens": sum(int(u.get("tokens", u.get("input_tokens", 0) + u.get("output_tokens", 0))) for u in usage),
+                            "usd": sum(float(u.get("usd") or 0) for u in usage)},
+              "min_samples": min_samples,
+              "evidence_verdict": "collected" if len(disagree) >= min_samples else "insufficient"}
+    return result
+
+
+def _percentile_value(values, percentile):
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * percentile / 100
+    low, high = int(index), min(int(index) + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (index - low)
+
+
+def format_routing_eval(card):
+    if card is None:
+        return "routing evidence: insufficient (no rows)"
+    columns = ("group", "n", "accepted_share", "first_pass_rate", "first_pass_defined_count",
+               "fix_round_rate", "fix_round_defined_count", "avg_fix_rounds",
+               "median_tokens_to_accepted", "tokens_to_accepted_defined_count",
+               "median_cost_to_accepted", "cost_to_accepted_defined_count", "gate_red_share",
+               "gate_red_defined_count", "review_request_changes_share",
+               "review_request_changes_defined_count")
+    def cell(value):
+        return "n/a" if value is None else str(round(value, 4) if isinstance(value, float) else value)
+    lines = ["\t".join(columns)]
+    rows = {key: card["groups"][key] for key in ("agree", "disagree")}
+    for signal, splits in card["groups"]["signals"].items():
+        for band, row in splits.items():
+            rows[f"signal:{signal}:{band}"] = row
+    for name, row in rows.items():
+        lines.append(name + "\t" + "\t".join(cell(row[key]) for key in columns[1:]))
+    coverage = card["coverage"]
+    lines.append(f"coverage: {coverage['classified']}/{coverage['execute_dispatches']} ({cell(coverage['share'])}) "
+                 f"skip_reasons={json.dumps(card['skip_reasons'], sort_keys=True)}")
+    lines.append(f"jev: latency median={cell(card['jev_latency_ms']['median'])}ms "
+                 f"p95={cell(card['jev_latency_ms']['p95'])}ms tokens={card['jev_usage']['tokens']} "
+                 f"usd={round(card['jev_usage']['usd'], 4)}")
+    lines.append("evidence verdict: " + card["evidence_verdict"])
+    return "\n".join(lines)
 
 
 def _failure_reason(task):

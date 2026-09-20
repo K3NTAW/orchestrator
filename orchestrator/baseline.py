@@ -166,6 +166,7 @@ def save(label, root=STATE, since=None):
         for row in rows:
             bucket = row.get('bucket') or 'other'
             counts[bucket] = counts.get(bucket, 0) + 1
+        cards['routing'] = scorecard.routing_eval(measured)
         snapshot = {'saved_at': now.isoformat(),
                     'window': {'since': since, 'until': now.isoformat(), 'rows_by_bucket': counts,
                                'row_count': len(rows), 'malformed_lines': malformed},
@@ -210,7 +211,23 @@ def compare(a, b, root=STATE):
                         'percent': delta / abs(x) * 100 if delta is not None and x else None,
                         'flag': flag, 'non_inferiority': key in NON_INFERIORITY}
     flags = [metrics[k]['flag'] for k in NON_INFERIORITY]
-    return {'metrics': metrics, 'fingerprint_diff': _changed(a.get('fingerprint', {}), b.get('fingerprint', {})),
+    routing_before = (a.get('efficiency') or {}).get('routing')
+    routing_after = (b.get('efficiency') or {}).get('routing')
+    routing = {'before_verdict': routing_before.get('evidence_verdict') if routing_before else None,
+               'after_verdict': routing_after.get('evidence_verdict') if routing_after else None,
+               'groups': {}}
+    for name in ('agree', 'disagree'):
+        before_group = ((routing_before or {}).get('groups') or {}).get(name, {})
+        after_group = ((routing_after or {}).get('groups') or {}).get(name, {})
+        routing['groups'][name] = {}
+        for key in ('accepted_share', 'first_pass_rate', 'fix_round_rate', 'avg_fix_rounds',
+                    'median_tokens_to_accepted', 'median_cost_to_accepted', 'gate_red_share',
+                    'review_request_changes_share'):
+            x, y = before_group.get(key), after_group.get(key)
+            routing['groups'][name][key] = {'before': x, 'after': y,
+                                            'absolute': y - x if x is not None and y is not None else None}
+    return {'metrics': metrics, 'routing': routing,
+            'fingerprint_diff': _changed(a.get('fingerprint', {}), b.get('fingerprint', {})),
             'non_inferior': 'no' if 'worse' in flags else 'undefined' if 'undefined' in flags else 'yes'}
 
 
@@ -222,5 +239,11 @@ def format_comparison(result):
         mark = '*' if row['non_inferiority'] and row['flag'] == 'worse' else ''
         lines.append(key + mark + '\t' + '\t'.join(cell(row[k]) for k in ('before', 'after', 'absolute', 'percent')) + '\t' + row['flag'])
     lines.append('fingerprint changed: ' + (', '.join(result['fingerprint_diff']) or 'none'))
+    routing = result.get('routing', {})
+    for name, metrics in routing.get('groups', {}).items():
+        values = ', '.join(f"{key}={cell(row['absolute'])}" for key, row in metrics.items())
+        lines.append(f"routing {name} deltas: {values}")
+    if routing:
+        lines.append('routing evidence verdict: ' + str(routing.get('after_verdict')))
     lines.append('non-inferior: ' + result['non_inferior'])
     return '\n'.join(lines)
