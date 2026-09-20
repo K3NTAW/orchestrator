@@ -297,6 +297,7 @@ class Daemon(unittest.TestCase):
         bus.update(tid, worktree=str(self.sandbox))
         pool = P.Pool()
         pool.cfg.setdefault("daemon", {})["flaky_rerun_max"] = 1
+        pool.cfg["daemon"]["flaky_rerun_timeout_s"] = 17
         def rerun(cmd, **kwargs):
             runs.append((cmd, kwargs))
             return FakeProc("1 passed", 0)
@@ -307,8 +308,14 @@ class Daemon(unittest.TestCase):
         self.assertEqual(task["pipeline"]["failure_kind"], "flaky")
         self.assertEqual(self.fixes_for(tid), [])
         self.assertEqual(len(runs), 1)
-        self.assertEqual(runs[0][0], ["pytest", "-q", "tests/test_x.py::test_x"])
-        self.assertEqual(runs[0][1]["cwd"], str(self.sandbox))
+        command, kwargs = runs[0]
+        failing_ids = ["tests/test_x.py::test_x"]
+        self.assertEqual([arg for arg in command if arg.startswith("tests/") or "::" in arg], failing_ids)
+        self.assertEqual(command[-len(failing_ids):], failing_ids)
+        self.assertNotIn(".", command)
+        self.assertNotIn("tests", command)
+        self.assertEqual(kwargs["cwd"], str(self.sandbox))
+        self.assertEqual(kwargs["timeout"], 17)
         self.assertEqual(task["resume_hint"]["failures"], failures)
         self.assertEqual(task["resume_hint"]["flaky_runs"], [{
             "ids": ["tests/test_x.py::test_x"], "returncode": 0, "output": "1 passed"}])
