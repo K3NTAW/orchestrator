@@ -244,6 +244,41 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertTrue(bus.get(tid)["pipeline"]["auto_fix_skipped"])
 
+    def test_rerun_rejects_argument_like_ids(self):
+        tid = self.held_for_fix("FAILED --rootdir=/ ../x.py::t")
+        bus.update(tid, worktree=str(self.sandbox))
+        calls = []
+
+        def rerun(cmd, **kwargs):
+            calls.append(cmd)
+            return FakeProc("", 0)
+
+        self.swap(daemon.subprocess, "run", rerun)
+        self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox)), "unknown")
+        self.assertEqual(calls, [])
+        self.assertEqual(set(bus.get(tid)["resume_hint"]["rejected_ids"]), {"--rootdir=/", "../x.py::t"})
+
+    def test_rerun_runner_resolved_in_worktree_not_daemon_interpreter(self):
+        tid = self.held_for_fix()
+        bus.update(tid, worktree=str(self.sandbox))
+        calls = []
+
+        def rerun(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return FakeProc("", 1)
+
+        self.swap(daemon.subprocess, "run", rerun)
+        self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox)), "code_defect")
+        self.assertEqual(calls[0][0], ["uv", "run", "--project", str(self.sandbox), "python", "-c", "import pytest"])
+        self.assertEqual(calls[1][0][-1], "tests.test_x.test_x")
+        self.assertEqual(calls[1][1]["cwd"], str(self.sandbox))
+
+    def test_node_id_to_unittest_conversion(self):
+        self.assertEqual(daemon._node_id_to_unittest("path/to/test_x.py::Class::name"),
+                         "path.to.test_x.Class.name")
+        self.assertEqual(daemon._node_id_to_unittest("path/to/test_x.py::name"), "path.to.test_x.name")
+        self.assertIsNone(daemon._node_id_to_unittest("../test_x.py::name"))
+
     def test_unchanged_failure_signature_escalates_instead_of_new_round(self):
         messages = []
         self.swap(daemon, "notify", messages.append)
@@ -299,6 +334,8 @@ class Daemon(unittest.TestCase):
         pool.cfg.setdefault("daemon", {})["flaky_rerun_max"] = 1
         pool.cfg["daemon"]["flaky_rerun_timeout_s"] = 17
         def rerun(cmd, **kwargs):
+            if cmd[-2:] == ["-c", "import pytest"]:
+                return FakeProc("", 0)
             runs.append((cmd, kwargs))
             return FakeProc("1 passed", 0)
         self.swap(daemon.subprocess, "run", rerun)
@@ -331,6 +368,8 @@ class Daemon(unittest.TestCase):
         runs = []
 
         def rerun(cmd, **kwargs):
+            if cmd[-2:] == ["-c", "import pytest"]:
+                return FakeProc("", 0)
             runs.append((cmd, kwargs))
             return FakeProc("still failing", 1)
 
@@ -360,6 +399,8 @@ class Daemon(unittest.TestCase):
         pool.cfg.setdefault("daemon", {})["flaky_rerun_timeout_s"] = 17
 
         def timed_out(cmd, **kwargs):
+            if cmd[-2:] == ["-c", "import pytest"]:
+                return FakeProc("", 1)
             self.assertEqual(kwargs["timeout"], 17)
             raise subprocess.TimeoutExpired(cmd, 17, output="hung test")
 

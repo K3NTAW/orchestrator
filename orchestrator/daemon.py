@@ -71,14 +71,40 @@ def lineage(task):
     return [t for t in bus.read() if root(t)["id"] == root_id]
 
 
-def _test_ids(failures):
+_PATH_TEST_ID = re.compile(r"[A-Za-z0-9_./-]+\.py(?:::[A-Za-z0-9_.\[\]]+)*\Z")
+_DOTTED_TEST_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\Z")
+
+
+def _valid_test_id(value):
+    return (isinstance(value, str) and value and ".." not in value and not value.startswith("-")
+            and (_PATH_TEST_ID.fullmatch(value) or _DOTTED_TEST_ID.fullmatch(value)))
+
+
+def _test_id_candidates(failures):
     if isinstance(failures, list):
         failures = "\n".join(str(line) for line in failures)
     if not isinstance(failures, str):
-        return None
-    ids = re.findall(r"^FAILED\s+(\S+)", failures, re.MULTILINE)
-    ids += re.findall(r"^(?:FAIL|ERROR):\s+[^\n]*\(([^)]+)\)", failures, re.MULTILINE)
-    return ids or None
+        return []
+    candidates = []
+    for line in failures.splitlines():
+        if line.startswith("FAILED "):
+            candidates.extend(line[7:].split(" - ", 1)[0].split())
+        else:
+            match = re.match(r"^(?:FAIL|ERROR):\s+[^\n]*\(([^)]+)\)", line)
+            if match:
+                candidates.append(match.group(1))
+    return candidates
+
+
+def _test_ids_with_rejections(failures):
+    ids, rejected = [], []
+    for candidate in _test_id_candidates(failures):
+        (ids if _valid_test_id(candidate) else rejected).append(candidate)
+    return (ids or None), rejected
+
+
+def _test_ids(failures):
+    return _test_ids_with_rejections(failures)[0]
 
 
 def _path_in_scope(path, scope):
@@ -118,11 +144,30 @@ def _failure_text(task):
         else str(hint.get("failures") or "")
 
 
-def _flaky_rerun_command(ids):
+def _node_id_to_unittest(node_id):
+    if not _valid_test_id(node_id):
+        return None
+    if _DOTTED_TEST_ID.fullmatch(node_id):
+        return node_id
+    path, *parts = node_id.split("::")
+    if not path.endswith(".py") or not parts:
+        return None
+    dotted_path = path[:-3].replace("/", ".").replace("\\", ".")
+    if not dotted_path or any(not part for part in dotted_path.split(".")):
+        return None
+    return ".".join([dotted_path, *parts])
+
+
+def _flaky_rerun_command(ids, worktree):
     """Match the project's test convention, including its unittest fallback."""
-    if importlib.util.find_spec("pytest") is not None:
-        return ["pytest", "-q", *ids]
-    return [sys.executable, "-m", "unittest", *ids]
+    probe = subprocess.run(["uv", "run", "--project", worktree, "python", "-c", "import pytest"],
+                           cwd=worktree, capture_output=True, text=True)
+    if probe.returncode == 0:
+        return ["uv", "run", "--project", worktree, "pytest", "-q", "-x", *ids]
+    converted = [_node_id_to_unittest(node_id) for node_id in ids]
+    if any(node_id is None for node_id in converted):
+        return None
+    return ["uv", "run", "--project", worktree, "python", "-m", "unittest", *converted]
 
 
 def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
@@ -142,7 +187,13 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     issues = "\n".join(str(c.get("issue") or "").lower() for _, cs in comments for c in cs)
     if ("spec" in issues and ("contradict" in issues or "impossible" in issues)) or "acceptance cannot" in issues:
         return "invalid_spec"
-    ids = _test_ids((task.get("resume_hint") or {}).get("failures"))
+    ids, rejected = _test_ids_with_rejections((task.get("resume_hint") or {}).get("failures"))
+    if rejected:
+        hint = dict(task.get("resume_hint") or {})
+        hint["rejected_ids"] = list(dict.fromkeys([*(hint.get("rejected_ids") or []), *rejected]))
+        bus.update(task["id"], resume_hint=hint)
+    if not ids:
+        return "unknown"
     # A rerun is deliberately restricted to the failing ids.  A missing worktree is not evidence of flakiness.
     runs = (task.get("resume_hint") or {}).get("flaky_runs") or []
     if reason == "gate_red" and any(run.get("returncode") == 0 and run.get("ids") == ids for run in runs):
@@ -150,7 +201,10 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     if (reason == "gate_red" and ids and worktree and Path(worktree).is_dir()
             and len(runs) < rerun_max):
         try:
-            rerun = subprocess.run(_flaky_rerun_command(ids), cwd=worktree, capture_output=True, text=True,
+            command = _flaky_rerun_command(ids, worktree)
+            if command is None:
+                return "unknown"
+            rerun = subprocess.run(command, cwd=worktree, capture_output=True, text=True,
                                    timeout=rerun_timeout)
         except subprocess.TimeoutExpired as exc:
             hint = dict(task.get("resume_hint") or {})
