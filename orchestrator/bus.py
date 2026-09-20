@@ -204,6 +204,8 @@ def events(since=0, limit=200, role=None, task_ids=None):
                         (since, limit)).fetchall()
     page = [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)}
             for s, t, ts, k, d in rows]
+    if role is None and task_ids is None:
+        return page
     return _filter_events(page, role, task_ids)
 
 

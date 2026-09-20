@@ -198,6 +198,16 @@ class Bus(unittest.TestCase):
             self.assertEqual(bus_mcp.bus_events(tail["next_since"], 2, role="execute"),
                              {"events": [], "next_since": tail["next_since"], "truncated": False})
 
+    def test_events_without_filters_preserve_orphaned_rows_and_shape(self):
+        task = bus.create_task("Execute", "s", ["a"], ["x"], role="execute")
+        page = bus.events()
+        bus.db().execute("delete from tasks where id=?", (task["id"],))
+
+        with patch.object(bus, "_filter_events", side_effect=AssertionError("no filtering requested")):
+            self.assertEqual(bus.events(), page)
+        self.assertEqual(bus._filter_events(page), page)
+        self.assertEqual(bus._filter_events(page, role="execute"), [])
+
     def test_depends_on(self):
         a = bus.create_task("A", "spec a", ["ok"], ["src/**"])
         b = bus.create_task("B", "spec b", ["ok"], ["src/**"], depends_on=[a["id"]])
