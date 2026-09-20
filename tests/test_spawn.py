@@ -480,6 +480,35 @@ class Render(unittest.TestCase):
             task["scope"] = ["auth/login.py"]
             self.assertIn("## security", spawn.review_packet(task, task))
 
+    def test_review_packet_security_section_on_complexity_bump_and_fail_closed_reasons(self):
+        cfg = {**P.config(), "review": {"security_paths": ["auth/*"]}}
+        reviewed = {**self.packet_fixture(), "spec": "ordinary change", "complexity": 4}
+        with mock.patch.object(P, "config", return_value=cfg):
+            review = {**reviewed, "complexity": 7}
+            self.assertIn("## security", spawn.review_packet(review, reviewed))
+            reviewed["pipeline"] = {"review_reason": "diff_unavailable"}
+            text = spawn.review_packet({**reviewed, "complexity": 4}, reviewed)
+            self.assertIn("## security", text)
+            self.assertIn("review_reason: diff_unavailable", text)
+            reviewed["pipeline"] = {}
+            self.assertNotIn("## security", spawn.review_packet({**reviewed, "complexity": 4}, reviewed))
+        empty_cfg = {**P.config(), "review": {"security_paths": []}}
+        with mock.patch.object(P, "config", return_value=empty_cfg):
+            text = spawn.review_packet({**reviewed, "complexity": 4}, reviewed)
+            self.assertIn("## security", text)
+            self.assertIn("review_reason: security_paths_empty", text)
+
+    def test_review_packet_single_bounding_pass_no_nested_truncation(self):
+        task = {**self.packet_fixture(), "spec": "ordinary change",
+                "acceptance": ["a" * 1500], "scope": ["widget.py", "x" * 1500],
+                "pipeline": {"last_failure_text": "g" * 1500}}
+        raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i} " + "x" * 80 for i in range(400))
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw):
+            text = spawn.review_packet(task, task)
+        self.assertLessEqual(len(text), 8200)
+        self.assertEqual(text.count("expand with:"), 1)
+        self.assertIn(f"expand with: git -C {TMP} diff -- widget.py {'x' * 1500}", text)
+
     def test_review_packet_excludes_other_tasks_and_memory(self):
         task = {**self.packet_fixture(), "spec": "only this task"}
         memory = TMP / ".orchestrator/memory"
@@ -614,7 +643,8 @@ class Render(unittest.TestCase):
         self.assertRegex(text, r"mem:gotchas\.md:1 Widget cache")
 
     def test_templates_fill(self):
-        s = spawn.render("scout", id="T-1", title="t", spec="q", acceptance=["a"], turns="20")
+        task = {**self.packet_fixture(), "id": "T-1", "spec": "q", "acceptance": ["a"]}
+        s = spawn.render("scout", packet=spawn.scout_packet(task), id="T-1", title="t", turns="20")
         self.assertIn("T-1", s); self.assertNotIn("{{", s)
         self.assertEqual(spawn.extract_json('here: {"summary":"x"} bye')["summary"], "x")
         self.assertTrue(spawn.extract_json("no json")["summary"])
@@ -664,11 +694,20 @@ class Render(unittest.TestCase):
 
     def test_render_does_not_rebound_diff(self):
         hint = f"git -C {TMP} diff -- widget.py"
-        bounded = spawn.bounded_diff("diff --git a/widget.py b/widget.py\n" +
-                                     "\n".join(f"+line {i}" for i in range(100)), 100, hint)
-        prompt = spawn.render("review", complexity="1", acceptance=["a"], diff=bounded, security="")
+        raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(1000))
+        task = {**self.packet_fixture(), "spec": "ordinary", "complexity": 1}
+        cfg = {**P.config(), "limits": {**P.config().get("limits", {}), "review_diff_chars": 100}}
+        with mock.patch.object(P, "config", return_value=cfg), \
+                mock.patch.object(spawn, "scoped_diff", return_value=raw):
+            packet = spawn.review_packet(task, task)
+        prompt = spawn.render("review", packet=packet, complexity="1")
         self.assertEqual(prompt.count("Diffstat: "), 1)
         self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
+
+    def test_render_requires_packet_for_review_spec_review_scout(self):
+        for role in ("review", "spec-review", "scout"):
+            with self.subTest(role=role), self.assertRaisesRegex(ValueError, role):
+                spawn.render(role)
 
     def test_fit_result_shrinks_oversize(self):
         big = {"summary": "s" * 3000, "findings": [{"claim": "c" * 380, "confidence": 0.5} for _ in range(40)]}
@@ -741,9 +780,12 @@ class SpawnBase(unittest.TestCase):
         self.assertEqual(spawn.base_for(scout), "origin/main")
 
     def test_scout_prompt_names_base(self):
-        prompt = spawn.render("scout", id="T-1", title="scout", spec="q", acceptance=["a"], turns="20",
+        task = {"id": "T-1", "title": "scout", "spec": "q", "acceptance": ["a"],
+                "scope": [], "worktree": str(TMP)}
+        packet = spawn.scout_packet(task)
+        prompt = spawn.render("scout", packet=packet, id="T-1", title="scout", turns="20",
                               base_branch="goal/G", base_sha="abc123")
-        self.assertEqual(prompt.splitlines()[0], "Base: abc123 on goal/G")
+        self.assertEqual(prompt.splitlines()[0], packet.splitlines()[0])
 
     def test_base_for_prefers_fix_round_parent(self):
         """A fix-round execute task (constraints.fix_round_for names the task it's fixing) must cut its worktree

@@ -85,10 +85,7 @@ def ensure_worktree(task_id, base=None):
 
 def render(name, **kw):
     if name in ("review", "spec-review", "scout") and "packet" not in kw:
-        fields = [(k, v) for k, v in kw.items() if k not in ("base_branch", "base_sha")]
-        kw["packet"] = "\n".join(f"## {k}\n{v if isinstance(v, str) else json.dumps(v)}" for k, v in fields)
-        if name == "scout":
-            kw["packet"] = f"Base: {kw.get('base_sha', '(unavailable)')} on {kw.get('base_branch', 'origin/main')}\n" + kw["packet"]
+        raise ValueError(f"packet is required for {name}")
     if name == "scout":
         kw.setdefault("base_branch", "origin/main")
         kw.setdefault("base_sha", "(unavailable)")
@@ -402,11 +399,12 @@ def _acceptance_test_ids(acceptance):
 
 
 def review_packet(task, reviewed) -> str:
+    from .daemon import SECURITY_CHECKLIST_COMPLEXITY
+
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
     raw_diff = scoped_diff(src)
     hint = f"git -C {wt} diff -- {' '.join(src.get('scope', []))}"
-    diff = bounded_diff(raw_diff, min(Pool().cfg.get("limits", {}).get("review_diff_chars", 12000), 4000), hint)
     changed = sorted(set(re.findall(r"^[+\-]{3} [ab]/(tests/\S+)", raw_diff, re.M)))
     tests = [f"{path}: present" for path in changed]
     for test_id in _acceptance_test_ids(src.get("acceptance", [])):
@@ -424,14 +422,26 @@ def review_packet(task, reviewed) -> str:
         failure = pipeline.get("last_failure_text") or pipeline.get("gate_failure") or src.get("reason") or "(unavailable)"
         gate_lines.append("last_failure_head: " + str(failure).splitlines()[0][:500])
     sections = [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
-                _section("scope", src.get("scope", [])), _section("diff", diff),
+                _section("scope", src.get("scope", [])), None,
                 _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines)]
     security_globs = Pool().cfg.get("review", {}).get("security_paths", [])
     matched = sorted({glob for glob in security_globs for path in src.get("scope", []) if Path(path).match(glob)})
     semantic = re.search(r"\b(auth|credential|secret|token|permission|crypt|security)\b",
-                         f"{src.get('spec', '')}\n{diff}", re.I)
-    if matched or semantic:
-        sections.append(_section("security", [*(matched or ["semantic security trigger"]),
+                         f"{src.get('spec', '')}\n{raw_diff}", re.I)
+    review_reason = (src.get("pipeline") or {}).get("review_reason")
+    reasons = []
+    if not security_globs:
+        reasons.append("security_paths_empty")
+    if review_reason in ("security_paths", "diff_unavailable", "security_paths_empty"):
+        reasons.append(review_reason)
+    if matched or semantic or task.get("complexity", 0) >= SECURITY_CHECKLIST_COMPLEXITY or reasons:
+        triggers = [*matched]
+        if semantic:
+            triggers.append("semantic security trigger")
+        if task.get("complexity", 0) >= SECURITY_CHECKLIST_COMPLEXITY:
+            triggers.append(f"complexity >= {SECURITY_CHECKLIST_COMPLEXITY}")
+        triggers.extend(f"review_reason: {reason}" for reason in dict.fromkeys(reasons))
+        sections.append(_section("security", [*triggers,
                         "checklist: skills/review/adversarial-review/references/security-checklist.md"]))
     fix_for = (src.get("constraints") or {}).get("fix_round_for")
     if fix_for:
@@ -448,10 +458,12 @@ def review_packet(task, reviewed) -> str:
                 if comments:
                     break
         sections.append(_section("fix-round context", [json.dumps(x, sort_keys=True) for x in comments] or ["(none)"]))
+    other_chars = len("\n".join(section for section in sections if section is not None)) + 1
+    diff_heading_chars = len("## diff\n")
+    configured_cap = Pool().cfg.get("limits", {}).get("review_diff_chars", 12000)
+    diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
+    sections[3] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
-    if len(body) > 8000:
-        sections[3] = _section("diff", bounded_text(diff, max(500, 12000 - len(body)), hint))
-        body = "\n".join(sections)
     return _role_packet(body, _base_sha(src, wt), f"task@{src.get('id', '(none)')} scoped-diff@HEAD")
 
 
