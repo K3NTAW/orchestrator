@@ -1,4 +1,6 @@
-# plan.md — Planner checkpoint (updated 2026-09-21 00:45; Phase I and P6 CLOSED, PRs 13 and 14 open; no open goal on this bus)
+# plan.md — Planner checkpoint (updated 2026-09-21 01:20; PRs 6-14 MERGED into main at cb6b522; main checkout on main; no open goal on this bus)
+
+## RELEASED 01:20 — all goal branches merged into main (user "merge it"): PRs 6, 7, 8 directly; PR 9 after R1 T-0500 merged main into goal/T-0201 (GitHub saw a conflict git did not); PR 10 after R2 T-0501 (plan.md, decisions.md, gotchas.md kept from the newer branch); PR 14 after R3 T-0502 (clean, gate 754 green), which closed PRs 11-13 as merged. The main checkout is on main. NEXT SESSION: restart with f orch so the MCP servers and daemon load the merged code (routes, reservations, acceptance-test gate, failure kinds, packets to Codex, shadow Jev rows, review telemetry). Then the first real goal produces the live after-measurements: baseline save <label> and compare against p6-review-telemetry; scorecard --efficiency, --economics, --routing, --reviews. P5 active ranking and P7 experiments open only when routing_eval says collected. Docs repo: PR 1 then PR 2 still for the human. Planner commits now land on main locally (guardrails block pushing main); the next goal branch, cut from main, carries them into its PR.
 
 ## P6 CLOSED 00:45 — goal/T-0489 head d7eb776 (7 commits over 4149f67), external gate green, PR 14 (base PR 13). Merged: P6a1 T-0491 (+codex_reply for review T-0494), P6a2 T-0492 (+codex_reply for review T-0497), P6b T-0493 (merge tests_red on the clock-dependent tally test, re-merged after T-0498), backlog B1 T-0488 (reparented from the closed T-0445), test fix T-0498. Baseline p6-review-telemetry: 159 pre-packet reviews, 2.09 findings per review mean, 40 percent with a high finding, 75.6k tokens and 0.51 USD per review, overlap between two reviews 8 percent. Cost 2.18 USD, 11.9M tokens. Remaining program: P5 active Jev ranking and P7 experiments, each its own goal once the server runs this code and routing_eval says collected; the P1b packet and complementary-role after-measurements likewise. Human: merge PRs 6-14 here, PR 1 then 2 in the docs repo; then switch the main checkout to the merged head and restart the session so the new code is live.
 
@@ -62,17 +64,18 @@ The daemon owns the loop; the Planner is a function of decision points (planner_
 - bus:T-0354, T-0355 Phase H scouts; docs bus T-0008, T-0009 system-map scouts.
 - Hosts: Hetzner `ssh kgpt@46.62.167.12` dir /home/kgpt/kgpt, home `ssh k3ntaw@192.168.1.167` (fish shell), kgpt home side /opt/kgpt-home.
 
-## Auto-handover 2026-09-21T00:28:29+02:00 — daemon tick
+## Auto-handover 2026-09-21T00:44:06+02:00 — daemon tick
 
-Open goals: none
+### T-0499 GOAL release: merge the PR chain 9, 10, 14 into main — merge origin/main into each PR branch in a worktree (goal/T-0201, then goal/T-0240, then goal/T-0489), resolving .orchestrator state-file conflicts deterministically, so GitHub reports the PRs mergeable; the Planner moves the branch refs, pushes and merges the PRs; PRs 11 to 13 close as merged when PR 14 lands
+- held: T-0500 R1: merge origin/main (8252635, PRs 6-8 merged) into the PR 9 branch goal/T-0201 (3aa7da6) inside this worktree — plain git merge, any conflict under .orchestrator/ resolved by keeping HEAD (the PR branch), any other conflict stops with the file list; tests-green green; report the merge commit sha (hold_reason=gate_red, resume_hint_keys=['failures'])
 
-Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 214 more
+Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 215 more
 
 Last events:
-- 2026-09-21T00:17:15+02:00 T-0492 update {"status": "done", "merged_into": "goal/T-0489", "sha": "d7eb7763778cdd437e0d53b
-- 2026-09-21T00:17:28+02:00 T-0492 update {"status": "done", "hold_reason": null}
-- 2026-09-21T00:17:28+02:00 T-0493 update {"status": "done", "hold_reason": null}
-- 2026-09-21T00:22:15+02:00 T-0489 update {"status": "done", "result": {"summary": "P6 closed: review-finding telemetry (T
-- 2026-09-21T00:22:15+02:00 T-0489 update {"status": "done", "result": {"summary": "P6 closed: review-finding telemetry (T
+- 2026-09-21T00:41:07+02:00 T-0500 update {"status": "running", "assigned_to": "codex", "worktree": "/Users/k3ntaw/code/or
+- 2026-09-21T00:41:07+02:00 T-0500 update {"rounds": 0, "executor": "astra", "tier": "astra"}
+- 2026-09-21T00:42:54+02:00 T-0500 update {"codex_thread": "01a0c0fa-f5c2-79f0-8912-4ff35a1b0a8d"}
+- 2026-09-21T00:42:54+02:00 T-0500 update {"status": "done", "result": {"summary": "Merge commit: `bdd11627ae89db1313aedbf
+- 2026-09-21T00:44:06+02:00 T-0500 update {"pipeline": {"dispatched_at": 1789944065.748263, "gated_at": 1789944246.50176},
 
 Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
