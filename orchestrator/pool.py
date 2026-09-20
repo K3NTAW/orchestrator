@@ -224,7 +224,10 @@ class Pool:
         ratio = (source or {}).get("usd_per_token") or (source or {}).get("usd-per-token")
         if ratio:
             return int(limit / float(ratio)), limit
-        return 0, limit
+        # This is only a conservative estimate for cold roles, until five completed runs provide a median.
+        # A positive estimate is essential: zero would make the daily-token reservation cap ineffective.
+        default_ratio = float(self.cfg.get("limits", {}).get("default_tokens_per_usd", 250000))
+        return max(1, int(limit * default_ratio)), limit
 
     @staticmethod
     def _usage_tokens(usage):

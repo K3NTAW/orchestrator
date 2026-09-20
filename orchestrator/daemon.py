@@ -508,7 +508,7 @@ def _requeue(tid, pipeline):
     return "requeued"
 
 
-def reconcile_dead(t):
+def reconcile_dead(t, pool=None):
     """A running task whose worker died >60s ago: the `claude -p` child (spawn.py Popen) can outlive the daemon
     thread that would have posted its result, finish and commit in its worktree, and leave the task stuck
     "running" with a dead pid. Requeuing unconditionally would redo that finished work on top of the executor's
@@ -518,7 +518,7 @@ def reconcile_dead(t):
     Everything else (scout/review/etc, or an execute task with no worktree or no commits ahead) requeues as
     before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
     tid, worktree = t["id"], t.get("worktree")
-    Pool().release(tid, (t.get("result") or {}).get("usage", {}))
+    (pool or Pool()).release(tid, (t.get("result") or {}).get("usage", {}))
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
         return _requeue(tid, t.get("pipeline"))
 
@@ -665,9 +665,9 @@ def hold_failed(tid, error_key, stage_label, exc):
     notify(f"{tid}: {stage_label} failed: {exc}")
 
 
-def _dispatch_worker(task_id, prompt):
+def _dispatch_worker(task_id, prompt, executor_id=None):
     try:
-        r = executor.start(task_id, prompt)
+        r = executor.start(task_id, prompt, executor_id)
         if r["status"] == "done":
             bus.post_result(task_id, spawn.fit_result({
                 "summary": r["message"][:3000],
@@ -715,8 +715,10 @@ def dispatch(pool):
             if stamp(t["id"], "dispatched_at"):
                 slots -= 1
                 prompt = spawn.render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"])
-                spawn_async(_dispatch_worker, t["id"], prompt)
+                spawn_async(_dispatch_worker, t["id"], prompt, account_id)
                 complete(t["id"], "dispatched_at")
+            else:
+                pool.release(t["id"])
         elif verdict == "request_changes":
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
@@ -1284,7 +1286,7 @@ def tick(pool=None, stop_event=None):
             return
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:
-                reconcile_dead(t)
+                reconcile_dead(t, pool)
             except Exception as e:
                 print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
                 continue

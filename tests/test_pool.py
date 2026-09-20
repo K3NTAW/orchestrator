@@ -101,6 +101,13 @@ class Reservations(unittest.TestCase):
         self.assertIsNone(other.reserve("run-2", "A", "scout", second))
         self.assertEqual(set(P.Pool(self.cfg).reservations), {"run-1"})
 
+    def test_estimate_never_zero_without_history(self):
+        self.cfg["claude_accounts"][0].pop("usd_per_token")
+        self.cfg["limits"]["default_tokens_per_usd"] = 250000
+        tokens, usd = P.Pool(self.cfg)._reservation_estimate("A", "scout")
+        self.assertEqual(usd, 0.6)
+        self.assertEqual(tokens, 150000)
+
     def test_expired_lease_with_live_pid_still_counts(self):
         first, second = self.task(), self.task()
         self.p.reserve("run-1", "A", "scout", first)

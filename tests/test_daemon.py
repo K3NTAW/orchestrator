@@ -141,7 +141,7 @@ class Daemon(unittest.TestCase):
         # Keep daemon work inside the test that dispatched it.  A real daemon thread can outlive cleanup,
         # after which the restored executor mock and the next test's bus sandbox make it post into the wrong bus.
         self.swap(daemon, "spawn_async", lambda fn, *args: fn(*args))
-        self.swap(executor, "start", lambda tid, prompt: self.started.append(tid))
+        self.swap(executor, "start", lambda tid, prompt, executor_id=None: self.started.append(tid))
         self.swap(spawn, "run_worker", lambda tid: self.workers.append(tid))
         self.swap(merge, "merge", lambda tid, target=None: (self.merged.append(tid),
                                                             {"status": "merged", "target": "goal/G", "sha": "abc12345"})[1])
@@ -237,6 +237,30 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.workers, [])
         self.assertEqual(self.fixes_for(tid), [])
         self.assertEqual([task["id"] for task in bus.read()], [tid])
+
+    def test_reservation_owner_matches_running_executor(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        pool = P.Pool()
+        tid = self.task("selected executor")
+
+        def start(task_id, prompt, executor_id):
+            bus.update(task_id, executor=executor_id)
+            return {"status": "held"}
+
+        self.swap(executor, "start", start)
+        daemon.dispatch(pool)
+        task = bus.get(tid)
+        reservation = P.Pool().reservations[tid]
+        self.assertEqual(reservation["account"], task["executor"])
+
+    def test_failed_dispatch_stamp_releases_reservation(self):
+        self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
+        pool = P.Pool()
+        tid = self.task("already dispatched")
+        self.swap(daemon, "stamp", lambda *args, **kwargs: False)
+        daemon.dispatch(pool)
+        self.assertNotIn(tid, P.Pool().reservations)
+        self.assertEqual(self.started, [])
 
     def test_notify_once_per_transition(self):
         self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
@@ -1606,7 +1630,7 @@ class Daemon(unittest.TestCase):
             thread.start()
         self.swap(daemon, "spawn_async", async_for_test)
         self.addCleanup(lambda: [thread.join() for thread in threads])
-        self.swap(executor, "start", lambda tid, prompt: (time.sleep(2), self.started.append(tid)))
+        self.swap(executor, "start", lambda tid, prompt, executor_id=None: (time.sleep(2), self.started.append(tid)))
         t0 = time.time()
         daemon.tick()
         self.assertLess(time.time() - t0, 0.5)                     # tick() returned before the sleep(2) finished
@@ -2213,7 +2237,7 @@ class DispatchWorker(unittest.TestCase):
         self.start.return_value = {"status": "done", "message": "x" * 6000,
                                    "thread": "thread-1", "usage": usage}
         daemon._dispatch_worker(self.task_id, "prompt")
-        self.start.assert_called_once_with(self.task_id, "prompt")
+        self.start.assert_called_once_with(self.task_id, "prompt", None)
         self.assertEqual(self.state["status"], "done")
         result = self.state["result"]
         self.assertEqual(result["summary"], "x" * 3000)

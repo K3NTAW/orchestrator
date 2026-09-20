@@ -490,7 +490,7 @@ def _account_from_assigned_to(assigned_to):
     return None
 
 
-def run_worker(task_id):
+def run_worker(task_id, account_id=None):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
     avoid = None
@@ -505,7 +505,7 @@ def run_worker(task_id):
             # account id out of assigned_to ("claude:<acct id>") so a fallback execution is never reviewed on
             # the same account it ran on.
             avoid = reviewed.get("account") or _account_from_assigned_to(reviewed.get("assigned_to"))
-    acct = pool.pick(role, avoid=avoid)
+    acct = next((a for a in pool.accounts if a.id == account_id), None) if account_id else pool.pick(role, avoid=avoid)
     if acct is None:
         bus.update(task_id, status="held", hold_reason="no account with headroom")
         return {"status": "held"}

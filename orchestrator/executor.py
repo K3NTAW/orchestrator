@@ -196,7 +196,7 @@ def post_tool_result(task_id, result, replace_result=False):
     return True, "result posted"
 
 
-def start(task_id, prompt):
+def start(task_id, prompt, executor_id=None):
     """Fresh Codex thread for one atomic task, in its worktree, on the executor pick_executor routes the task to.
     Held (not failed) when every executor in the task's complexity band is cooling, busy or over its daily budget.
     scores() is B3's ranking input; absent, every executor scores 1.0."""
@@ -212,13 +212,16 @@ def start(task_id, prompt):
             return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
         if t.get("status") not in ("queued", "running", "done"):
             return {"status": "refused", "reason": f"task {task_id} status is {t.get('status')}; cannot claim"}
-        try:
-            scores = scorecard.scores(scorecard.build())
-        except Exception:
-            scores = {}
-        ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
+        if executor_id in pool.executors:
+            ex = pool.executors[executor_id]
+        else:
+            try:
+                scores = scorecard.scores(scorecard.build())
+            except Exception:
+                scores = {}
+            ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
         if ex is None or ex.provider != "codex":
-            return _exhausted(pool, t)
+            return _exhausted(pool, t, account_id=executor_id)
         if pool.reserve(task_id, ex.id, "execute", t) is None:
             pipeline = dict(t.get("pipeline") or {})
             pipeline["hold_note"] = "budget"
@@ -235,17 +238,18 @@ def start(task_id, prompt):
         pool.release(task_id, (result or {}).get("usage", {}))
 
 
-def _exhausted(pool, t, run=None):
+def _exhausted(pool, t, run=None, account_id=None):
     """§4.10: hold by default; with on_exhausted=fallback_claude dispatch to sonnet (<=5) / opus (6-8) on an account with headroom.
     Complexity >=9 always holds for Astra. Review of a Claude-executed task must be another model on the other account."""
     pol = pool.cfg["codex"]["on_exhausted"]
     tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
-    if tier is None or pool.pick("execute") is None:
+    acct = next((a for a in pool.accounts if a.id == account_id), None) if account_id else pool.pick("execute")
+    if tier is None or acct is None:
         bus.update(t["id"], status="held", hold_reason=f"codex unavailable; policy={pol}; no Claude fallback for complexity {t['complexity']}")
         return {"status": "held", "policy": pol, "codex": pool.status()["codex"]}
     from .spawn import run_worker
     bus.update(t["id"], tier=tier, fallback="claude", review_rule="same-family-review: other account, different model")
-    threading.Thread(target=run or run_worker, args=(t["id"],), daemon=True).start()
+    threading.Thread(target=run or run_worker, args=(t["id"], acct.id), daemon=True).start()
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 
