@@ -9,14 +9,15 @@ MEM = ROOT / ".orchestrator" / "memory"
 TASKS = ROOT / ".orchestrator" / "tasks"
 CMEM = Path(os.environ.get("CLAUDE_MEM_DB") or Path.home() / ".claude-mem" / "claude-mem.db")
 LESSONS = Path(os.environ.get("GRAPHIFY_OUT") or ROOT / "graphify-out") / "reflections" / "LESSONS.md"
-HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (.+)$")
+HEAD = re.compile(r"^## (?:(\d{4}-\d{2}-\d{2}) )?(.+)$")
 MAX_GET_CHARS = 6000  # same cap as a bus result; one `get` never exceeds it
 
 
-def configured_hits():
+def configured_hits(root=None):
+    state_root = Path(root) if root is not None else ROOT
     try:
         import tomllib
-        with (ROOT / ".orchestrator" / "pool.toml").open("rb") as f:
+        with (state_root / ".orchestrator" / "pool.toml").open("rb") as f:
             return int(tomllib.load(f).get("limits", {}).get("recall_hits", 30))
     except (OSError, ValueError, TypeError):
         return 30
@@ -62,15 +63,16 @@ def note_entries(f):
     for n, i in enumerate(idx):
         end = idx[n + 1] if n + 1 < len(idx) else len(lines)
         m = HEAD.match(lines[i])
-        yield i + 1, m.group(1), m.group(2), "\n".join(lines[i:end]).rstrip()
+        yield i + 1, m.group(1) or "", m.group(2), "\n".join(lines[i:end]).rstrip()
 
 
-def index_notes(terms):
+def index_notes(terms, memory_dir=MEM):
     out = []
-    for f in sorted(MEM.glob("*.md")) if MEM.exists() else []:
+    for f in sorted(memory_dir.glob("*.md")) if memory_dir.exists() else []:
         for ln, date, title, body in note_entries(f):
             s = score(title, terms) * 3 + score(body, terms)
-            if s:
+            if s or f.name == "index.md":
+                s = max(1, s)
                 out.append((s, f"mem:{f.name}:{ln}", date, "mem", title))
     return out
 
@@ -80,9 +82,9 @@ def _date(t):
     return datetime.date.fromtimestamp(ts).isoformat() if ts else ""
 
 
-def index_bus(terms):
+def index_bus(terms, tasks_dir=TASKS):
     out = []
-    for p in sorted(TASKS.glob("T-*.json")) if TASKS.exists() else []:
+    for p in sorted(tasks_dir.glob("T-*.json")) if tasks_dir.exists() else []:
         t = json.loads(p.read_text())
         if t.get("status") not in {"done", "failed"}:
             continue
@@ -111,41 +113,49 @@ def index_cmem(terms, project, limit):
     return [(1, f"cmem:{i}", (d or "")[:10], "cmem", f"[{ty}/{pr}] {ti or ''}") for i, d, ty, ti, pr in rows]
 
 
-def index_graph(terms):
-    if not LESSONS.exists():
+def index_graph(terms, lessons=LESSONS):
+    if not lessons.exists():
         return []
     out = []
-    for n, l in enumerate(LESSONS.read_text(errors="replace").splitlines(), 1):
+    for n, l in enumerate(lessons.read_text(errors="replace").splitlines(), 1):
         if l.startswith(("-", "*")) and score(l, terms):
             out.append((score(l, terms), f"graph:lesson:{n}", "", "graph", l.lstrip("-* ")[:100]))
     return out
 
 
-def _layer_hits(layer, terms, *, task, limit):
+def _layer_hits(layer, terms, *, task, limit, paths=None):
     """Return one layer's index hits, or ``None`` when the source is unavailable."""
     if layer == "notes":
-        return index_notes(terms)
+        return index_notes(terms) if paths is None else index_notes(terms, paths["memory"])
     if layer == "bus":
-        return index_bus(terms)
+        return index_bus(terms) if paths is None else index_bus(terms, paths["tasks"])
     if layer == "claude-mem":
         if not CMEM.exists():
             return None
         return index_cmem(terms, task, limit)
     if layer == "graph":
-        if not LESSONS.exists():
+        lessons = LESSONS if paths is None else paths["lessons"]
+        if not lessons.exists():
             return None
-        return index_graph(terms)
+        return index_graph(terms) if paths is None else index_graph(terms, lessons)
     raise ValueError(f"unknown recall layer: {layer}")
 
 
-def recall(query, *, layers=("notes", "bus", "claude-mem", "graph"), budget_hits=8,
+def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), budget_hits=8,
            min_score=0.5, budget_chars=6000, task=None):
     """Recall progressively, avoiding richer layers once the cheap answer is sufficient."""
     started = time.monotonic()
     terms = terms_of(query)
+    paths = None
+    if root is not None:
+        state_root = Path(root)
+        graph_root = Path(os.environ.get("GRAPHIFY_OUT") or state_root / "graphify-out")
+        paths = {"memory": state_root / ".orchestrator" / "memory",
+                 "tasks": state_root / ".orchestrator" / "tasks",
+                 "lessons": graph_root / "reflections" / "LESSONS.md"}
     hits, consulted, chars, stopped_at = [], [], 0, None
     for layer in layers:
-        layer_hits = _layer_hits(layer, terms, task=task, limit=budget_hits)
+        layer_hits = _layer_hits(layer, terms, task=task, limit=budget_hits, paths=paths)
         if layer_hits is None:
             consulted.append(f"{layer} unavailable")
             continue

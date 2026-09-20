@@ -642,6 +642,15 @@ class Render(unittest.TestCase):
         text = spawn.packet(task, TMP)
         self.assertRegex(text, r"mem:gotchas\.md:1 Widget cache")
 
+    def test_packet_memory_reads_from_monkeypatched_state(self):
+        task = self.packet_fixture()
+        memory = TMP / ".orchestrator" / "memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "gotchas.md").write_text("## 2026-09-20 Widget cache\nFacts: widget.py needs a cache reset.\n")
+        with mock.patch.object(spawn, "STATE", TMP / ".orchestrator"):
+            text = spawn.packet(task, TMP)
+        self.assertIn("Widget cache", text.split("## gotchas", 1)[1].split("## decisions", 1)[0])
+
     def test_packet_memory_uses_notes_and_bus_only(self):
         seen = {}
         def fake_recall(query, **kwargs):

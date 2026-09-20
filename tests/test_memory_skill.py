@@ -1,6 +1,6 @@
 """skills/planner/memory/scripts: record.sh (draft/add/set) and recall.sh (index/get) over the orchestrator's
 memory files, plus the retrospect-written hook accepting what record.sh writes."""
-import importlib.util, io, json, os, subprocess, sys, time, unittest
+import importlib.util, io, json, os, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_memory_skill.py` doesn't add this dir itself
@@ -124,6 +124,32 @@ class MemorySkill(unittest.TestCase):
         with redirect_stdout(out):
             recall.cmd_index(["--progressive", "memory"])
         self.assertIn("layers_consulted: notes", out.getvalue())
+
+    def test_recall_uses_explicit_root_not_import_time_cwd(self):
+        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as elsewhere_dir:
+            root, elsewhere = Path(root_dir), Path(elsewhere_dir)
+            memory = root / ".orchestrator" / "memory"
+            tasks = root / ".orchestrator" / "tasks"
+            memory.mkdir(parents=True)
+            tasks.mkdir(parents=True)
+            (memory / "gotchas.md").write_text("## 2026-09-20 Root-only gotcha\nwidget cache fact\n")
+            (tasks / "T-root.json").write_text(json.dumps({
+                "id": "T-root", "role": "execute", "status": "done", "title": "Root-only task",
+                "spec": "widget cache result", "result": {"summary": "root-only result"}, "events": []}))
+            old_cwd, old_root = Path.cwd(), os.environ.get("ORCH_ROOT")
+            try:
+                os.environ["ORCH_ROOT"] = str(elsewhere)
+                os.chdir(elsewhere)
+                recall = self.load_recall()
+                result = recall.recall("root-only widget cache", root=root, layers=("notes", "bus"))
+            finally:
+                os.chdir(old_cwd)
+                if old_root is None:
+                    os.environ.pop("ORCH_ROOT", None)
+                else:
+                    os.environ["ORCH_ROOT"] = old_root
+            self.assertEqual({hit["layer"] for hit in result["hits"]}, {"mem", "bus"})
+            self.assertTrue(all("root-only" in hit["title"].lower() for hit in result["hits"]))
 
 
 if __name__ == "__main__":

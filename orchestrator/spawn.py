@@ -17,6 +17,7 @@ def memory_recall(query, **kwargs):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         _MEMORY_RECALL = module.recall
+    kwargs.setdefault("root", STATE.parent)
     return _MEMORY_RECALL(query, **kwargs)
 
 TOOLS = {
