@@ -270,7 +270,9 @@ class Pool:
                               if not daily or r.get("account") == account_id)
             if daily and day_used + live_tokens + est_tokens > daily:
                 return None
-            role_cap = self.cfg.get("review", {}).get("max_budget_usd", {}).get(role)
+            role_cap = self.cfg.get("limits", {}).get("max_budget_usd", {}).get(role)
+            if role_cap is None and role == "review":
+                role_cap = self.cfg.get("review", {}).get("budget_usd")
             history = state.setdefault("reservation_history", {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}})
             goal_spend = history.get("goals", {}).get(goal, {}).get(role, {}).get("usd", 0)
             goal_reserved = sum(float(r.get("est_usd", 0)) for r in reservations.values()

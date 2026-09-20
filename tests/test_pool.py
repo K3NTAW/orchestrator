@@ -133,6 +133,17 @@ class Reservations(unittest.TestCase):
         fresh.release("run-1", {"input_tokens": 12, "output_tokens": 8, "usd": 0.2})
         self.assertEqual(P.Pool(self.cfg).reservation_history, history)
 
+    def test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap(self):
+        self.cfg["claude_accounts"][0]["daily_budget_tokens"] = 1000
+        self.cfg["limits"]["max_budget_usd"]["scout"] = 1.3
+        first, second, third = self.task(), self.task(), self.task()
+        self.assertIsNotNone(self.p.reserve("run-1", "A", "scout", first))
+        self.p.release("run-1", {"usd": 0.2})
+        self.assertIsNotNone(self.p.reserve("run-2", "A", "scout", second))
+        self.assertIsNone(P.Pool(self.cfg).reserve("run-3", "A", "scout", third))
+        self.cfg["limits"]["max_budget_usd"]["scout"] = 1.5
+        self.assertIsNotNone(P.Pool(self.cfg).reserve("run-3", "A", "scout", third))
+
 
 class Executors(unittest.TestCase):
     """[[executors]] routing: complexity bands, disabled placeholders, quota-group cooldowns, scored ranking."""

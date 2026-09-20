@@ -217,6 +217,18 @@ class Executor(unittest.TestCase):
 
         self.assertEqual(seen["task"], task)
 
+    def test_exhausted_hold_releases_dispatch_reservation(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(complexity=9, title="release-dispatch-reservation")
+        dispatch_pool = P.Pool()
+        self.assertIsNotNone(dispatch_pool.reserve(tid, "A", "execute", bus.get(tid)))
+        original_pick = P.Pool.pick_executor
+        P.Pool.pick_executor = lambda *args, **kwargs: None
+        self.addCleanup(lambda: setattr(P.Pool, "pick_executor", original_pick))
+
+        self.assertEqual(executor.start(tid, "do it")["status"], "held")
+        self.assertNotIn(tid, P.Pool().reservations)
+
     def test_usage_limit_cools_the_whole_quota_group(self):
         self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "th-limit"},
                                      {"type": "error", "message": "You've hit your usage limit. Try again in 30 minutes."}), 1)

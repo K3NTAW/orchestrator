@@ -200,31 +200,31 @@ def start(task_id, prompt):
     """Fresh Codex thread for one atomic task, in its worktree, on the executor pick_executor routes the task to.
     Held (not failed) when every executor in the task's complexity band is cooling, busy or over its daily budget.
     scores() is B3's ranking input; absent, every executor scores 1.0."""
-    t = bus.get(task_id)
-    previous = t.get("result")
-    if previous is not None and (t.get("status") == "done" or t.get("merged_into") is not None):
-        return {"status": "refused", "reason":
-                f"task {task_id} already has a result from thread {previous.get('thread', 'unknown')}; use codex_reply for a fix round"}
-    if t.get("merged_into") is not None:
-        return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
-    if t.get("status") not in ("queued", "running", "done"):
-        return {"status": "refused", "reason": f"task {task_id} status is {t.get('status')}; cannot claim"}
     pool = Pool()
-    try:
-        scores = scorecard.scores(scorecard.build())
-    except Exception:
-        scores = {}
-    ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
-    if ex is None or ex.provider != "codex":
-        return _exhausted(pool, t)
-    if pool.reserve(task_id, ex.id, "execute", t) is None:
-        pipeline = dict(t.get("pipeline") or {})
-        pipeline["hold_note"] = "budget"
-        bus.update(task_id, status="queued", pipeline=pipeline)
-        return {"status": "budget", "reason": "budget reservation refused"}
-    from .spawn import ensure_worktree
     result = None
     try:
+        t = bus.get(task_id)
+        previous = t.get("result")
+        if previous is not None and (t.get("status") == "done" or t.get("merged_into") is not None):
+            return {"status": "refused", "reason":
+                    f"task {task_id} already has a result from thread {previous.get('thread', 'unknown')}; use codex_reply for a fix round"}
+        if t.get("merged_into") is not None:
+            return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
+        if t.get("status") not in ("queued", "running", "done"):
+            return {"status": "refused", "reason": f"task {task_id} status is {t.get('status')}; cannot claim"}
+        try:
+            scores = scorecard.scores(scorecard.build())
+        except Exception:
+            scores = {}
+        ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
+        if ex is None or ex.provider != "codex":
+            return _exhausted(pool, t)
+        if pool.reserve(task_id, ex.id, "execute", t) is None:
+            pipeline = dict(t.get("pipeline") or {})
+            pipeline["hold_note"] = "budget"
+            bus.update(task_id, status="queued", pipeline=pipeline)
+            return {"status": "budget", "reason": "budget reservation refused"}
+        from .spawn import ensure_worktree
         wt = Path(t.get("worktree") or ensure_worktree(task_id))
         bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
         ex.roll_day(); ex.day_tasks += 1
