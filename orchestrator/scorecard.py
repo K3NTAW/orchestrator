@@ -597,9 +597,8 @@ def accepted_goals(root=STATE):
     tasks_dir = root / "tasks"
     tasks = [json.loads(path.read_text()) for path in sorted(tasks_dir.glob("T-*.json"))] if tasks_dir.exists() else []
     task_by_id = {task["id"]: task for task in tasks}
-    goal_ids = sorted({task.get("parent") for task in tasks if task.get("parent")} |
-                      {task["id"] for task in tasks if task.get("pr_url") or
-                       isinstance(task.get("result"), dict) and task["result"].get("pr_url")})
+    goal_ids = sorted(task["id"] for task in tasks
+                      if task.get("role") in ("triage", "goal") and task.get("parent") is None)
     accepted = []
     for goal_id in goal_ids:
         goal = task_by_id.get(goal_id)
@@ -611,12 +610,18 @@ def accepted_goals(root=STATE):
 
 def tokens_per_accepted_goal(root=STATE):
     """Mean accepted-lineage goal tokens; retain historical goal totals without merged roots."""
-    card = by_goal(root)
     goal_ids = accepted_goals(root)
     count = len(goal_ids)
-    attributed = efficiency(root)["goals"]
-    total = sum(attributed[gid]["tokens"] if attributed.get(gid, {}).get("accepted_tasks")
-                else card.get(gid, {}).get("total_tokens", 0) for gid in goal_ids)
+    tasks_dir = root / "tasks"
+    tasks = [json.loads(path.read_text()) for path in sorted(tasks_dir.glob("T-*.json"))] if tasks_dir.exists() else []
+    has_accepted = {task.get("parent") for task in tasks
+                    if task.get("role") == "execute" and task.get("merged_into")}
+    if goal_ids and all(gid in has_accepted for gid in goal_ids):
+        attributed = efficiency(root)["goals"]
+        total = sum(attributed.get(gid, {}).get("tokens", 0) for gid in goal_ids)
+    else:
+        card = by_goal(root)
+        total = sum(card.get(gid, {}).get("total_tokens", 0) for gid in goal_ids)
     return {"tokens": total / count if count else None, "count": count, "goal_ids": goal_ids}
 
 
@@ -631,12 +636,18 @@ def format_task_tokens_cell(entry):
 
 def usd_per_accepted_goal(root=STATE):
     """Mean accepted-lineage goal USD; retain historical goal totals without merged roots."""
-    card = by_goal(root)
     goal_ids = accepted_goals(root)
     count = len(goal_ids)
-    attributed = efficiency(root)["goals"]
-    total = sum(attributed[gid]["usd"] if attributed.get(gid, {}).get("accepted_tasks")
-                else card.get(gid, {}).get("total_usd", 0.0) for gid in goal_ids)
+    tasks_dir = root / "tasks"
+    tasks = [json.loads(path.read_text()) for path in sorted(tasks_dir.glob("T-*.json"))] if tasks_dir.exists() else []
+    has_accepted = {task.get("parent") for task in tasks
+                    if task.get("role") == "execute" and task.get("merged_into")}
+    if goal_ids and all(gid in has_accepted for gid in goal_ids):
+        attributed = efficiency(root)["goals"]
+        total = sum(attributed.get(gid, {}).get("usd", 0.0) for gid in goal_ids)
+    else:
+        card = by_goal(root)
+        total = sum(card.get(gid, {}).get("total_usd", 0.0) for gid in goal_ids)
     return {"usd": total / count if count else 0.0, "count": count, "goal_ids": goal_ids}
 
 
@@ -731,8 +742,7 @@ def _attributed(row, tasks):
 
 def _efficiency_rows(root, tasks):
     """Read worker and Jev usage once, excluding Jev's non-usage gate decision ledger."""
-    global _last_malformed_lines
-    _last_malformed_lines = 0
+    malformed_lines = 0
     paths = sorted((root / "runs").glob("*.jsonl"))
     paths += [p for p in sorted((root / "runs" / "jev").glob("*.jsonl")) if p.name != "gate.jsonl"]
     rows = []
@@ -743,10 +753,10 @@ def _efficiency_rows(root, tasks):
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
-                _last_malformed_lines += 1
+                malformed_lines += 1
                 continue
             if not isinstance(row, dict):
-                _last_malformed_lines += 1
+                malformed_lines += 1
                 continue
             if path.parent.name == "jev":
                 row = {**row, "bucket": "jev"}
@@ -762,7 +772,7 @@ def _efficiency_rows(root, tasks):
             lineage_root = row.get("lineage_root") or row.get("task") or "unknown"
             parent = task.get("parent") or tasks.get(lineage_root, {}).get("parent")
             rows.append(dict(row, lineage_root=lineage_root, goal_id=row.get("goal_id") or parent or "unknown"))
-    return rows
+    return rows, malformed_lines
 
 
 def _stamp(value):
@@ -830,7 +840,7 @@ def efficiency(root=STATE, by=None):
         except json.JSONDecodeError:
             continue
         tasks[task.get("id", path.stem)] = task
-    rows = _efficiency_rows(root, tasks)
+    rows, malformed_lines = _efficiency_rows(root, tasks)
     accepted = {}
     for tid, task in tasks.items():
         if task.get("role") != "execute" or not task.get("merged_into") or _task_lineage(task, tasks)[0] != tid:
@@ -863,7 +873,7 @@ def efficiency(root=STATE, by=None):
             values = [accepted[tid][metric] for tid in members]
             goal_card[gid][metric] = sum(values) if values and all(v is not None for v in values) else None
     summary = _efficiency_summary(rows, list(accepted.values()))
-    summary.update({"by": by, "tasks": accepted, "goals": goal_card,
+    summary.update({"by": by, "tasks": accepted, "goals": goal_card, "malformed_lines": malformed_lines,
                     "tokens_per_accepted_goal": sum(g["tokens"] for g in goal_card.values()) / len(goal_card) if goal_card else None,
                     "usd_per_accepted_goal": sum(g["usd"] for g in goal_card.values()) / len(goal_card) if goal_card else None})
     grouped_rows = {"unknown": []}

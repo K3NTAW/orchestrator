@@ -18,6 +18,10 @@ class Scorecard(unittest.TestCase):
     def write_task(self, tid, **fields):
         base = {"id": tid, "role": "execute", "tier": "sonnet", "complexity": 3, "status": "queued",
                 "acceptance": ["a"], "scope": ["x"], "spec": "s", "title": tid}
+        result = fields.get("result")
+        if "role" not in fields and fields.get("parent") is None and isinstance(result, dict) and any(
+                result.get(key) for key in ("pr", "pr_url", "url")):
+            base["role"] = "triage"
         (self.root / "tasks" / f"{tid}.json").write_text(json.dumps({**base, **fields}))
 
     def test_scorecard_planner_text_and_json(self):
@@ -67,7 +71,7 @@ class Scorecard(unittest.TestCase):
 
     def test_tokens_per_accepted_goal_undefined_at_zero(self):
         from unittest.mock import patch
-        self.write_task("T-goal")
+        self.write_task("T-goal", role="triage")
         self.write_task("T-child", parent="T-goal")
         self.write_runs({"task": "T-child", "role": "execute", "total_tokens": 42})
         result = scorecard.tokens_per_accepted_goal(self.root)
@@ -86,7 +90,7 @@ class Scorecard(unittest.TestCase):
             else:
                 self.assertIn("tokens per accepted goal: undefined (0 accepted goals)", output.getvalue())
                 self.assertIn("n=1 range 42-42", output.getvalue())
-        self.write_task("T-goal", status="done")
+        self.write_task("T-goal", role="triage", status="done")
         self.write_task("T-child", parent="T-goal", merged_into="goal/G")
         self.assertEqual(scorecard.tokens_per_accepted_goal(self.root)["tokens"], 42)
 
@@ -392,7 +396,7 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(card["T-9940"]["total_tokens"], 0)
 
     def test_tokens_per_accepted_goal(self):
-        self.write_task("T-9950", status="done", result={"url": "https://github.com/acme/repo/pull/5"})
+        self.write_task("T-9950", role="triage", status="done", result={"url": "https://github.com/acme/repo/pull/5"})
         self.write_task("T-9951", parent="T-9950", role="execute")
         self.write_task("T-9960", status="queued")
         self.write_task("T-9961", parent="T-9960", role="execute")
@@ -404,6 +408,33 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(scorecard.tokens_per_accepted_goal(root=self.root),
                          {"tokens": 20.0, "count": 1, "goal_ids": ["T-9950"]})
         self.assertEqual(scorecard.usd_per_accepted_goal(root=self.root)["usd"], 2.0)
+
+    def test_accepted_goals_ignores_non_goal_tasks_with_pr_url(self):
+        self.write_task("T-goal", role="triage", result={"pr_url": "https://example.test/pull/1"})
+        self.write_task("T-execute", merged_into="main", pr_url="https://example.test/pull/2")
+        self.assertEqual(scorecard.accepted_goals(root=self.root), ["T-goal"])
+
+    def test_tokens_per_accepted_goal_scans_runs_once(self):
+        from unittest.mock import patch
+        self.write_task("T-goal", role="triage", result={"pr_url": "https://example.test/pull/1"})
+        self.write_task("T-child", parent="T-goal", merged_into="main")
+        self.write_runs({"task": "T-child", "role": "execute", "total_tokens": 42})
+        original = scorecard._efficiency_rows
+        calls = []
+        with patch.object(scorecard, "_efficiency_rows",
+                          side_effect=lambda *args: calls.append(args) or original(*args)):
+            self.assertEqual(scorecard.tokens_per_accepted_goal(self.root)["tokens"], 42)
+        self.assertEqual(len(calls), 1)
+
+    def test_scorecard_by_goal_footer_unaffected_by_efficiency(self):
+        runs_file = self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl"
+        runs_file.write_text('{not valid json\n')
+        scorecard.efficiency(self.root)
+        self.assertEqual(scorecard.malformed_run_lines(), 0)
+        scorecard.by_goal(self.root)
+        self.assertEqual(scorecard.malformed_run_lines(), 1)
+        scorecard.efficiency(self.root)
+        self.assertEqual(scorecard.malformed_run_lines(), 1)
 
     def test_malformed_jsonl_line_skipped_and_counted(self):
         self.write_task("T-9800", executor="good", complexity=3, status="done", merged_into="goal/G")
