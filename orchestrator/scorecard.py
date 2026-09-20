@@ -1,10 +1,9 @@
 """Per-executor outcome rollup: runs/*.jsonl + tasks/T-*.json, keyed by executor id. Feeds pick_executor's
 scores() so routing reacts to live merge/fail/usage-limit history instead of static weights alone."""
 import json
-import fnmatch
 import statistics
 from datetime import date, datetime
-from . import STATE, bench
+from . import STATE, bench, attribution
 
 BANDS = ("1-3", "4-6", "7-10")
 TASK_CLASSES = ("mechanical", "unfamiliar", "debugging", "architectural", "security")
@@ -53,37 +52,11 @@ def malformed_footer():
 
 
 def _band(complexity):
-    if complexity is None:
-        return None
-    if complexity <= 3:
-        return "1-3"
-    if complexity <= 6:
-        return "4-6"
-    return "7-10"
+    return attribution.band(complexity)
 
 
 def task_class(task):
-    """Return the routing class explicitly requested by a spec, or infer its durable fallback class."""
-    constraints = task.get("constraints") or {}
-    explicit = constraints.get("task_class") if isinstance(constraints, dict) else None
-    if explicit:
-        return explicit
-    try:
-        from .pool import config
-        security_paths = config().get("review", {}).get("security_paths", [])
-    except Exception:
-        security_paths = []
-    scope = task.get("scope") or []
-    if any(fnmatch.fnmatch(path, pattern) for path in scope for pattern in security_paths):
-        return "security"
-    if (task.get("complexity") or 0) >= 7:
-        return "architectural"
-    title = (task.get("title") or "").lower()
-    if title.startswith("fix") or (isinstance(constraints, dict) and constraints.get("fix_round_for")):
-        return "debugging"
-    if (task.get("complexity") or 0) <= 3:
-        return "mechanical"
-    return "unfamiliar"
+    return attribution.task_class(task)
 
 
 def class_success(executor_id, task_class_name, root=STATE, min_samples=None):

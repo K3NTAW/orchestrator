@@ -436,8 +436,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
     bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
-                outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), turns=out.get("num_turns", 0),
-                provider="claude", **log, **{**used, **bus.normalize_usage("claude", used)})
+                outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
+                provider="claude", usage=used, **log, **used)
     if not out.get("is_error") and p.returncode == 0:
         return {"status": "done", "output": out}
     reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]

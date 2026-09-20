@@ -22,6 +22,54 @@ class BusSandbox(unittest.TestCase):
 
 class Bus(BusSandbox):
 
+    def written_row(self, **fields):
+        bus.log_run(**fields)
+        return json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+
+    def test_log_run_enriches_bucket_lineage_band_class(self):
+        root = bus.create_task("Root", "s", ["a"], ["x"], role="execute")
+        task = bus.create_task("Repair", "s", ["a"], ["x"], role="execute", complexity=5,
+                               constraints={"fix_round_for": root["id"]})
+        row = self.written_row(task=task["id"], role="execute", executor="astra", tier="astra", account="codex")
+        self.assertEqual([row[k] for k in ("bucket", "lineage_root", "round_index", "band", "task_class")],
+                         ["fix_round", root["id"], 1, "4-6", "debugging"])
+        self.assertEqual(row["model"], "gpt-6-astra")
+
+    def test_log_run_without_task_uses_other_bucket(self):
+        row = self.written_row(role="unknown")
+        self.assertEqual(row["bucket"], "other")
+        self.assertNotIn("usd", row)
+        self.assertNotIn("usd_source", row)
+        self.assertEqual(self.written_row(role="planner_decision")["bucket"], "planner")
+
+    def test_log_run_writes_normalized_tokens_for_claude_and_codex(self):
+        from orchestrator.executor import _tokens
+        for provider, usage, expected in [
+            ("codex", {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 5}, [60, 40, 0, 5, 105]),
+            ("claude", {"input_tokens": 100, "cache_read_input_tokens": 40,
+                        "cache_creation_input_tokens": 10, "output_tokens": 5}, [100, 40, 10, 5, 155]),
+        ]:
+            expanded = _tokens(usage) if provider == "codex" else usage
+            row = self.written_row(provider=provider, usage=usage, **expanded)
+            self.assertEqual(row["usage"], usage)
+            self.assertEqual([row[k] for k in ("input_uncached_tokens", "cache_read_tokens",
+                                              "cache_write_tokens", "output_tokens", "total_tokens")], expected)
+        row = self.written_row(role="planner_decision", provider="claude", **usage)
+        self.assertEqual(row["usage"], usage)
+        self.assertEqual(row["total_tokens"], 155)
+
+    def test_codex_usd_estimated_with_source(self):
+        cfg = {"executors": [{"id": "test", "usd_per_token": 0.01}]}
+        with patch.object(bus, "pool_config", return_value=cfg):
+            row = self.written_row(provider="codex", executor="test", usage={"input_tokens": 100, "output_tokens": 5})
+        self.assertAlmostEqual(row["usd"], 1.05)
+        self.assertEqual(row["usd_source"], "token_estimate")
+
+    def test_claude_usd_reported_with_source(self):
+        row = self.written_row(provider="claude", usd=0.123, usage={"input_tokens": 100})
+        self.assertEqual(row["usd"], 0.123)
+        self.assertEqual(row["usd_source"], "reported")
+
     def test_log_run_carries_decision_identity_and_versions(self):
         import tempfile
         from unittest.mock import patch

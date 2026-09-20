@@ -6,7 +6,7 @@ optional HTTP call.
 
 Usage lines go to .orchestrator/runs/jev/<date>.jsonl -- a subdirectory of runs/, not runs/<date>.jsonl itself,
 so they never collide with worker run lines that cli.cost() and scorecard.build()/by_task()/by_goal() glob
-non-recursively (root/runs/*.jsonl) and key on a "role" field jev lines don't carry. The E3 tool-call gate
+non-recursively (root/runs/*.jsonl) and aggregate worker runs separately. The E3 tool-call gate
 writes its own log to .orchestrator/runs/jev/gate.jsonl in that same subdirectory, for the same reason.
 """
 import fcntl, json, os, re, sys, tempfile, time, urllib.error, urllib.request
@@ -148,7 +148,7 @@ def _add_day_tokens(input_tokens):
     _with_state_lock(op)
 
 
-def _log_usage(caller, input_tokens, model, latency_ms, ok, votes=1, task=None):
+def _log_usage(caller, input_tokens, model, latency_ms, ok, votes=1, task=None, usage=None):
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     task = task or os.environ.get("ORCH_TASK_ID")
     goal_id = None
@@ -159,7 +159,10 @@ def _log_usage(caller, input_tokens, model, latency_ms, ok, votes=1, task=None):
         except (KeyError, OSError, ValueError, json.JSONDecodeError):
             pass
     entry = {"ts": time.time(), "caller": caller, "input_tokens": input_tokens, "model": model,
-              "latency_ms": latency_ms, "ok": ok, "votes": votes, "task": task, "goal_id": goal_id}
+              "latency_ms": latency_ms, "ok": ok, "votes": votes, "task": task, "goal_id": goal_id,
+              "role": "jev", "bucket": "jev"}
+    if isinstance(usage, dict):
+        entry.update(usage=usage, **bus.normalize_usage("jev", usage))
     with open(RUNS_DIR / f"{_today()}.jsonl", "a") as fh:
         fh.write(json.dumps(entry) + "\n")
 
@@ -224,7 +227,7 @@ def ask(state, questions, *, model=None, timeout_s=None, task=None):
             return None
         else:
             input_tokens = (body.get("usage") or {}).get("input_tokens", 0)
-            _log_usage(caller, input_tokens, model, (time.monotonic() - started) * 1000, True, votes, task)
+            _log_usage(caller, input_tokens, model, (time.monotonic() - started) * 1000, True, votes, task, usage=body.get("usage"))
             _add_day_tokens(input_tokens)
             try:
                 answers = body.get("answers") or {}

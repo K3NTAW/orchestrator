@@ -266,6 +266,15 @@ def policy_version():
         return _policy_cache[1]
 
 
+def pool_config():
+    """Load attribution policy without making telemetry depend on its availability."""
+    from .pool import config
+    try:
+        return config()
+    except (OSError, ValueError):
+        return {}
+
+
 def log_run(*, attempt=1, **fields):
     """Append one line per event to runs/<date>.jsonl: tokens, role, tier, account, executor, complexity, duration,
     outcome. Callers normalize cached tokens to cache_read_input_tokens so cli.cost sums one key across providers."""
@@ -283,7 +292,45 @@ def log_run(*, attempt=1, **fields):
         except Exception:
             fields.setdefault("goal_id", None)
         fields.setdefault("provider", "codex" if fields.get("account") == "codex" else "claude")
-    RUNS.mkdir(exist_ok=True)
+    from . import attribution
+    task = {}
+    if task_id:
+        try:
+            task = get(task_id)
+        except (KeyError, OSError, ValueError):
+            pass
+        chain = attribution.lineage({"id": task_id, **task})
+        fields.setdefault("lineage_root", chain["root"])
+        fields.setdefault("round_index", chain["round_index"])
+        fields.setdefault("task_class", attribution.task_class(task))
+    cfg = pool_config()
+    provider = fields.get("provider") or ("codex" if fields.get("account") == "codex" else "claude")
+    tier = fields.get("tier", task.get("tier"))
+    fields.setdefault("bucket", attribution.bucket_of(fields.get("role", task.get("role")), task))
+    fields.setdefault("band", attribution.band(fields.get("complexity", task.get("complexity"))))
+    fields.setdefault("executor", task.get("executor") or (
+        tier if provider == "codex" else f"claude:{tier}" if tier else None))
+    fields.setdefault("model", attribution.model_of(fields["executor"], tier, cfg))
+    usage = fields.get("usage")
+    if not isinstance(usage, dict):
+        # Older callers (including planner decisions) expand provider usage into kwargs.
+        keys = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_read_input_tokens",
+                "cache_creation_input_tokens", "reasoning_output_tokens", "reasoning_tokens")
+        usage = {key: fields[key] for key in keys if key in fields}
+    if usage:
+        fields["usage"] = dict(usage)
+        fields.update(normalize_usage(provider, usage))
+        if provider == "codex":
+            from .pool import Pool
+            from types import SimpleNamespace
+            pricing = SimpleNamespace(cfg=cfg, _usage_tokens=Pool._usage_tokens)
+            source = next((row for row in cfg.get("executors", [])
+                           if row.get("id") == fields["executor"]), {})
+            fields.setdefault("usd", Pool.usd_of(pricing, {"usage": dict(usage)}, source))
+            fields.setdefault("usd_source", "token_estimate")
+        elif fields.get("usd") is not None:
+            fields.setdefault("usd_source", "reported")
+    RUNS.mkdir(parents=True, exist_ok=True)
     with open(RUNS / f"{date.today().isoformat()}.jsonl", "a") as f:
         f.write(json.dumps({"ts": time.time(), **fields}) + "\n")
 

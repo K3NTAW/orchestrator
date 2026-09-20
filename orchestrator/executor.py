@@ -137,7 +137,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
     u = ev["usage"]
     bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
-                outcome="error" if ev["error"] else "done", **log, **_tokens(u))
+                outcome="error" if ev["error"] else "done", usage=u, **log, **(_tokens(u) if u else {}))
     if ev["error"] or r.returncode:
         return {"status": "failed", "reason": ev["error"] or r.stderr[-800:], "thread": ev["thread_id"]}
     return {"status": "done", "thread": ev["thread_id"], "message": ev["message"][:6000], "usage": u}
