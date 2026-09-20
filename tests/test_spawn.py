@@ -404,7 +404,7 @@ class RunWorkerMissingReason(unittest.TestCase):
 
 
 class SpecReview(unittest.TestCase):
-    def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_spec_and_code_excerpt(self):
+    def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_minimal_packet(self):
         scratch_repo(TMP)
         (TMP / "spec_review_target.py").write_text("def handler():\n    return 1\n")
 
@@ -437,8 +437,9 @@ class SpecReview(unittest.TestCase):
         self.assertEqual(bus.get(execute["id"])["spec_review_verdict"], "request_changes")
         self.assertEqual(bus.get(execute["id"])["spec_review_risks"][0]["severity"], "med")
         self.assertIn("implement the thing precisely", captured["prompt"])
-        self.assertIn("def handler():", captured["prompt"])
-        self.assertRegex(captured["prompt"], r"(?m)^\s*\d+\| ")
+        self.assertIn("## existing tests", captured["prompt"])
+        self.assertIn("tests/test_spec_review_target.py: missing", captured["prompt"])
+        self.assertNotIn("def handler():", captured["prompt"])
 
 
 class Render(unittest.TestCase):
@@ -459,6 +460,69 @@ class Render(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("tests/test_widget.py", text)
         self.assertIn("widget.py:3 build_widget", text)
+
+    def test_review_packet_has_spec_acceptance_diff_tests_gate_in_order(self):
+        task = self.packet_fixture()
+        task.update(spec="precise spec", pipeline={"gated_at": "now", "gate_attempts": 2,
+                    "gate_reds": 1, "first_green_at": None, "last_failure_text": "boom\ndetail"},
+                    acceptance=["tests/test_widget.py::test_build_widget passes"])
+        text = spawn.review_packet(task, task)
+        names = ["spec", "acceptance", "scope", "diff", "changed tests", "gate"]
+        self.assertEqual([text.index(f"## {n}") for n in names], sorted(text.index(f"## {n}") for n in names))
+        self.assertIn("test_build_widget: present", text)
+        self.assertIn("last_failure_head: boom", text)
+
+    def test_review_packet_security_section_only_on_security_path(self):
+        task = {**self.packet_fixture(), "spec": "ordinary change"}
+        cfg = {**P.config(), "review": {"security_paths": ["auth/*"]}}
+        with mock.patch.object(P, "config", return_value=cfg):
+            self.assertNotIn("## security", spawn.review_packet(task, task))
+            task["scope"] = ["auth/login.py"]
+            self.assertIn("## security", spawn.review_packet(task, task))
+
+    def test_review_packet_excludes_other_tasks_and_memory(self):
+        task = {**self.packet_fixture(), "spec": "only this task"}
+        memory = TMP / ".orchestrator/memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "gotchas.md").write_text("## SECRET GOTCHA\nbody that must not leak\n")
+        bus.create_task("OTHER FINISHED TASK", "other text", ["other acceptance"], ["other.py"])
+        text = spawn.review_packet(task, task)
+        self.assertNotIn("OTHER FINISHED TASK", text)
+        self.assertNotIn("SECRET GOTCHA", text)
+
+    def test_spec_review_packet_minimal_fields(self):
+        task = {**self.packet_fixture(), "spec": "review me", "complexity": 4, "tier": "sonnet"}
+        text = spawn.spec_review_packet(task)
+        for name in ("spec", "acceptance", "scope", "depends_on", "existing tests", "complexity", "tier"):
+            self.assertIn(f"## {name}", text)
+        self.assertNotIn("## diff", text)
+
+    def test_scout_packet_bounded_tree_and_memory_titles_only(self):
+        memory = TMP / ".orchestrator/memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "index.md").write_text("## Useful title\nPRIVATE BODY\n")
+        task = {**self.packet_fixture(), "spec": "find facts"}
+        text = spawn.scout_packet(task)
+        self.assertIn("Useful title", text)
+        self.assertNotIn("PRIVATE BODY", text)
+        tree = text.split("## scope tree\n", 1)[1].split("\n## ", 1)[0]
+        self.assertLessEqual(len(tree.splitlines()), 60)
+
+    def test_role_prompts_have_no_unfilled_placeholder(self):
+        task = {**self.packet_fixture(), "spec": "s", "complexity": 3, "tier": "sonnet"}
+        packets = {"review": spawn.review_packet(task, task),
+                   "spec-review": spawn.spec_review_packet(task), "scout": spawn.scout_packet(task)}
+        for role, role_packet in packets.items():
+            self.assertNotIn("{{", spawn.render(role, packet=role_packet))
+
+    def test_packet_meta_logged_for_review_and_scout(self):
+        for role, builder in (("review", lambda t: spawn.review_packet(t, t)),
+                              ("scout", spawn.scout_packet)):
+            task = {**self.packet_fixture(), "spec": "s", "role": role}
+            meta = {**spawn.packet_run_meta(builder(task)), "role": role}
+            self.assertEqual(meta["role"], role)
+            self.assertGreater(meta["chars"], 0)
+            self.assertEqual(meta["hash"], meta["version"])
 
     def test_packet_over_cap_keeps_every_acceptance_criterion(self):
         task = self.packet_fixture()

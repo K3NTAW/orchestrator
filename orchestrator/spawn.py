@@ -84,6 +84,11 @@ def ensure_worktree(task_id, base=None):
 
 
 def render(name, **kw):
+    if name in ("review", "spec-review", "scout") and "packet" not in kw:
+        fields = [(k, v) for k, v in kw.items() if k not in ("base_branch", "base_sha")]
+        kw["packet"] = "\n".join(f"## {k}\n{v if isinstance(v, str) else json.dumps(v)}" for k, v in fields)
+        if name == "scout":
+            kw["packet"] = f"Base: {kw.get('base_sha', '(unavailable)')} on {kw.get('base_branch', 'origin/main')}\n" + kw["packet"]
     if name == "scout":
         kw.setdefault("base_branch", "origin/main")
         kw.setdefault("base_sha", "(unavailable)")
@@ -346,11 +351,14 @@ def packet_meta(task, worktree) -> dict:
 
 def packet_run_meta(text) -> dict:
     """Measure the exact packet sent, using its H8 header as the version identity."""
-    header = re.match(r"packet v([0-9a-f]+) base (\S+) sources pool.toml@(\S+) gotchas@(\S+)", text)
+    header = re.match(r"packet v([0-9a-f]+) base (\S+) sources (.+)", text)
     meta = {"chars": len(text), "est_tokens": len(text) // 4, "hash": None, "version": None}
     if header:
-        version, base, policy, gotchas = header.groups()
-        meta.update(hash=version, version=version, base=base, policy_version=policy, gotchas=gotchas)
+        version, base, sources = header.groups()
+        meta.update(hash=version, version=version, base=base, sources=sources)
+        legacy = re.match(r"pool.toml@(\S+) gotchas@(\S+)", sources)
+        if legacy:
+            meta.update(policy_version=legacy.group(1), gotchas=legacy.group(2))
     return meta
 
 
@@ -370,6 +378,123 @@ def packet(task, worktree) -> str:
                 break
             over = actual
     return header + "\n" + body
+
+
+def _role_packet(body, base, sources):
+    version = hashlib.sha256(body.encode()).hexdigest()[:12]
+    return f"packet v{version} base {base or '(unavailable)'} sources {sources}\n{body}"
+
+
+def _section(name, value):
+    if isinstance(value, (list, tuple)):
+        value = "\n".join(f"- {item}" for item in value) or "- (none)"
+    return f"## {name}\n{value if value not in (None, '') else '(none)'}"
+
+
+def _base_sha(task, worktree=None):
+    wt = Path(worktree or task.get("worktree") or ROOT)
+    return git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()[:12] or "(unavailable)"
+
+
+def _acceptance_test_ids(acceptance):
+    return sorted(set(re.findall(r"(?:tests/[^\s,:'\"]+\.py::)?test_[A-Za-z0-9_]+",
+                                 "\n".join(map(str, acceptance)))))
+
+
+def review_packet(task, reviewed) -> str:
+    src = reviewed or task
+    wt = Path(src.get("worktree") or ROOT)
+    raw_diff = scoped_diff(src)
+    hint = f"git -C {wt} diff -- {' '.join(src.get('scope', []))}"
+    diff = bounded_diff(raw_diff, min(Pool().cfg.get("limits", {}).get("review_diff_chars", 12000), 4000), hint)
+    changed = sorted(set(re.findall(r"^[+\-]{3} [ab]/(tests/\S+)", raw_diff, re.M)))
+    tests = [f"{path}: present" for path in changed]
+    for test_id in _acceptance_test_ids(src.get("acceptance", [])):
+        path = test_id.split("::", 1)[0] if "::" in test_id else None
+        if path:
+            present = (wt / path).is_file()
+        else:
+            present = any(re.search(rf"\bdef\s+{re.escape(test_id)}\b", candidate.read_text(errors="replace"))
+                          for candidate in sorted((wt / "tests").glob("test_*.py"))) if (wt / "tests").is_dir() else False
+        tests.append(f"{test_id}: {'present' if present else 'missing'}")
+    pipeline = src.get("pipeline") or {}
+    gate_lines = [f"gated_at: {pipeline.get('gated_at')}", f"gate_attempts: {pipeline.get('gate_attempts')}",
+                  f"gate_reds: {pipeline.get('gate_reds')}", f"first_green_at: {pipeline.get('first_green_at')}"]
+    if pipeline.get("gate_reds"):
+        failure = pipeline.get("last_failure_text") or pipeline.get("gate_failure") or src.get("reason") or "(unavailable)"
+        gate_lines.append("last_failure_head: " + str(failure).splitlines()[0][:500])
+    sections = [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
+                _section("scope", src.get("scope", [])), _section("diff", diff),
+                _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines)]
+    security_globs = Pool().cfg.get("review", {}).get("security_paths", [])
+    matched = sorted({glob for glob in security_globs for path in src.get("scope", []) if Path(path).match(glob)})
+    semantic = re.search(r"\b(auth|credential|secret|token|permission|crypt|security)\b",
+                         f"{src.get('spec', '')}\n{diff}", re.I)
+    if matched or semantic:
+        sections.append(_section("security", [*(matched or ["semantic security trigger"]),
+                        "checklist: skills/review/adversarial-review/references/security-checklist.md"]))
+    fix_for = (src.get("constraints") or {}).get("fix_round_for")
+    if fix_for:
+        comments = []
+        for candidate_id in [*src.get("inputs", []), fix_for]:
+            if not isinstance(candidate_id, str):
+                continue
+            try:
+                candidate = bus.get(candidate_id)
+            except KeyError:
+                continue
+            if candidate.get("role") == "review" or candidate_id == fix_for:
+                comments = (candidate.get("result") or {}).get("comments", [])
+                if comments:
+                    break
+        sections.append(_section("fix-round context", [json.dumps(x, sort_keys=True) for x in comments] or ["(none)"]))
+    body = "\n".join(sections)
+    if len(body) > 8000:
+        sections[3] = _section("diff", bounded_text(diff, max(500, 12000 - len(body)), hint))
+        body = "\n".join(sections)
+    return _role_packet(body, _base_sha(src, wt), f"task@{src.get('id', '(none)')} scoped-diff@HEAD")
+
+
+def spec_review_packet(task) -> str:
+    wt = Path(task.get("worktree") or ROOT)
+    dependencies = []
+    for task_id in task.get("depends_on", []):
+        try:
+            dependencies.append(f"{task_id}: {bus.get(task_id).get('title', '')}")
+        except KeyError:
+            dependencies.append(f"{task_id}: (missing)")
+    tests = []
+    for scope_path in task.get("scope", []):
+        candidate = Path("tests") / f"test_{Path(scope_path).stem}.py"
+        tests.append(f"{scope_path} -> {candidate}: {'present' if (wt / candidate).is_file() else 'missing'}")
+    body = "\n".join([_section("spec", task.get("spec")), _section("acceptance", task.get("acceptance", [])),
+                       _section("scope", task.get("scope", [])), _section("depends_on", dependencies),
+                       _section("existing tests", tests), _section("complexity", task.get("complexity")),
+                       _section("tier", task.get("tier"))])
+    return _role_packet(body, _base_sha(task, wt), f"task@{task.get('id', '(none)')} tree@HEAD")
+
+
+def scout_packet(task) -> str:
+    wt = Path(task.get("worktree") or ROOT)
+    tree = []
+    for item in task.get("scope", []):
+        tree.append(item)
+        path = wt / item
+        directory = path if path.is_dir() else path.parent
+        if directory.is_dir():
+            tree.extend(str(child.relative_to(wt)) for child in sorted(directory.iterdir()))
+    tree = list(dict.fromkeys(tree))[:60]
+    titles = []
+    for index in (wt / ".orchestrator/memory/index.md", ROOT / ".orchestrator/memory/index.md"):
+        if index.is_file():
+            titles = [title for _, title, _ in _memory_entries(index)][:10]
+            break
+    body = "\n".join([_section("question", task.get("spec")),
+                       _section("expected output", task.get("acceptance", [])),
+                       _section("scope tree", tree), _section("memory titles", titles),
+                       _section("result contract", ["bus_post_result fields: findings, open_questions, suggested_next, blocked",
+                                                    "result limit: 1,500 tokens"])])
+    return _role_packet(body, _base_sha(task, wt), f"task@{task.get('id', '(none)')} tree@HEAD memory-index@HEAD")
 
 
 def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:
@@ -543,34 +668,29 @@ def run_worker(task_id, account_id=None):
     model = pool.cfg["models"][t["tier"]]
     if role == "review":
         src = reviewed if reviewed is not None else t
-        wt = src.get("worktree") or ROOT
-        diff_hint = f"git -C {wt} diff -- {' '.join(src['scope'])}"
-        prompt = render("review", complexity=str(t["complexity"]), acceptance=t["acceptance"],
-                        diff=bounded_diff(scoped_diff(src), lim.get("review_diff_chars", 12000), diff_hint),
-                        security="Apply skills/review/adversarial-review/references/security-checklist.md." if t["complexity"] >= 7 else "")
+        role_packet = review_packet(t, src)
+        t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
+        prompt = render("review", packet=role_packet)
     elif role == "challenge":
         prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                         for k in ("claim", "evidence", "confidence")})
     elif role == "spec_review":
         src = bus.get(t["inputs"][0])
-        code_wt = src.get("worktree") or ROOT
-        code_hint = f"git -C {code_wt} show HEAD:<path>"
-        prompt = render("spec-review", complexity=str(t["complexity"]), spec=src["spec"], acceptance=src["acceptance"],
-                        scope=src["scope"], code=bounded_text(code_excerpts(src["scope"], code_wt),
-                                                              lim.get("spec_review_code_chars", 8000), code_hint))
+        role_packet = spec_review_packet(src)
+        t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
+        prompt = render("spec-review", packet=role_packet)
     elif role == "execute":
         t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
         bus.update(task_id, executor=t["executor"])
         packet_worktree = t.get("worktree") or ROOT
-        t["packet_meta"] = packet_meta(t, packet_worktree)
+        t["packet_meta"] = {**packet_meta(t, packet_worktree), "role": role}
         prompt = render("execute", packet=packet(t, packet_worktree), spec=t["spec"],
                         acceptance=t["acceptance"], scope=t["scope"]) + \
             "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
     else:
-        base = base_for(t)
-        base_sha = git("rev-parse", base, check=False).stdout.strip() or "(unavailable)"
-        prompt = render("scout", id=t["id"], title=t["title"], spec=t["spec"], acceptance=t["acceptance"],
-                        turns=str(lim["max_turns"].get(role, 20)), base_branch=base, base_sha=base_sha)
+        role_packet = scout_packet(t)
+        t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
+        prompt = render("scout", packet=role_packet)
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
         pipeline["hold_note"] = "budget"
