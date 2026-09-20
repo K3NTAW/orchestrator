@@ -141,13 +141,13 @@ def post_tool_result(task_id, result, replace_result=False):
     if result.get("status") != "done":
         return False, f"codex result status is {result.get('status')}, not done"
     previous = task.get("result")
-    if replace_result:
-        if task.get("merged_into") is not None:
-            return False, f"task is merged into {task.get('merged_into')}"
-    elif previous is not None and task.get("status") != "running":
-        return False, f"result exists from thread {previous.get('thread', 'unknown')}"
-    elif task.get("status") != "running":
-        return False, f"task status is {task.get('status')}, not running"
+    if task.get("merged_into") is not None:
+        return False, f"task is merged into {task.get('merged_into')}"
+    if not replace_result:
+        if previous is not None:
+            return False, f"result exists from thread {previous.get('thread', 'unknown')}"
+        if task.get("status") != "running":
+            return False, f"task status is {task.get('status')}, not running"
     message = result.get("message", "")
     commit = _commit_from_message(message) or subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=task["worktree"], capture_output=True, text=True, check=True
@@ -171,7 +171,16 @@ def start(task_id, prompt):
     """Fresh Codex thread for one atomic task, in its worktree, on the executor pick_executor routes the task to.
     Held (not failed) when every executor in the task's complexity band is cooling, busy or over its daily budget.
     scores() is B3's ranking input; absent, every executor scores 1.0."""
-    pool = Pool(); t = bus.get(task_id)
+    t = bus.get(task_id)
+    previous = t.get("result")
+    if previous is not None and (t.get("status") == "done" or t.get("merged_into") is not None):
+        return {"status": "refused", "reason":
+                f"task {task_id} already has a result from thread {previous.get('thread', 'unknown')}; use codex_reply for a fix round"}
+    if t.get("merged_into") is not None:
+        return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
+    if t.get("status") not in ("queued", "running", "done"):
+        return {"status": "refused", "reason": f"task {task_id} status is {t.get('status')}; cannot claim"}
+    pool = Pool()
     try:
         scores = scorecard.scores(scorecard.build())
     except Exception:
@@ -204,7 +213,10 @@ def _exhausted(pool, t, run=None):
 def reply(task_id, delta):
     """Fix-loop round: resume the task's thread with a delta (failing tests + assertion lines) on the executor that
     started it — same thread, same model, never a re-pick mid-task. Capped at MAX_ROUNDS."""
-    pool = Pool(); t = bus.get(task_id)
+    t = bus.get(task_id)
+    if t.get("merged_into") is not None:
+        return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
+    pool = Pool()
     if not t.get("codex_thread"):
         return {"status": "failed", "reason": "task has no codex_thread; call codex() first"}
     rounds = t.get("rounds", 0) + 1

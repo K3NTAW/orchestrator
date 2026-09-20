@@ -72,13 +72,46 @@ class CodexResultPosting(unittest.TestCase):
 
     def test_codex_fresh_thread_does_not_overwrite_done_task(self):
         task_id = self._running()
-        bus.post_result(task_id, {"summary": "old", "commit": "1111111", "thread": "thread-one"}, "done")
+        bus.post_result(task_id, {"summary": "old", "commit": "1111111", "thread": "thread-one",
+                                  "rounds": 2, "provenance": ["repo"]}, "done")
+        bus.update(task_id, codex_thread="thread-one", rounds=1)
+        before = bus.get(task_id)
         result = {"status": "done", "message": "new; commit 2222222", "usage": {}, "thread": "thread-two"}
-        with mock.patch.object(mcp.executor, "start", return_value=result):
+        with mock.patch.object(mcp.executor, "_run", return_value=result) as run:
             reply = mcp.codex(task_id, "go")
+        run.assert_not_called()
         self.assertFalse(reply["posted"])
-        self.assertEqual(reply["posted_reason"], "result exists from thread thread-one")
-        self.assertEqual(bus.get(task_id)["result"]["commit"], "1111111")
+        self.assertEqual(reply["status"], "refused")
+        self.assertEqual(reply["reason"],
+                         f"task {task_id} already has a result from thread thread-one; use codex_reply for a fix round")
+        self.assertEqual(bus.get(task_id), before)
+
+    def test_codex_reply_on_merged_task_is_refused(self):
+        task_id = self._running()
+        bus.post_result(task_id, {"commit": "1111111", "thread": "thread-one", "rounds": 1}, "done")
+        bus.update(task_id, codex_thread="thread-one", merged_into="goal/test")
+        before = bus.get(task_id)
+        result = {"status": "done", "message": "commit 2222222", "thread": "thread-one"}
+        with mock.patch.object(mcp.executor, "_run", return_value=result) as run:
+            reply = mcp.codex_reply(task_id, "fix")
+        run.assert_not_called()
+        self.assertFalse(reply["posted"])
+        self.assertEqual(reply["status"], "refused")
+        self.assertIn("merged into goal/test", reply["reason"])
+        self.assertEqual(bus.get(task_id), before)
+
+    def test_post_tool_result_protects_existing_and_merged_results(self):
+        task_id = self._running()
+        bus.post_result(task_id, {"commit": "1111111", "thread": "thread-one"}, "done")
+        result = {"status": "done", "message": "commit 2222222", "thread": "thread-two"}
+        for merged_into, replace_result in ((None, False), ("goal/test", False), ("goal/test", True)):
+            with self.subTest(merged_into=merged_into, replace_result=replace_result):
+                bus.update(task_id, status="running", merged_into=merged_into)
+                before = bus.get(task_id)
+                posted, reason = mcp.executor.post_tool_result(task_id, result, replace_result=replace_result)
+                self.assertFalse(posted)
+                self.assertIn("merged into" if merged_into else "result exists", reason)
+                self.assertEqual(bus.get(task_id), before)
 
 
 if __name__ == "__main__":
