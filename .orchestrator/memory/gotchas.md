@@ -106,3 +106,63 @@ type: gotcha · goal: T-0065 · tasks: T-0070,T-0071,T-0072 · provenance: repo
 - orchestrator/daemon.py:168-171 gate() creates the review task without a tier, so it defaults to sonnet; T-0070 was executed by claude:sonnet (fallback) and T-0071 was a sonnet review of sonnet output, against the never-review-own-output rule
 - manual remedy used: a second review task on tier opus with inputs=[T-0070], spawned with spawn_review (T-0072); the daemon merged on the first approve before the second landed
 outcome: fix candidate: gate() reads the executed task's executor field and picks a different model (opus for a sonnet executor) and waits for that review; until then, add the other-model review by hand for every fallback-executed task
+
+## 2026-09-18 spec_review role was in no account's role_affinity, so every spec review held with no account with headroom
+type: gotcha · goal: T-0073 · tasks: T-0081 · provenance: repo
+- orchestrator/pool.py:136 pick() skips accounts whose affinity lacks the role; .orchestrator/pool.toml role_affinity listed planner/scout/triage/execute/review/challenge only, so T-0081 (the first spec_review ever spawned) held twice with 'no account with headroom' at 6 percent utilization
+- the daemon spawns spec reviews for every complexity 5+ task (daemon.py:126-140), so without this every such task would have stalled silently before dispatch
+outcome: fixed 2026-09-18 17:55 in both pool.toml files (orchestrator and kgpt): spec_review added to both accounts; test candidate for C-O6 or later: a pool test asserting every role in ROLES appears in at least one affinity
+
+## 2026-09-18 a rebased fix round hides the original task from already_merged, which checks branch ancestry
+type: gotcha · goal: T-0073 · tasks: T-0078,T-0087,T-0090 · provenance: repo
+- merge.py rebases the fix-round branch onto the goal branch, so the original task branch (task/T-0078 at b4b1b1e) is no longer an ancestor of goal/T-0073 even though its rebased copy (c2aa847) is; daemon.already_merged (daemon.py:59-83) uses git merge-base --is-ancestor and returns False, and the original stays held with merged_into unset, blocking dependents via bus.ready
+outcome: worked around 2026-09-18 by bus.update(T-0078, status=done, merged_into=goal/T-0073); fix candidate: compare by patch id (git patch-id) or by the fix_round_for constraint, and mark the original merged when its fix round merges
+
+## 2026-09-18 A Planner restart orphans running fallback executors: the claude child finishes and commits, but nobody posts its result
+type: gotcha · goal: T-0073 · tasks: T-0115 · provenance: repo
+- mcp.py:20 runs spawn.run_worker in a daemon thread of the MCP server; the claude -p child (spawn.py:130 Popen with PIPE) outlives the server when the Planner session restarts, finishes its work in the worktree and exits, but the thread that would parse its output and post the bus result is gone
+- the daemon then sees a dead pid and requeues the task as 'process died', which would re-run finished work on top of the executor's commit (T-0115: abc3f56 sat in wt/T-0115 with the task queued)
+- manual remedy 2026-09-18 14:50: bus_claim the task before the daemon redispatches, run .claude/hooks/tests-green.sh on the worktree, verify acceptance by hand, bus_post_result done with the commit sha; the daemon then gates and reviews as usual
+outcome: fix candidate for Phase D session rules (D4): before a handover, either wait for running executes or have the daemon's requeue path check the worktree for a commit ahead of the base and re-gate instead of redispatching; the handover command (C-O7b) should refuse while an execute is running
+
+## 2026-09-18 run_worker crashes with KeyError 'reason' when claude exits non-zero with JSON output (budget cap), so the worker's failure is never recorded properly
+type: gotcha · goal: T-0073 · tasks: T-0134 · provenance: repo
+- spawn.py run_claude returns {status: failed, output: out} without a reason key when the claude process exits non-zero but printed JSON (typical for --max-budget-usd reached); run_worker line 264 then does r['reason'] and the outer except records 'post_result failed: reason'
+- T-0134 (opus review of the 389-line T-0129 delta) hit the review cap at 1.58 USD after 277 s; output_tokens 15924; the reviewer's partial findings were lost
+outcome: review cap raised to 3.0 in pool.toml 2026-09-18 16:00 (decision recorded); fix candidate C-O10: run_claude sets reason from out.get('result')[:500] or 'is_error' when rc != 0, and run_worker uses r.get('reason')
+
+## 2026-09-18 run_worker overwrites a reviewer's own posted verdict with a parse_error result, so the daemon never merges
+type: gotcha · goal: T-0073 · tasks: T-0139,T-0135 · provenance: repo
+- the opus reviewer for T-0135 posted {verdict: approve, ...} itself through bus_post_result, then returned fenced JSON as its final text; spawn.run_worker's review branch ran extract_json on that text, failed, and posted a second result {summary, parse_error, ...} without a verdict, which replaced the first
+- daemon.merge_reviewed reads src.review_verdict or r.review_verdict; neither was set because run_worker only sets them when its own parse yields a verdict, so T-0135 sat done+gated for 15 min until the Planner merged by hand (acc0894)
+outcome: fix candidate C-O11 for spawn.run_worker: when extract_json fails and the task already has a result with a verdict, keep the existing result and set review_verdict from it; when it fails and there is none, post failed with the raw text in resume_hint instead of a done result without a verdict; also make merge_reviewed fall back to r.result.verdict
+
+## 2026-09-18 spawn_spec_review(execute id) starts an execute run: the tool wants the spec_review task id
+type: gotcha · goal: T-0073 · tasks: T-0116,T-0142 · provenance: repo
+- mcp.py spawn_spec_review(task_id) is _bg(task_id) = spawn.run_worker(task_id); run_worker branches on the task's role, so an execute id runs the Claude fallback executor on that task (T-0116 at 17:03 while held after a request_changes spec review; T-0142 at 17:17 before any spec review). Both killed within 2 min, about 0.3 USD lost
+- daemon.dispatch spawns spec reviews itself for queued complexity 5+ tasks that have none, before the free_slots check, so it works even while Codex cools; T-0140 came from the daemon, not the Planner
+outcome: leave c5+ tasks queued and let the daemon create the spec_review task; call spawn_spec_review only with a spec_review task id you created with bus_create_task(role=spec_review, inputs=[exec id]). Fix candidate: spawn_spec_review and spawn_review should refuse an id whose role is not spec_review/review
+
+## 2026-09-18 daemon.dispatch breaks out of its loop at the first ready low-complexity task when free_slots is 0, so later tasks never get their spec review
+type: gotcha · goal: T-0073 · tasks: T-0142,T-0120,T-0121 · provenance: repo
+- dispatch() iterates queued execute tasks in id order; for a task below SPEC_REVIEW_MIN (or already approved) it breaks out of the loop when no slot is free. With Codex cooling and the pre-4aaaa03 free_slots (0), ready tasks T-0120/T-0121 (Phase D, c4/c3) sit before T-0142 (c6) and the break stops the loop before the spec-review branch runs for T-0142; T-0140 was created earlier only because those two were not yet ready
+- the fixed free_slots (4aaaa03) yields free slots while Claude workers are idle, which hides the problem but does not remove it: with all fallback slots busy the same break skips every later spec review
+outcome: workaround 2026-09-18 17:30: Planner created the spec_review task by hand (bus_create_task role=spec_review inputs=[T-0142]) and stamped spec_review_at. Fix candidate (fold into D1 T-0120 or a tiny C task): replace break with continue so the spec-review branch still runs for later tasks, or run a separate spec-review pass before the slot-limited dispatch pass
+
+## 2026-09-18 linux/amd64 executor image cannot be built on the arm64 laptop: the Claude Code native installer (Bun) segfaults under emulation for lack of AVX
+type: gotcha · goal: T-0073 · tasks: T-0165,T-0173 · provenance: repo
+- docker build --platform linux/amd64 of the executor Dockerfile on the M-series Mac fails at the Claude Code install step: Bun 1.4.3 prints 'CPU lacks AVX support' and exits 139 (log in the session scratchpad, 2026-09-18 23:59). The arm64 native build of the same Dockerfile (T-0165) succeeded: 1.66 GB, four versions printed
+- the T-0171 review asked for a --platform=linux/amd64 pin so kenta-server (x86_64) never gets an arm64 codex binary; the pin makes the laptop smoke build impossible instead
+- two executor runs (T-0173) backgrounded the emulated build and exited before it finished, leaving uncommitted edits; the Planner committed the worktree and ran the build as the external gate
+outcome: Dockerfile should stay multi-arch: no platform pin; choose the codex asset (x86_64 vs aarch64 musl) and let the uv and Claude installers detect the arch, so the laptop builds arm64 natively for smoke tests and kenta-server builds amd64 natively. The amd64 build evidence is a human step on kenta-server in the runbook. Tasks whose acceptance includes a multi-minute docker build need a timeout sized for it or the build moved into a gate script
+
+## 2026-09-19 claude CLI vanished mid-session: the homebrew symlink points at a removed npm package path, every Claude worker dies with FileNotFoundError
+type: gotcha · goal: T-0109 · tasks: T-0200 · provenance: repo
+- 2026-09-19 about 13:00: spawn.run_claude raised FileNotFoundError for 'claude'; shutil.which('claude') is None; the homebrew link for claude resolves to ../lib/node_modules/@anthropic-ai/claude-code/.../claude.exe which no longer exists; no native copy under ~/.local or ~/.claude/local. Workers ran fine until about 07:00 the same morning; the interactive session itself kept running (its own binary was already loaded)
+- symptom on the bus: the daemon re-spawned review T-0200 and requeued it as 'process died' with no run record and no stderr visible; running spawn.run_worker from the Planner shell showed the traceback
+outcome: the human reinstalls the CLI (npm global package or the native setup); then spawn_review(T-0200) resumes Phase D. Fix candidate: run_claude should check shutil.which('claude') first and hold the task with reason 'claude CLI not found' instead of dying silently in a daemon thread
+
+## 2026-09-19 fix-round worktrees come from the goal branch within one daemon tick; a Planner-made worktree loses the race
+type: gotcha · goal: T-0201 · tasks: T-0222,T-0223 · provenance: repo
+- spawn.base_for() ignores constraints.fix_round_for and inputs; the daemon dispatched T-0222 about 20 s after creation with a worktree on goal/T-0201 (6358799) instead of task/T-0220 (d8531a3); planner-mode.sh also stops the Planner from repointing a worktree
+outcome: workaround: the fix-round spec opens with a STEP 0 that puts the worktree on task/<parent task>, and the acceptance requires the parent commit in the log (T-0223). Fix candidate for a polish task: base_for() prefers constraints.fix_round_for's task branch

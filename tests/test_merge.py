@@ -9,6 +9,17 @@ from orchestrator import STATE, bus, merge, spawn
 
 
 class MergeQueue(unittest.TestCase):
+    def _ensure_ci_fixture(self):
+        """pyproject.toml + a passing test, committed on whatever branch TMP currently has checked out, so
+        tests-green.sh has something to run regardless of which test method (in this file or another sharing
+        TMP) ran first. Idempotent: no-ops when the files and commit already exist."""
+        (TMP / "tests").mkdir(exist_ok=True)
+        if not (TMP / "tests" / "test_ok.py").exists():
+            (TMP / "tests" / "test_ok.py").write_text("import unittest\nclass T(unittest.TestCase):\n def test_x(self): pass\n")
+        if not (TMP / "pyproject.toml").exists():
+            (TMP / "pyproject.toml").write_text("[project]\nname='x'\nversion='0.1.0'\n")
+        g("add", "-A"); g("commit", "-qm", "ensure ci fixture")
+
     def test_rebase_tests_ff_and_conflict(self):
         scratch_repo(TMP)
         (TMP / "tests" / "test_ok.py").parent.mkdir(exist_ok=True)
@@ -33,6 +44,65 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(bus.get(t2["id"])["resume_hint"]["conflicts"], ["feature.py"])
         self.assertTrue(bus.commit_state())                          # orchestrator-state branch got the task JSON
         self.assertIn(f"tasks/{t['id']}.json", g("ls-tree", "-r", "--name-only", "orchestrator-state").stdout)
+
+    def test_checkout_ff_when_root_has_target_checked_out(self):
+        """ROOT has the target branch checked out and clean -> merge() fast-forwards ROOT's HEAD/index/worktree
+        with `git merge --ff-only` instead of leaving them stale behind an update-ref move (2026-09-18)."""
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        g("checkout", "-q", "-b", "goal/CO-sync")  # branches from current HEAD: no working-tree change, safe regardless of dirty state elsewhere
+        t = bus.create_task("feat-sync", "s", ["a"], ["co_sync.py"], role="execute")
+        wt = spawn.ensure_worktree(t["id"], base="HEAD"); bus.update(t["id"], worktree=str(wt))
+        (wt / "co_sync.py").write_text("X = 1\n"); g("add", "-A", cwd=wt); g("commit", "-qm", "feat", cwd=wt)
+        sha = g("rev-parse", "HEAD", cwd=wt).stdout.strip()
+        r = merge.merge(t["id"], target="goal/CO-sync")
+        self.assertEqual(r["status"], "merged", r)
+        self.assertTrue(r["checkout_synced"], r)
+        self.assertNotIn("checkout_stale", r)
+        self.assertEqual(g("rev-parse", "HEAD").stdout.strip(), sha)
+        # scoped to our own path: TMP is shared with other test files, which may leave unrelated dirty state
+        self.assertEqual(g("status", "--porcelain", "--", "co_sync.py").stdout.strip(), "")
+
+    def test_checkout_stale_when_root_has_conflicting_local_change(self):
+        """ROOT has the target checked out with an uncommitted local edit to a file the merge also touches ->
+        `git merge --ff-only` refuses; merge() falls back to update-ref (ref still moves) and reports
+        checkout_stale, leaving ROOT's local modification untouched."""
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        (TMP / "co_stale.py").write_text("BASE = 0\n")
+        g("add", "-A"); g("commit", "-qm", "add co_stale baseline")
+        g("checkout", "-q", "-b", "goal/CO-stale")
+        t = bus.create_task("feat-stale", "s", ["a"], ["co_stale.py"], role="execute")
+        wt = spawn.ensure_worktree(t["id"], base="HEAD"); bus.update(t["id"], worktree=str(wt))
+        (wt / "co_stale.py").write_text("X = 2\n"); g("add", "-A", cwd=wt); g("commit", "-qm", "feat2", cwd=wt)
+        sha = g("rev-parse", "HEAD", cwd=wt).stdout.strip()
+        (TMP / "co_stale.py").write_text("LOCAL EDIT\n")  # uncommitted; overlaps the incoming change
+        r = merge.merge(t["id"], target="goal/CO-stale")
+        self.assertEqual(r["status"], "merged", r)
+        self.assertTrue(r["checkout_stale"], r)
+        self.assertFalse(r["checkout_synced"], r)
+        self.assertEqual(g("rev-parse", "goal/CO-stale").stdout.strip(), sha)
+        self.assertEqual((TMP / "co_stale.py").read_text(), "LOCAL EDIT\n")
+        self.assertIn("co_stale.py", g("status", "--porcelain").stdout)
+
+    def test_checkout_synced_false_when_target_not_checked_out(self):
+        """ROOT is on another branch entirely -> behaviour is unchanged: update-ref moves the target, ROOT's
+        HEAD is untouched, and no checkout_stale key is added."""
+        scratch_repo(TMP)
+        self._ensure_ci_fixture()
+        orig_branch = g("symbolic-ref", "-q", "HEAD").stdout.strip()
+        orig_sha = g("rev-parse", "HEAD").stdout.strip()
+        t = bus.create_task("feat-none", "s", ["a"], ["co_none.py"], role="execute")
+        wt = spawn.ensure_worktree(t["id"], base="HEAD"); bus.update(t["id"], worktree=str(wt))
+        (wt / "co_none.py").write_text("X = 3\n"); g("add", "-A", cwd=wt); g("commit", "-qm", "feat3", cwd=wt)
+        sha = g("rev-parse", "HEAD", cwd=wt).stdout.strip()
+        r = merge.merge(t["id"], target="goal/CO-none")
+        self.assertEqual(r["status"], "merged", r)
+        self.assertFalse(r["checkout_synced"], r)
+        self.assertNotIn("checkout_stale", r)
+        self.assertEqual(g("rev-parse", "goal/CO-none").stdout.strip(), sha)
+        self.assertEqual(g("symbolic-ref", "-q", "HEAD").stdout.strip(), orig_branch)
+        self.assertEqual(g("rev-parse", "HEAD").stdout.strip(), orig_sha)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
-import sys, tempfile, time, unittest
+import http.server, os, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
@@ -31,12 +31,27 @@ class Daemon(unittest.TestCase):
         self.swap(spawn, "run_worker", lambda tid: self.workers.append(tid))
         self.swap(merge, "merge", lambda tid, target=None: (self.merged.append(tid),
                                                             {"status": "merged", "target": "goal/G", "sha": "abc12345"})[1])
+        # README now tells operators to export ORCH_NOTIFY_URL/ORCH_NOTIFY_DESKTOP ambiently; without clearing
+        # them here every notify() call in this suite would fire a real webhook POST or osascript popup.
+        self.clear_env("ORCH_NOTIFY_URL")
+        self.clear_env("ORCH_NOTIFY_DESKTOP")
         self.gate_green(True)
 
     def swap(self, mod, name, value):
         orig = getattr(mod, name)
         setattr(mod, name, value)
         self.addCleanup(setattr, mod, name, orig)
+
+    def clear_env(self, name):
+        had = name in os.environ
+        orig = os.environ.pop(name, None)
+        self.addCleanup(lambda: os.environ.__setitem__(name, orig) if had else os.environ.pop(name, None))
+
+    def set_env(self, name, value):
+        had = name in os.environ
+        orig = os.environ.get(name)
+        os.environ[name] = value
+        self.addCleanup(lambda: os.environ.__setitem__(name, orig) if had else os.environ.pop(name, None))
 
     def gate_green(self, green):
         """daemon.subprocess.run covers the tests-green gate, notify()'s osascript, and already_merged()'s git
@@ -79,6 +94,80 @@ class Daemon(unittest.TestCase):
         bus.update(a, merged_into="goal/G", sha="deadbee")
         daemon.tick()
         self.assertEqual(self.settle_started(2), [a, b])           # A is not dispatched twice: dispatched_at is stamped
+
+    def test_free_slots_uses_claude_capacity_under_fallback(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)                        # cools the whole "chatgpt" quota group
+        self.assertEqual(pool.cfg["codex"]["on_exhausted"], "fallback_claude")
+        self.assertEqual(daemon.free_slots(pool), pool.cfg["limits"]["max_parallel_claude_workers"])
+
+    def test_free_slots_zero_under_hold_policy(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        pool.cfg["codex"]["on_exhausted"] = "hold"
+        self.assertEqual(daemon.free_slots(pool), 0)
+
+    def test_free_slots_subtracts_running_claude_executes(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        a = self.task("running A", complexity=3)
+        bus.update(a, status="running", executor="claude:sonnet")
+        b = self.task("running B", complexity=3)
+        bus.update(b, status="running", executor="claude:opus")
+        want = pool.cfg["limits"]["max_parallel_claude_workers"] - 2
+        self.assertEqual(daemon.free_slots(pool), want)
+
+    def test_daemon_once_dispatches_under_fallback_when_codex_cooling(self):
+        """§T-0083 acceptance: with pool.toml as committed and every Codex executor cooling, a single tick still
+        dispatches a queued low-complexity execute task instead of stalling at free_slots()==0 (gotchas.md
+        2026-09-18: T-0070 needed a hand dispatch before this fix)."""
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        a = self.task("A", complexity=3)
+        daemon.tick(pool)
+        self.assertTrue(bus.get(a)["pipeline"].get("dispatched_at"))
+
+    def test_saturated_codex_returns_zero_not_fallback(self):
+        """§T-0102 acceptance: with the committed pool.toml, four healthy Codex rows at running == max_parallel
+        (saturated, never cooling) must return 0 -- not fall into the Claude fallback branch, which is for a
+        pool where every row is cooling, not merely busy."""
+        pool = P.Pool()
+        for ex in pool.executors.values():
+            if ex.enabled and "execute" in ex.roles:
+                ex.running = ex.max_parallel
+        self.assertEqual(daemon.free_slots(pool), 0)
+
+    def test_fallback_counts_running_claude_roles_and_inflight_dispatches(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)                       # cools the whole "chatgpt" quota group
+        scout = self.task("scout running", role="scout", complexity=2)
+        bus.update(scout, status="running", assigned_to="claude:A")
+        dispatched = self.task("dispatched not claimed", complexity=3)
+        bus.update(dispatched, pipeline={"dispatched_at": time.time()})   # spawn_async window before bus.claim
+        want = pool.cfg["limits"]["max_parallel_claude_workers"] - 2
+        self.assertEqual(daemon.free_slots(pool), want)
+
+    def test_fallback_skips_complexity_without_tier(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)
+        c = self.task("complexity9", complexity=9)
+        bus.update(c, spec_review_verdict="approve")
+        daemon.tick(pool)
+        t = bus.get(c)
+        self.assertEqual(t["status"], "queued")
+        self.assertFalse((t.get("pipeline") or {}).get("dispatched_at"))
+
+    def test_free_slots_survives_missing_cfg_tables(self):
+        pool = P.Pool()
+        pool.cooldown_executor("astra", 600)                       # no executor available
+        cfg_no_codex = {k: v for k, v in pool.cfg.items() if k != "codex"}
+        pool.cfg = cfg_no_codex
+        self.assertEqual(daemon.free_slots(pool), 0)                # missing [codex] defaults on_exhausted to "hold"
+
+        cfg_fallback_no_limits = {k: v for k, v in cfg_no_codex.items() if k != "limits"}
+        cfg_fallback_no_limits["codex"] = {"on_exhausted": "fallback_claude"}
+        pool.cfg = cfg_fallback_no_limits
+        self.assertEqual(daemon.free_slots(pool), 4)                # missing [limits] defaults max_parallel_claude_workers to 4
 
     def test_high_complexity_waits_for_spec_review(self):
         c = self.task("C", complexity=6)
@@ -125,6 +214,40 @@ class Daemon(unittest.TestCase):
         self.assertEqual(bus.read(role="review"), [])
         self.assertEqual(self.merged, [])
 
+    def test_gate_never_merges_orphaned_result_even_when_cheap(self):
+        """A result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit, not from
+        an executor that actually finished. gate() must never route it straight to merge.merge just because the
+        task's complexity is at or below DIRECT_MERGE_MAX -- it must always go to review instead, with the
+        orphaned warning leading the review task's spec."""
+        t = self.task("orphaned cheap", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP), result={"orphaned": True, "commit": "deadbee"})
+        daemon.tick()
+        self.assertEqual(self.merged, [])
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["inputs"], [t])
+        self.assertEqual(reviews[0]["tier"], "sonnet")
+        self.assertTrue(reviews[0]["spec"].startswith(
+            "orphaned executor: verify the acceptance criteria are fully met, the worker may have died mid-task"))
+
+    def test_gate_review_tier_opus_for_sonnet_executor(self):
+        t = self.task("big", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), executor="claude:sonnet")
+        daemon.tick()
+        self.assertEqual(bus.read(role="review")[0]["tier"], "opus")
+
+    def test_gate_review_tier_sonnet_for_opus_executor(self):
+        t = self.task("big", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), executor="claude:opus")
+        daemon.tick()
+        self.assertEqual(bus.read(role="review")[0]["tier"], "sonnet")
+
+    def test_gate_review_tier_default_for_codex(self):
+        t = self.task("big", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick()
+        self.assertEqual(bus.read(role="review")[0]["tier"], "sonnet")
+
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")
         r_ok = self.task("review ok", complexity=5, role="review", inputs=[ok])
@@ -137,6 +260,16 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.merged, [ok])                       # merged once, not once per tick
         held = bus.get(bad)
         self.assertEqual((held["status"], held["hold_reason"]), ("held", "review request_changes"))
+
+    def test_merge_reviewed_falls_back_to_result_verdict(self):
+        """T-0139/T-0141: when review_verdict never landed on the review task or its source (spawn.run_worker's
+        parse failed before it could set them), merge_reviewed still finds the verdict inside the review's own
+        posted result."""
+        ok = self.gated_execute("approved-fallback")
+        r_ok = self.task("review approved-fallback", complexity=5, role="review", inputs=[ok])
+        bus.update(r_ok, status="done", result={"verdict": "approve", "confidence": 1.0, "provenance": ["repo"]})
+        daemon.tick()
+        self.assertEqual(self.merged, [ok])
 
     def gated_execute(self, title):
         """A done execute task that already cleared the gate, so gate() leaves it to merge_reviewed()."""
@@ -231,6 +364,165 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.merged, [pending_id])         # non-ancestor task still gated and merged as before
         self.assertTrue(pending["pipeline"]["gated_at"])
 
+    def dead_pid(self):
+        """A pid guaranteed not alive: spawn a trivial child and wait for it to exit."""
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    def test_reconcile_dead_regates_clean_worktree_ahead_of_base(self):
+        """An execute task's worker died, but it had already committed and left the worktree clean: tick() must
+        post that commit as a done result (orphaned=true) instead of requeuing and redoing the work."""
+        scratch_repo(TMP)
+        self.addCleanup(lambda: (TMP / "orphan_clean.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", "task/orphan-clean")
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")
+        g("checkout", "-b", "task/orphan-clean")
+        (TMP / "orphan_clean.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "finished work")
+        sha = g("rev-parse", "HEAD").stdout.strip()
+
+        t = self.task("orphan clean")
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual(task["status"], "done")
+        self.assertTrue(task["result"]["orphaned"])
+        self.assertEqual(task["result"]["commit"], sha)
+
+    def test_reconcile_dead_holds_dirty_worktree_ahead_of_base(self):
+        """Same as above but the worktree has an uncommitted change on top of the commit: too risky to auto-gate,
+        so tick() must hold the task for the Planner instead, naming the commit in the resume hint."""
+        scratch_repo(TMP)
+        self.addCleanup(lambda: (TMP / "orphan_dirty.txt").unlink(missing_ok=True))
+        self.addCleanup(lambda: (TMP / "uncommitted.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", "task/orphan-dirty")
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")
+        g("checkout", "-b", "task/orphan-dirty")
+        (TMP / "orphan_dirty.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "finished work")
+        sha = g("rev-parse", "HEAD").stdout.strip()
+        (TMP / "uncommitted.txt").write_text("dirty")   # untracked change: worktree is no longer clean
+
+        t = self.task("orphan dirty")
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "orphaned_dirty_worktree"))
+        self.assertEqual(task["resume_hint"]["commit"], sha)
+
+    def test_reconcile_dead_regates_using_main_when_no_goal_branch(self):
+        """No goal/<parent> branch exists to merge-base against (a parentless task, or the first execute task of
+        a goal that hasn't cut its branch yet): reconcile_dead must fall back to merge-base against origin/main,
+        then main, instead of requeuing a worktree that actually has finished work sitting in it."""
+        scratch_repo(TMP)
+        t = bus.create_task("no goal branch", "spec", ["works"], ["x.py"], role="execute", complexity=2)["id"]
+        self.addCleanup(lambda: (TMP / "no_goal.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", f"task/{t}")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", f"task/{t}")
+        (TMP / "no_goal.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "finished work")
+        sha = g("rev-parse", "HEAD").stdout.strip()
+
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61,
+                   worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual(task["status"], "done")
+        self.assertTrue(task["result"]["orphaned"])
+        self.assertEqual(task["result"]["commit"], sha)
+
+    def test_reconcile_dead_requeues_and_retriggers_dispatch_when_no_commits_ahead(self):
+        """The worker died before committing anything: no ahead commits, so tick() must fall back to the plain
+        requeue instead of treating an unchanged worktree as orphaned work. The requeue must also drop
+        pipeline.dispatched_at so the very next tick dispatches the task again -- otherwise dispatch()'s stamp()
+        sees the stale stamp, thinks a worker is already out, and leaves the task queued forever."""
+        scratch_repo(TMP)
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")   # HEAD == base: nothing ahead
+
+        t = self.task("orphan none")
+        old_stamp = time.time() - 120
+        bus.update(t, status="running", executor="astra", pid=self.dead_pid(), claimed_at=time.time() - 61,
+                   worktree=str(TMP), pipeline={"dispatched_at": old_stamp})
+        daemon.tick()   # reconcile_dead requeues it, then dispatch() -- later in this same tick -- sees it
+                        # queued again with dispatched_at cleared and dispatches it right away
+
+        self.assertEqual(self.settle_started(1), [t])
+        task = bus.get(t)
+        self.assertEqual(task["reason"], "process died; requeued")
+        self.assertGreater(task["pipeline"]["dispatched_at"], old_stamp)
+
+    def test_reconcile_dead_requeues_non_execute_role_unchanged(self):
+        """A scout task's worker died: this is the pre-existing path and must be untouched by the orphaned-work
+        check, which only ever applies to execute tasks."""
+        t = self.task("scout dead", role="scout", complexity=2)
+        bus.update(t, status="running", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        daemon.tick()
+
+        task = bus.get(t)
+        self.assertEqual((task["status"], task["reason"]), ("queued", "process died; requeued"))
+
+    def test_reconcile_dead_return_values(self):
+        """reconcile_dead(task) itself returns the tri-state result the daemon acted on, so this is testable
+        directly without going through tick()'s live-pid check."""
+        scratch_repo(TMP)
+        self.addCleanup(lambda: (TMP / "rv.txt").unlink(missing_ok=True))
+        self.addCleanup(g, "branch", "-D", "task/rv")
+        self.addCleanup(g, "branch", "-D", "goal/T-0043")
+        self.addCleanup(g, "checkout", "main")
+        g("checkout", "-b", "goal/T-0043")
+        g("checkout", "-b", "task/rv")
+        (TMP / "rv.txt").write_text("x")
+        g("add", "-A")
+        g("commit", "-qm", "work")
+
+        t = self.task("rv clean")
+        task = bus.get(t)
+        task["worktree"] = str(TMP)
+        self.assertEqual(daemon.reconcile_dead(task), "regated")
+
+        (TMP / "rv.txt").write_text("y")   # dirty it for the held case
+        t2 = self.task("rv dirty")
+        task2 = bus.get(t2)
+        task2["worktree"] = str(TMP)
+        self.assertEqual(daemon.reconcile_dead(task2), "held")
+
+        g("reset", "--hard", "goal/T-0043")   # discard the dirty change and land back on base: nothing ahead
+        t3 = self.task("rv none")
+        task3 = bus.get(t3)
+        task3["worktree"] = str(TMP)
+        self.assertEqual(daemon.reconcile_dead(task3), "requeued")
+
+        t4 = self.task("rv scout", role="scout", complexity=2)
+        task4 = bus.get(t4)
+        self.assertEqual(daemon.reconcile_dead(task4), "requeued")
+
+    def test_tick_survives_reconcile_dead_exception(self):
+        """A vanished worktree or a git call inside reconcile_dead that raises for one dead task must not abort
+        tick()'s stage loop: dispatch/gate/merge_reviewed must still run for every other task this tick."""
+        dead = self.task("dead git", complexity=2)
+        bus.update(dead, status="running", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        self.swap(daemon, "_git_in", raiser(RuntimeError("git blew up")))
+        other = self.task("other queued", complexity=3)
+
+        daemon.tick()
+
+        self.assertEqual(self.settle_started(1), [other])   # dispatch() still ran despite the reconcile blow-up
+        self.assertEqual(bus.get(dead)["status"], "running")   # left alone, not requeued or crashed on
+
     def test_tick_skips_execute_task_of_closed_goal(self):
         closed_goal = bus.create_task("goal closed", "s", ["ok"], ["x.py"], role="scout")["id"]
         bus.update(closed_goal, status="done")
@@ -251,6 +543,113 @@ class Daemon(unittest.TestCase):
         cmd = calls[-1]
         self.assertEqual(cmd[-1], msg[:200])                       # untrusted text only ever lands in argv
         self.assertTrue(all(msg not in part for part in cmd[:-1]))
+
+    def test_webhook_posts_body(self):
+        received = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received["method"] = self.command
+                received["body"] = self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        url = f"http://127.0.0.1:{server.server_port}/"
+        self.set_env("ORCH_NOTIFY_URL", url)
+        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0))
+
+        daemon.notify("hello webhook")
+        thread.join(timeout=5)
+
+        self.assertEqual(received.get("method"), "POST")
+        self.assertEqual(received.get("body"), b"hello webhook")
+
+    def test_webhook_body_capped_at_200_chars(self):
+        received = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received["body"] = self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        url = f"http://127.0.0.1:{server.server_port}/"
+        self.set_env("ORCH_NOTIFY_URL", url)
+        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0))
+
+        msg = "x" * 1000                                            # e.g. unbounded merge stderr (daemon.py:188)
+        daemon.notify(msg)
+        thread.join(timeout=5)
+
+        self.assertEqual(received.get("body"), msg[:200].encode())
+
+    def test_webhook_failure_is_swallowed(self):
+        self.set_env("ORCH_NOTIFY_URL", "http://127.0.0.1:1/")
+        self.swap(daemon.subprocess, "run", lambda *a, **k: FakeProc("", 0))
+        daemon.notify("unreachable")                               # must not raise
+
+    def test_no_osascript_off_darwin(self):
+        calls = []
+        self.swap(daemon.subprocess, "run", lambda *a, **k: calls.append(a[0]) or FakeProc("", 0))
+        self.swap(daemon.sys, "platform", "linux")
+        daemon.notify("linux box")
+        self.assertEqual(calls, [])
+
+    def test_desktop_alert_suppressed_by_env(self):
+        calls = []
+        self.swap(daemon.subprocess, "run", lambda *a, **k: calls.append(a[0]) or FakeProc("", 0))
+        self.swap(daemon.sys, "platform", "darwin")
+        self.set_env("ORCH_NOTIFY_DESKTOP", "0")
+        daemon.notify("suppressed")
+        self.assertEqual(calls, [])
+
+    def test_ambient_notify_url_does_not_leak_into_other_tests(self):
+        """Stands in for a shell that exported ORCH_NOTIFY_URL before this process's setUp ran: re-applying
+        clear_env's own pop-then-restore here proves that pattern -- not just avoiding the var in test bodies
+        -- is what keeps an internal notify() call (gate()'s worktree-missing path, exercised for real by
+        test_gate_missing_worktree_holds) from ever reaching the webhook."""
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        server.timeout = 0.3
+        self.addCleanup(server.server_close)
+        url = f"http://127.0.0.1:{server.server_port}/"
+
+        os.environ["ORCH_NOTIFY_URL"] = url   # simulate the stale ambient value setUp would normally clear
+        self.clear_env("ORCH_NOTIFY_URL")
+
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        t = self.task("nowt", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP / "does-not-exist"))
+        daemon.tick()                          # gate()'s worktree-missing branch calls notify() internally
+
+        thread.join(timeout=2)
+        self.assertEqual(received, [])
 
 
 class BusLock(unittest.TestCase):

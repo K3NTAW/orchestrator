@@ -1,6 +1,6 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
-import json, os, shutil, subprocess, time
+import json, os, shutil, subprocess, sys, time
 from pathlib import Path
 from . import ROOT, STATE, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -74,15 +74,29 @@ def render(name, **kw):
     return t
 
 
-def secrets_for_role(role):
-    """pool.toml [secrets.<role>]: ENV_NAME = "bash command printing the value" (e.g. sourcing f.sh for `f tok get X --reveal`).
-    Values never touch disk or logs."""
+def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:
+    """mapping: ENV_NAME -> "bash command printing the value" (e.g. sourcing f.sh for `f tok get X --reveal`),
+    or ENV_NAME = "env:OTHER_NAME" to read OTHER_NAME straight from this process's environment (headless hosts: no
+    Keychain, no `f tok get`). Values never touch disk or logs."""
     out = {}
-    for name, cmd in Pool().cfg.get("secrets", {}).get(role, {}).items():
+    for name, cmd in mapping.items():
+        if cmd.startswith("env:"):
+            var = cmd[len("env:"):]
+            val = os.environ.get(var)
+            if val:
+                out[name] = val
+            else:
+                print(f"resolve_secrets: env var {var} is not set, skipping {name}", file=sys.stderr)
+            continue
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
             out[name] = r.stdout.strip()
     return out
+
+
+def secrets_for_role(role):
+    """pool.toml [secrets.<role>]. See resolve_secrets for the value-form rules."""
+    return resolve_secrets(Pool().cfg.get("secrets", {}).get(role, {}))
 
 
 def trust_workspace(config_dir, wt):
@@ -104,6 +118,10 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         shutil.copy(role_cfg, wt / ".mcp.json")
     env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
            "ORCH_ROOT": str(ROOT), **secrets_for_role(task["role"])}
+    # Headless hosts: `claude setup-token` issues a long-lived CLAUDE_CODE_OAUTH_TOKEN per CLAUDE_CONFIG_DIR,
+    # set in this process's environment under the name pool.toml's oauth_token_env points at. Never logged.
+    if acct.oauth_token_env and os.environ.get(acct.oauth_token_env):
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[acct.oauth_token_env]
     # claude 2.1.273 has no turn-cap flag; --max-budget-usd + subprocess timeout are the hard stops (§6.5)
     # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
     # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.
@@ -138,7 +156,10 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
                 outcome="done" if p.returncode == 0 else "error", usd=out.get("total_cost_usd"), **log,
                 **{k: used.get(k, 0) for k in
                    ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
-    return {"status": "done" if p.returncode == 0 else "failed", "output": out}
+    if not out.get("is_error") and p.returncode == 0:
+        return {"status": "done", "output": out}
+    reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
+    return {"status": "failed", "output": out, "reason": reason}
 
 
 def extract_json(text):
@@ -180,15 +201,27 @@ def fit_result(result, cap=bus.MAX_RESULT_CHARS):
     return out
 
 
+def _account_from_assigned_to(assigned_to):
+    """"claude:<acct id>" -> "<acct id>"; anything else (None, "codex", ...) -> None."""
+    if assigned_to and assigned_to.startswith("claude:"):
+        return assigned_to[len("claude:"):]
+    return None
+
+
 def run_worker(task_id):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
     avoid = None
     if role == "review" and t.get("inputs") and isinstance(t["inputs"][0], str):
         try:
-            avoid = bus.get(t["inputs"][0]).get("account")
+            reviewed = bus.get(t["inputs"][0])
         except KeyError:
-            avoid = None
+            reviewed = None
+        if reviewed is not None:
+            # Older/in-flight tasks may not have an explicit "account" field yet; fall back to parsing the
+            # account id out of assigned_to ("claude:<acct id>") so a fallback execution is never reviewed on
+            # the same account it ran on.
+            avoid = reviewed.get("account") or _account_from_assigned_to(reviewed.get("assigned_to"))
     acct = pool.pick(role, avoid=avoid)
     if acct is None:
         bus.update(task_id, status="held", hold_reason="no account with headroom")
@@ -214,6 +247,7 @@ def run_worker(task_id):
         prompt = render("scout", id=t["id"], title=t["title"], spec=t["spec"], acceptance=t["acceptance"],
                         turns=str(lim["max_turns"].get(role, 20)))
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
+    bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                    lim["max_budget_usd"].get(role, 2.0), t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
     try:
@@ -221,9 +255,24 @@ def run_worker(task_id):
             bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
                                       "review": "other account, different model; label PR same-family-review"}), "done")
         elif r["status"] == "done":
-            result = extract_json(r["output"].get("result", ""))
-            bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
-            if role in ("review", "spec_review") and result.get("verdict"):
+            text = r["output"].get("result", "")
+            result = extract_json(text)
+            review_role = role in ("review", "spec_review")
+            # A review worker may post its verdict itself via bus_post_result mid-run, then end with prose or
+            # fenced JSON this parser can't take; or return valid JSON that simply lacks "verdict". Either way
+            # treat it as a failed parse for review roles so we never silently drop an already-posted verdict
+            # (T-0139: an approve sat unmerged after a second, verdict-less post overwrote the first).
+            parse_failed = bool(result.get("parse_error")) or (review_role and not result.get("verdict"))
+            existing_result = (bus.get(task_id).get("result") or {}) if parse_failed else {}
+            if parse_failed and existing_result.get("verdict"):
+                result = existing_result  # keep the worker's own posted result; do not overwrite it
+            elif parse_failed and review_role:
+                bus.update(task_id, status="failed", reason="review returned no parseable verdict",
+                          resume_hint={"raw": text[-2000:]})
+                result = None
+            else:
+                bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+            if result and review_role and result.get("verdict"):
                 verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
                     if role == "spec_review" else {"review_verdict": result["verdict"]}
                 bus.update(task_id, **verdict_fields)
@@ -233,9 +282,13 @@ def run_worker(task_id):
                     except KeyError:
                         pass
         elif r["status"] == "held":
-            bus.update(task_id, status="held", hold_reason=r["reason"])
+            bus.update(task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
         else:
-            bus.update(task_id, status="failed", reason=r["reason"])
+            update_fields = {"status": "failed", "reason": r.get("reason", "unknown failure")}
+            result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
+            if isinstance(result, str):
+                update_fields["resume_hint"] = {"partial_output": result[:2000]}
+            bus.update(task_id, **update_fields)
     except Exception as e:
         bus.log_run(task=task_id, role=role, outcome="post_failed",
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])

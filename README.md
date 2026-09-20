@@ -10,6 +10,8 @@ scaffold committed before ORCH_ROOT, spawn, the bus and merge (all rooted at ORC
 repo, run `uv run orchestrator install /path/to/target` — it's idempotent, prints `created`/`kept`/`updated` per
 file, and wires `.mcp*.json` to run this repo's code with `ORCH_ROOT` set to the target. Then, in the target repo:
 commit the scaffold, and start the Planner there with `ORCH_ROOT=/path/to/target`.
+To run the executor itself in a container on a dedicated host instead of locally, see
+[docs/executor-host.md](docs/executor-host.md).
 
 ## Phase 0 (you, once)
 ```bash
@@ -25,6 +27,27 @@ Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` t
 ## Run it
 `f orch [goal]` (from anywhere) launches the Planner on account A in this repo. `f orch status|cost|daemon|hold|resume|merge` is the CLI.
 `f orch survey` is the old cross-repo briefing session.
+`orchestrator pick planner|scout|review|execute` tallies Planner usage fresh, then prints `<account_id>\t<config_dir>`
+for `pool.pick(role)`, or exits 3 with `hold: no account with headroom`; a launcher not running the daemon calls this
+so its account choice still reflects current Planner usage.
+`uv run orchestrator handover [--reason TEXT]` writes/replaces the `## Auto-handover` section at the end of
+`.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
+calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.
+
+## Planner usage is counted from transcripts
+The Planner itself is an interactive `claude` session, not a worker spawned by `run_claude`, so it never posts a JSON
+result carrying a `usage` block — without `tally_planner()` the pool would only ever see the workers it spawns and
+stay blind to the largest consumer of any account's window. `Pool.tally_planner()` reads Claude Code's own transcript
+files for this project under each account's `config_dir` (`<config_dir>/projects/<encoded ROOT>/*.jsonl`), sums the
+same `input_tokens + output_tokens + cache_read_input_tokens // 10` `run_claude` uses for assistant turns, gating the
+day and window counters independently per line (a same-day line outside the current window still counts toward the
+day, and vice versa), and folds both totals into `Account.utilization()` and the daily-budget check alongside the
+worker totals. It reads incrementally (a per-file byte offset persists in `.orchestrator/planner_usage.json`, written
+only by `tally_planner()` under an flock so it isn't raced by `pool_state.json` saves) and skips a missing transcripts
+directory with one stderr line per account per process rather than raising on every tick. `daemon.tick()` calls it
+once per tick; `orchestrator pick <role>` calls it directly (tally failures there print one stderr line and fall
+through to the pool's stored numbers rather than crashing pick) for callers that need a fresh account choice without
+a running daemon.
 
 ## Pipeline
 State machine per execute task: `queued` → (depends_on merged, complexity ≥5 → `spec_review` first) → dispatched to
@@ -36,6 +59,10 @@ bus lock before acting, so a crash-and-retry never re-runs a stage.
 Run it: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart` in `pool.toml` (`ORCH_DAEMON=0`
 or `autostart = false` disables it), and `uv run orchestrator daemon` takes the same single-instance lock so two loops
 never run at once; `orchestrator daemon --once` runs a single pass without the lock.
+`notify()` always logs `[notify] <msg>` to stderr. Set `ORCH_NOTIFY_URL` (e.g. `https://ntfy.kentawaibel.com/orchestrator`,
+shape only, not this repo's setup) to also POST the message as a plain-text body to that URL; a failed or unreachable
+webhook only logs `[notify] webhook failed: ...` and never breaks a tick. On macOS a desktop notification fires too
+unless `ORCH_NOTIFY_DESKTOP=0`; it's a no-op on other platforms regardless.
 Holds (`status="held"`) mean the daemon stopped and a human/Planner must act: `spec_review request_changes`, `review
 request_changes`, or `gate_red` (tests failed at the gate). The `hold_reason` field and `resume_hint` on the task say
 which. The Planner clears a hold by writing a new spec with `depends_on=[held_task_id]`, never by editing the held
@@ -65,6 +92,18 @@ of Use restrict automated access; the user decided on 2026-09-17 to proceed unde
 CLI: `orchestrator scorecard [--by executor|tier] [--json]` · `orchestrator bench show` ·
 `orchestrator bench fetch [--force] [--by NAME]` · `orchestrator bench set <model_id> --by <name> key=value...` ·
 `orchestrator status --plain`.
+
+## Headless hosts
+The laptop's `secrets_for_role` command form shells out to `f tok get` (a Keychain wrapper) and the `[[claude_accounts]]`
+tables assume an interactive `/login`. Neither works on a headless Linux host. Two options, independent of each other:
+- **Claude account auth**: run `claude setup-token` once per `CLAUDE_CONFIG_DIR` to mint a long-lived
+  `CLAUDE_CODE_OAUTH_TOKEN`, export it under a name of your choice, and set that name as `oauth_token_env` on the
+  matching `[[claude_accounts]]` row in `pool.toml`. `spawn.run_claude` puts the value into the child's
+  `CLAUDE_CODE_OAUTH_TOKEN` env var when the account has `oauth_token_env` set and that variable is present in the
+  environment; it is never logged.
+- **Role secrets**: for a `[secrets.<role>]` entry, use `ENV_NAME = "env:OTHER_NAME"` instead of a shell command to
+  read `OTHER_NAME` straight from this process's environment (e.g. set by systemd or CI). A missing env var is
+  skipped with a stderr note naming the variable, not its value.
 
 ## Access model (decided 2026-09-16)
 Full access, guardrails as a hard floor, human only at PR approval:

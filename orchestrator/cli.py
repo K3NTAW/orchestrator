@@ -1,9 +1,15 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
-import argparse, json
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
+import argparse, json, os, sys
 from collections import defaultdict
 from . import bus, scorecard
 from .bus import RUNS
 from .pool import Pool
+
+
+def _format_goal_line(e):
+    counts = ",".join(f"{status}={len(items)}" for status, items in sorted(e["children"].items())) or "-"
+    return (f"{e['goal_id']}\tstatus={e['record_status']}\tplanner_alive={e['planner_alive']}\t"
+            f"children=[{counts}]\tpr_url={e['pr_url'] or '-'}")
 
 
 def cost(by):
@@ -23,12 +29,22 @@ def main():
     c = sub.add_parser("cost"); c.add_argument("--by", default="role", choices=["role", "tier", "account", "task"])
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
     sub.add_parser("resume").add_argument("account")
+    pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
+    ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard"); sc.add_argument("--by", default="executor", choices=["executor", "tier"])
     sc.add_argument("--json", action="store_true")
+    g = sub.add_parser("goal"); gsub = g.add_subparsers(dest="goal_cmd", required=True)
+    gs = gsub.add_parser("start"); gs.add_argument("repo"); gs.add_argument("text")
+    gs.add_argument("--account", default="A"); gs.add_argument("--reinstall", action="store_true")
+    gst = gsub.add_parser("status"); gst.add_argument("repo"); gst.add_argument("id", nargs="?")
+    gst.add_argument("--json", action="store_true")
+    gl = gsub.add_parser("list"); gl.add_argument("repo"); gl.add_argument("--json", action="store_true")
+    gsp = gsub.add_parser("stop"); gsp.add_argument("repo"); gsp.add_argument("id")
+    sv = sub.add_parser("serve"); sv.add_argument("--host", default="127.0.0.1"); sv.add_argument("--port", type=int, default=8090)
     bn = sub.add_parser("bench"); bsub = bn.add_subparsers(dest="bench_cmd", required=True)
     bf = bsub.add_parser("fetch"); bf.add_argument("--force", action="store_true"); bf.add_argument("--by", default="orchestrator")
     bsub.add_parser("show")
@@ -38,7 +54,8 @@ def main():
         if a.plain:
             s = Pool().status()
             for acc in s["accounts"]:
-                print(f"{acc['id']}\tutil={acc['utilization']:.3f}\tcooling={acc['cooling_s']}s\treason={acc['reason'] or '-'}")
+                print(f"{acc['id']}\tutil={acc['utilization']:.3f}\tcooling={acc['cooling_s']}s\t"
+                     f"reason={acc['reason'] or '-'}\tplanner_day_tokens={acc['planner_day_tokens']}")
             c = s["codex"]
             print(f"codex\tavailable={c['available']}\trunning={c['running']}\tday_tasks={c['day_tasks']}\tcooling={c['cooling_s']}s")
         else:
@@ -49,16 +66,58 @@ def main():
         pl = Pool(); pl.cooldown(pl.get(a.account), a.minutes * 60, "manual"); print(json.dumps(pl.status(), indent=1))
     elif a.cmd == "resume":
         pl = Pool(); pl.resume(a.account); print(json.dumps(pl.status(), indent=1))
+    elif a.cmd == "pick":
+        pl = Pool()
+        try:
+            pl.tally_planner()
+        except Exception as e:
+            print(f"pick: planner tally failed: {e}", file=sys.stderr)
+        picked = pl.pick(a.role)
+        if picked is None:
+            print("hold: no account with headroom", file=sys.stderr)
+            raise SystemExit(3)
+        print(f"{picked.id}\t{os.path.expanduser(picked.config_dir)}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
+    elif a.cmd == "handover":
+        from . import handover
+        print(handover.write(a.reason))
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
     elif a.cmd == "install":
         from .install import install
         for line in install(a.target):
             print(line)
-        print("Next: commit the scaffold in the target repo, then start the Planner there with "
-              f"ORCH_ROOT={a.target}.")
+        print(f'Next: orchestrator goal start {a.target} "<goal>"')
+    elif a.cmd == "goal":
+        from . import goals
+        if a.goal_cmd == "start":
+            r = goals.start(a.repo, a.text, account_id=a.account, reinstall=a.reinstall)
+            if not r.get("launched"):
+                print(r.get("reason", "not launched"))
+                raise SystemExit(2)
+            for k, v in r.items():
+                print(f"{k}: {v}")
+            if r.get("commit"):
+                print(f"revert: git revert {r['commit']}")
+        elif a.goal_cmd == "status":
+            entries = goals.status(a.repo, a.id)
+            if a.json:
+                for e in entries:
+                    print(json.dumps(e, indent=1))
+            else:
+                print("no goals" if not entries else "\n".join(_format_goal_line(e) for e in entries))
+        elif a.goal_cmd == "list":
+            entries = goals.list_goals(a.repo)
+            if a.json:
+                print("no goals" if not entries else "\n".join(json.dumps(e, indent=1) for e in entries))
+            else:
+                print("no goals" if not entries else "\n".join(_format_goal_line(e) for e in entries))
+        elif a.goal_cmd == "stop":
+            print(json.dumps(goals.stop(a.repo, a.id), indent=1))
+    elif a.cmd == "serve":
+        from .serve import main as serve_main
+        serve_main(host=a.host, port=a.port)
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":

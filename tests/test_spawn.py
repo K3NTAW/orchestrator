@@ -1,10 +1,25 @@
-"""spawn.run_worker's review-verdict propagation, prompt template rendering / result fitting, and base-branch
-selection for stacked/challenge/review tasks (review T-0026, T-0030)."""
-import json, subprocess, sys, unittest
+"""spawn.run_worker's review-verdict propagation, prompt template rendering / result fitting, base-branch
+selection for stacked/challenge/review tasks (review T-0026, T-0030), and headless-host secret/token wiring
+(env-form secrets, CLAUDE_CODE_OAUTH_TOKEN injection)."""
+import json, os, subprocess, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_spawn.py` doesn't add this dir itself
 from _harness import TMP, g, scratch_repo
 from orchestrator import bus, pool as P, spawn
+
+
+class FakePopen:
+    """Stand-in for subprocess.Popen: run_claude only reads .pid, .communicate() and .returncode."""
+    def __init__(self, cmd, cwd=None, env=None, stdout=None, stderr=None, text=None):
+        FakePopen.last_env = env
+        self.pid = 4242
+        self.returncode = 0
+
+    def communicate(self, timeout=None):
+        return json.dumps({"result": "ok", "usage": {}}), ""
+
+    def kill(self):
+        pass
 
 
 class ReviewVerdict(unittest.TestCase):
@@ -25,6 +40,136 @@ class ReviewVerdict(unittest.TestCase):
         spawn.run_worker(review["id"])
         self.assertEqual(bus.get(review["id"])["review_verdict"], "request_changes")
         self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "request_changes")
+
+
+class ReviewAvoidsAccount(unittest.TestCase):
+    def test_review_avoids_executing_account_from_assigned_to(self):
+        reviewed = bus.create_task("feat-avoid", "s", ["a"], ["rv.py"], role="execute")
+        bus.update(reviewed["id"], assigned_to="claude:B")   # no explicit "account" field on the reviewed task
+        review = bus.create_task("review feat-avoid", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        captured = {}
+        orig_pick = P.Pool.pick
+        def fake_pick(self, role, avoid=None):
+            captured["avoid"] = avoid
+            return self.get("A")
+        P.Pool.pick = fake_pick
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        fake_out = {"result": json.dumps({"verdict": "approve", "comments": []}), "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+        self.assertEqual(captured["avoid"], "B")
+
+
+class ReviewVerdictSurvivesParseFailure(unittest.TestCase):
+    """T-0139/T-0141: a reviewer that posts its verdict itself via bus_post_result mid-run, then ends with text
+    the daemon can't parse, must not lose that verdict to a second, verdict-less post."""
+
+    def test_verdict_survives_unparseable_final_text(self):
+        reviewed = bus.create_task("feat-parsefail", "s", ["a"], ["rv.py"], role="execute")
+        review = bus.create_task("review feat-parsefail", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        # Simulate the worker's own bus_post_result MCP call mid-run, before its final text fails to parse below.
+        bus.post_result(review["id"], {"verdict": "approve", "comments": []})
+
+        fake_out = {"result": "```json\n{unparseable: true}\n```", "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+
+        updated = bus.get(review["id"])
+        self.assertEqual(updated["result"]["verdict"], "approve")
+        self.assertEqual(updated["review_verdict"], "approve")
+        self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "approve")
+
+
+class ReviewNoVerdictAnywhereFails(unittest.TestCase):
+    def test_unparseable_with_no_prior_verdict_fails_with_raw_hint(self):
+        reviewed = bus.create_task("feat-noverdict", "s", ["a"], ["rv.py"], role="execute")
+        review = bus.create_task("review feat-noverdict", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        fake_out = {"result": "```json\n{unparseable: true}\n```", "usage": {}}
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": fake_out}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+
+        updated = bus.get(review["id"])
+        self.assertEqual(updated["status"], "failed")
+        self.assertIn("verdict", updated["reason"])
+        self.assertIn("unparseable", updated["resume_hint"]["raw"])
+
+
+class RunClaudeBudgetExitReason(unittest.TestCase):
+    """T-0134: a non-zero exit with parseable JSON (typical of --max-budget-usd cutoffs) must carry a "reason"
+    string, not silently drop into a dict run_worker can't read."""
+
+    class FakePopenBudgetExceeded(FakePopen):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.returncode = 1
+
+        def communicate(self, timeout=None):
+            return json.dumps({"is_error": True, "result": "budget exceeded", "usage": {}}), ""
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = self.FakePopenBudgetExceeded
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_non_zero_exit_with_json_returns_reason(self):
+        t = bus.create_task("budget-test", "s", ["a"], ["x.py"], role="execute", tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", ["execute"])
+        pool = P.Pool()
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS["execute"], 2.0, 60)
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("rc=1", r["reason"])
+        self.assertIn("budget exceeded", r["reason"])
+
+
+class RunWorkerMissingReason(unittest.TestCase):
+    """T-0134: run_worker must not KeyError when run_claude returns a failure dict without a "reason" key, and
+    should preserve any partial output as a resume_hint for the next attempt."""
+
+    def test_failed_without_reason_key_sets_default_and_resume_hint(self):
+        task = bus.create_task("feat-noreason", "s", ["a"], ["rv.py"], role="execute")
+        (TMP / "wt" / task["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        orig_run_claude = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "failed", "output": {"result": "partial"}}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(task["id"])
+        updated = bus.get(task["id"])
+        self.assertEqual(updated["status"], "failed")
+        self.assertEqual(updated["reason"], "unknown failure")
+        self.assertEqual(updated["resume_hint"]["partial_output"], "partial")
 
 
 class SpecReview(unittest.TestCase):
@@ -155,6 +300,76 @@ class SpawnBase(unittest.TestCase):
         diff = spawn.scoped_diff(review)
         self.assertIn("+B = 1", diff)
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
+
+
+class SecretsForRole(unittest.TestCase):
+    """env-form secrets (headless hosts, T-0079): ENV_NAME = "env:OTHER_NAME" reads OTHER_NAME from os.environ;
+    a missing var is skipped, not raised; the command form (today's laptop config) is untouched."""
+
+    def with_secrets_cfg(self, secrets):
+        orig_config = P.config
+        P.config = lambda: {**orig_config(), "secrets": secrets}
+        self.addCleanup(lambda: setattr(P, "config", orig_config))
+
+    def test_env_form_reads_present_var(self):
+        self.with_secrets_cfg({"scout": {"FOO": "env:T0079_TEST_VAR"}})
+        os.environ["T0079_TEST_VAR"] = "s3cr3t"
+        self.addCleanup(lambda: os.environ.pop("T0079_TEST_VAR", None))
+        self.assertEqual(spawn.secrets_for_role("scout"), {"FOO": "s3cr3t"})
+
+    def test_env_form_missing_var_is_skipped_without_raising(self):
+        self.with_secrets_cfg({"scout": {"FOO": "env:T0079_MISSING_VAR"}})
+        os.environ.pop("T0079_MISSING_VAR", None)
+        self.assertEqual(spawn.secrets_for_role("scout"), {})
+
+    def test_command_form_behaviour_unchanged(self):
+        self.with_secrets_cfg({"scout": {"FOO": "echo -n hello"}})
+        self.assertEqual(spawn.secrets_for_role("scout"), {"FOO": "hello"})
+
+
+class OauthTokenInjection(unittest.TestCase):
+    """CLAUDE_CODE_OAUTH_TOKEN injection (headless hosts, T-0079): run_claude puts the env var named by the
+    account's oauth_token_env into the child's CLAUDE_CODE_OAUTH_TOKEN when it's configured and set; leaves it
+    out otherwise."""
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = FakePopen
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        FakePopen.last_env = None
+        # run_claude's trust_workspace writes acct.config_dir/.claude.json; never touch the real ~/.claude-*
+        # profiles from a test, so no-op it here.
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+        # scrub so an ambient CLAUDE_CODE_OAUTH_TOKEN on the test host can't mask the "omit" assertions
+        had = os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        if had is not None:
+            self.addCleanup(lambda: os.environ.__setitem__("CLAUDE_CODE_OAUTH_TOKEN", had))
+
+    def run_claude_task(self, oauth_token_env=""):
+        t = bus.create_task("oauth-test", "s", ["a"], ["x.py"], role="execute", tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", ["execute"], oauth_token_env=oauth_token_env)
+        pool = P.Pool()
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS["execute"], 2.0, 60)
+        self.assertEqual(r["status"], "done")
+        return FakePopen.last_env
+
+    def test_injects_token_when_configured_and_set(self):
+        os.environ["T0079_OAUTH_VAR"] = "tok-abc"
+        self.addCleanup(lambda: os.environ.pop("T0079_OAUTH_VAR", None))
+        env = self.run_claude_task(oauth_token_env="T0079_OAUTH_VAR")
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "tok-abc")
+
+    def test_omits_token_when_configured_but_unset(self):
+        os.environ.pop("T0079_OAUTH_VAR_UNSET", None)
+        env = self.run_claude_task(oauth_token_env="T0079_OAUTH_VAR_UNSET")
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+
+    def test_omits_token_when_not_configured(self):
+        env = self.run_claude_task(oauth_token_env="")
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
 
 
 if __name__ == "__main__":

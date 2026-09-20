@@ -3,19 +3,31 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, os, subprocess, sys, threading, time
+import fcntl, json, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, bus, executor, merge, spawn
-from .pool import Pool
+from . import STATE, bus, executor, handover, merge, spawn
+from .pool import Pool, fallback_tier
 
 SPEC_REVIEW_MIN = 5   # complexity at which a spec must be reviewed before an executor sees it
 DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
 LOCK_PATH = STATE / "daemon.lock"
+HANDOVER_INTERVAL_S = 15 * 60
+HANDOVER_STATE = STATE / "handover_state.json"
 
 
 def notify(msg):
     print(f"[notify] {msg}", file=sys.stderr)
-    if sys.platform == "darwin":
+    url = os.environ.get("ORCH_NOTIFY_URL")
+    if url:
+        try:
+            # msg is untrusted (merge stderr, task titles): capped the same as the osascript arm below so an
+            # unbounded blob of git output is never shipped whole to an external webhook.
+            req = urllib.request.Request(url, data=msg[:200].encode(), method="POST",
+                                          headers={"Content-Type": "text/plain"})
+            urllib.request.urlopen(req, timeout=5).close()
+        except Exception as e:
+            print(f"[notify] webhook failed: {e}", file=sys.stderr)
+    if sys.platform == "darwin" and os.environ.get("ORCH_NOTIFY_DESKTOP") != "0":
         # msg is untrusted (merge stderr, task titles): passed as an argv item, never interpolated into the
         # AppleScript source, so a quote in it cannot break out and run arbitrary local commands.
         subprocess.run(["osascript", "-e", "on run argv", "-e",
@@ -41,6 +53,79 @@ def stamp(tid, stage, **fields):
         pipeline[stage] = time.time()
         bus.update(tid, pipeline=pipeline, **fields)
     return True
+
+
+def _git_in(worktree, *args):
+    return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+
+
+def _requeue(tid, pipeline):
+    """Put a task back in the queue for dispatch() to retry. Clearing pipeline.dispatched_at is what actually
+    makes that retry happen: dispatch()'s stamp() no-ops when the stage is already stamped, so a requeue that
+    left dispatched_at in place would leave the task queued forever without a live worker."""
+    clean = {k: v for k, v in (pipeline or {}).items() if k != "dispatched_at"}
+    bus.update(tid, status="queued", pid=None, reason="process died; requeued", pipeline=clean)
+    return "requeued"
+
+
+def reconcile_dead(t):
+    """A running task whose worker died >60s ago: the `claude -p` child (spawn.py Popen) can outlive the daemon
+    thread that would have posted its result, finish and commit in its worktree, and leave the task stuck
+    "running" with a dead pid. Requeuing unconditionally would redo that finished work on top of the executor's
+    own commit (gotchas.md 2026-09-18: T-0115, commit abc3f56 sat in wt/T-0115 while the task went back to
+    queued). Only an execute task with a worktree gets the extra check: a clean worktree with commits ahead of
+    its base is posted as a done result so gate() re-gates it normally; a dirty one is held for the Planner.
+    Everything else (scout/review/etc, or an execute task with no worktree or no commits ahead) requeues as
+    before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
+    tid, worktree = t["id"], t.get("worktree")
+    if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
+        return _requeue(tid, t.get("pipeline"))
+
+    base = None
+    parent = t.get("parent")
+    if parent:
+        r = _git_in(worktree, "merge-base", "HEAD", f"goal/{parent}")
+        if r.returncode == 0:
+            base = r.stdout.strip()
+    # No goal/<parent> branch to merge-base against (parentless task, or the first execute task of a goal that
+    # hasn't cut its goal branch yet): fall back to the trunk the worktree was actually cut from.
+    if base is None:
+        r = _git_in(worktree, "merge-base", "HEAD", "origin/main")
+        if r.returncode == 0:
+            base = r.stdout.strip()
+    if base is None:
+        r = _git_in(worktree, "merge-base", "HEAD", "main")
+        if r.returncode == 0:
+            base = r.stdout.strip()
+    if base is None:
+        return _requeue(tid, t.get("pipeline"))
+
+    r = _git_in(worktree, "rev-list", "--count", f"{base}..HEAD")
+    ahead = int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else 0
+    if ahead == 0:
+        return _requeue(tid, t.get("pipeline"))
+
+    # --porcelain lists untracked files too, not just modified ones; they count as dirty here as well since
+    # holding the task for the Planner is the safe direction when the daemon can't tell what they are.
+    status = _git_in(worktree, "status", "--porcelain")
+    sha = _git_in(worktree, "rev-parse", "HEAD").stdout.strip()
+    if status.stdout.strip():
+        bus.update(tid, status="held", hold_reason="orphaned_dirty_worktree", pid=None,
+                   resume_hint={"commit": sha, "dirty": status.stdout.splitlines()[:20]})
+        notify(f"{tid}: dead worker left a dirty worktree with commit {sha[:8]} ahead of {base[:8]}; held")
+        return "held"
+
+    bus.post_result(tid, {
+        "summary": f"executor exited without posting a result; daemon found commit {sha} ahead of "
+                   f"{base[:8]} in the worktree and re-gated it",
+        "commit": sha,
+        "executed_by": t.get("executor") or f"claude:{t.get('tier', 'sonnet')}",
+        "orphaned": True,
+        "provenance": ["repo"],
+    }, "done")
+    print(f"[daemon] {tid}: dead worker left commit {sha[:8]} ahead of {base[:8]} in the worktree; re-gated",
+          file=sys.stderr)
+    return "regated"
 
 
 def stale(t):
@@ -81,11 +166,43 @@ def already_merged(t):
     return False
 
 
+def _codex_available(pool):
+    """True iff some enabled execute-role executor is not cooling right now. A row that is merely saturated
+    (running == max_parallel) still counts as available -- only a cooldown takes it out of the pool -- so a
+    queue of ready tasks against four busy-but-healthy rows waits for the next tick instead of spilling into
+    the Claude fallback branch below."""
+    return any(ex.enabled and "execute" in ex.roles and not ex.cooling() for ex in pool.executors.values())
+
+
+def _fallback_mode(pool):
+    """True iff no execute executor is available at all (every one cooling) and the pool is configured to
+    dispatch to a Claude tier instead of holding. pool.cfg is read with .get and the current defaults so a
+    pool.toml without a [codex] table can't raise here."""
+    return not _codex_available(pool) and pool.cfg.get("codex", {}).get("on_exhausted", "hold") == "fallback_claude"
+
+
 def free_slots(pool):
     """How many execute dispatches this tick may make: the executor pool's idle parallelism. Bounds tick()'s work
-    so a queue of forty ready tasks does not fork forty subprocesses at once."""
-    return sum(max(0, ex.max_parallel - ex.running) for ex in pool.executors.values()
-               if ex.enabled and "execute" in ex.roles and not ex.cooling())
+    so a queue of forty ready tasks does not fork forty subprocesses at once.
+
+    Only when every enabled execute executor is cooling (never merely saturated) and codex.on_exhausted ==
+    "fallback_claude" does executor.start()'s _exhausted() path (executor.py:110) route tasks to a Claude
+    fallback tier instead of holding them -- so the real ceiling then is limits.max_parallel_claude_workers, less
+    every in-flight Claude worker of any role (running, assigned_to or executor starting "claude:") and every
+    execute task already dispatched this tick but not yet claimed (gotchas.md 2026-09-18: T-0070 needed a hand
+    dispatch without this; a later review round found the saturated-vs-cooling conflation fixed above)."""
+    codex_slots = sum(max(0, ex.max_parallel - ex.running) for ex in pool.executors.values()
+                      if ex.enabled and "execute" in ex.roles and not ex.cooling())
+    if not _fallback_mode(pool):
+        return codex_slots
+    running_claude = sum(1 for t in bus.read(status="running")
+                         if (t.get("assigned_to") or "").startswith("claude:")
+                         or (t.get("executor") or "").startswith("claude:"))
+    inflight_dispatches = sum(1 for t in bus.read(status="queued", role="execute")
+                              if (t.get("pipeline") or {}).get("dispatched_at")
+                              and not (t.get("pipeline") or {}).get("gated_at"))
+    max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
+    return max(0, max_workers - running_claude - inflight_dispatches)
 
 
 def spawn_async(fn, *args):
@@ -119,11 +236,14 @@ def _dispatch_worker(task_id, prompt):
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
+    fallback = _fallback_mode(pool)
     for t in bus.read(status="queued", role="execute"):
         if stale(t) or not bus.ready(t):
             continue
         verdict = t.get("spec_review_verdict")
         if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
+            if fallback and fallback_tier(t["complexity"]) is None:
+                continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if slots <= 0:
                 break
             if stamp(t["id"], "dispatched_at"):
@@ -144,6 +264,19 @@ def dispatch(pool):
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
 
 
+def review_tier(t):
+    """Never let a model review its own output (CLAUDE.md rule): a task the daemon fell back to a Claude tier for
+    (executor.py's _exhausted(), executor field "claude:<tier>") must be reviewed by the other Claude tier, not
+    the reviewer's usual sonnet default (gotchas.md 2026-09-18: T-0071 was sonnet-executed and sonnet-reviewed).
+    Codex-executed tasks keep the default tier."""
+    ex = t.get("executor") or ""
+    if ex.startswith("claude:sonnet"):
+        return "opus"
+    if ex.startswith("claude:opus"):
+        return "sonnet"
+    return "sonnet"
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
     open a review task (everything else)."""
@@ -162,12 +295,21 @@ def gate(pool):
             continue
         if not stamp(t["id"], "gated_at"):
             continue
+        orphaned = bool((t.get("result") or {}).get("orphaned"))
         try:
-            if t["complexity"] <= DIRECT_MERGE_MAX:
+            if not orphaned and t["complexity"] <= DIRECT_MERGE_MAX:
                 report_merge(t["id"], merge.merge(t["id"]))
             else:
-                r = bus.create_task(f"review: {t['title']}", t["spec"], t["acceptance"], t["scope"], role="review",
-                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"])
+                spec = t["spec"]
+                if orphaned:
+                    # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
+                    # not from an executor that actually finished: never let complexity alone route it straight
+                    # to merge, whatever the task's normal tier would be.
+                    spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
+                            f"have died mid-task\n\n{spec}")
+                r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+                                    inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
+                                    tier=review_tier(t))
                 spawn_async(spawn.run_worker, r["id"])
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
@@ -193,7 +335,7 @@ def merge_reviewed(pool):
             continue
         if already_merged(src):
             continue
-        verdict = src.get("review_verdict") or r.get("review_verdict")
+        verdict = src.get("review_verdict") or r.get("review_verdict") or (r.get("result") or {}).get("verdict")
         if verdict == "approve":
             # stamped before the merge, not after: a conflict leaves merged_into unset, and retrying it every tick
             # would just rebuild the same conflict
@@ -207,11 +349,65 @@ def merge_reviewed(pool):
                 notify(f"{src['id']}: review asked for changes; Planner writes the fix round")
 
 
+def _handover_last_at():
+    try:
+        return json.loads(HANDOVER_STATE.read_text()).get("handover_last_at", 0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return 0
+
+
+def _save_handover_last_at(now):
+    """Read-modify-write .orchestrator/handover_state.json under an flock on the file itself, the same pattern
+    as pool._save_planner_account -- so a concurrent tick (another thread, or another daemon process briefly
+    racing the lock file) can't clobber this timestamp with a stale read."""
+    HANDOVER_STATE.parent.mkdir(parents=True, exist_ok=True)
+    with open(HANDOVER_STATE, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.seek(0)
+            raw = fh.read()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {}
+            data["handover_last_at"] = now
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(data, indent=1))
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def maybe_handover(reason, now=None):
+    """Write the auto-handover section at most once every HANDOVER_INTERVAL_S, so plan.md is never staler than
+    that even when the Planner is gone. The throttle timestamp lives in its own handover_state.json, not
+    pool_state.json, so a handover tick never races Pool.save()'s full read-modify-write of the pool's own
+    state."""
+    now = now if now is not None else time.time()
+    if now - _handover_last_at() < HANDOVER_INTERVAL_S:
+        return False
+    try:
+        handover.write(reason)
+    except Exception as e:
+        print(f"[daemon] handover failed: {e}", file=sys.stderr)
+        return False
+    _save_handover_last_at(now)
+    return True
+
+
 def tick(pool=None):
     pool = pool or Pool()
+    try:
+        pool.tally_planner()
+    except Exception as e:
+        print(f"[daemon] tally_planner failed: {e}", file=sys.stderr)
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
-            bus.update(t["id"], status="queued", pid=None, reason="process died; requeued")
+            try:
+                reconcile_dead(t)
+            except Exception as e:
+                print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
+                continue
     for stage in (dispatch, gate, merge_reviewed):
         try:
             stage(pool)
@@ -225,6 +421,7 @@ def tick(pool=None):
             notify(f"account {a.id} hit its daily budget; tasks held")
     if not pool.codex_available() and pool.codex.cooling():
         notify("Executor (Codex) cooling; execute tasks held, refill the pipeline")
+    maybe_handover("daemon tick")
 
 
 def acquire_lock():

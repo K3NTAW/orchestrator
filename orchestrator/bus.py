@@ -11,7 +11,8 @@ ROLES = {"scout", "triage", "execute", "review", "challenge", "spec_review"}
 STATUSES = {"queued", "held", "running", "done", "failed"}
 
 
-LOCK = STATE / "bus.lock"
+LOCK_NAME = "bus.lock"
+LOCK = STATE / LOCK_NAME
 _held = threading.local()
 
 
