@@ -597,21 +597,26 @@ def accepted_goals(root=STATE):
     tasks_dir = root / "tasks"
     tasks = [json.loads(path.read_text()) for path in sorted(tasks_dir.glob("T-*.json"))] if tasks_dir.exists() else []
     task_by_id = {task["id"]: task for task in tasks}
-    goal_ids = sorted({task.get("parent") for task in tasks if task.get("parent")})
+    goal_ids = sorted({task.get("parent") for task in tasks if task.get("parent")} |
+                      {task["id"] for task in tasks if task.get("pr_url") or
+                       isinstance(task.get("result"), dict) and task["result"].get("pr_url")})
     accepted = []
     for goal_id in goal_ids:
         goal = task_by_id.get(goal_id)
         children = [task for task in tasks if task.get("parent") == goal_id and task.get("role") == "execute"]
-        if goals.task_pr_url(goal) or (goal and goal.get("status") == "done" and all(child.get("merged_into") for child in children)):
+        if (goal and (goal.get("pr_url") or isinstance(goal.get("result"), dict) and goal["result"].get("pr_url"))) or goals.task_pr_url(goal) or (goal and goal.get("status") == "done" and all(child.get("merged_into") for child in children)):
             accepted.append(goal_id)
     return accepted
 
 
 def tokens_per_accepted_goal(root=STATE):
+    """Mean accepted-lineage goal tokens; retain historical goal totals without merged roots."""
     card = by_goal(root)
     goal_ids = accepted_goals(root)
     count = len(goal_ids)
-    total = sum(card.get(goal_id, {}).get("total_tokens", 0) for goal_id in goal_ids)
+    attributed = efficiency(root)["goals"]
+    total = sum(attributed[gid]["tokens"] if attributed.get(gid, {}).get("accepted_tasks")
+                else card.get(gid, {}).get("total_tokens", 0) for gid in goal_ids)
     return {"tokens": total / count if count else None, "count": count, "goal_ids": goal_ids}
 
 
@@ -625,10 +630,13 @@ def format_task_tokens_cell(entry):
 
 
 def usd_per_accepted_goal(root=STATE):
+    """Mean accepted-lineage goal USD; retain historical goal totals without merged roots."""
     card = by_goal(root)
     goal_ids = accepted_goals(root)
     count = len(goal_ids)
-    total = sum(card.get(goal_id, {}).get("total_usd", 0.0) for goal_id in goal_ids)
+    attributed = efficiency(root)["goals"]
+    total = sum(attributed[gid]["usd"] if attributed.get(gid, {}).get("accepted_tasks")
+                else card.get(gid, {}).get("total_usd", 0.0) for gid in goal_ids)
     return {"usd": total / count if count else 0.0, "count": count, "goal_ids": goal_ids}
 
 
@@ -673,4 +681,226 @@ def format_premium_summary(summary):
     for row in summary["exceptions"]:
         lines.append(f"soft-budget exception {row['goal_id']}: {row['launches']}>{row['limit']} "
                      f"(advisory); reasons: {row['reasons']}")
+    return "\n".join(lines)
+
+
+EFFICIENCY_BUCKETS = {
+    "planner": "Planner", "scout": "Scout", "execute": "Execution",
+    "fix_round": "Fix rounds", "spec_review": "Spec review", "review": "Code review",
+    "challenge": "Challenge", "jev": "Jev", "other": "Other",
+}
+
+
+def _task_lineage(task, tasks):
+    """Resolve fix_round_for against this snapshot, counting edges with cycle protection."""
+    seen = set()
+    index = 0
+    while task.get("id") not in seen:
+        seen.add(task.get("id"))
+        target = (task.get("constraints") or {}).get("fix_round_for")
+        if not target or target in seen:
+            break
+        index += 1
+        task = tasks.get(target, {"id": target})
+    terminal = dict(task, constraints={})
+    return attribution.lineage(terminal)["root"], index
+
+
+def _attributed(row, tasks):
+    """Fill absent P0 attribution from task metadata; preserve persisted attribution."""
+    fields = ("bucket", "lineage_root", "round_index", "band", "task_class", "executor", "model")
+    if all(key in row for key in fields):
+        return row
+    task = tasks.get(row.get("task"), {})
+    lineage_root, index = _task_lineage(task, tasks)
+    executor_id = row.get("executor") or task.get("executor")
+    try:
+        cfg = attribution.bus.pool_config()
+    except (OSError, ValueError):
+        cfg = {}
+    defaults = {
+        "bucket": attribution.bucket_of(row.get("role") or task.get("role"), task or None),
+        "lineage_root": lineage_root or row.get("task"), "round_index": index,
+        "band": attribution.band(task.get("complexity")),
+        "task_class": attribution.task_class(task) if task else None,
+        "executor": executor_id,
+        "model": task.get("model") or attribution.model_of(executor_id, row.get("tier") or task.get("tier"), cfg),
+    }
+    return {**defaults, **row}
+
+
+def _efficiency_rows(root, tasks):
+    """Read worker and Jev usage once, excluding Jev's non-usage gate decision ledger."""
+    global _last_malformed_lines
+    _last_malformed_lines = 0
+    paths = sorted((root / "runs").glob("*.jsonl"))
+    paths += [p for p in sorted((root / "runs" / "jev").glob("*.jsonl")) if p.name != "gate.jsonl"]
+    rows = []
+    for path in paths:
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                _last_malformed_lines += 1
+                continue
+            if not isinstance(row, dict):
+                _last_malformed_lines += 1
+                continue
+            if path.parent.name == "jev":
+                row = {**row, "bucket": "jev"}
+            row = _attributed(row, tasks)
+            task = tasks.get(row.get("task"), {})
+            # Review/challenge tasks name their subject in constraints or inputs.
+            if row["bucket"] in ("review", "spec_review", "challenge"):
+                constraints = task.get("constraints") or {}
+                inputs = row.get("inputs") or task.get("inputs") or []
+                target = constraints.get("review_for") or constraints.get("spec_review_for") or (inputs[0] if inputs else None)
+                if isinstance(target, str) and target in tasks:
+                    row = dict(row, lineage_root=_task_lineage(tasks[target], tasks)[0])
+            lineage_root = row.get("lineage_root") or row.get("task") or "unknown"
+            parent = task.get("parent") or tasks.get(lineage_root, {}).get("parent")
+            rows.append(dict(row, lineage_root=lineage_root, goal_id=row.get("goal_id") or parent or "unknown"))
+    return rows
+
+
+def _stamp(value):
+    """Epoch seconds from numeric or ISO stamps; absent/invalid stamps are undefined."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        from datetime import timezone
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _efficiency_summary(rows, tasks):
+    """Rates use defined tasks only; median/max use lineage tokens; amplification = Total/Execution.
+
+    Tokens sum _tokens_of (cache reads discounted 10:1); usd and turns sum recorded values;
+    calls count usage rows. Distribution counts rows and effective tokens per model per bucket.
+    """
+    breakdown = dict.fromkeys(EFFICIENCY_BUCKETS.values(), 0)
+    models = {}
+    for row in rows:
+        tokens = _tokens_of(row)
+        bucket = row.get("bucket") or "other"
+        breakdown[EFFICIENCY_BUCKETS.get(bucket, "Other")] += tokens
+        model = models.setdefault(row.get("model") or "unknown", {})
+        entry = model.setdefault(bucket, {"rows": 0, "tokens": 0})
+        entry["rows"] += 1
+        entry["tokens"] += tokens
+    breakdown["Total"] = sum(breakdown.values())
+    amplification = breakdown["Total"] / breakdown["Execution"] if breakdown["Execution"] else None
+    breakdown["Amplification"] = amplification
+    first = [t["first_pass"] for t in tasks if t["first_pass"] is not None]
+    fixes = [t["fix_rounds"] for t in tasks if t["fix_rounds"] is not None]
+    tokens = [t["tokens"] for t in tasks]
+    return {"tokens": breakdown["Total"], "usd": sum(r.get("usd") or 0 for r in rows),
+            "calls": len(rows), "turns": sum(r.get("turns") or 0 for r in rows),
+            "accepted_tasks": len(tasks), "first_pass_rate": sum(first) / len(first) if first else None,
+            "first_pass_defined_count": len(first),
+            "fix_round_rate": sum(n >= 1 for n in fixes) / len(fixes) if fixes else None,
+            "fix_round_defined_count": len(fixes), "avg_fix_rounds": statistics.mean(fixes) if fixes else None,
+            "median_tokens_per_accepted_task": statistics.median(tokens) if tokens else None,
+            "max_tokens_per_accepted_task": max(tokens) if tokens else None,
+            "model_distribution": models, "breakdown": breakdown, "pipeline_amplification": amplification}
+
+
+def efficiency(root=STATE, by=None):
+    """P0 efficiency across all usage, with accepted execute lineages as the rate denominator.
+
+    Task tokens/cost/calls/turns sum all lineage rows. Tokens to first green include ts <=
+    first_green_at; elapsed times subtract created_at. Fix rounds use the recorded count or
+    count descendants linked by fix_round_for. First pass requires first green, zero fixes,
+    and zero gate reds; missing stamps remain None. Goal totals sum accepted lineage rows
+    plus goal planner/scout rows. Unknown and unaccepted usage remain in window breakdowns.
+    """
+    if by not in (None, "goal", "executor", "band", "class", "role"):
+        raise ValueError(f"unsupported efficiency grouping: {by}")
+    tasks = {}
+    for path in sorted((root / "tasks").glob("*.json")):
+        try:
+            task = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        tasks[task.get("id", path.stem)] = task
+    rows = _efficiency_rows(root, tasks)
+    accepted = {}
+    for tid, task in tasks.items():
+        if task.get("role") != "execute" or not task.get("merged_into") or _task_lineage(task, tasks)[0] != tid:
+            continue
+        own = [r for r in rows if r["lineage_root"] == tid]
+        pipeline = task.get("pipeline") or {}
+        green = _stamp(pipeline.get("first_green_at"))
+        created = _stamp(task.get("created_at"))
+        end = _stamp(task.get("accepted_at"))
+        fixes = task.get("lineage_fix_rounds", pipeline.get("lineage_fix_rounds"))
+        if fixes is None:
+            fixes = sum(other != tid and _task_lineage(t, tasks)[0] == tid for other, t in tasks.items())
+        reds = pipeline.get("gate_reds", task.get("gate_reds"))
+        meta = _attributed({"task": tid, "role": "execute"}, tasks)
+        accepted[tid] = {**_efficiency_summary(own, []),
+            "goal_id": task.get("parent") or "unknown", "executor": meta["executor"],
+            "band": meta["band"], "task_class": meta["task_class"], "accepted_at": task.get("accepted_at"),
+            "tokens_to_first_green": sum(_tokens_of(r) for r in own if _stamp(r.get("ts")) is not None and _stamp(r["ts"]) <= green) if green is not None else None,
+            "time_to_first_green_s": green - created if green is not None and created is not None else None,
+            "time_to_accepted_s": end - created if end is not None and created is not None else None,
+            "fix_rounds": fixes, "fix_round_tokens": sum(_tokens_of(r) for r in own if r["bucket"] == "fix_round"),
+            "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None}
+    goal_card = {}
+    for gid in accepted_goals(root):
+        members = {tid for tid, task in accepted.items() if task["goal_id"] == gid}
+        own = [r for r in rows if r["lineage_root"] in members or (r["goal_id"] == gid and r["bucket"] in ("planner", "scout"))]
+        goal_card[gid] = _efficiency_summary(own, [accepted[tid] for tid in members])
+        for metric in ("tokens_to_first_green", "time_to_first_green_s", "time_to_accepted_s",
+                       "fix_rounds", "fix_round_tokens"):
+            values = [accepted[tid][metric] for tid in members]
+            goal_card[gid][metric] = sum(values) if values and all(v is not None for v in values) else None
+    summary = _efficiency_summary(rows, list(accepted.values()))
+    summary.update({"by": by, "tasks": accepted, "goals": goal_card,
+                    "tokens_per_accepted_goal": sum(g["tokens"] for g in goal_card.values()) / len(goal_card) if goal_card else None,
+                    "usd_per_accepted_goal": sum(g["usd"] for g in goal_card.values()) / len(goal_card) if goal_card else None})
+    grouped_rows = {"unknown": []}
+    grouped_tasks = {"unknown": []}
+    for row in rows:
+        task = accepted.get(row["lineage_root"])
+        if by == "role":
+            key = row.get("role") or ("jev" if row["bucket"] == "jev" else "unknown")
+        elif by == "goal":
+            key = row["goal_id"]
+        elif by and task:
+            key = task.get("task_class" if by == "class" else by) or "unknown"
+        elif by is None and task:
+            key = "all"
+        else:
+            key = "unknown"
+        grouped_rows.setdefault(key, []).append(row)
+    for tid, task in accepted.items():
+        if by == "role":
+            continue  # Roles group calls, not task outcomes.
+        key = task["goal_id"] if by == "goal" else task.get("task_class" if by == "class" else by) if by else "all"
+        grouped_tasks.setdefault(key or "unknown", []).append(task)
+    summary["groups"] = {key: _efficiency_summary(grouped_rows.get(key, []), grouped_tasks.get(key, []))
+                         for key in sorted(grouped_rows.keys() | grouped_tasks.keys())}
+    return summary
+
+
+def format_efficiency(card):
+    """Render undefined ratios/stamps as n/a and the ordered amplification footer."""
+    def cell(value):
+        return "n/a" if value is None else str(round(value, 4) if isinstance(value, float) else value)
+    columns = ("tokens", "usd", "accepted_tasks", "first_pass_rate", "first_pass_defined_count",
+               "fix_round_rate", "fix_round_defined_count", "avg_fix_rounds",
+               "median_tokens_per_accepted_task", "max_tokens_per_accepted_task", "pipeline_amplification")
+    lines = ["group\t" + "\t".join(columns)]
+    for name, group in [("total", card), *card["groups"].items()]:
+        lines.append(name + "\t" + "\t".join(cell(group[key]) for key in columns))
+    for name, group in [("total", card), *card["groups"].items()]:
+        lines.append(name + " breakdown: " + ", ".join(f"{key}={cell(value)}" for key, value in group["breakdown"].items()))
     return "\n".join(lines)

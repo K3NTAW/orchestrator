@@ -128,6 +128,18 @@ class Cli(unittest.TestCase):
             output = self._scorecard_output("--by", "goal")
         self.assertIn("tokens per accepted goal: 0 over 1 goals (usd 2.0)", output)
 
+    def test_cli_scorecard_efficiency_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            text = self._scorecard_output("--efficiency", "--by", "band")
+            self.assertIn("n/a", text)
+            self.assertIn("Amplification=", text)
+            self.assertIn("unknown", text)
+            card = json.loads(self._scorecard_output("--efficiency", "--json"))
+            self.assertIsNone(card["by"])
+            self.assertEqual(card["tokens"], 0)
+            self.assertIn("unknown", card["groups"])
+
     def test_scorecard_default_output_unchanged(self):
         with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):
             self.assertEqual(self._scorecard_output(), "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore\n")

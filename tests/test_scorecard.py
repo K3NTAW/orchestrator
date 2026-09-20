@@ -752,3 +752,87 @@ class Bench(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Efficiency(unittest.TestCase):
+    write_task = Scorecard.write_task
+    write_runs = Scorecard.write_runs
+
+    def setUp(self):
+        Scorecard.setUp(self)
+        self.write_task("T-goal", role="goal", pr_url="https://example.test/pull/1")
+        self.write_task("T-root", parent="T-goal", merged_into="main", executor="worker", complexity=5,
+                        created_at=100, accepted_at=160, pipeline={"first_green_at": 130, "gate_reds": 0})
+        self.write_task("T-fix", parent="T-goal", constraints={"fix_round_for": "T-root"})
+        self.write_task("T-review", parent="T-goal", role="review", inputs=["T-fix"])
+        self.write_runs(
+            {"task": "T-root", "role": "execute", "total_tokens": 100, "ts": 110, "usd": 1, "model": "m", "turns": 2},
+            {"task": "T-fix", "role": "execute", "total_tokens": 20, "ts": 120, "usd": 2, "model": "m"},
+            {"task": "T-review", "role": "review", "total_tokens": 30, "ts": 140, "usd": 3},
+            {"role": "planner", "goal_id": "T-goal", "total_tokens": 10},
+            {"total_tokens": 7})
+
+    def test_efficiency_legacy_rows_attributed_at_read_time(self):
+        tasks = {"T-root": {"id": "T-root"}, "T-fix": {"id": "T-fix", "constraints": {"fix_round_for": "T-root"}}}
+        row = scorecard._attributed({"task": "T-fix", "role": "execute"}, tasks)
+        self.assertEqual((row["bucket"], row["lineage_root"], row["round_index"]), ("fix_round", "T-root", 1))
+        self.assertIs(scorecard._attributed(row, tasks), row)
+
+    def test_efficiency_collapses_fix_round_lineage_into_root(self):
+        jev = self.root / "runs/jev"
+        jev.mkdir()
+        (jev / "usage.jsonl").write_text(json.dumps({"task": "T-fix", "input_tokens": 4}) + "\n")
+        card = scorecard.efficiency(self.root)
+        self.assertEqual(set(card["tasks"]), {"T-root"})
+        task = card["tasks"]["T-root"]
+        self.assertEqual((task["tokens"], task["usd"], task["calls"], task["turns"]), (154, 6, 4, 2))
+        self.assertEqual(task["fix_round_tokens"], 20)
+
+    def test_efficiency_first_pass_and_fix_round_rates(self):
+        self.write_task("T-clean", merged_into="main", pipeline={"first_green_at": 120, "gate_reds": 0}, lineage_fix_rounds=0)
+        card = scorecard.efficiency(self.root)
+        self.assertEqual((card["first_pass_rate"], card["fix_round_rate"], card["avg_fix_rounds"]), (.5, .5, .5))
+        self.assertEqual(card["first_pass_defined_count"], 2)
+        self.assertEqual(card["fix_round_defined_count"], 2)
+
+    def test_efficiency_tokens_and_time_to_first_green_use_stamps(self):
+        task = scorecard.efficiency(self.root)["tasks"]["T-root"]
+        self.assertEqual((task["tokens_to_first_green"], task["time_to_first_green_s"], task["time_to_accepted_s"]), (120, 30, 60))
+        self.assertEqual(scorecard._stamp("1970-01-01T00:02:10Z"), 130)
+
+    def test_efficiency_missing_stamps_give_none_not_crash(self):
+        self.write_task("T-root", merged_into="main")
+        task = scorecard.efficiency(self.root)["tasks"]["T-root"]
+        for key in ("tokens_to_first_green", "time_to_first_green_s", "time_to_accepted_s", "first_pass"):
+            self.assertIsNone(task[key])
+        self.assertEqual(task["fix_rounds"], 1)
+
+    def test_efficiency_amplification_breakdown_sums_to_total_and_none_at_zero_execution(self):
+        card = scorecard.efficiency(self.root)
+        breakdown = card["breakdown"]
+        self.assertEqual(list(breakdown), ["Planner", "Scout", "Execution", "Fix rounds", "Spec review", "Code review", "Challenge", "Jev", "Other", "Total", "Amplification"])
+        self.assertEqual(sum(breakdown[key] for key in list(breakdown)[:9]), 167)
+        self.assertEqual(card["pipeline_amplification"], 1.67)
+        self.write_runs({"role": "review", "total_tokens": 2})
+        self.assertIsNone(scorecard.efficiency(self.root)["pipeline_amplification"])
+
+    def test_efficiency_unknown_bucket_is_reported(self):
+        card = scorecard.efficiency(self.root, by="goal")
+        self.assertEqual(card["groups"]["unknown"]["tokens"], 7)
+        self.assertEqual(sum(g["tokens"] for g in card["groups"].values()), card["tokens"])
+
+    def test_efficiency_goal_total_matches_tokens_per_accepted_goal(self):
+        card = scorecard.efficiency(self.root)
+        self.assertEqual(card["goals"]["T-goal"]["tokens"], scorecard.tokens_per_accepted_goal(self.root)["tokens"])
+        self.assertEqual(card["usd_per_accepted_goal"], scorecard.usd_per_accepted_goal(self.root)["usd"])
+
+    def test_efficiency_group_by_band_class_executor_role(self):
+        for by, key in (("band", "4-6"), ("class", "unfamiliar"), ("executor", "worker"), ("role", "execute")):
+            card = scorecard.efficiency(self.root, by=by)
+            self.assertEqual(card["groups"][key]["tokens"], 120 if by == "role" else 150)
+            self.assertEqual(sum(g["tokens"] for g in card["groups"].values()), 167)
+            self.assertIn("unknown", card["groups"])
+
+    def test_efficiency_model_distribution(self):
+        model = scorecard.efficiency(self.root)["model_distribution"]["m"]
+        self.assertEqual(model, {"execute": {"rows": 1, "tokens": 100}, "fix_round": {"rows": 1, "tokens": 20}})

@@ -134,7 +134,8 @@ def main():
     ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard")
-    sc.add_argument("--by", default="executor", choices=["executor", "tier", "task", "goal"])
+    sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role"])
+    sc.add_argument("--efficiency", action="store_true")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -153,6 +154,13 @@ def main():
     bsub.add_parser("show")
     bs = bsub.add_parser("set"); bs.add_argument("model_id"); bs.add_argument("--by", required=True); bs.add_argument("metrics", nargs="+", metavar="key=value")
     a = ap.parse_args()
+    if a.cmd == "scorecard":
+        if a.efficiency and a.by in ("tier", "task"):
+            ap.error("--efficiency supports --by goal|executor|band|class|role")
+        if not a.efficiency:
+            a.by = a.by or "executor"
+            if a.by in ("band", "class", "role"):
+                ap.error("this --by requires --efficiency")
     if a.cmd == "status":
         if a.plain:
             s = Pool().status()
@@ -235,7 +243,10 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.planner:
+        if a.efficiency:
+            card = scorecard.efficiency(root=scorecard.STATE, by=a.by)
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_efficiency(card))
+        elif a.planner:
             from . import planner_runs
             summary = planner_runs.premium_summary(root=scorecard.STATE)
             print(json.dumps(summary, indent=1) if a.json else scorecard.format_premium_summary(summary))
