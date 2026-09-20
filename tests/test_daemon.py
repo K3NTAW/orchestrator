@@ -1312,6 +1312,40 @@ class Daemon(unittest.TestCase):
         daemon.tick(self.review_pool("always"))
         self.assertEqual(self.merged, [t])
 
+    def test_open_reviews_assigns_acceptance_and_adversarial_roles_when_complementary(self):
+        pool = self.review_pool("always")
+        pool.cfg["review"]["complementary"] = True
+        t = self.task("complementary", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick(pool)
+        reviews = bus.read(role="review")
+        self.assertEqual([r["constraints"]["reviewer_role"] for r in reviews],
+                         ["acceptance", "adversarial"])
+
+    def test_open_reviews_unchanged_when_complementary_false(self):
+        pool = self.review_pool("always")
+        pool.cfg["review"]["complementary"] = False
+        t = self.task("general reviews", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick(pool)
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual(sorted(r["tier"] for r in reviews), ["opus", "sonnet"])
+        self.assertTrue(all("reviewer_role" not in r["constraints"] for r in reviews))
+
+    def test_open_reviews_security_review_keeps_tier_bump_and_gets_role(self):
+        pool = self.review_pool("always")
+        pool.cfg["review"]["complementary"] = True
+        daemon._load_review_cfg(pool)
+        t = self.task("security pair", complexity=3)
+        bus.update(t, worktree=str(TMP), executor="astra")
+        reviews = daemon._open_reviews(bus.get(t), 2, "security_paths:orchestrator/*.py")
+        stored = [bus.get(r["id"]) for r in reviews]
+        self.assertEqual([r["constraints"]["reviewer_role"] for r in stored],
+                         ["acceptance", "adversarial"])
+        self.assertTrue(all(r["tier"] == daemon._security_review_tier(bus.get(t)) for r in stored))
+        self.assertTrue(all(r["complexity"] >= daemon.SECURITY_CHECKLIST_COMPLEXITY for r in stored))
+
     def test_two_reviews_claude_executor_same_non_executing_tier(self):
         """T-0150 review item 3: for a Claude-executed complexity-7 task, both reviews must land on the
         non-executing tier (never the tier that executed), not split across the two tiers. Both reviews may

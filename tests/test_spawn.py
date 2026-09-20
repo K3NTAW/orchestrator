@@ -497,6 +497,36 @@ class Render(unittest.TestCase):
         self.assertIn("test_build_widget: present", text)
         self.assertIn("last_failure_head: boom", text)
 
+    def test_review_packet_role_section_for_each_role(self):
+        reviewed = {**self.packet_fixture(), "spec": "ordinary change"}
+        packets = {}
+        for role in ("acceptance", "adversarial"):
+            task = {**reviewed, "constraints": {"reviewer_role": role}}
+            packets[role] = spawn.review_packet(task, reviewed)
+            self.assertIn("## role", packets[role])
+            self.assertIn(f"reviewer-role@{role}", packets[role].splitlines()[0])
+        self.assertIn("every acceptance criterion", packets["acceptance"])
+        self.assertIn("adversarial reasoning", packets["adversarial"])
+        self.assertNotEqual(spawn.packet_run_meta(packets["acceptance"])["version"],
+                            spawn.packet_run_meta(packets["adversarial"])["version"])
+
+    def test_review_packet_security_section_present_for_both_roles_on_security_path(self):
+        reviewed = {**self.packet_fixture(), "spec": "ordinary change", "scope": ["auth/login.py"]}
+        cfg = {**P.config(), "review": {"security_paths": ["auth/*"]}}
+        with mock.patch.object(P, "config", return_value=cfg):
+            for role in ("acceptance", "adversarial"):
+                task = {**reviewed, "constraints": {"reviewer_role": role}}
+                text = spawn.review_packet(task, reviewed)
+                self.assertGreater(text.index("## security"), text.index("## role"))
+
+    def test_review_packet_without_role_unchanged(self):
+        task = {**self.packet_fixture(), "spec": "ordinary change"}
+        without_constraints = spawn.review_packet(task, task)
+        with_empty_constraints = spawn.review_packet({**task, "constraints": {}}, task)
+        self.assertEqual(without_constraints, with_empty_constraints)
+        self.assertNotIn("## role", without_constraints)
+        self.assertNotIn("reviewer-role@", without_constraints.splitlines()[0])
+
     def test_review_packet_security_section_only_on_security_path(self):
         task = {**self.packet_fixture(), "spec": "ordinary change"}
         cfg = {**P.config(), "review": {"security_paths": ["auth/*"]}}

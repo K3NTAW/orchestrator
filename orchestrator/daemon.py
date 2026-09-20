@@ -218,9 +218,10 @@ def _load_review_cfg(pool):
     """Refresh the review-policy thresholds from pool.cfg's [review] table. Missing table or keys fall back to
     the defaults set on the module above -- so a pool.toml without [review] behaves exactly as if it had one
     with these values (§review policy, 2026-09-18: reviews were costing as much as execution)."""
-    global SPEC_REVIEW_MIN, DIRECT_MERGE_MAX, TWO_REVIEWS_FROM, SPEC_REVIEW_TIER
+    global SPEC_REVIEW_MIN, DIRECT_MERGE_MAX, TWO_REVIEWS_FROM, SPEC_REVIEW_TIER, REVIEW_COMPLEMENTARY
     global CODE_REVIEW, SECURITY_PATHS, SEMANTIC_PATHS, SEMANTIC_PATTERNS, SECURITY_REVIEW_TIER, _code_review_warned, STAGE_LEASE_S
     review = pool.cfg.get("review", {})
+    REVIEW_COMPLEMENTARY = review.get("complementary", False) is True
     SPEC_REVIEW_MIN = review.get("spec_review_min", 6)
     DIRECT_MERGE_MAX = review.get("direct_merge_max", 3)
     TWO_REVIEWS_FROM = review.get("two_reviews_from", 7)
@@ -861,8 +862,12 @@ def _open_reviews(t, n_reviews, review_reason):
             tier = review_tier(t)
         else:
             tier = _other_tier(existing[0]["tier"])
+        constraints = None
+        if globals().get("REVIEW_COMPLEMENTARY", False) and n_reviews == 2:
+            constraints = {"reviewer_role": "acceptance" if number == 0 else "adversarial"}
         r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
-                            inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier)
+                            inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier,
+                            constraints=constraints)
         if reviewed_sha:
             bus.update(r["id"], reviewed_sha=reviewed_sha)
         spawn_async(spawn.run_worker, r["id"])

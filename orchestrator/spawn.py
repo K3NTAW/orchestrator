@@ -435,6 +435,17 @@ def review_packet(task, reviewed) -> str:
     sections = [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
                 _section("scope", src.get("scope", [])), None,
                 _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines)]
+    reviewer_role = (task.get("constraints") or {}).get("reviewer_role")
+    role_focus = {
+        "acceptance": ("Focus: every acceptance criterion met by the diff, functional correctness, regressions "
+                       "in touched code paths, tests present and meaningful for each acceptance id; leave security "
+                       "and adversarial edge cases to the second reviewer unless blocking"),
+        "adversarial": ("Focus: adversarial reasoning about the diff, security and privilege boundaries, edge cases "
+                        "and failure modes, hidden assumptions and untested paths; leave acceptance bookkeeping to "
+                        "the first reviewer unless blocking"),
+    }
+    if reviewer_role in role_focus:
+        sections.append(_section("role", role_focus[reviewer_role]))
     security_globs = Pool().cfg.get("review", {}).get("security_paths", [])
     matched = sorted({glob for glob in security_globs for path in src.get("scope", []) if Path(path).match(glob)})
     semantic = re.search(r"\b(auth|credential|secret|token|permission|crypt|security)\b",
@@ -475,7 +486,9 @@ def review_packet(task, reviewed) -> str:
     diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
     sections[3] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
-    return _role_packet(body, _base_sha(src, wt), f"task@{src.get('id', '(none)')} scoped-diff@HEAD")
+    role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
+    return _role_packet(body, _base_sha(src, wt),
+                        f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}")
 
 
 def spec_review_packet(task) -> str:
