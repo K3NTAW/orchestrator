@@ -171,7 +171,9 @@ def save(label, root=STATE, since=None):
         cards['routing'] = scorecard.routing_eval(measured)
         cards['reviews'] = {by: scorecard.review_quality(measured, by=by)
                             for by in ('role', 'packet_version')}
-        snapshot = {'saved_at': now.isoformat(),
+        parallel = scorecard.parallelism(measured)
+        snapshot = {'parallelism': {key: parallel[key] for key in ('totals', 'skip_reasons', 'waves')},
+                    'saved_at': now.isoformat(),
                     'window': {'since': since, 'until': now.isoformat(), 'rows_by_bucket': counts,
                                'row_count': len(rows), 'malformed_lines': malformed},
                     'efficiency': cards, 'metrics': _metrics(cards['all'], tasks),
@@ -253,7 +255,8 @@ def compare(a, b, root=STATE):
             x, y = before_group.get(key), after_group.get(key)
             routing['groups'][name][key] = {'before': x, 'after': y,
                                             'absolute': y - x if x is not None and y is not None else None}
-    return {'metrics': metrics, 'reviews': review_comparison, 'routing': routing,
+    parallel = _parallelism_deltas(a.get('parallelism', {}), b.get('parallelism', {}))
+    return {'parallelism': parallel, 'metrics': metrics, 'reviews': review_comparison, 'routing': routing,
             'fingerprint_diff': _changed(a.get('fingerprint', {}), b.get('fingerprint', {})),
             'non_inferior': 'no' if 'worse' in flags else 'undefined' if 'undefined' in flags else 'yes'}
 
@@ -277,5 +280,22 @@ def format_comparison(result):
             values = ', '.join(f"{key}={cell(row['absolute'])} ({row['flag']})"
                                for key, row in metrics.items())
             lines.append(f"review quality {grouping}/{group}: {values}")
+    for key, row in result.get('parallelism', {}).items():
+        values = '\t'.join('undefined' if row[k] is None else cell(row[k])
+                           for k in ('before', 'after', 'absolute'))
+        lines.append(f'parallelism {key}\t{values}')
     lines.append('non-inferior: ' + result['non_inferior'])
     return '\n'.join(lines)
+
+
+def _parallelism_deltas(before, after, prefix=''):
+    result = {}
+    for key in sorted(before.keys() | after.keys()):
+        name = f'{prefix}.{key}' if prefix else key
+        x, y = before.get(key), after.get(key)
+        if isinstance(x, dict) or isinstance(y, dict):
+            result.update(_parallelism_deltas(x or {}, y or {}, name))
+        elif all(v is None or isinstance(v, (int, float)) for v in (x, y)):
+            result[name] = {'before': x, 'after': y,
+                            'absolute': y - x if x is not None and y is not None else None}
+    return result

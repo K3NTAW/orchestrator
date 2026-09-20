@@ -53,6 +53,8 @@ summary whose `tokens` ratio is `null` when no goals are accepted; text displays
 `.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
 calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.
 
+`orchestrator scorecard --parallelism [--goal ID] [--json]` reports per-goal and total executor and Claude worker concurrency (averaged over busy time), queue, dependency, execution, review and merge waits, wall time, DAG critical paths, conflicts, rebase failures, stale events, repair rounds and dispatch-skip reasons. Missing timing evidence displays `undefined`; absent scheduler logs contribute zero events. Baseline saves include a `parallelism` block, and comparisons report its numeric deltas while accepting older snapshots without it.
+
 ## Phase H: efficiency
 
 ### Accounting
