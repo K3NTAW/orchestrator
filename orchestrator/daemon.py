@@ -707,7 +707,6 @@ def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
-    budget_refused = False
     for t in bus.read(status="queued", role="execute"):
         if stale(t) or not bus.ready(t):
             continue
@@ -717,27 +716,13 @@ def dispatch(pool):
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if slots <= 0:
                 break
-            if fallback:
-                acct = pool.pick("execute")
-                account_id = acct.id if acct else "claude"
-            else:
-                ex = pool.pick_executor("execute", t["complexity"], task=t)
-                account_id = ex.id if ex else "codex"
-            if pool.reserve(t["id"], account_id, "execute", t) is None:
-                budget_refused = True
-                pipeline = dict(t.get("pipeline") or {})
-                pipeline["hold_note"] = "budget"
-                bus.update(t["id"], pipeline=pipeline)
-                continue
             if stamp(t["id"], "dispatched_at"):
                 slots -= 1
                 prompt = spawn.render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"])
-                # Bind selection as a keyword inside a one-argument callable so test/mocking wrappers whose
-                # contract is only ``fn(task_id)`` remain compatible.
-                spawn_async(lambda task_id: _dispatch_worker(task_id, prompt, executor_id=account_id), t["id"])
+                spawn_async(_dispatch_worker, t["id"], prompt)
                 complete(t["id"], "dispatched_at")
             else:
-                pool.release(t["id"])
+                continue
         elif verdict == "request_changes":
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")

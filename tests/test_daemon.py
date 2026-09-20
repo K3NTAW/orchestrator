@@ -220,13 +220,29 @@ class Daemon(unittest.TestCase):
         tid = self.task("budget refused")
         before = bus.get(tid)
         reservations = []
+        worker_done = threading.Event()
 
         def refuse(pool, run_key, account_id, role, task):
             reservations.append((run_key, role, task["id"]))
             return None
 
         self.swap(P.Pool, "reserve", refuse)
+        def run_worker(task_id, prompt):
+            try:
+                task = bus.get(task_id)
+                account = P.Pool().pick("execute")
+                if P.Pool().reserve(task_id, account.id, "execute", task) is None:
+                    pipeline = dict(task.get("pipeline") or {})
+                    pipeline["hold_note"] = "budget"
+                    pipeline.pop("dispatched_at", None)
+                    bus.update(task_id, status="queued", pipeline=pipeline)
+                return {"status": "budget"}
+            finally:
+                worker_done.set()
+
+        self.swap(executor, "start", run_worker)
         daemon.tick()
+        self.assertTrue(worker_done.wait(1))
         after = bus.get(tid)
         self.assertEqual(reservations, [(tid, "execute", tid)])
         self.assertEqual(after["status"], "queued")
@@ -243,8 +259,10 @@ class Daemon(unittest.TestCase):
         pool = P.Pool()
         tid = self.task("selected executor")
 
-        def start(task_id, prompt, executor_id):
-            bus.update(task_id, executor=executor_id)
+        def start(task_id, prompt):
+            selected = P.Pool().pick_executor("execute", bus.get(task_id)["complexity"], task=bus.get(task_id))
+            P.Pool().reserve(task_id, selected.id, "execute", bus.get(task_id))
+            bus.update(task_id, executor=selected.id)
             return {"status": "held"}
 
         self.swap(executor, "start", start)
@@ -252,6 +270,25 @@ class Daemon(unittest.TestCase):
         task = bus.get(tid)
         reservation = P.Pool().reservations[tid]
         self.assertEqual(reservation["account"], task["executor"])
+
+    def test_dispatch_passes_no_placeholder_ids(self):
+        self.swap(P.Pool, "pick_executor", lambda *args, **kwargs: None)
+        calls = []
+        done = threading.Event()
+
+        def start(*args, **kwargs):
+            calls.append((args, kwargs))
+            done.set()
+            return {"status": "held"}
+
+        self.swap(executor, "start", start)
+        tid = self.task("no placeholder ids")
+        daemon.dispatch(P.Pool())
+        self.assertTrue(done.wait(1))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], tid)
+        self.assertEqual(len(calls[0][0]), 2)
+        self.assertEqual(calls[0][1], {})
 
     def test_failed_dispatch_stamp_releases_reservation(self):
         self.swap(P, "PERSIST", self.sandbox / "pool_state.json")

@@ -245,12 +245,13 @@ def start(task_id, prompt, executor_id=None):
                 scores = {}
             ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
         if ex is None or ex.provider != "codex":
-            result = _exhausted(pool, t, account_id=executor_id)
+            result = _exhausted(pool, t)
             handed_off = result.get("status") == "fallback"
             return result
         if pool.reserve(task_id, ex.id, "execute", t) is None:
             pipeline = dict(t.get("pipeline") or {})
             pipeline["hold_note"] = "budget"
+            pipeline.pop("dispatched_at", None)
             bus.update(task_id, status="queued", pipeline=pipeline)
             return {"status": "budget", "reason": "budget reservation refused"}
         from .spawn import ensure_worktree
@@ -268,12 +269,12 @@ def start(task_id, prompt, executor_id=None):
             pool.release(task_id, (result or {}).get("usage", {}))
 
 
-def _exhausted(pool, t, run=None, account_id=None):
+def _exhausted(pool, t, run=None):
     """§4.10: hold by default; with on_exhausted=fallback_claude dispatch to sonnet (<=5) / opus (6-8) on an account with headroom.
     Complexity >=9 always holds for Astra. Review of a Claude-executed task must be another model on the other account."""
     pol = pool.cfg["codex"]["on_exhausted"]
     tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
-    acct = next((a for a in pool.accounts if a.id == account_id), None) if account_id else pool.pick("execute")
+    acct = pool.pick("execute")
     if tier is None or acct is None:
         bus.update(t["id"], status="held", hold_reason=f"codex unavailable; policy={pol}; no Claude fallback for complexity {t['complexity']}")
         return {"status": "held", "policy": pol, "codex": pool.status()["codex"]}

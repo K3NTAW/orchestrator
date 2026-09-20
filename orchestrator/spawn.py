@@ -544,6 +544,7 @@ def run_worker(task_id, account_id=None):
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
         pipeline["hold_note"] = "budget"
+        pipeline.pop("dispatched_at", None)
         bus.update(task_id, status="queued", pipeline=pipeline)
         return {"status": "budget"}
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))

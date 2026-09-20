@@ -220,11 +220,26 @@ class Executor(unittest.TestCase):
 
         self.assertEqual(seen["task"], task)
 
+    def test_worker_refusal_requeues_without_hold(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(title="worker budget refusal")
+        bus.update(tid, pipeline={"dispatched_at": time.time()})
+        original_reserve = P.Pool.reserve
+        P.Pool.reserve = lambda *args, **kwargs: None
+        self.addCleanup(lambda: setattr(P.Pool, "reserve", original_reserve))
+
+        result = executor.start(tid, "do it")
+
+        task = bus.get(tid)
+        self.assertEqual(result["status"], "budget")
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(task["pipeline"].get("hold_note"), "budget")
+        self.assertNotIn("hold_reason", task)
+        self.assertNotIn("dispatched_at", task["pipeline"])
+
     def test_exhausted_hold_releases_dispatch_reservation(self):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
         tid = self.exec_task(complexity=9, title="release-dispatch-reservation")
-        dispatch_pool = P.Pool()
-        self.assertIsNotNone(dispatch_pool.reserve(tid, "A", "execute", bus.get(tid)))
         original_pick = P.Pool.pick_executor
         P.Pool.pick_executor = lambda *args, **kwargs: None
         self.addCleanup(lambda: setattr(P.Pool, "pick_executor", original_pick))
@@ -235,11 +250,11 @@ class Executor(unittest.TestCase):
     def test_fallback_handoff_keeps_reservation_until_worker_finishes(self):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
         tid = self.exec_task(complexity=5, title="fallback-keeps-reservation")
-        self.assertIsNotNone(P.Pool().reserve(tid, "A", "execute", bus.get(tid)))
         original_pick, original_worker, original_release = P.Pool.pick_executor, spawn.run_worker, P.Pool.release
         started, finish, releases = executor.threading.Event(), executor.threading.Event(), []
 
         def worker(task_id, account_id=None):
+            self.assertIsNotNone(P.Pool().reserve(task_id, account_id, "execute", bus.get(task_id)))
             started.set(); finish.wait(2)
             P.Pool().release(task_id)
 
