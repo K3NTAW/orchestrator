@@ -1,62 +1,57 @@
-# plan.md — Planner checkpoint (updated 2026-09-19 23:58, session 5, Phase G closed; next goal: docs.kentawaibel.com)
+# plan.md — Planner checkpoint (updated 2026-09-20 12:50, session 5; open goal: T-0353 Phase H efficiency handover)
 
 ## State in one paragraph
-Phase G (T-0260, token economy, complexity 8) closed at 23:56: all eleven sub-goals merged on goal/T-0260 (head 2ca1517, 37 commits over goal/T-0240), tests-green exit 0 externally on wt/goal-T-0260, PR 11 https://github.com/K3NTAW/orchestrator/pull/11 open for the human after PR 10, retrospective in decisions.md 2026-09-19. No task under T-0260 is open. The main checkout stays on goal/T-0240 (the running MCP server loads Phase F code); switch to goal/T-0260 only after PR 11 is merged or the human says so. The next goal is the user's 23:46 request: create docs.kentawaibel.com with the same visual as kentawaibel.com and one entry for the orchestrator (see "Next goal").
+Open goal: T-0353 Phase H, complexity 8: implement /Users/k3ntaw/Documents/orchestrator-efficiency-handover.md on top of goal/T-0260 (Phase G, PR 11 unmerged). Goal branch goal/T-0353 cut from goal/T-0260 head 2ca1517 at 12:48; a read-only checkout of that head sits at wt/goal-T-0260 for scouts (the running server is still Phase F code on goal/T-0240, so scout worktrees are stale and every spec says READ wt/goal-T-0260). Two sonnet scouts on account B are running the gap matrices: T-0354 (handover sections 2-5) and T-0355 (sections 6-11). Next: summarize both once into the matrix below, decide the core changes, write atomic specs with parent T-0353 (the daemon dispatches them into goal/T-0353), then PR 12 goal/T-0353 to main. Phase G closed 2026-09-19 23:56 (PR 11). docs.kentawaibel.com is live (see below).
 
-## docs.kentawaibel.com (requested 2026-09-19 23:46; LIVE 2026-09-20 00:30)
-Repo /Users/k3ntaw/code/docs-kentawaibel (private GitHub K3NTAW/docs-kentawaibel, PR 1 goal/T-0001 to main open for the human). `orchestrator goal start` scaffolded it at 085d4d9 and a headless Planner on account B ran the goal in 11 min for 6.17 USD: five Codex tasks T-0002..T-0006 merged into goal/T-0001 at ebf4a11, zero fix rounds, no reviews. This Planner verified the gate and build on wt/deploy, created Vercel project docs-kentawaibel, added the domain and deployed to production: https://docs.kentawaibel.com serves the site (index and /orchestrator return 200). Deployed from the goal branch, not main. Follow-ups (new goals, on the docs bus): connect the Vercel project to the GitHub repo for automatic deploys; gitignore .vercel; more entries.
-Facts gathered (read-only, session 5):
-- kentawaibel.com is the Vite + React 19 + TypeScript + Tailwind v4 site at /Users/k3ntaw/code/k3ntaw-portfolio (no git repo, deployed with the Vercel CLI; .vercel/project.json links project k3ntaw-portfolio, prj_HIXTMCLlDCM7lNDJ6MJgzxKv38Jk, team k3ntaws-projects). Design tokens live in src/index.css @theme: OKLCH near-black surfaces (bg 0.145, surface 0.205, border 0.32), cool white ink, one azure accent (oklch 0.72 0.15 255), Geist Variable and Geist Mono via @fontsource-variable, motion + lenis for animation, lucide-react icons; components Nav, Hero, Featured, Repos, Skills, About, Footer, CommandPalette.
-- Domain: kentawaibel.com is registered at Vercel with Cloudflare nameservers (lisa/fonzie.ns.cloudflare.com, proxied); docs.kentawaibel.com already resolves to Cloudflare and Vercel answers DEPLOYMENT_NOT_FOUND, so no DNS change is needed: add docs.kentawaibel.com as a domain on a new Vercel project. Vercel CLI 54 is logged in (the human completed the device login at 23:47). No Cloudflare API tooling on this machine (cloudflared cert only); Keychain and ~/.config/f are guardrail-protected.
-- Stack decision (house rules): new repo /Users/k3ntaw/code/docs-kentawaibel, Vite + React + TypeScript + Tailwind v4, the portfolio's @theme tokens copied verbatim, content as markdown files under content/ rendered at build (import.meta.glob + react-markdown + remark-gfm), sidebar of entries, first entry "Orchestrator" written from this repo's README, CLAUDE.md, skills/orchestrate and decisions.md (what it is, roles, lifecycle, bus, daemon, review policy, memory, cost numbers). Deploy: new Vercel project docs-kentawaibel, domain docs.kentawaibel.com. Approval gate for the human: creating the Vercel project and adding the domain are outward-facing; the Planner asks before running them.
-- How to run it: this bus belongs to the orchestrator repo. Use `uv run orchestrator goal start <repo> "<text>"` (scaffolds .orchestrator in the target, creates the GOAL task, launches a headless Planner there), or install into the new repo and run a Planner session in it. Codex worktrees are per ORCH_ROOT, so the docs repo needs its own.
+## Phase H: premium usage evidence (measured, 2026-09-20 12:45)
+- Interactive Planner (Fable, account A): planner_day_tokens 35.2M on 2026-09-19 (status() at 23:24), over the 30M daily budget; this session 5 alone ran Phase G's tail, the docs goal and now Phase H. Zero headless decision runs recorded in this root (no .orchestrator/planner_runs.json). One headless goal Planner (docs repo, Fable, account B): 6.17 USD, 1.0M cache-read tokens, 11 min, 652 s API time.
+- Workers, 3 days (runs/2026-09-18..20, usd is API-equivalent): execute 128 rows 78.19 USD (in 45.8M, out 2.2M, cache_read 230M; mostly Codex), review 83 rows 67.98 USD (cache_read 52M), spec_review 21 rows 13.61 USD, scout 11 rows 6.12 USD.
+- Reading: the premium bottleneck is the interactive Fable session doing bookkeeping the merged Phase G code already automates (marking chains merged, posting Codex results, re-spawning reviews, resetting slot counters, writing fix rounds by hand). The single largest lever is running goal/T-0260 code in the server; Phase H must not rebuild what G7 v4, G6 v4 and G10 already merged.
+- Known gaps from session 5 gotchas (all on goal/T-0260): executor running counters persisted and leaking; codex/codex_reply MCP tools do not post results; requeued reviews never re-dispatched; gate does not check acceptance-named tests exist (Codex skipped them 5 times); plan.md rewritten by the daemon every 15 min (competing writer).
+
+## Phase H gap matrix (to fill from T-0354 and T-0355 once)
+(pending)
+
+## Phase H task map
+- Scouts: T-0354 (sections 2-5), T-0355 (sections 6-11) running on account B.
+- Execute specs: after the matrix.
+
+## Phase G (T-0260) closed 2026-09-19 23:56
+All eleven sub-goals merged on goal/T-0260 (head 2ca1517, 37 commits over goal/T-0240), tests-green exit 0 externally, PR 11 https://github.com/K3NTAW/orchestrator/pull/11 open for the human after PR 10, retrospective in decisions.md. Cost 22.38 USD, 82 tasks, review 62.8 percent.
+
+## docs.kentawaibel.com (LIVE 2026-09-20 00:30)
+Repo /Users/k3ntaw/code/docs-kentawaibel (private GitHub K3NTAW/docs-kentawaibel, PR 1 goal/T-0001 to main open). Headless Planner on account B: 11 min, 6.17 USD, five Codex tasks, zero fix rounds. Vercel project docs-kentawaibel (linked to the GitHub repo, production branch main), domain docs.kentawaibel.com, production deploy from goal/T-0001 at ebf4a11. Merging PR 1 triggers the first automatic deploy.
 
 ## Read first
-1. `bus_read(status_not="done")` then skill `resume`. Nothing live under T-0260; leftovers are superseded/failed.
-2. Planner commits from the main checkout (goal/T-0240): `git status --short` first; stage only .orchestrator/ paths; commit with `git commit -F <scratchpad file>`. planner-mode.sh scans the whole command text: keep backticks, `>`, `<`, and the words it treats as writes (cp, rm, mv, install, tail with a pipe, git rebase/checkout/reset/revert even inside quoted prose, .env) out of Bash text. Use absolute paths: a `cd wt/...` inside a command moves the session cwd. macOS has no `timeout`; use run_in_background instead.
-3. Tool contracts: `spawn_spec_review(<spec_review task id>)`; `spawn_scout(<execute id>)` runs the fallback executor; `spawn_review(<review task id>)`; `merge(task_id, target)` skips the review policy. `codex(task_id, prompt)` and `codex_reply(task_id, delta)` return the result dict and do NOT post it: bus.post_result(tid, {summary, commit, executed_by, provenance:['repo'], usage}, 'done') by hand. Specs are immutable: a fix round is a new task with constraints.fix_round_for; mark the chain merged by hand (bus.update(original, status='done', merged_into=..., merged_via='fix round <id> <sha>', hold_reason=None)) until G7 v4 runs in the server.
-4. Before trusting a Codex result whose acceptance names test ids: `git diff --stat HEAD~1` in the worktree must touch tests/; if not, one codex_reply listing the missing ids fixes it (five cases in Phase G).
-5. Slot counters: pool_state.json running fields leak when a restart kills a Codex process; reset them by hand only when pgrep shows no codex exec and no claude -p worker, then confirm the next tick dispatches.
+1. `bus_read(status_not="done")` then skill `resume`. Live: T-0353 and its children; the rest are superseded/failed leftovers.
+2. Planner commits from the main checkout (goal/T-0240): stage only .orchestrator/ paths; commit with `git commit -F <scratchpad file>`. planner-mode.sh scans the whole command text: keep backticks, `>`, `<`, and the words it treats as writes (cp, rm, mv, install, tail with a pipe, git rebase/checkout/reset/revert, .env) out of Bash text. Use absolute paths. macOS has no `timeout`; use run_in_background.
+3. Tool contracts: `spawn_scout(<scout id>)`; `spawn_review(<review task id>)`; `spawn_spec_review(<spec_review task id>)`; `merge(task_id, target)` skips the review policy. `codex(task_id, prompt)` and `codex_reply(task_id, delta)` return the result dict and do NOT post it: bus.post_result by hand. Specs are immutable: a fix round is a new task with constraints.fix_round_for; mark the chain merged by hand (bus.update(original, status='done', merged_into=..., merged_via='fix round <id> <sha>', hold_reason=None)) until G7 v4 runs in the server.
+4. Before trusting a Codex result whose acceptance names test ids: `git diff --stat HEAD~1` in the worktree must touch tests/; if not, one codex_reply listing the missing ids fixes it.
+5. Slot counters: pool_state.json running fields leak when a restart kills a Codex process; reset only when pgrep shows no codex exec and no claude -p worker.
 6. A review that shows status queued with a "process died; requeued" event never runs again by itself: spawn_review(<id>) by hand.
-7. Restart rule: hand over at ~150k context or when an account's daily budget is reached, only when no worker is alive. Account A planner_day_tokens 35.2M over its 30M budget at 23:24; `orchestrator pick planner` says hold. Keep Planner turns short.
+7. Restart rule: hand over at ~150k context or when an account's daily budget is reached, only when no worker is alive. Keep Planner turns short; this goal's own objective is fewer Fable tokens.
 8. The daemon appends an "Auto-handover" section to this file every 15 min while a goal is open; drop it when rewriting.
+9. Goal branch for T-0353 is goal/T-0353 (from goal/T-0260); execute tasks with parent T-0353 base on it. When Phase H closes: PR 12 goal/T-0353 to main, listing PR 11 as its base.
 
 ## Human items outstanding
-- Merge PRs 6, 7, 8, 9, 10, 11 in order: https://github.com/K3NTAW/orchestrator/pull/11 is Phase G.
+- Merge PRs 6, 7, 8, 9, 10, 11 in order; PR 1 in the docs repo. PR 12 (Phase H) follows.
 - Decisions: latency target, security_paths width, daemon as a process (Phase F review); review budget (Phase G: 22.38 USD, review 63 percent, every review found a defect).
-- Approve before the Planner runs them: `vercel project add docs-kentawaibel` and `vercel domains add docs.kentawaibel.com` for the docs goal.
 
-## Backlog (c2-c3, orchestrator repo, after PR 11)
-- Pool load derives executor running counters from bus tasks (status running, executor == id); drop the legacy codex mirror.
-- codex and codex_reply MCP tools post the result to the bus when the task is running and assigned to codex.
+## Backlog (c2-c3, after PR 11) — candidates for Phase H specs
+- Pool load derives executor running counters from bus tasks; drop the legacy codex mirror.
+- codex and codex_reply MCP tools post the result to the bus.
 - dispatch re-spawns queued review and spec_review tasks whose pipeline is empty.
 - Gate checks that every tests/...::name in the acceptance resolves to a defined test.
 - Consistent total_tokens for pre-G1a scorecard rows; recall ranking relevance.
-- Switch the checkout to goal/T-0260 after PR 11 so the daemon runs leases, auto fix rounds and packets on itself; measure tokens per accepted goal against 5.96M.
 - kgpt side of the orchestrator module (C-K1..C-K4) on the kgpt bus.
 
 ## Phase C architecture (decided)
-Two processes. (1) kgpt `modules/orchestrator`, thin MCP module on the shared image, runs_on home, owns per-user `orchestrator_connections` (endpoint_url, label, encrypted bearer), tools list_goals/goal_status READ and start_goal/cancel_goal WRITE_EXTERNAL (proposals), forwards to the user's endpoint with X-KGPT-User-Id applied by UserContextMiddleware. (2) `orchestrator serve` in its own container on kenta-server (ubuntu:24.04 image from this repo: claude native installer, codex release binary, uv, git, gh), one ORCH_ROOT per repo under /work, `goal start` = install+commit scaffold + GOAL task + headless Planner launch; bearer per endpoint; per-slug locks.
+Two processes. (1) kgpt `modules/orchestrator`, thin MCP module on the shared image, runs_on home, owns per-user `orchestrator_connections`, tools list_goals/goal_status READ and start_goal/cancel_goal WRITE_EXTERNAL, forwards to the user's endpoint with X-KGPT-User-Id. (2) `orchestrator serve` in its own container on kenta-server, one ORCH_ROOT per repo under /work, `goal start` = install+commit scaffold + GOAL task + headless Planner launch; bearer per endpoint; per-slug locks.
 
 ## Phase D architecture (decided)
-The daemon owns the loop; the Planner becomes a function of decision points (planner_runs.py): task held, scout fan-out done, goal closable. Each decision is a fresh headless `claude -p` launched by goals.launch_planner with an ids-only prompt, recorded in planner_runs.json, reconciled when dead, terminal gave_up after two failures. Never while an interactive session is registered in planner_session.json. Review cost is bounded by pool.toml [review]; scout cost by pool.toml scout limits; Planner session cost by the 150k handover rule.
+The daemon owns the loop; the Planner becomes a function of decision points (planner_runs.py): task held, scout fan-out done, goal closable. Each decision is a fresh headless `claude -p` launched by goals.launch_planner with an ids-only prompt (G10: compact decision packet), recorded in planner_runs.json, reconciled when dead, terminal gave_up after two failures. Never while an interactive session is registered in planner_session.json.
 
 ## Prior art (ids for recall.sh get)
 - Phase C, D, F, G retrospectives: decisions.md 2026-09-18/19 entries (goals T-0073, T-0109, T-0240, T-0260). Gotchas of 2026-09-19 in gotchas.md.
-- bus:T-0066..T-0069 kgpt scouts; T-0074..T-0077 Phase C scouts; T-0261..T-0263 Phase G scouts.
-- Hosts: Hetzner `ssh kgpt@46.62.167.12` dir /home/kgpt/kgpt (compose project), home `ssh k3ntaw@192.168.1.167` (fish shell, pipe scripts via `bash -s`), kgpt home side /opt/kgpt-home.
-
-## Auto-handover 2026-09-20T12:23:50+02:00 — daemon tick
-
-Open goals: none
-
-Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 143 more
-
-Last events:
-- 2026-09-19T23:52:03+02:00 T-0351 update {"pipeline": {"dispatched_at": 1789854374.351734, "gated_at": 1789854567.241838,
-- 2026-09-19T23:53:03+02:00 T-0351 update {"status": "done", "merged_into": "goal/T-0260", "sha": "2ca1517c316f3f279da4b1f
-- 2026-09-19T23:53:25+02:00 T-0348 update {"status": "done", "merged_into": "goal/T-0260", "merged_via": "fix round T-0351
-- 2026-09-19T23:53:25+02:00 T-0277 update {"status": "done", "merged_into": "goal/T-0260", "merged_via": "fix round T-0351
-- 2026-09-19T23:55:53+02:00 T-0260 update {"status": "done", "result": {"summary": "Phase G closed: 11 sub-goals merged on
-
-Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
+- bus:T-0261..T-0263 Phase G scouts; T-0354, T-0355 Phase H scouts.
+- Hosts: Hetzner `ssh kgpt@46.62.167.12` dir /home/kgpt/kgpt, home `ssh k3ntaw@192.168.1.167` (fish shell), kgpt home side /opt/kgpt-home.
