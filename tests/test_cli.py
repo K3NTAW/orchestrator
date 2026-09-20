@@ -157,16 +157,24 @@ class Cli(unittest.TestCase):
         fixture = self._scorecard_fixture()
         fixture.write_task("T-route", executor="worker", merged_into="main",
                            pipeline={"first_green_at": 1, "gate_reds": 0}, lineage_fix_rounds=0)
+        fixture.write_task("T-route-agree", executor="worker", status="failed",
+                           pipeline={"gate_reds": 1}, lineage_fix_rounds=0)
         fixture.write_runs({"task": "T-route", "role": "execute"},
                            {"task": "T-route", "role": "jev_route", "baseline": "worker",
                             "hypothetical": "other", "signals": {"fit": .7}, "latency_ms": 5,
+                            "usage": {"tokens": 3, "usd": .001}},
+                           {"task": "T-route-agree", "role": "execute"},
+                           {"task": "T-route-agree", "role": "jev_route", "baseline": "worker",
+                            "hypothetical": "worker", "signals": {"fit": .4}, "latency_ms": 5,
                             "usage": {"tokens": 3, "usd": .001}})
         with mock.patch.object(cli.scorecard, "STATE", fixture.root):
             text = self._scorecard_output("--routing")
-            self.assertIn("agree\t1", text)
-            self.assertIn("disagree\t1", text)
+            rows = [line.split("\t") for line in text.splitlines()]
+            self.assertEqual([row[:2] for row in rows if row[0] == "agree"], [["agree", "1"]])
+            self.assertEqual([row[:2] for row in rows if row[0] == "disagree"], [["disagree", "1"]])
             self.assertIn("evidence verdict: insufficient", text)
             card = json.loads(self._scorecard_output("--routing", "--json"))
+            self.assertEqual(card["groups"]["agree"]["n"], 1)
             self.assertEqual(card["groups"]["disagree"]["n"], 1)
 
     def test_scorecard_default_output_unchanged(self):
