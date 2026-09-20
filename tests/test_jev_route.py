@@ -74,9 +74,48 @@ class JevRoute(unittest.TestCase):
         changed, ask = self.classify()
         self.assertEqual(changed["cache"], "miss"); self.assertEqual(ask.call_count, 1)
         path = self.root / "runs" / "jev" / "route_cache.json"
-        row = json.loads(path.read_text()); row["created_at"] = time.time() - 90000; path.write_text(json.dumps(row))
+        rows = json.loads(path.read_text())
+        rows[jev_route._key(self.task)]["saved_at"] = time.time() - 90000
+        path.write_text(json.dumps(rows))
         expired, ask = self.classify()
         self.assertEqual(expired["cache"], "miss"); self.assertEqual(ask.call_count, 1)
+
+    def test_cache_holds_entries_per_key_for_interleaved_tasks(self):
+        other = {**self.task, "id": "T-2", "spec": "another change"}
+        with mock.patch.object(jev_route.jev, "_cfg", return_value=self.cfg), \
+             mock.patch.object(jev_route.jev, "_day_tokens_used", return_value=0), \
+             mock.patch.object(jev_route.jev, "ask", return_value=self.answer()) as ask:
+            first_a = jev_route.classify(self.task, FakePool(), self.eligible, self.root)
+            first_b = jev_route.classify(other, FakePool(), self.eligible, self.root)
+            second_a = jev_route.classify(self.task, FakePool(), self.eligible, self.root)
+            second_b = jev_route.classify(other, FakePool(), self.eligible, self.root)
+        self.assertEqual(ask.call_count, 2)
+        self.assertEqual([first_a["cache"], first_b["cache"], second_a["cache"], second_b["cache"]],
+                         ["miss", "miss", "hit", "hit"])
+
+    def test_cache_prunes_expired_and_caps_entries(self):
+        path, _ = jev_route._cache_paths(self.root)
+        path.parent.mkdir(parents=True)
+        now = time.time()
+        path.write_text(json.dumps({
+            "expired": {"signals": {}, "confidence": .5, "saved_at": now - 11, "task": "old"},
+            "oldest": {"signals": {}, "confidence": .5, "saved_at": now - 2, "task": "one"},
+            "newest": {"signals": {}, "confidence": .5, "saved_at": now - 1, "task": "two"},
+        }))
+        row = {"signals": {}, "confidence": .5, "task": "three"}
+        jev_route._cache_write(self.root, "added", row, ttl=10, max_entries=2)
+        rows = json.loads(path.read_text())
+        self.assertEqual(set(rows), {"newest", "added"})
+
+    def test_pool_toml_jev_routing_table_follows_jev(self):
+        path = Path(__file__).parents[1] / ".orchestrator" / "pool.toml"
+        lines = path.read_text().splitlines()
+        jev = lines.index("[jev]")
+        routing = lines.index("[jev.routing]")
+        secrets = min(i for i, line in enumerate(lines) if line.startswith("[secrets."))
+        self.assertLess(jev, routing)
+        self.assertLess(routing, secrets)
+        self.assertEqual(lines[routing + 5], "cache_max_entries = 500")
 
     def test_state_contains_no_file_contents_and_is_redacted(self):
         self.task.update(spec="TOKEN=abcdefghijklmnopqrstuvwxyz123456 SECRET", memory_titles=["safe title"])

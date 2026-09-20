@@ -42,25 +42,39 @@ def _cache_read(root, key, ttl):
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             try:
-                row = json.loads(path.read_text())
+                rows = json.loads(path.read_text())
             except (FileNotFoundError, json.JSONDecodeError, OSError):
                 return None
-            if row.get("key") != key or time.time() - row.get("created_at", 0) > ttl:
+            row = rows.get(key) if isinstance(rows, dict) else None
+            age = time.time() - row.get("saved_at", 0) if isinstance(row, dict) else -1
+            if row is None or not 0 <= age <= ttl:
                 return None
-            return {**row, "cache": "hit"}
+            return {**row, "key": key, "cache": "hit"}
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def _cache_write(root, row):
+def _cache_write(root, key, row, ttl, max_entries):
     path, lock = _cache_paths(root)
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "a+") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
+            try:
+                rows = json.loads(path.read_text())
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                rows = {}
+            if not isinstance(rows, dict):
+                rows = {}
+            now = time.time()
+            rows = {cached_key: cached for cached_key, cached in rows.items()
+                    if isinstance(cached, dict) and 0 <= now - cached.get("saved_at", 0) <= ttl}
+            rows[key] = {"signals": row["signals"], "confidence": row["confidence"],
+                         "saved_at": now, "task": row["task"]}
+            rows = dict(sorted(rows.items(), key=lambda item: item[1]["saved_at"])[-max_entries:])
             fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=".route_cache.")
             with os.fdopen(fd, "w") as out:
-                json.dump(row, out)
+                json.dump(rows, out)
             os.replace(name, path)
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
@@ -104,12 +118,13 @@ def classify(task, pool, eligible, root=STATE):
             return None
         confidences = [answers[key].get("confidence") for key in QUESTIONS]
         confidence = None if any(v is None for v in confidences) else sum(confidences) / len(confidences)
-        row = {"signals": signals, "confidence": confidence,
+        row = {"signals": signals, "confidence": confidence, "task": task.get("id"),
                "latency_ms": (time.monotonic() - started) * 1000,
-               "usage": result.get("usage"), "cache": "miss", "key": key, "created_at": time.time()}
+               "usage": result.get("usage"), "cache": "miss", "key": key}
     except Exception:
         return None
-    _cache_write(root, row)
+    _cache_write(root, key, row, routing.get("cache_ttl_s", 86400),
+                 routing.get("cache_max_entries", 500))
     return row
 
 
