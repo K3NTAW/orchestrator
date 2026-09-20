@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, fnmatch, hashlib, importlib.util, json, os, re, subprocess, sys, threading, time, urllib.request
+import fcntl, fnmatch, hashlib, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, acceptance, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
@@ -158,10 +158,18 @@ def _node_id_to_unittest(node_id):
     return ".".join([dotted_path, *parts])
 
 
-def _flaky_rerun_command(ids, worktree):
+class _RunnerProbeTimeout(Exception):
+    def __init__(self, timeout_s):
+        self.timeout_s = timeout_s
+
+
+def _flaky_rerun_command(ids, worktree, *, probe_timeout=60):
     """Match the project's test convention, including its unittest fallback."""
-    probe = subprocess.run(["uv", "run", "--project", worktree, "python", "-c", "import pytest"],
-                           cwd=worktree, capture_output=True, text=True)
+    try:
+        probe = subprocess.run(["uv", "run", "--project", worktree, "python", "-c", "import pytest"],
+                               cwd=worktree, capture_output=True, text=True, timeout=probe_timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise _RunnerProbeTimeout(probe_timeout) from exc
     if probe.returncode == 0:
         return ["uv", "run", "--project", worktree, "pytest", "-q", "-x", *ids]
     converted = [_node_id_to_unittest(node_id) for node_id in ids]
@@ -177,7 +185,7 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     if "conflict" in reason or "rebase_conflict" in text:
         return "conflict"
     if any(marker in text for marker in ("modulenotfounderror", "no module named", "enoent",
-                                          "missing venv", "missing .venv", "tools/")):
+                                          "command not found", "missing venv", "missing .venv", "uv: error")):
         return "environment"
     if any(marker in text for marker in ("eacces", "permission denied", "sandbox")):
         return "permissions"
@@ -201,11 +209,18 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     if (reason == "gate_red" and ids and worktree and Path(worktree).is_dir()
             and len(runs) < rerun_max):
         try:
-            command = _flaky_rerun_command(ids, worktree)
+            probe_timeout = max(30, min(60, rerun_timeout / 10))
+            command = _flaky_rerun_command(ids, worktree, probe_timeout=probe_timeout)
             if command is None:
                 return "unknown"
             rerun = subprocess.run(command, cwd=worktree, capture_output=True, text=True,
                                    timeout=rerun_timeout)
+        except _RunnerProbeTimeout as exc:
+            hint = dict(task.get("resume_hint") or {})
+            hint["runner_probe"] = "timeout"
+            hint["runner_probe_timeout_s"] = exc.timeout_s
+            bus.update(task["id"], resume_hint=hint)
+            return "unknown"
         except subprocess.TimeoutExpired as exc:
             hint = dict(task.get("resume_hint") or {})
             runs = list(hint.get("flaky_runs") or [])

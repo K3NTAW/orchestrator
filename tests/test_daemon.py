@@ -273,6 +273,27 @@ class Daemon(unittest.TestCase):
         self.assertEqual(calls[1][0][-1], "tests.test_x.test_x")
         self.assertEqual(calls[1][1]["cwd"], str(self.sandbox))
 
+    def test_runner_probe_timeout_does_not_block_or_mark_flaky(self):
+        tid = self.held_for_fix()
+        bus.update(tid, worktree=str(self.sandbox))
+        calls = []
+
+        def probe_timeout(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+        self.swap(daemon.subprocess, "run", probe_timeout)
+        self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox)), "unknown")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["timeout"], 60)
+        self.assertEqual(bus.get(tid)["resume_hint"]["runner_probe"], "timeout")
+        self.assertEqual(bus.get(tid)["resume_hint"]["runner_probe_timeout_s"], 60)
+        self.assertNotIn("flaky_runs", bus.get(tid)["resume_hint"])
+
+    def test_tools_path_in_traceback_is_not_environment(self):
+        tid = self.held_for_fix("FAILED tests/test_x.py::test_x - traceback in tools/path.py")
+        self.assertEqual(daemon.failure_kind(bus.get(tid), None), "code_defect")
+
     def test_node_id_to_unittest_conversion(self):
         self.assertEqual(daemon._node_id_to_unittest("path/to/test_x.py::Class::name"),
                          "path.to.test_x.Class.name")
