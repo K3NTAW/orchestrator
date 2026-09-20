@@ -1247,6 +1247,33 @@ class Daemon(unittest.TestCase):
         self.assertTrue(held["hold_reason"].startswith("gate failed"), held["hold_reason"])
         self.assertIn("merge blew up", held["pipeline"]["gated_error"])
 
+    def test_gate_skips_task_without_worktree_and_continues(self):
+        not_directory = self.sandbox / "not-a-directory"
+        not_directory.write_text("file")
+        for worktree in (None, "", str(not_directory)):
+            with self.subTest(worktree=worktree):
+                skipped = self.task("no usable worktree")
+                ready = self.task("ready to gate")
+                bus.update(skipped, status="done", worktree=worktree)
+                bus.update(ready, status="done", worktree=str(self.sandbox))
+                calls = []
+                previous = daemon.subprocess.run
+
+                def run(argv, **kwargs):
+                    if argv[:1] == [str(merge.TESTS_GREEN)]:
+                        calls.append(argv)
+                    return previous(argv, **kwargs)
+
+                self.swap(daemon.subprocess, "run", run)
+                try:
+                    daemon.gate(P.Pool())
+                finally:
+                    daemon.subprocess.run = previous
+
+                self.assertEqual(calls, [[str(merge.TESTS_GREEN), str(self.sandbox)]])
+                self.assertFalse((bus.get(skipped).get("pipeline") or {}).get("gated_at"))
+                self.assertTrue(bus.get(ready)["pipeline"]["gated_at_done"])
+
     def test_gate_red_when_acceptance_test_missing(self):
         t = bus.create_task("missing acceptance test", "spec", [
             "tests/not_defined.py::test_missing and ::test_also_missing pass"], ["x.py"],

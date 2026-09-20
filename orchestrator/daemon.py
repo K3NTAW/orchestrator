@@ -763,6 +763,8 @@ def gate(pool):
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
                 notify(f"{t['id']}: worktree missing; held")
             continue
+        if not worktree or not Path(worktree).is_dir():
+            continue
         if worktree:
             dirty = _dirty_scope_paths(worktree, t.get("scope") or [])
             if dirty:
