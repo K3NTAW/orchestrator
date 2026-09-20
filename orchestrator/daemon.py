@@ -736,9 +736,6 @@ def dispatch(pool):
                     complete(t["id"], "spec_review_at")
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
-    if pool.notification_transition("budget_refusals", budget_refused) and budget_refused:
-        notify("budget reservation refused; tasks remain queued")
-
     # Reviews are normally spawned when they are created, so they are not part of the execute loop above.
     # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread
     # that vanished before bus.claim.  The per-requeue stamp prevents every daemon tick spawning another copy.
