@@ -242,6 +242,14 @@ class Executors(unittest.TestCase):
         st = self.p.status()
         self.assertEqual((len(st["executors"]), sum(e["enabled"] for e in st["executors"])), (7, 4))
 
+    def test_eligible_executors_matches_pick_executor_filter(self):
+        for complexity in (1, 3, 6, 8, 10):
+            eligible = self.p.eligible_executors("execute", complexity)
+            picked = self.p.pick_executor("execute", complexity)
+            self.assertEqual(picked is not None, bool(eligible))
+            if picked:
+                self.assertIn(picked, eligible)
+
     def test_pick_by_expected_cost_with_floor(self):
         from orchestrator import scorecard
         task = {"title": "small", "complexity": 3}

@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, acceptance, bus, decision, executor, handover, merge, planner_runs, spawn
+from . import STATE, acceptance, bus, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
 from . import failures, gitutil, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
@@ -490,6 +490,12 @@ def hold_failed(tid, error_key, stage_label, exc):
 
 
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
+    routing = None
+    try:
+        task = bus.get(task_id)
+        routing = jev_route.shadow_context(task, Pool())
+    except Exception:
+        routing = None
     try:
         try:
             parameters = inspect.signature(executor.start).parameters.values()
@@ -506,6 +512,8 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
         if packet_meta is not None and accepts_meta:
             kwargs["packet_meta"] = packet_meta
         r = executor.start(task_id, prompt, **kwargs)
+        if routing is not None:
+            jev_route.record_shadow(task_id, routing)
         if r["status"] == "done":
             bus.post_result(task_id, spawn.fit_result({
                 "summary": r["message"][:3000],

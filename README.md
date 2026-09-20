@@ -254,6 +254,8 @@ note: task specs, tool-call metadata and memory titles leave the machine; file c
 
 Jev API confidence is optional: with confidence at least 0.6 the gate blocks at P(redundant) ≥ 0.85 or P(needed) ≤ 0.15; without confidence it uses stricter thresholds of 0.92 and 0.08. The gate defaults to deterministic `sample` mode (10% of calls), detects repeated inputs while tracking target mtimes, and `orchestrator jev diagnose` reports waste, repeats, latency and role/tool splits. Use its JSONL export for hand labelling before enabling any block rule; `block_repeats` can then deny unchanged repeats locally without a network call.
 
+Executor routing can collect Jev evidence with `[jev.routing] mode = "shadow"`. It batches seven task-shape questions, compares a deliberately simple hypothetical choice with the unchanged pool choice, and logs both under the Jev attribution bucket. Only redacted task metadata and memory titles are sent—never repository file contents or diffs—and hard eligibility constraints remain authoritative. The code default is `off`; `active` is accepted as a shadow-mode preview until active ranking lands in P5.
+
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),
 `roles`, `complexity_min`/`max`, `max_parallel`, `daily_budget_tasks`, `quota_group`, `weight`, `enabled`.

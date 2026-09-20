@@ -11,6 +11,8 @@ def bucket_of(role, task=None):
         return "fix_round" if constraints.get("fix_round_for") or constraints.get("auto_round") else "execute"
     if role in ("scout", "triage"):
         return "scout"
+    if role == "jev_route":
+        return "jev"
     return role if role in ("spec_review", "review", "challenge", "jev", "memory") else "other"
 
 
@@ -67,4 +69,3 @@ def task_class(task):
     if (task.get("complexity") or 0) <= 3:
         return "mechanical"
     return "unfamiliar"
-

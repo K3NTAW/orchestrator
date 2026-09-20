@@ -519,9 +519,8 @@ class Pool:
                                    a.window_started, today)
 
     # executors ---------------------------------------------------------------------------------
-    def pick_executor(self, role, complexity, scores=None, task=None):
-        """Choose the cheapest proven-safe executor, otherwise retain the established score ranking."""
-        scores = scores or {}
+    def eligible_executors(self, role, complexity, task=None):
+        """Return executors satisfying every hard routing constraint, without ranking them."""
         ok = []
         for ex in self.executors.values():
             if not ex.enabled or role not in ex.roles or ex.cooling():
@@ -534,6 +533,12 @@ class Pool:
             if ex.daily_budget_tasks and ex.day_tasks >= ex.daily_budget_tasks:
                 continue
             ok.append(ex)
+        return ok
+
+    def pick_executor(self, role, complexity, scores=None, task=None):
+        """Choose the cheapest proven-safe executor, otherwise retain the established score ranking."""
+        scores = scores or {}
+        ok = self.eligible_executors(role, complexity, task)
         if not ok:
             return None
         if task is not None:

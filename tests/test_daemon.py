@@ -6,11 +6,70 @@ Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
 import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
 from orchestrator import bus, daemon, executor, merge, pool as P, spawn
+from orchestrator import jev_route
 
 REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
+
+
+class JevRouteDispatch(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="jev-route-dispatch-")
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        self.patchers = [mock.patch.object(bus, "STATE", root),
+                         mock.patch.object(bus, "TASKS", root / "tasks"),
+                         mock.patch.object(bus, "RUNS", root / "runs")]
+        for patcher in self.patchers:
+            patcher.start(); self.addCleanup(patcher.stop)
+        self.task = bus.create_task("route", "spec", ["passes"], ["x.py"], role="execute", complexity=3)
+
+    def run_worker(self, classification=None, chosen="terra"):
+        context = {"mode": "shadow", "eligible": [], "classification": classification, "evidence": {}}
+        def start(task_id, prompt, **kwargs):
+            bus.update(task_id, executor=chosen)
+            return {"status": "held"}
+        with mock.patch.object(jev_route, "shadow_context", return_value=context), \
+             mock.patch.object(executor, "start", side_effect=start), \
+             mock.patch.object(jev_route, "record_shadow", wraps=jev_route.record_shadow) as record:
+            daemon._dispatch_worker(self.task["id"], "prompt")
+        return record
+
+    def test_shadow_dispatch_never_changes_chosen_executor(self):
+        record = self.run_worker({"signals": {}, "key": "k"}, "terra")
+        self.assertEqual(bus.get(self.task["id"])["executor"], "terra")
+        record.assert_called_once()
+
+    def test_shadow_row_written_with_baseline_hypothetical_and_evidence(self):
+        context = {"mode": "shadow", "eligible": [], "classification": {"signals": {}, "key": "k"},
+                   "evidence": {"terra": {"class_success": .8, "expected_cost": 1}}}
+        bus.update(self.task["id"], executor="terra")
+        jev_route.record_shadow(self.task["id"], context)
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(row["baseline"], "terra")
+        self.assertIn("hypothetical", row); self.assertIn("evidence", row)
+
+    def test_active_mode_behaves_as_shadow_and_notifies_once(self):
+        class Pool:
+            cfg = {"jev": {"routing": {"mode": "active"}}}
+            def notification_transition(self, key, active):
+                previous = getattr(self, "seen", False); self.seen = True; return not previous
+            def eligible_executors(self, *args): return []
+        pool = Pool(); notices = []
+        with mock.patch.object(daemon, "notify", side_effect=notices.append), \
+             mock.patch.object(jev_route, "classify", return_value=None), \
+             mock.patch.object(jev_route, "evidence_for", return_value={}):
+            first = jev_route.shadow_context(self.task, pool)
+            second = jev_route.shadow_context(self.task, pool)
+        self.assertEqual((first["mode"], second["mode"]), ("active", "active"))
+        self.assertEqual(notices, ["jev routing active requested; active ranking lands in P5"])
+
+    def test_classification_failure_still_dispatches_baseline(self):
+        self.run_worker(None, "sol")
+        self.assertEqual(bus.get(self.task["id"])["executor"], "sol")
 
 
 def raiser(exc):
