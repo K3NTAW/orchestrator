@@ -151,9 +151,6 @@ class Pool:
                          for a in self.cfg["claude_accounts"]]
         self.codex = Codex()
         self.executors = self._read_executors()
-        self.reservations = {}
-        self.reservation_history = {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}}
-        self.notified_state = {}
         self._load()
         self._sync_legacy_codex()
 
@@ -180,9 +177,6 @@ class Pool:
                                    if k not in {"id", "config_dir", "affinity", "reserve", "daily_budget",
                                                 "oauth_token_env", *PLANNER_ACCOUNT_FIELDS}})
             self.codex.__dict__.update(st.get("codex", {}))
-            self.reservations = st.get("reservations", {})
-            self.reservation_history = st.get("reservation_history", self.reservation_history)
-            self.notified_state = st.get("notified_state", {})
             for eid, ex in self.executors.items():
                 ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
         for ex in self.executors.values():
@@ -196,15 +190,15 @@ class Pool:
             a.planner_offsets = entry.get("offsets", {})
 
     def save(self):
-        PERSIST.write_text(json.dumps({"accounts": {a.id: {k: v for k, v in asdict(a).items()
-                                                            if k not in PLANNER_ACCOUNT_FIELDS}
-                                                     for a in self.accounts},
-                                       "codex": {k: v for k, v in asdict(self.codex).items() if k != "running"},
-                                       "executors": {eid: {k: getattr(ex, k) for k in sorted(EXEC_STATE_FIELDS)}
-                                                     for eid, ex in self.executors.items()},
-                                       "reservations": self.reservations,
-                                       "reservation_history": self.reservation_history,
-                                       "notified_state": self.notified_state}, indent=1))
+        def mutate(state):
+            state.update({"accounts": {a.id: {k: v for k, v in asdict(a).items()
+                                               if k not in PLANNER_ACCOUNT_FIELDS}
+                                      for a in self.accounts},
+                          "codex": {k: v for k, v in asdict(self.codex).items() if k != "running"},
+                          "executors": {eid: {k: getattr(ex, k) for k in sorted(EXEC_STATE_FIELDS)}
+                                        for eid, ex in self.executors.items()}})
+
+        self._reservation_file(mutate)
 
     def _reservation_estimate(self, account_id, role):
         limit = float(self.cfg.get("limits", {}).get("max_budget_usd", {}).get(role, 0))
@@ -237,7 +231,7 @@ class Pool:
                        ("input_tokens", "output_tokens", "cache_creation_input_tokens",
                         "cache_read_input_tokens", "cached_input_tokens")))
 
-    def _reservation_file(self, mutate):
+    def _reservation_file(self, mutate=None):
         PERSIST.parent.mkdir(parents=True, exist_ok=True)
         with open(PERSIST, "a+") as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
@@ -246,13 +240,26 @@ class Pool:
                 state = json.loads(fh.read() or "{}")
             except json.JSONDecodeError:
                 state = {}
-            result = mutate(state)
-            fh.seek(0); fh.truncate(); fh.write(json.dumps(state, indent=1))
+            result = mutate(state) if mutate else state
+            if mutate:
+                fh.seek(0); fh.truncate(); fh.write(json.dumps(state, indent=1))
             fcntl.flock(fh, fcntl.LOCK_UN)
-        self.reservations = state.get("reservations", {})
-        self.reservation_history = state.get("reservation_history", self.reservation_history)
-        self.notified_state = state.get("notified_state", self.notified_state)
         return result
+
+    def live_reservations(self):
+        return self._reservation_file(lambda state: dict(state.get("reservations", {})))
+
+    @property
+    def reservations(self):
+        """Backward-compatible read-only view; reservation state is never held by the Pool instance."""
+        return self.live_reservations()
+
+    def reservation_history(self):
+        return self._reservation_file(lambda state: state.get("reservation_history", {
+            "tokens": 0, "usd": 0.0, "roles": {}, "goals": {}}))
+
+    def notified_state(self):
+        return self._reservation_file(lambda state: dict(state.get("notified_state", {})))
 
     def reserve(self, run_key, account_id, role, task):
         """Atomically reserve a run's worst-case budget; repeated calls for the same run are idempotent."""

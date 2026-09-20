@@ -268,7 +268,7 @@ class Daemon(unittest.TestCase):
         self.swap(executor, "start", start)
         daemon.dispatch(pool)
         task = bus.get(tid)
-        reservation = P.Pool().reservations[tid]
+        reservation = P.Pool().live_reservations()[tid]
         self.assertEqual(reservation["account"], task["executor"])
 
     def test_dispatch_passes_no_placeholder_ids(self):
@@ -296,7 +296,7 @@ class Daemon(unittest.TestCase):
         tid = self.task("already dispatched")
         self.swap(daemon, "stamp", lambda *args, **kwargs: False)
         daemon.dispatch(pool)
-        self.assertNotIn(tid, P.Pool().reservations)
+        self.assertNotIn(tid, P.Pool().live_reservations())
         self.assertEqual(self.started, [])
 
     def test_notify_once_per_transition(self):
@@ -313,13 +313,13 @@ class Daemon(unittest.TestCase):
         for _ in range(3):
             daemon.tick(P.Pool())  # restart-equivalent: reload the persisted notification state
         self.assertEqual(messages, ["account A hit its daily budget; tasks held"])
-        self.assertTrue(P.Pool().notified_state["daily_budget:A"])
+        self.assertTrue(P.Pool().notified_state()["daily_budget:A"])
 
         pool = P.Pool()
         pool.get("A").day_tokens = 0
         pool.save()
         daemon.tick(P.Pool())
-        self.assertFalse(P.Pool().notified_state["daily_budget:A"])
+        self.assertFalse(P.Pool().notified_state()["daily_budget:A"])
         pool = P.Pool()
         pool.get("A").day_tokens = pool.get("A").daily_budget
         pool.save()

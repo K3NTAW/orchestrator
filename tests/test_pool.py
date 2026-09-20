@@ -99,7 +99,7 @@ class Reservations(unittest.TestCase):
         self.assertIsNotNone(reservation)
         self.assertEqual(reservation["est_tokens"], 60)
         self.assertIsNone(other.reserve("run-2", "A", "scout", second))
-        self.assertEqual(set(P.Pool(self.cfg).reservations), {"run-1"})
+        self.assertEqual(set(P.Pool(self.cfg).live_reservations()), {"run-1"})
 
     def test_estimate_never_zero_without_history(self):
         self.cfg["claude_accounts"][0].pop("usd_per_token")
@@ -112,7 +112,7 @@ class Reservations(unittest.TestCase):
         first, second = self.task(), self.task()
         self.p.reserve("run-1", "A", "scout", first)
         P.bus.update(first["id"], status="running", pid=os.getpid())
-        expiry = self.p.reservations["run-1"]["lease_until"]
+        expiry = self.p.live_reservations()["run-1"]["lease_until"]
         with mock.patch.object(P.time, "time", return_value=expiry + 1):
             self.assertEqual(self.p.sweep_reservations(), [])
             self.assertIsNone(self.p.reserve("run-2", "A", "scout", second))
@@ -123,22 +123,39 @@ class Reservations(unittest.TestCase):
             P.bus.update(second["id"], status="running", pid=os.getpid())
             with mock.patch.object(P.os, "kill", side_effect=ProcessLookupError):
                 self.assertEqual(self.p.sweep_reservations(), [])
-        self.assertEqual(set(P.Pool(self.cfg).reservations), {"run-2"})
+        self.assertEqual(set(P.Pool(self.cfg).live_reservations()), {"run-2"})
 
     def test_release_reconciles_estimate_with_actual(self):
         self.p.reserve("run-1", "A", "scout", self.task())
-        self.assertEqual(self.p.reservations["run-1"]["est_tokens"], 60)
+        self.assertEqual(self.p.live_reservations()["run-1"]["est_tokens"], 60)
         self.p.release("run-1", {"input_tokens": 12, "output_tokens": 8, "usd": 0.2})
         fresh = P.Pool(self.cfg)
-        self.assertEqual(fresh.reservations, {})
-        history = fresh.reservation_history
+        self.assertEqual(fresh.live_reservations(), {})
+        history = fresh.reservation_history()
         self.assertEqual(history["tokens"], 20)
         self.assertAlmostEqual(history["usd"], 0.2)
         self.assertEqual(history["roles"]["scout"], {"tokens": 20, "usd": 0.2})
         self.assertEqual(history["goals"]["G-budget"]["scout"], {"tokens": 20, "usd": 0.2})
         # Cleanup retries must not count the same actual usage a second time.
         fresh.release("run-1", {"input_tokens": 12, "output_tokens": 8, "usd": 0.2})
-        self.assertEqual(P.Pool(self.cfg).reservation_history, history)
+        self.assertEqual(P.Pool(self.cfg).reservation_history(), history)
+
+    def test_save_never_overwrites_concurrent_reservations(self):
+        first, = (self.task(),)
+        pool_a = P.Pool(self.cfg)
+        pool_b = P.Pool(self.cfg)
+        self.assertIsNotNone(pool_b.reserve("run-1", "A", "scout", first))
+        pool_a.get("A").cooldown_until = time.time() + 60
+        pool_a.save()
+        self.assertIn("run-1", pool_b.live_reservations())
+
+    def test_notified_state_survives_pool_save(self):
+        pool_a = P.Pool(self.cfg)
+        self.assertTrue(pool_a.notification_transition("daily_budget:A", True))
+        pool_b = P.Pool(self.cfg)
+        pool_b.get("A").cooldown_until = time.time() + 60
+        pool_b.save()
+        self.assertTrue(P.Pool(self.cfg).notified_state()["daily_budget:A"])
 
     def test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap(self):
         self.cfg["claude_accounts"][0]["daily_budget_tokens"] = 1000
