@@ -335,3 +335,68 @@ uv run orchestrator status | cost --by role|tier|account|task | hold A --minutes
 - `window_cap_tokens` in `pool.toml` is a calibration knob: set it from observed 5h-window resets. Raised from 2M to
   10M on 2026-09-17 after 2M was reached in 2.2h with zero real rate limits; real limits still cool an account via
   the reset-hint parser.
+
+## Efficiency telemetry (Phase I P0)
+
+Run rows record `bucket` (planner, scout, execute, fix_round, spec_review, review,
+challenge, jev, memory, or other), `lineage_root` (initial execute task), `round_index`,
+`band` (1-3, 4-6, 7-10), `task_class`, `executor`, and `model`.
+Normalized usage fields are `input_uncached_tokens`, `cache_read_tokens`,
+`cache_write_tokens`, `output_tokens`, `reasoning_tokens`, and `total_tokens`.
+Raw total = uncached + cache read + cache write + output; reasoning is informational,
+already included in output. `usd_source` distinguishes `reported` from `token_estimate`.
+Efficiency uses effective tokens E = uncached + output + floor(cache read / 10) + cache write.
+Legacy total-only rows retain their recorded total rather than inventing token buckets.
+
+Lifecycle stamps: task `created_at`; pipeline `first_green_at`, `gate_attempts`,
+`gate_reds`; `lineage_fix_rounds`; and task `accepted_at`. Missing stamps remain
+undefined, never zero. Acceptance means a merged initial execute lineage; repairs,
+reviews, and spec reviews contribute usage to that lineage without extra acceptances.
+
+`orchestrator scorecard --efficiency [--by goal|executor|band|class|role] [--json]`
+reports the following (a zero denominator produces an undefined ratio):
+
+| Metric | Formula |
+| --- | --- |
+| tokens / usd | Sum E / sum recorded or estimated USD in the selected rows |
+| calls / turns | Usage row count / sum recorded turns (missing turns contribute zero) |
+| accepted_tasks | Count accepted initial execute lineages |
+| tokens / usd / calls / turns per accepted task | Mean corresponding lineage total over accepted tasks |
+| tokens / usd per accepted goal | Mean accepted-goal total: accepted lineage usage plus goal planner/scout usage |
+| tokens_to_first_green | Sum lineage E with timestamp ≤ first_green_at; baseline reports mean over accepted tasks |
+| time_to_first_green_s / time_to_accepted_s | Corresponding stamp minus created_at |
+| fix_rounds / fix_round_tokens | Recorded lineage count (else linked descendants) / sum fix_round E |
+| first_pass_rate | Accepted tasks with first green, zero fixes and zero gate reds / tasks with defined first-pass evidence |
+| fix_round_rate / avg_fix_rounds | Tasks with ≥1 fix / defined tasks; mean fix count over defined tasks |
+| first_pass_defined_count / fix_round_defined_count | Number of accepted tasks with the respective evidence |
+| median_tokens_per_accepted_task / max_tokens_per_accepted_task | Median / maximum accepted lineage E |
+| gate_success_share | Sum(gate_attempts − gate_reds) / sum(gate_attempts), for tasks recording both |
+| review_request_changes_rate | Review tasks with request_changes / review tasks with approve or request_changes |
+| model_distribution | Row count and sum E per model and bucket |
+| breakdown | Sum E by Planner, Scout, Execution, Fix rounds, Spec review, Code review, Challenge, Jev, Other; Total is their sum |
+| pipeline_amplification / Amplification | Total E / initial Execution E |
+
+Amplification is an observation metric, not a target: reducing necessary review can
+lower it while worsening quality. Read it alongside first-pass and repair outcomes.
+The `unknown` group retains unattributed usage; unaccepted usage remains in window
+breakdowns. Unknown models are explicit, and unrecognized buckets contribute to Other.
+Legacy rows receive read-time attribution from task metadata and fix/review links,
+with explicit recorded attribution preserved; history is never rewritten. Missing
+lifecycle evidence stays undefined. Role groups measure usage rather than outcomes.
+
+Before any P1+ change, run `orchestrator baseline save phase-h-code`.
+Snapshots live in `.orchestrator/baselines/<label>.json` and freeze all six groupings,
+window row counts, and the pool, Jev, review, executor, planner-route, packet, client,
+policy, git and package fingerprint. Mixed recorded client/policy versions remain lists.
+Use `baseline save phase-i-shadow --since 2026-09-20T00:00:00Z` for a usage window;
+undated/out-of-window rows and out-of-window acceptances are excluded. Lineage totals
+then cover only that window; lifecycle stamps remain lifetime observations. Without
+`--since`, all available history is measured. Naive ISO timestamps are interpreted as UTC.
+Use `baseline show phase-h-code [--json]`, `baseline list`, then
+`baseline compare phase-h-code phase-i-shadow [--json]` after the change.
+Deltas are after − before; percent is 100 × delta / |before|, undefined at zero.
+Lower primary metrics and repair/rejection rates are flagged better; higher first-pass
+and gate success rates are better. Worse non-inferiority metrics have `*` in text.
+The footer is `non-inferior: no` for any regression, `undefined` for missing evidence,
+or `yes` when all non-inferiority metrics are defined and unchanged or improved.
+Fingerprint diffs name changed leaf keys, so configuration changes remain visible.

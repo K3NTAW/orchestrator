@@ -153,6 +153,12 @@ def main():
     bf = bsub.add_parser("fetch"); bf.add_argument("--force", action="store_true"); bf.add_argument("--by", default="orchestrator")
     bsub.add_parser("show")
     bs = bsub.add_parser("set"); bs.add_argument("model_id"); bs.add_argument("--by", required=True); bs.add_argument("metrics", nargs="+", metavar="key=value")
+    bl = sub.add_parser("baseline"); blsub = bl.add_subparsers(dest="baseline_cmd", required=True)
+    blsave = blsub.add_parser("save"); blsave.add_argument("label"); blsave.add_argument("--since")
+    blshow = blsub.add_parser("show"); blshow.add_argument("label"); blshow.add_argument("--json", action="store_true")
+    blsub.add_parser("list")
+    blcompare = blsub.add_parser("compare"); blcompare.add_argument("a"); blcompare.add_argument("b")
+    blcompare.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
         if a.efficiency and a.by in ("tier", "task"):
@@ -171,6 +177,24 @@ def main():
             print(f"codex\tavailable={c['available']}\trunning={c['running']}\tday_tasks={c['day_tasks']}\tcooling={c['cooling_s']}s")
         else:
             print(json.dumps({**Pool().status(), "queue": {s: len(bus.read(status=s)) for s in ("queued", "held", "running")}}, indent=1))
+    elif a.cmd == "baseline":
+        from . import baseline
+        try:
+            if a.baseline_cmd == "save":
+                print(baseline.save(a.label, since=a.since))
+            elif a.baseline_cmd == "list":
+                print("label\tsaved_at")
+                for label in baseline.list_labels():
+                    print(f"{label}\t{baseline.load(label)['saved_at']}")
+            elif a.baseline_cmd == "show":
+                snapshot = baseline.load(a.label)
+                print(json.dumps(snapshot, indent=2) if a.json else
+                      scorecard.format_efficiency(snapshot['efficiency']['all']))
+            else:
+                result = baseline.compare(a.a, a.b)
+                print(json.dumps(result, indent=2) if a.json else baseline.format_comparison(result))
+        except (ValueError, OSError) as error:
+            ap.error(str(error))
     elif a.cmd == "cost":
         print(json.dumps(cost(a.by), indent=1))
     elif a.cmd == "hold":
