@@ -1406,6 +1406,7 @@ def stop_background(thread, timeout=5):
         return
     thread.stop_event.set()
     thread.join(timeout)
+    executor.join_fallback_threads(timeout)
 
 
 def main(interval=30, once=False):
@@ -1419,6 +1420,7 @@ def main(interval=30, once=False):
     try:
         _loop(interval, threading.Event())
     finally:
+        executor.join_fallback_threads()
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
 

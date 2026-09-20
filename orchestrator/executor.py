@@ -15,6 +15,29 @@ from . import scorecard
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
+FALLBACK_JOIN_TIMEOUT_S = 5
+_fallback_threads = []
+_fallback_threads_lock = threading.Lock()
+
+
+def _prune_fallback_threads():
+    """Drop completed fallback workers while holding the registry lock."""
+    _fallback_threads[:] = [thread for thread in _fallback_threads if thread.is_alive()]
+
+
+def fallback_threads():
+    """Return the currently running Claude fallback worker threads."""
+    with _fallback_threads_lock:
+        _prune_fallback_threads()
+        return tuple(_fallback_threads)
+
+
+def join_fallback_threads(timeout=FALLBACK_JOIN_TIMEOUT_S):
+    """Wait a bounded time for fallback workers, returning those still alive."""
+    deadline = time.monotonic() + timeout
+    for thread in fallback_threads():
+        thread.join(max(0, deadline - time.monotonic()))
+    return fallback_threads()
 
 
 def argv_for(kind, args, cwd, access):
@@ -265,7 +288,20 @@ def _exhausted(pool, t, run=None, account_id=None):
     except (TypeError, ValueError):
         accepts_account = True
     kwargs = {"account_id": acct.id} if accepts_account else {}
-    threading.Thread(target=worker, args=(t["id"],), kwargs=kwargs, daemon=True).start()
+    thread = None
+
+    def run_fallback():
+        try:
+            worker(t["id"], **kwargs)
+        finally:
+            with _fallback_threads_lock:
+                _fallback_threads.remove(thread)
+
+    thread = threading.Thread(target=run_fallback, daemon=True)
+    with _fallback_threads_lock:
+        _prune_fallback_threads()
+        _fallback_threads.append(thread)
+    thread.start()
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 

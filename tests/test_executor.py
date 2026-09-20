@@ -63,6 +63,9 @@ class Executor(unittest.TestCase):
                 self.assertEqual(task["codex_thread"], "old-thread")
                 packet.assert_not_called()
 
+    def tearDown(self):
+        self.assertEqual(executor.join_fallback_threads(2), ())
+
     def exec_task(self, complexity=3, title="exec"):
         """An execute task with a worktree already set, so start() never has to create one."""
         t = bus.create_task(title, "s", ["a"], ["x.py"], role="execute", complexity=complexity)
@@ -255,10 +258,7 @@ class Executor(unittest.TestCase):
         self.assertTrue(started.wait(1))
         self.assertIn(tid, P.Pool().reservations)
         finish.set()
-        for _ in range(100):
-            if tid not in P.Pool().reservations:
-                break
-            time.sleep(.01)
+        self.assertEqual(executor.join_fallback_threads(1), ())
         self.assertNotIn(tid, P.Pool().reservations)
         self.assertEqual(releases, [tid])
 
