@@ -1291,29 +1291,41 @@ def routine_close(point, ctx, pool):
         if ctx["gate_state"] != "green" or not ctx["all_children_merged"]:
             return
         stamp(goal_id, "closed_at")
-        _retrospective(goal_id)
+    _retrospective(goal_id)
+    with bus.locked():
+        goal = bus.get(goal_id)
+        pipeline = dict(goal.get("pipeline") or {})
         if (goal.get("result") or {}).get("goal_closed"):
             return
         auto_pr = ctx["routes"].get("auto_open_pr", False)
         if auto_pr and pipeline.get("close_error"):
             if time.time() - pipeline.get("close_attempted_at", 0) < pool.cfg.get("daemon", {}).get("close_retry_s", 900):
                 return
-        try:
-            pr_url = _open_pr(goal) if auto_pr else None
-        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            pipeline = dict(bus.get(goal_id).get("pipeline") or {})
+    try:
+        pr_url = _open_pr(goal) if auto_pr else None
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        with bus.locked():
+            goal = bus.get(goal_id)
+            if (goal.get("result") or {}).get("goal_closed"):
+                return
+            pipeline = dict(goal.get("pipeline") or {})
             pipeline.update(close_error=str(exc)[:500], close_attempted_at=time.time(),
                             close_attempts=pipeline.get("close_attempts", 0) + 1)
             bus.update(goal_id, pipeline=pipeline)
-            notify.notify_once(goal_id, "close_error", f"{goal_id}: PR close failed: {str(exc)[:100]}")
+        notify.notify_once(goal_id, "close_error", f"{goal_id}: PR close failed: {str(exc)[:100]}")
+        return
+    with bus.locked():
+        goal = bus.get(goal_id)
+        if (goal.get("result") or {}).get("goal_closed"):
             return
         result = {"goal_closed": True, "pr_url": pr_url,
                   "summary": "Goal complete", "note": "PR opened" if pr_url else "PR pending: Planner opens goal/<id> to main"}
         bus.post_result(goal_id, result)
+    with bus.locked():
         pipeline = dict(bus.get(goal_id).get("pipeline") or {})
         pipeline.pop("close_error", None)
         bus.update(goal_id, pipeline=pipeline)
-        notify.notify_once(goal_id, "closed", f"{goal_id}: {result['note']}")
+    notify.notify_once(goal_id, "closed", f"{goal_id}: {result['note']}")
 
 
 def tick(pool=None):
@@ -1327,7 +1339,7 @@ def tick(pool=None):
             break
         return
     groups = {}
-    enabled = config["routes"].get("enabled", True)
+    enabled = decision.routes_enabled(config)
     for raw in list(decision_points()):
         point = _point(raw)
         if point["kind"] == "held" and any(t.get("status") != "failed" and

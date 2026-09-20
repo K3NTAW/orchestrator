@@ -1151,6 +1151,47 @@ class RoutedDecisions(PlannerRunsBase):
         self.assertEqual(result["note"], "PR pending: Planner opens goal/<id> to main")
         self.assertTrue(bus.get(goal)["pipeline"]["closed_at"])
 
+    def test_routine_close_runs_gh_outside_bus_lock(self):
+        from unittest.mock import patch
+        from subprocess import CompletedProcess
+        goal = self.closable()
+        self.pool.cfg["planner"]["routes"]["auto_open_pr"] = True
+        depth = 0
+        locked = bus.locked
+
+        @contextlib.contextmanager
+        def tracked_lock():
+            nonlocal depth
+            with locked():
+                depth += 1
+                try:
+                    yield
+                finally:
+                    depth -= 1
+
+        def gh(argv, **kwargs):
+            self.assertEqual(depth, 0, "gh must not hold the bus lock")
+            self.assertEqual(argv[0], "gh")
+            # Changes made while gh runs must survive the subsequent update.
+            pipeline = dict(bus.get(goal)["pipeline"], concurrent_change=True)
+            bus.update(goal, pipeline=pipeline)
+            return CompletedProcess(argv, 0, "[]" if argv[2] == "list" else "https://example.test/pr/1\n", "")
+
+        retrospective = PR._retrospective
+
+        def record(goal_id):
+            self.assertEqual(depth, 0, "retrospective must not hold the bus lock")
+            retrospective(goal_id)
+
+        with patch.object(bus, "locked", tracked_lock), \
+                patch.object(PR.subprocess, "run", side_effect=gh) as runner, \
+                patch.object(PR, "_retrospective", side_effect=record):
+            PR.routine_close({"goal_id": goal}, {"gate_state": "green", "all_children_merged": True,
+                                               "routes": {"auto_open_pr": True}}, self.pool)
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(bus.get(goal)["result"]["pr_url"], "https://example.test/pr/1")
+        self.assertTrue(bus.get(goal)["pipeline"]["concurrent_change"])
+
     def test_close_recovers_crash_after_stamp(self):
         goal = self.closable()
         PR.stamp(goal, "closed_at")

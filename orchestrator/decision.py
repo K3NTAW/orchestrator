@@ -31,6 +31,11 @@ class Route:
     tier: str | None
 
 
+def routes_enabled(cfg: dict) -> bool:
+    """Routing is enabled unless the routes table explicitly disables it."""
+    return cfg.get("routes", {}).get("enabled", True) is not False
+
+
 def route(point: dict, ctx: dict) -> Route:
     """Choose a route deterministically, failing closed on unknown risk."""
     config = ctx.get("routes", {})
@@ -79,7 +84,7 @@ def route(point: dict, ctx: dict) -> Route:
                 return field
         return None
 
-    if config.get("enabled", True) is False:
+    if not routes_enabled(ctx):
         return result("escalate", "routes_disabled")
     if ctx.get("infra_failure_kind"):
         return result("none", f"infra:{ctx['infra_failure_kind']}")

@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, acceptance, bus, executor, handover, merge, planner_runs, spawn
+from . import STATE, acceptance, bus, decision, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
 from . import failures, gitutil, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
@@ -173,7 +173,7 @@ def auto_fix_round(pool):
         # A fix task's own constraint records the failure it was created to repair.
         # Matching it means the immediately preceding round did not change the failure.
         repeated = any((t.get("constraints") or {}).get("failure_signature") == signature for t in chain)
-        if pool.cfg.get("planner", {}).get("autonomous") and pool.cfg.get("planner", {}).get("routes", {}).get("enabled", False):
+        if pool.cfg.get("planner", {}).get("autonomous") and decision.routes_enabled(pool.cfg.get("planner", {})):
             point = {"goal_id": held.get("parent"), "kind": "held", "task_id": held["id"],
                      "payload_key": planner_runs._held_key(held)}
             if point["goal_id"]:

@@ -34,6 +34,27 @@ class DecisionTests(unittest.TestCase):
                     self.assertEqual((decision.name, decision.reason, decision.tier),
                                      ("none", f"infra:{failure}", None))
 
+    def test_routes_enabled_default_true_shared_by_callers(self):
+        from unittest.mock import patch
+        from orchestrator import decision
+        from test_planner_runs import RoutedDecisions
+
+        for cfg in ({}, {"routes": {}}, {"routes": {"enabled": True}}):
+            self.assertTrue(decision.routes_enabled(cfg))
+            self.assertEqual(route(point("held"), {**self.ctx, **cfg}).name, "routine")
+        self.assertFalse(decision.routes_enabled({"routes": {"enabled": False}}))
+
+        case = RoutedDecisions("test_security_hold_is_not_given_routine_fix")
+        case.setUp()
+        try:
+            case.pool.cfg["planner"]["routes"].pop("enabled")
+            with patch.object(decision, "routes_enabled", wraps=decision.routes_enabled) as enabled:
+                case.test_security_hold_is_not_given_routine_fix()
+            # auto_fix_round, Planner tick, and their route decisions share the helper.
+            self.assertGreaterEqual(enabled.call_count, 4)
+        finally:
+            case.doCleanups()
+
     def test_routine_hold_when_auto_fix_possible(self):
         for review_fix in (False, True):
             with self.subTest(review_fix=review_fix):
