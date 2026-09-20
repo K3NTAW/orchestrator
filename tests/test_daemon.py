@@ -20,6 +20,100 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_reply_worker_handles_held_requeues_fix_task_for_retry(self):
+        parent = self.held_for_fix()
+        bus.update(parent, codex_thread="parent-thread", executor="astra", rounds=1,
+                   worktree=str(self.sandbox))
+        fix = self.task("budget retry", constraints={"fix_round_for": parent})
+        calls = []
+        def reply(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"status": "held", "reason": "executor cooling"}
+        self.swap(executor, "reply", reply)
+        daemon.dispatch(P.Pool())
+        held = bus.get(fix)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "budget"))
+        self.assertEqual(held["result"]["reason"], "budget")
+        for key in ("dispatched_at", "dispatched_at_done", "dispatched_at_lease"):
+            self.assertNotIn(key, held["pipeline"])
+        self.assertEqual(len(calls), 1)
+        daemon.dispatch(P.Pool())  # the next daemon tick can retry the same fix
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][1]["fix_round_task_id"], fix)
+        self.assertIsNone(bus.get(parent).get("result"))
+
+    def test_reply_worker_handles_refused_marks_fix_task_failed_parent_merged(self):
+        parent = self.held_for_fix()
+        bus.update(parent, codex_thread="parent-thread", executor="astra", worktree=str(self.sandbox))
+        fix = self.task("merged parent", constraints={"fix_round_for": parent})
+        pending = []
+        self.swap(daemon, "spawn_async", lambda fn, *args: pending.append((fn, args)))
+        daemon.dispatch(P.Pool())
+        bus.update(parent, merged_into="goal/T-0043")
+        fn, args = pending.pop()
+        fn(*args)  # real reply observes the concurrent merge
+        failed = bus.get(fix)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["result"]["reason"], "parent_merged")
+        self.assertEqual(failed["pipeline"]["resume"]["reason"], "parent_merged")
+        self.assertIsNone(bus.get(parent).get("result"))
+
+    def test_fix_round_fresh_reasons_rounds_exhausted_and_executor_not_codex(self):
+        for reason, fields in (
+                ("rounds_exhausted", {"rounds": executor.MAX_ROUNDS, "executor": "astra"}),
+                ("executor_not_codex", {"rounds": 0, "executor": "claude"})):
+            with self.subTest(reason=reason):
+                parent = self.held_for_fix()
+                bus.update(parent, codex_thread="parent-thread", worktree=str(self.sandbox), **fields)
+                fix = self.task(reason, constraints={"fix_round_for": parent})
+                before = bus.get(parent)
+                daemon.dispatch(P.Pool())
+                self.assertIn(fix, self.started)
+                self.assertNotIn(parent, self.started)
+                self.assertEqual(bus.get(fix)["pipeline"]["resume"], {"mode": "fresh", "reason": reason})
+                self.assertEqual(bus.get(parent), before)
+
+    def test_reply_compat_changed_falls_back_to_fresh_on_fix_task_not_parent(self):
+        pending, executions = [], []
+        self.swap(daemon, "spawn_async", lambda fn, *args: pending.append((fn, args)))
+        compatible = [True]
+        self.swap(executor, "_resume_compatible", lambda task: (compatible[0], "worktree is dirty"))
+        def start(tid, prompt, **kwargs):
+            task = bus.get(tid)
+            executions.append((tid, prompt, task.get("worktree"), task.get("branch")))
+            own_worktree = str(self.sandbox / tid)
+            bus.update(tid, worktree=own_worktree, executor="astra")
+            return {"status": "done", "message": "repaired", "thread": "fresh-thread"}
+        self.swap(executor, "start", start)
+        for reason in ("incompatible_worktree", "rounds_exhausted", "executor_not_codex"):
+            with self.subTest(reason=reason):
+                compatible[0] = True
+                parent = self.held_for_fix()
+                bus.update(parent, codex_thread="parent-thread", codex_thread_head="abc", rounds=1,
+                           executor="astra", worktree=str(self.sandbox), branch=f"task/{parent}")
+                fix = self.task("repair objective", constraints={"fix_round_for": parent})
+                daemon.dispatch(P.Pool())
+                if reason == "incompatible_worktree":
+                    compatible[0] = False
+                elif reason == "rounds_exhausted":
+                    bus.update(parent, rounds=executor.MAX_ROUNDS)
+                else:
+                    bus.update(parent, executor="claude")
+                before = bus.get(parent)
+                fn, args = pending.pop()
+                fn(*args)
+                self.assertEqual(bus.get(parent), before)
+                task = bus.get(fix)
+                self.assertEqual(task["pipeline"]["resume"], {"mode": "fresh", "reason": f"compat_changed:{reason}"})
+                self.assertEqual((task["status"], task["result"]["thread"]), ("done", "fresh-thread"))
+                tid, prompt, inherited_worktree, branch = executions[-1]
+                self.assertEqual(tid, fix)
+                self.assertIsNone(inherited_worktree)
+                self.assertEqual(branch, f"task/{fix}")
+                self.assertEqual(task["worktree"], str(self.sandbox / fix))
+                self.assertTrue(prompt.startswith("packet v"))
+                self.assertIn("## objective\nrepair objective", prompt)
+
     def test_dispatch_prompt_contains_packet_not_placeholder(self):
         tid = self.task("packet dispatch objective")
         seen = {}

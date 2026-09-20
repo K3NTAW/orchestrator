@@ -607,8 +607,8 @@ def dispatch(pool):
                                               "parent": parent["id"]}
                         bus.update(t["id"], pipeline=pipeline, worktree=parent.get("worktree"),
                                    branch=parent.get("branch") or f"task/{parent['id']}")
-                        spawn_async(_dispatch_reply_worker, t["id"], parent["id"], _fix_round_delta(parent, t), plan)
                         complete(t["id"], "dispatched_at")
+                        spawn_async(_dispatch_reply_worker, t["id"], parent["id"], _fix_round_delta(parent, t), plan)
                         continue
                     pipeline["resume"] = {"mode": "fresh", "reason": reason}
                     bus.update(t["id"], pipeline=pipeline)

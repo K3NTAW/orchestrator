@@ -4,11 +4,39 @@ from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_executor.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, codex_stream  # noqa: F401
-from orchestrator import bus, executor, pool as P, spawn
+from orchestrator import bus, daemon, executor, pool as P, spawn
 
 
 class Executor(unittest.TestCase):
     LIVE = {"astra", "luna", "terra", "sol"}
+
+    def test_resume_plan_single_source_used_by_dispatch_and_reply(self):
+        parent = self.exec_task(title="shared resume policy")
+        bus.update(parent, status="held", codex_thread="thread-policy", executor="astra", rounds=0)
+        fix = bus.create_task("policy fix", "repair", ["a"], ["x.py"], role="execute",
+                              constraints={"fix_round_for": parent})
+        pending = []
+        decisions = [{"mode": "resume", "reason": None},
+                     {"mode": "fresh", "reason": "rounds_exhausted"}]
+        with patch.object(executor, "resume_plan", side_effect=decisions) as policy, \
+                patch.object(daemon, "free_slots", return_value=1), \
+                patch.object(daemon, "_fallback_mode", return_value=False), \
+                patch.object(bus, "read", side_effect=lambda **kw: [bus.get(fix["id"])]
+                             if kw == {"status": "queued", "role": "execute"} else []), \
+                patch.object(daemon, "spawn_async", side_effect=lambda fn, *args: pending.append((fn, args))), \
+                patch.object(executor, "_run") as run:
+            daemon.dispatch(P.Pool())
+            self.assertEqual(bus.get(fix["id"])["pipeline"]["resume"]["mode"], "resume")
+            self.assertEqual(len(pending), 1)
+            plan = pending[0][1][-1]
+            before = bus.get(parent)
+            result = executor.reply(parent, "repair", fix_round_task_id=fix["id"], plan=plan)
+            self.assertEqual(result, {"status": "incompatible", "reason": "rounds_exhausted"})
+            self.assertEqual(policy.call_count, 2)
+            for call in policy.call_args_list:
+                self.assertEqual((call.args[0]["id"], call.args[1]["id"]), (parent, fix["id"]))
+            run.assert_not_called()
+            self.assertEqual(bus.get(parent), before)
 
     def test_codex_run_row_has_packet_meta_and_prompt_chars(self):
         tid = self.exec_task(title="packet logging")
