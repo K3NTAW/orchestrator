@@ -8,6 +8,33 @@ from orchestrator import attribution, bus, scorecard
 
 
 class AttributionTests(unittest.TestCase):
+    def test_review_facts_normalises_severities_and_counts(self):
+        task = {"id": "R", "role": "review", "complexity": 7,
+                "constraints": {"reviewer_role": "security", "reviewed_sha": "abc"},
+                "result": {"verdict": "request_changes", "comments": [
+                    {"severity": "critical"}, {"severity": "medium"}, {"severity": "nit"},
+                    {"severity": "unexpected"}]}}
+        facts = attribution.review_facts(task)
+        self.assertEqual(facts["findings_count"], 4)
+        self.assertEqual(facts["findings_by_severity"], {"high": 1, "med": 1, "low": 1, "other": 1})
+        self.assertTrue(facts["checklist_used"])
+
+    def test_review_facts_handles_missing_fields_on_old_reviews(self):
+        facts = attribution.review_facts({"id": "old", "role": "review"})
+        self.assertEqual(facts["verdict"], None)
+        self.assertEqual(facts["findings_count"], 0)
+        self.assertEqual(facts["reviewer_role"], "general")
+        self.assertIsNone(facts["packet_version"])
+
+    def test_review_facts_pass_index_orders_sibling_reviews(self):
+        reviewed = bus.create_task("attribution target", "s", ["a"], ["x.py"], role="execute")
+        bus.update(reviewed["id"], pipeline={"reviews_expected": 2})
+        first = bus.create_task("first review", "s", ["a"], ["x.py"], role="review", inputs=[reviewed["id"]])
+        second = bus.create_task("second review", "s", ["a"], ["x.py"], role="review", inputs=[reviewed["id"]])
+        self.assertEqual(attribution.review_facts(first)["review_pass_index"], 1)
+        self.assertEqual(attribution.review_facts(second)["review_pass_index"], 2)
+        self.assertEqual(attribution.review_facts(second)["reviews_expected"], 2)
+
     def test_bucket_of_every_role(self):
         expected = {"planner_decision": "planner", "planner": "planner", "scout": "scout",
                     "triage": "scout", "execute": "execute", "spec_review": "spec_review",

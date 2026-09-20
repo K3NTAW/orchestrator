@@ -1,6 +1,72 @@
 """Shared run attribution, independent of scorecard aggregation."""
 import fnmatch
+import json
 from . import bus
+
+
+_SECURITY_REASONS = {"security_paths", "diff_unavailable", "security_paths_empty"}
+
+
+def review_facts(review_task):
+    """Return stable telemetry for new and historical review tasks, tolerating partial old rows."""
+    try:
+        task = review_task or {}
+        constraints = task.get("constraints") or {}
+        pipeline = task.get("pipeline") or {}
+        result = task.get("result") or {}
+        comments = result.get("comments") if isinstance(result.get("comments"), list) else []
+        severities = {"high": 0, "med": 0, "low": 0, "other": 0}
+        aliases = {"critical": "high", "high": "high", "medium": "med", "med": "med",
+                   "low": "low", "info": "low", "nit": "low"}
+        for comment in comments:
+            raw = comment.get("severity") if isinstance(comment, dict) else None
+            severities[aliases.get(str(raw).lower(), "other")] += 1
+
+        packet_version = result.get("packet_version")
+        if packet_version is None:
+            for path in sorted(bus.RUNS.glob("*"), reverse=True):
+                try:
+                    row = json.loads(path.read_text())
+                except (OSError, ValueError, TypeError, IsADirectoryError):
+                    continue
+                if row.get("task") == task.get("id"):
+                    packet_version = (row.get("packet_meta") or {}).get("version")
+                    if packet_version is not None:
+                        break
+
+        inputs = task.get("inputs") or []
+        reviewed_id = inputs[0] if inputs and isinstance(inputs[0], str) else None
+        siblings = []
+        if reviewed_id is not None:
+            try:
+                siblings = [row for row in bus.read(role="review")
+                            if (row.get("inputs") or [None])[0] == reviewed_id]
+            except Exception:
+                siblings = []
+        siblings.sort(key=lambda row: (row.get("created_at") or "", row.get("id") or ""))
+        pass_index = next((i for i, row in enumerate(siblings, 1) if row.get("id") == task.get("id")), None)
+        reviews_expected = None
+        if reviewed_id is not None:
+            try:
+                reviews_expected = (bus.get(reviewed_id).get("pipeline") or {}).get("reviews_expected")
+            except Exception:
+                pass
+        return {
+            "verdict": result.get("verdict"),
+            "findings_count": len(comments),
+            "findings_by_severity": severities,
+            "reviewer_role": constraints.get("reviewer_role") or "general",
+            "checklist_used": pipeline.get("review_reason") in _SECURITY_REASONS or (task.get("complexity") or 0) >= 7,
+            "reviewed_sha": constraints.get("reviewed_sha") or pipeline.get("reviewed_sha"),
+            "packet_version": packet_version,
+            "review_pass_index": pass_index,
+            "reviews_expected": reviews_expected,
+        }
+    except Exception:
+        return {"verdict": None, "findings_count": 0,
+                "findings_by_severity": {"high": 0, "med": 0, "low": 0, "other": 0},
+                "reviewer_role": "general", "checklist_used": False, "reviewed_sha": None,
+                "packet_version": None, "review_pass_index": None, "reviews_expected": None}
 
 
 def bucket_of(role, task=None):

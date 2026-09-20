@@ -2,7 +2,7 @@
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
-from . import ROOT, STATE, bus
+from . import ROOT, STATE, attribution, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -612,9 +612,18 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     used = out.get("usage", {})
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
+    review_log = {}
+    if task.get("role") == "review":
+        parsed = extract_json(out.get("result", ""))
+        if not parsed.get("verdict"):
+            parsed = (bus.get(task["id"]).get("result") or parsed)
+        parsed["packet_version"] = (task.get("packet_meta") or {}).get("version")
+        facts = attribution.review_facts({**task, "result": parsed})
+        review_log = {key: facts[key] for key in ("verdict", "findings_count", "findings_by_severity",
+                      "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
     bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
                 outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
-                provider="claude", usage=used, **log, **used)
+                provider="claude", usage=used, **log, **review_log, **used)
     if not out.get("is_error") and p.returncode == 0:
         return {"status": "done", "output": out}
     reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
@@ -733,6 +742,8 @@ def run_worker(task_id, account_id=None):
             text = r["output"].get("result", "")
             result = extract_json(text)
             review_role = role in ("review", "spec_review")
+            if role == "review":
+                result["packet_version"] = (t.get("packet_meta") or {}).get("version")
             # A review worker may post its verdict itself via bus_post_result mid-run, then end with prose or
             # fenced JSON this parser can't take; or return valid JSON that simply lacks "verdict". Either way
             # treat it as a failed parse for review roles so we never silently drop an already-posted verdict
@@ -741,6 +752,9 @@ def run_worker(task_id, account_id=None):
             existing_result = (bus.get(task_id).get("result") or {}) if parse_failed else {}
             if parse_failed and existing_result.get("verdict"):
                 result = existing_result  # keep the worker's own posted result; do not overwrite it
+                if role == "review":
+                    result["packet_version"] = (t.get("packet_meta") or {}).get("version")
+                    bus.post_result(task_id, fit_result(result), "done")
             elif parse_failed and review_role:
                 bus.update(task_id, status="failed", reason="review returned no parseable verdict",
                           resume_hint={"raw": text[-2000:]})
@@ -751,6 +765,9 @@ def run_worker(task_id, account_id=None):
                 verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
                     if role == "spec_review" else {"review_verdict": result["verdict"]}
                 bus.update(task_id, **verdict_fields)
+                if role == "review":
+                    facts = attribution.review_facts(bus.get(task_id))
+                    bus.update(task_id, review_facts=facts, **facts)
                 if t.get("inputs") and isinstance(t["inputs"][0], str):
                     try:
                         bus.update(t["inputs"][0], **verdict_fields)

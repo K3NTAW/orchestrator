@@ -24,6 +24,31 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_review_run_row_and_task_carry_review_facts(self):
+        reviewed = bus.create_task("review facts target", "s", ["a"], ["facts.py"], role="execute")
+        bus.update(reviewed["id"], pipeline={"reviews_expected": 1})
+        review = bus.create_task("review facts", "s", ["a"], ["facts.py"], role="review",
+                                 inputs=[reviewed["id"]], complexity=7,
+                                 constraints={"reviewed_sha": "deadbeef", "reviewer_role": "security"})
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)
+        original_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", original_pick))
+        comments = [{"severity": "high"}, {"severity": "medium"}, {"severity": "info"}]
+        original = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": {
+            "result": json.dumps({"verdict": "request_changes", "comments": comments}), "usage": {}}}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", original))
+        with mock.patch.object(spawn, "ensure_worktree", return_value=TMP / "wt" / review["id"]):
+            spawn.run_worker(review["id"])
+        updated = bus.get(review["id"])
+        facts = updated["review_facts"]
+        self.assertEqual(facts["findings_count"], 3)
+        self.assertEqual(facts["packet_version"], updated["result"]["packet_version"])
+        for key in ("verdict", "findings_count", "findings_by_severity", "reviewer_role", "checklist_used",
+                    "reviewed_sha", "packet_version", "review_pass_index"):
+            self.assertIn(key, updated)
+
     def test_packet_dependencies_section_lists_depends_on(self):
         dep = bus.create_task("D" * 110, "s", ["a"], ["x.py"], role="execute")
         bus.update(dep["id"], status="done", merged_into="goal/G", sha="abc12345")
