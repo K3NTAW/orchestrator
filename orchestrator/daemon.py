@@ -7,7 +7,7 @@ import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threadin
 from pathlib import Path
 from . import STATE, acceptance, bus, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
-from . import failures, gitutil, notify as notifications
+from . import failures, gitutil, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
                        _test_ids, _path_in_scope, _rejecting_reviews, _normal_issue, failure_signature,
                        _failure_text, _node_id_to_unittest, _RunnerProbeTimeout, _flaky_rerun_command,
@@ -592,18 +592,52 @@ def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
+    row = {"ts": time.time(), "free_slots": slots, "fallback": fallback,
+           "running_execute": len(bus.read(status="running", role="execute")),
+           "running_claude": running_claude_workers(pool), "considered": []}
+    enabled = [ex for ex in pool.executors.values() if ex.enabled and "execute" in ex.roles]
+    capacity_reason = ("account_capacity" if fallback else
+                       "cooldown" if enabled and all(ex.cooling() for ex in enabled) else
+                       "executor_capacity")
+    slots_exhausted = False
     retry_held = [t for t in bus.read(status="held", role="execute")
                   if t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")]
     for t in bus.read(status="queued", role="execute") + retry_held:
-        if stale(t) or not bus.ready(t):
+        entry = {"task": t["id"], "goal_id": t.get("parent"), "ready": bus.ready(t),
+                 "action": "skipped", "reason": "other"}
+        if t.get("executor"):
+            entry["executor"] = t["executor"]
+        row["considered"].append(entry)
+        if stale(t):
+            entry["reason"] = "stale"
             continue
+        if not entry["ready"]:
+            entry["reason"] = "dependency"
+            continue
+        if t.get("status") == "queued":
+            with bus.locked():
+                current = bus.get(t["id"])
+                pipeline = dict(current.get("pipeline") or {})
+                if "first_ready_at" not in pipeline:
+                    pipeline["first_ready_at"] = time.time()
+                    bus.update(t["id"], pipeline=pipeline)
         verdict = t.get("spec_review_verdict")
         if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
+            if slots_exhausted:
+                entry["reason"] = capacity_reason
+                continue
             if fallback and fallback_tier(t["complexity"]) is None:
+                entry["reason"] = "fallback_no_tier"
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if slots <= 0:
-                break
+                slots_exhausted = True
+                entry["reason"] = capacity_reason
+                continue
             if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
+                entry["action"] = "dispatched"
+                entry.pop("reason")
+                if fallback:
+                    entry["executor"] = "claude:" + fallback_tier(t["complexity"])
                 slots -= 1
                 fix_parent_id = (t.get("constraints") or {}).get("fix_round_for")
                 if fix_parent_id:
@@ -630,6 +664,7 @@ def dispatch(pool):
                 continue
         elif verdict == "request_changes":
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
+                entry["reason"] = "spec_review_changes"
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
         elif not any(r["inputs"][:1] == [t["id"]] for r in bus.read(role="spec_review")):
             if stamp(t["id"], "spec_review_at"):
@@ -637,10 +672,19 @@ def dispatch(pool):
                     sr = bus.create_task(f"spec review: {t['title']}", t["spec"], t["acceptance"], t["scope"],
                                          role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
                                          complexity=t["complexity"], tier=SPEC_REVIEW_TIER)
+                    entry.update(action="spec_review", reason="spec_review_pending")
                     spawn_async(spawn.run_worker, sr["id"])
                     complete(t["id"], "spec_review_at")
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
+        else:
+            entry["reason"] = "spec_review_pending"
+    held_ids = {t["id"] for t in retry_held}
+    for entry in row["considered"]:
+        if entry["task"] in held_ids and entry["action"] != "dispatched":
+            entry["reason"] = "budget"
+    if row["considered"]:
+        schedlog.append("dispatch", row)
     # Reviews are normally spawned when they are created, so they are not part of the execute loop above.
     # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread
     # that vanished before bus.claim.  The per-requeue stamp prevents every daemon tick spawning another copy.

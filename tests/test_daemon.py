@@ -79,6 +79,117 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def dispatch_telemetry(self, slots=0):
+        self.swap(daemon.schedlog, "SCHED_DIR", self.sandbox / "sched")
+        self.swap(daemon, "free_slots", lambda pool: slots)
+        self.swap(daemon, "_fallback_mode", lambda pool: False)
+        self.swap(daemon, "spawn_async", lambda *args, **kwargs: None)
+        self.swap(spawn, "packet", lambda *args: {})
+        self.swap(spawn, "render", lambda *args, **kwargs: "prompt")
+        self.swap(spawn, "packet_run_meta", lambda packet: {})
+        return P.Pool()
+
+    def test_dispatch_stamps_first_ready_at_once(self):
+        pool = self.dispatch_telemetry()
+        dependency = self.task("dependency")
+        task = self.task("waiting", depends_on=[dependency])
+        daemon.dispatch(pool)
+        self.assertNotIn("first_ready_at", bus.get(task).get("pipeline") or {})
+        bus.update(dependency, status="done", merged_into="goal/test")
+        with mock.patch.object(daemon.time, "time", return_value=123.0):
+            daemon.dispatch(pool)
+        self.assertEqual(bus.get(task)["pipeline"]["first_ready_at"], 123.0)
+        with mock.patch.object(daemon.time, "time", return_value=456.0):
+            daemon.dispatch(pool)
+        self.assertEqual(bus.get(task)["pipeline"]["first_ready_at"], 123.0)
+
+    def test_dispatch_logs_skip_reasons_capacity_and_dependency(self):
+        pool = self.dispatch_telemetry(slots=1)
+        first = self.task("first", complexity=2)
+        waiting = self.task("waiting", complexity=2)
+        blocked = self.task("blocked", depends_on=[first], complexity=2)
+        daemon.dispatch(pool)
+        row, = daemon.schedlog.read("dispatch")
+        self.assertEqual(row["free_slots"], 1)
+        self.assertFalse(row["fallback"])
+        self.assertEqual(row["running_execute"], 0)
+        self.assertEqual(row["running_claude"], 0)
+        entries = row["considered"]
+        self.assertEqual([entry["task"] for entry in entries], [first, waiting, blocked])
+        self.assertEqual(entries[0]["action"], "dispatched")
+        self.assertNotIn("reason", entries[0])
+        self.assertEqual([(entry["ready"], entry["action"], entry["reason"]) for entry in entries[1:]],
+                         [(True, "skipped", "executor_capacity"), (False, "skipped", "dependency")])
+        self.assertEqual(entries[0]["goal_id"], bus.get(first)["parent"])
+        self.assertNotIn("dispatched_at", bus.get(waiting)["pipeline"])
+
+    def test_dispatch_log_row_absent_on_idle_tick(self):
+        pool = self.dispatch_telemetry()
+        daemon.dispatch(pool)
+        self.assertFalse((daemon.schedlog.SCHED_DIR / "dispatch.jsonl").exists())
+
+    def test_dispatch_logs_cooldown_fallback_budget_and_noop(self):
+        pool = self.dispatch_telemetry()
+        task = self.task("capacity reasons", complexity=2)
+        pool.executors = {"cooling": mock.Mock(enabled=True, roles=["execute"])}
+        pool.executors["cooling"].cooling.return_value = True
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "cooldown")
+        self.swap(daemon, "_fallback_mode", lambda pool: True)
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "account_capacity")
+        bus.update(task, status="done")
+        high = self.task("no fallback tier", complexity=9)
+        bus.update(high, spec_review_verdict="approve")
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "fallback_no_tier")
+        bus.update(high, status="held", hold_reason="budget")
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "budget")
+        bus.update(high, status="done")
+        bus.update(task, status="held", hold_reason="budget", executor="claude:sonnet")
+        self.swap(daemon, "free_slots", lambda pool: 1)
+        daemon.dispatch(pool)
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual(entry["action"], "dispatched")
+        self.assertEqual(entry["executor"], "claude:sonnet")
+        self.assertNotIn("reason", entry)
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "other")
+
+    def test_dispatch_logs_stale_and_spec_review_changes(self):
+        pool = self.dispatch_telemetry()
+        stale_task = self.task("stale", complexity=2)
+        changes = self.task("changes", complexity=daemon.SPEC_REVIEW_MIN)
+        bus.update(changes, spec_review_verdict="request_changes")
+        self.swap(daemon, "stale", lambda task: task["id"] == stale_task)
+        daemon.dispatch(pool)
+        entries = daemon.schedlog.read("dispatch")[0]["considered"]
+        self.assertEqual([entry["reason"] for entry in entries], ["stale", "spec_review_changes"])
+        self.assertEqual(bus.get(changes)["status"], "held")
+
+    def test_dispatch_creates_spec_reviews_after_slots_exhausted(self):
+        pool = self.dispatch_telemetry(slots=1)
+        first = self.task("first", complexity=2)
+        waiting = self.task("waiting", complexity=2)
+        review = self.task("needs review", complexity=daemon.SPEC_REVIEW_MIN)
+        later = self.task("later", complexity=2)
+        daemon.dispatch(pool)
+        rows = daemon.schedlog.read("dispatch")
+        self.assertEqual([entry["task"] for entry in rows[0]["considered"]
+                          if entry["action"] == "dispatched"], [first])
+        reviews = bus.read(role="spec_review")
+        self.assertEqual([task["inputs"] for task in reviews], [[review]])
+        self.assertEqual(rows[0]["considered"][2]["action"], "spec_review")
+        self.assertEqual(rows[0]["considered"][2]["reason"], "spec_review_pending")
+        for task in (waiting, later):
+            self.assertNotIn("dispatched_at", bus.get(task)["pipeline"])
+        daemon.dispatch(pool)
+        self.assertEqual(len(bus.read(role="spec_review")), 1)
+        entry = next(entry for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
+                     if entry["task"] == review)
+        self.assertEqual((entry["action"], entry["reason"]), ("skipped", "spec_review_pending"))
+
     def test_reply_worker_handles_held_requeues_fix_task_for_retry(self):
         parent = self.held_for_fix()
         bus.update(parent, codex_thread="parent-thread", executor="astra", rounds=1,
