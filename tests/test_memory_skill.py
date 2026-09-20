@@ -172,15 +172,16 @@ class MemorySkill(unittest.TestCase):
     def test_recall_index_entries_without_relevance_do_not_satisfy_budget(self):
         recall = self.load_recall()
         with tempfile.TemporaryDirectory() as tmp:
-            memory = Path(tmp) / "memory"
+            root = Path(tmp)
+            memory = root / ".orchestrator" / "memory"
             memory.mkdir()
             unrelated = "\n".join(f"## 2026-01-01 unrelated entry {n}\nnoise" for n in range(20))
             (memory / "index.md").write_text(unrelated + "\n## 2026-01-01 cache timeout gotcha\ncache timeout\n")
-            recall.MEM = memory
             calls = {"bus": 0}
             recall.index_bus = lambda terms: calls.__setitem__("bus", calls["bus"] + 1) or [
                 (1, "bus:T-1", "", "bus", "timeout workaround")]
-            result = recall.recall("cache timeout", layers=("notes", "bus"), budget_hits=2, min_score=1)
+            result = recall.recall("cache timeout", root=root, layers=("notes", "bus"),
+                                   budget_hits=2, min_score=1)
         self.assertEqual(calls["bus"], 1)
         self.assertEqual([hit["id"] for hit in result["hits"][:2]],
                          [next(hit["id"] for hit in result["hits"] if hit["id"].startswith("mem:")), "bus:T-1"])

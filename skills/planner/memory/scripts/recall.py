@@ -17,7 +17,7 @@ DEFAULT_BUDGET_CHARS = 6000
 
 
 def resolve_root(root=None):
-    return Path(root) if root is not None else ROOT
+    return Path(root) if root is not None else Path(os.environ.get("ORCH_ROOT") or Path.cwd())
 
 
 def configured_hits(root, setting="budget_hits"):
@@ -167,19 +167,16 @@ def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), 
            min_score=None, budget_chars=None, task=None):
     """Recall progressively, avoiding richer layers once the cheap answer is sufficient."""
     started = time.monotonic()
-    explicit_root = root is not None
     root = resolve_root(root)
     budget_hits = configured_hits(root) if budget_hits is None else budget_hits
     min_score = configured_hits(root, "min_score") if min_score is None else min_score
     budget_chars = configured_hits(root, "budget_chars") if budget_chars is None else budget_chars
     terms = terms_of(query)
-    paths = None
-    if explicit_root:
-        state_root = Path(root)
-        graph_root = Path(os.environ.get("GRAPHIFY_OUT") or state_root / "graphify-out")
-        paths = {"memory": state_root / ".orchestrator" / "memory",
-                 "tasks": state_root / ".orchestrator" / "tasks",
-                 "lessons": graph_root / "reflections" / "LESSONS.md"}
+    state_root = Path(root)
+    graph_root = Path(os.environ.get("GRAPHIFY_OUT") or state_root / "graphify-out")
+    paths = {"memory": state_root / ".orchestrator" / "memory",
+             "tasks": state_root / ".orchestrator" / "tasks",
+             "lessons": graph_root / "reflections" / "LESSONS.md"}
     hits, consulted, chars, stopped_at = [], [], 0, None
     for layer in layers:
         layer_hits = _layer_hits(layer, terms, task=task, limit=budget_hits, paths=paths)
