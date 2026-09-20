@@ -1,6 +1,6 @@
 """skills/planner/memory/scripts: record.sh (draft/add/set) and recall.sh (index/get) over the orchestrator's
 memory files, plus the retrospect-written hook accepting what record.sh writes."""
-import importlib.util, io, os, subprocess, sys, time, unittest
+import importlib.util, io, json, os, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_memory_skill.py` doesn't add this dir itself
@@ -84,6 +84,109 @@ class MemorySkill(unittest.TestCase):
         with redirect_stdout(out):
             recall.cmd_index(["jev", "rank", "flag", "--goal", "ship the jev rank flag"])
         self.assertIn("jev: off", out.getvalue())
+
+    def test_recall_stops_after_budget_hits_in_notes_layer(self):
+        recall = self.load_recall()
+        calls = {"bus": 0, "cmem": 0, "graph": 0}
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "one"), (1, "mem:x:2", "", "mem", "two")]
+        recall.index_bus = lambda terms, tasks=None: calls.__setitem__("bus", calls["bus"] + 1) or []
+        recall.index_cmem = lambda *args: calls.__setitem__("cmem", calls["cmem"] + 1) or []
+        recall.index_graph = lambda terms, lessons=None: calls.__setitem__("graph", calls["graph"] + 1) or []
+        result = recall.recall("one two", budget_hits=2)
+        self.assertEqual(result["layers_consulted"], ["notes"])
+        self.assertEqual(result["stopped_at"], "notes")
+        self.assertEqual(calls, {"bus": 0, "cmem": 0, "graph": 0})
+
+    def test_recall_skips_unavailable_layer_and_names_it(self):
+        recall = self.load_recall()
+        recall.index_notes = lambda terms, memory=None: []
+        recall.index_bus = lambda terms, tasks=None: []
+        recall.CMEM = TMP / "missing.db"
+        recall.LESSONS = TMP / "missing-lessons.md"
+        result = recall.recall("nothing")
+        self.assertEqual(result["layers_consulted"], ["notes", "bus", "claude-mem unavailable", "graph unavailable"])
+
+    def test_recall_logs_memory_run_row_with_task_and_layers(self):
+        task = bus.create_task("memory recall row", "s", ["a"], ["x.py"])
+        recall = self.load_recall()
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "memory")]
+        result = recall.recall("memory", layers=("notes",), task=task["id"])
+        row = json.loads(sorted(bus.RUNS.glob("*.jsonl"))[-1].read_text().splitlines()[-1])
+        self.assertEqual(row["role"], "memory")
+        self.assertEqual(row["task"], task["id"])
+        self.assertEqual(row["goal_id"], task["id"])
+        self.assertEqual(row["layers_consulted"], result["layers_consulted"])
+
+    def test_recall_progressive_cli_header(self):
+        recall = self.load_recall()
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "memory")]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            recall.cmd_index(["--progressive", "memory"])
+        self.assertIn("layers_consulted: notes", out.getvalue())
+
+    def test_recall_uses_explicit_root_not_import_time_cwd(self):
+        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as elsewhere_dir:
+            root, elsewhere = Path(root_dir), Path(elsewhere_dir)
+            memory = root / ".orchestrator" / "memory"
+            tasks = root / ".orchestrator" / "tasks"
+            memory.mkdir(parents=True)
+            tasks.mkdir(parents=True)
+            (memory / "gotchas.md").write_text("## 2026-09-20 Root-only gotcha\nwidget cache fact\n")
+            (tasks / "T-root.json").write_text(json.dumps({
+                "id": "T-root", "role": "execute", "status": "done", "title": "Root-only task",
+                "spec": "widget cache result", "result": {"summary": "root-only result"}, "events": []}))
+            old_cwd, old_root = Path.cwd(), os.environ.get("ORCH_ROOT")
+            try:
+                os.environ["ORCH_ROOT"] = str(elsewhere)
+                os.chdir(elsewhere)
+                recall = self.load_recall()
+                result = recall.recall("root-only widget cache", root=root, layers=("notes", "bus"))
+            finally:
+                os.chdir(old_cwd)
+                if old_root is None:
+                    os.environ.pop("ORCH_ROOT", None)
+                else:
+                    os.environ["ORCH_ROOT"] = old_root
+            self.assertEqual({hit["layer"] for hit in result["hits"]}, {"mem", "bus"})
+            self.assertTrue(all("root-only" in hit["title"].lower() for hit in result["hits"]))
+
+    def test_recall_budget_from_root_pool_toml(self):
+        recall = self.load_recall()
+        calls = {"bus": 0}
+        recall.index_notes = lambda terms, memory=None: [(1, "mem:x:1", "", "mem", "one"),
+                                            (1, "mem:x:2", "", "mem", "two")]
+        recall.index_bus = lambda terms, tasks=None: calls.__setitem__("bus", calls["bus"] + 1) or []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pool = root / ".orchestrator" / "pool.toml"
+            pool.parent.mkdir()
+            pool.write_text("[memory]\nbudget_hits = 2\n")
+            first = recall.recall("one two", root=root, layers=("notes", "bus"))
+            self.assertEqual(first["layers_consulted"], ["notes"])
+            pool.write_text("[memory]\nbudget_hits = 10\n")
+            second = recall.recall("one two", root=root, layers=("notes", "bus"))
+        self.assertEqual(second["layers_consulted"], ["notes", "bus"])
+        self.assertEqual(calls["bus"], 1)
+
+    def test_recall_index_entries_without_relevance_do_not_satisfy_budget(self):
+        recall = self.load_recall()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = root / ".orchestrator" / "memory"
+            memory.mkdir(parents=True)
+            unrelated = "\n".join(f"## 2026-01-01 unrelated entry {n}\nnoise" for n in range(20))
+            (memory / "index.md").write_text(unrelated + "\n## 2026-01-01 cache timeout gotcha\ncache timeout\n")
+            calls = {"bus": 0}
+            recall.index_bus = lambda terms, tasks=None: calls.__setitem__("bus", calls["bus"] + 1) or [
+                (1, "bus:T-1", "", "bus", "timeout workaround")]
+            result = recall.recall("cache timeout", root=root, layers=("notes", "bus"),
+                                   budget_hits=2, min_score=1)
+        self.assertEqual(calls["bus"], 1)
+        self.assertEqual([hit["id"] for hit in result["hits"][:2]],
+                         [next(hit["id"] for hit in result["hits"] if hit["id"].startswith("mem:")), "bus:T-1"])
+        self.assertTrue(all(hit["relevant"] for hit in result["hits"][:2]))
+        self.assertTrue(all(not hit["relevant"] for hit in result["hits"][2:]))
 
 
 if __name__ == "__main__":

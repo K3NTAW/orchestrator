@@ -7,7 +7,7 @@ Observed ``codex exec resume --help`` options (2026-09-19): ``--config``, ``--la
 Notably, resume accepts ``--json`` and the access flags, but not ``-C``; its process cwd selects the worktree.
 Usage-limit errors cool Codex down and hold the task (§4.10).
 """
-import json, subprocess, time
+import inspect, json, re, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
@@ -15,6 +15,29 @@ from . import scorecard
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
+FALLBACK_JOIN_TIMEOUT_S = 5
+_fallback_threads = []
+_fallback_threads_lock = threading.Lock()
+
+
+def _prune_fallback_threads():
+    """Drop completed fallback workers while holding the registry lock."""
+    _fallback_threads[:] = [thread for thread in _fallback_threads if thread.is_alive()]
+
+
+def fallback_threads():
+    """Return the currently running Claude fallback worker threads."""
+    with _fallback_threads_lock:
+        _prune_fallback_threads()
+        return tuple(_fallback_threads)
+
+
+def join_fallback_threads(timeout=FALLBACK_JOIN_TIMEOUT_S):
+    """Wait a bounded time for fallback workers, returning those still alive."""
+    deadline = time.monotonic() + timeout
+    for thread in fallback_threads():
+        thread.join(max(0, deadline - time.monotonic()))
+    return fallback_threads()
 
 
 def argv_for(kind, args, cwd, access):
@@ -67,7 +90,13 @@ def _tokens(u):
     both providers uniformly; keep the Codex key for one release so older runs/*.jsonl readers keep working."""
     out = {k: u.get(k, 0) for k in ("input_tokens", "output_tokens", "cached_input_tokens")}
     out["cache_read_input_tokens"] = out["cached_input_tokens"]
+    out.update(bus.normalize_usage("codex", u))
     return out
+
+
+def _state_target(task):
+    """Return the task whose execution state belongs to this run."""
+    return task.get("_run_task_id", task["id"])
 
 
 def _run(pool, task, args, cwd, timeout, ex=None):
@@ -77,11 +106,15 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     kind = "resume" if args and args[0] == "resume" else "exec"
     command_args = args[1:] if kind == "resume" else args
     cmd = argv_for(kind, command_args, cwd, access)
+    log_task = _state_target(task)
     log = {"executor": ex.id if ex else "codex", "complexity": task["complexity"]}
+    constraints = task.get("_run_constraints", task.get("constraints") or {})
+    if constraints.get("fix_round_for"):
+        log["resume_mode"] = task.get("_resume_mode", "fresh")
+    log["prompt_chars"] = len(args[-1])
+    from .spawn import packet_run_meta
+    log["packet_meta"] = task.get("packet_meta") or packet_run_meta(args[-1])
     t0 = time.time()
-    if ex:
-        ex.running += 1
-    pool.codex.running += 1; pool.save()          # legacy mirror, until B3 drops pool.codex
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
         if kind == "resume":
@@ -89,32 +122,34 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         r = subprocess.run(cmd, **run_kwargs)
     except subprocess.TimeoutExpired:
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
-    finally:
-        if ex:
-            ex.running -= 1
-        pool.codex.running -= 1; pool.save()
     if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
         reason = f"codex argv error: {r.stderr[-800:]}"
-        bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex",
+        bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex",
                     duration_s=round(time.time() - t0, 1), outcome="failed", reason=reason, **log)
-        bus.update(task["id"], resume_hint={"argv_error": reason[:300]})
+        bus.update(_state_target(task), resume_hint={"argv_error": reason[:300]})
         return {"status": "failed", "reason": reason}
     ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
     if ev["thread_id"]:
-        bus.update(task["id"], codex_thread=ev["thread_id"])
+        # The head is a resume boundary, not merely result metadata: later replies must not
+        # expose an old conversation to unrelated worktree changes.
+        fields = {"codex_thread": ev["thread_id"]}
+        head = _thread_head(cwd)
+        if head:
+            fields["codex_thread_head"] = head
+        bus.update(task["id"], **fields)
     if ev["error"] and is_rate_limited(ev["error"]):
         secs = parse_reset_hint(ev["error"], pool.cfg["limits"]["cooldown_default_s"])
         if ex:
             pool.cooldown_executor(ex.id, secs, "codex usage limit")   # a usage limit is the quota group's, not one model's
         pool.codex.cooldown_until = time.time() + secs; pool.save()
-        bus.update(task["id"], status="held", hold_reason=f"codex usage limit; resets in {secs // 60} min",
+        bus.update(_state_target(task), status="held", hold_reason=f"codex usage limit; resets in {secs // 60} min",
                    resume_hint={"thread": ev["thread_id"], "diff_stat": _diff_stat(cwd)})
-        bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
+        bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
                     cooldown_s=secs, **log)
         return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
     u = ev["usage"]
-    bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex", duration_s=round(time.time() - t0, 1),
-                outcome="error" if ev["error"] else "done", **log, **_tokens(u))
+    bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
+                outcome="error" if ev["error"] else "done", usage=u, **log, **(_tokens(u) if u else {}))
     if ev["error"] or r.returncode:
         return {"status": "failed", "reason": ev["error"] or r.stderr[-800:], "thread": ev["thread_id"]}
     return {"status": "done", "thread": ev["thread_id"], "message": ev["message"][:6000], "usage": u}
@@ -124,24 +159,144 @@ def _diff_stat(cwd):
     return subprocess.run(["git", "diff", "--stat"], cwd=cwd, capture_output=True, text=True).stdout[-1500:]
 
 
-def start(task_id, prompt):
+def _thread_head(cwd):
+    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _resume_compatible(task):
+    """A resumed thread may only see a clean descendant of its prior checkout head."""
+    expected = task.get("codex_thread_head")
+    cwd = task.get("worktree")
+    if not cwd:
+        return False, "worktree unavailable"
+    # Tasks created before thread heads were recorded retain their historical resume behaviour.
+    if not expected:
+        return True, "legacy thread has no recorded head"
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True)
+    if status.returncode or status.stdout.strip():
+        return False, "worktree is dirty"
+    head = _thread_head(cwd)
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"], cwd=cwd,
+                              capture_output=True, text=True)
+    return (bool(head and ancestor.returncode == 0), "worktree head moved" if head else "worktree HEAD unavailable")
+
+
+def resume_plan(parent, fix_task):
+    """Return the single authoritative routing decision for a fix round."""
+    if not parent.get("codex_thread"):
+        return {"mode": "fresh", "reason": "no_thread"}
+    if parent.get("rounds", 0) >= MAX_ROUNDS:
+        return {"mode": "fresh", "reason": "rounds_exhausted"}
+    ex = Pool().executors.get(parent.get("executor") or "")
+    if ex is None or ex.provider != "codex":
+        return {"mode": "fresh", "reason": "executor_not_codex"}
+    compatible, _ = _resume_compatible(parent)
+    if not compatible:
+        return {"mode": "fresh", "reason": "incompatible_worktree"}
+    return {"mode": "resume", "reason": None}
+
+
+def _commit_from_message(message):
+    """Extract an explicitly reported commit, avoiding incidental short hexadecimal text."""
+    full = re.search(r"\b[0-9a-f]{40}\b", message, re.I)
+    if full:
+        return full.group(0)
+    labelled = re.search(
+        r"\b(?:commit\s+sha|committed|commit|sha|HEAD\s+is\s+now\s+at)\b(?:\s*[:=]\s*|\s+)([0-9a-f]{7,40})\b",
+        message, re.I,
+    )
+    if labelled:
+        return labelled.group(1)
+    backticked = re.search(r"\bCommit\b[^\n`]*`([0-9a-f]{7,40})`", message, re.I)
+    return backticked.group(1) if backticked else None
+
+
+def post_tool_result(task_id, result, replace_result=False):
+    """Post a Codex result; fix-loop replies replace an unmerged task's prior round."""
+    task = bus.get(task_id)
+    if task.get("assigned_to") != "codex":
+        return False, f"task is assigned to {task.get('assigned_to')}, not codex"
+    if result.get("status") != "done":
+        return False, f"codex result status is {result.get('status')}, not done"
+    previous = task.get("result")
+    if task.get("merged_into") is not None:
+        return False, f"task is merged into {task.get('merged_into')}"
+    if not replace_result:
+        if previous is not None:
+            return False, f"result exists from thread {previous.get('thread', 'unknown')}"
+        if task.get("status") != "running":
+            return False, f"task status is {task.get('status')}, not running"
+    message = result.get("message", "")
+    commit = _commit_from_message(message) or subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=task["worktree"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    posted = {
+        "summary": message[:3000],
+        "commit": commit,
+        "executed_by": "codex:" + task["executor"],
+        "provenance": ["repo"],
+        "usage": result.get("usage"),
+        "thread": result.get("thread") or task.get("codex_thread"),
+        "rounds": (previous.get("rounds", 1) + 1) if replace_result and previous else 1,
+    }
+    if replace_result and previous:
+        posted["previous_commits"] = [*previous.get("previous_commits", []), previous.get("commit")]
+    bus.post_result(task_id, posted, "done")
+    return True, "result posted"
+
+
+def start(task_id, prompt, executor_id=None, packet_meta=None):
     """Fresh Codex thread for one atomic task, in its worktree, on the executor pick_executor routes the task to.
     Held (not failed) when every executor in the task's complexity band is cooling, busy or over its daily budget.
     scores() is B3's ranking input; absent, every executor scores 1.0."""
-    pool = Pool(); t = bus.get(task_id)
+    pool = Pool()
+    result = None
+    handed_off = False
     try:
-        scores = scorecard.scores(scorecard.build())
-    except Exception:
-        scores = {}
-    ex = pool.pick_executor("execute", t["complexity"], scores=scores)
-    if ex is None or ex.provider != "codex":
-        return _exhausted(pool, t)
-    from .spawn import ensure_worktree
-    wt = Path(t.get("worktree") or ensure_worktree(task_id))
-    bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
-    ex.roll_day(); ex.day_tasks += 1
-    pool.codex.day_tasks += 1; pool.save()       # legacy mirror, until B3 drops pool.codex
-    return _run(pool, t, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
+        t = bus.get(task_id)
+        previous = t.get("result")
+        if previous is not None and (t.get("status") == "done" or t.get("merged_into") is not None):
+            return {"status": "refused", "reason":
+                    f"task {task_id} already has a result from thread {previous.get('thread', 'unknown')}; use codex_reply for a fix round"}
+        if t.get("merged_into") is not None:
+            return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
+        if t.get("status") not in ("queued", "running", "done"):
+            return {"status": "refused", "reason": f"task {task_id} status is {t.get('status')}; cannot claim"}
+        if executor_id in pool.executors:
+            ex = pool.executors[executor_id]
+        else:
+            try:
+                scores = scorecard.scores(scorecard.build())
+            except Exception:
+                scores = {}
+            ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
+        if ex is None or ex.provider != "codex":
+            result = _exhausted(pool, t)
+            handed_off = result.get("status") == "fallback"
+            return result
+        if pool.reserve(task_id, ex.id, "execute", t) is None:
+            pipeline = dict(t.get("pipeline") or {})
+            pipeline["hold_note"] = "budget"
+            pipeline.pop("dispatched_at", None)
+            bus.update(task_id, status="queued", pipeline=pipeline)
+            return {"status": "budget", "reason": "budget reservation refused"}
+        from .spawn import ensure_worktree
+        wt = Path(t.get("worktree") or ensure_worktree(task_id))
+        from .spawn import packet_run_meta
+        t = {**t, "packet_meta": packet_meta if packet_meta is not None else packet_run_meta(prompt)}
+        bus.update(task_id, packet_meta=t["packet_meta"])
+        bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
+        ex.roll_day(); ex.day_tasks += 1
+        pool.codex.day_tasks += 1; pool.save()       # legacy mirror, until B3 drops pool.codex
+        result = _run(pool, t, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
+        return result
+    finally:
+        # A Claude fallback inherits this run key's existing dispatch reservation.
+        # Its run_worker() finally owns the matching release, so do not create the
+        # gap where start() has returned but the worker has not yet claimed it.
+        if not handed_off:
+            pool.release(task_id, (result or {}).get("usage", {}))
 
 
 def _exhausted(pool, t, run=None):
@@ -149,30 +304,84 @@ def _exhausted(pool, t, run=None):
     Complexity >=9 always holds for Astra. Review of a Claude-executed task must be another model on the other account."""
     pol = pool.cfg["codex"]["on_exhausted"]
     tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
-    if tier is None or pool.pick("execute") is None:
+    acct = pool.pick("execute")
+    if tier is None or acct is None:
         bus.update(t["id"], status="held", hold_reason=f"codex unavailable; policy={pol}; no Claude fallback for complexity {t['complexity']}")
         return {"status": "held", "policy": pol, "codex": pool.status()["codex"]}
     from .spawn import run_worker
     bus.update(t["id"], tier=tier, fallback="claude", review_rule="same-family-review: other account, different model")
-    threading.Thread(target=run or run_worker, args=(t["id"],), daemon=True).start()
+    worker = run or run_worker
+    try:
+        parameters = inspect.signature(worker).parameters.values()
+        accepts_account = any(p.kind == inspect.Parameter.VAR_KEYWORD or
+                              (p.name == "account_id" and p.kind != inspect.Parameter.POSITIONAL_ONLY)
+                              for p in parameters)
+    except (TypeError, ValueError):
+        accepts_account = True
+    kwargs = {"account_id": acct.id} if accepts_account else {}
+    thread = None
+
+    def run_fallback():
+        try:
+            worker(t["id"], **kwargs)
+        finally:
+            with _fallback_threads_lock:
+                _fallback_threads.remove(thread)
+
+    thread = threading.Thread(target=run_fallback, daemon=True)
+    with _fallback_threads_lock:
+        _prune_fallback_threads()
+        _fallback_threads.append(thread)
+    thread.start()
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 
-def reply(task_id, delta):
-    """Fix-loop round: resume the task's thread with a delta (failing tests + assertion lines) on the executor that
-    started it — same thread, same model, never a re-pick mid-task. Capped at MAX_ROUNDS."""
-    pool = Pool(); t = bus.get(task_id)
+def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):
+    """Run one bounded fix round and return its execution outcome.
+
+    The parent owns the Codex thread and round counter; when ``fix_round_task_id``
+    is supplied, the fix task owns execution status, reasons, holds, and hints.
+    """
+    t = bus.get(task_id)
+    if fix_round_task_id is not None:
+        fix = bus.get(fix_round_task_id)
+        t = {**t, "_run_task_id": fix_round_task_id,
+             "_run_constraints": fix.get("constraints") or {}, "_resume_mode": "resume"}
+    if packet_meta is not None:
+        t["packet_meta"] = packet_meta
+    if t.get("merged_into") is not None:
+        return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
+    current_plan = resume_plan(bus.get(task_id), fix if fix_round_task_id is not None else t)
+    if plan is not None and current_plan != plan:
+        return {"status": "incompatible", "reason": current_plan["reason"]}
+    pool = Pool()
     if not t.get("codex_thread"):
         return {"status": "failed", "reason": "task has no codex_thread; call codex() first"}
     rounds = t.get("rounds", 0) + 1
     if rounds > MAX_ROUNDS:
-        bus.update(task_id, status="failed", reason=f"fix loop exceeded {MAX_ROUNDS} rounds; escalate or re-spec")
+        bus.update(_state_target(t), status="failed", reason=f"fix loop exceeded {MAX_ROUNDS} rounds; escalate or re-spec")
         return {"status": "failed", "reason": "round budget exhausted"}
     ex = pool.executors.get(t.get("executor") or "") or pool._legacy_executor()  # pre-B2 tasks have no executor field
-    if ex is None or ex.cooling() or ex.running >= ex.max_parallel:
-        bus.update(task_id, status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
+    # The task being resumed is itself one of the bus-derived running slots.
+    if ex is None or ex.cooling() or ex.running > ex.max_parallel:
+        bus.update(_state_target(t), status="held", hold_reason=f"executor {ex.id if ex else 'codex'} unavailable")
         return {"status": "held", "codex": pool.status()["codex"]}
-    result = _run(pool, t, ["resume", t["codex_thread"], delta], t["worktree"],
+    if current_plan["mode"] == "resume":
+        args = ["resume", t["codex_thread"], delta]
+    elif plan is not None or fix_round_task_id is not None:
+        return {"status": "incompatible", "reason": current_plan["reason"]}
+    else:
+        # Preserve the public direct-reply fallback for callers that did not
+        # pre-plan a fix task; daemon fix rounds never execute on the parent.
+        from .spawn import packet, packet_run_meta
+        briefing = packet(t, t["worktree"])
+        t["packet_meta"] = packet_run_meta(briefing)
+        repair = briefing + "\n\nRepair delta:\n" + delta
+        bus.update(_state_target(t), resume_incompatible=current_plan["reason"])
+        args = ["-m", ex.model, repair]
+    if t.get("packet_meta"):
+        bus.update(_state_target(t), packet_meta=t["packet_meta"])
+    result = _run(pool, t, args, t["worktree"],
                   t["constraints"].get("timeout_s", 1800), ex=ex)
     if not result.get("reason", "").startswith("codex argv error:"):
         bus.update(task_id, rounds=rounds)

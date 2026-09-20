@@ -12,15 +12,103 @@ does not block while attempts < 2 -- reconcile() retries it -- and turns permane
 second early exit would push attempts to 2. failed_launch (an exception between claim and launch, or a claimed
 row reconcile() aged out because the process never got as far as recording "running") behaves like exited_early:
 it does not block, but counts toward the same attempts/gave_up-at-2 rule.
+
+Routed ticks coalesce non-routine points per goal, retaining a record for each point.
+The ledger gains a goal_launches mapping: goal_launches[goal_id] stores
+last_state_version and cursor. Equal child-state versions cannot launch again;
+infra failures restore the previous guard and cursor. Legacy list ledgers remain
+readable and per-point APIs retain their original blocking semantics.
 """
-import json, os, re, sys, tempfile, time
-from . import ROOT, STATE, bus, goals, handover, jev, spawn
+import fnmatch, hashlib, json, os, re, subprocess, sys, tempfile, time, tomllib, uuid
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from . import ROOT, STATE, bus, goals, handover, jev, spawn, decision, failures, gitutil, notify
 from .pool import Pool
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 _STALE_CLAIM_S = 120
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 _JEV_TIMEOUT_S = 3.0
+
+
+def _fenced(label, value, limit=None):
+    value = str(value or "")
+    if limit is not None:
+        value = value[:limit]
+    value = re.sub(r"`{3,}", "[backticks elided]", value)
+    return [f"{label}:", "```data", value, "```"]
+
+
+def decision_packet(goal_id, kind, payload, repo_path=ROOT):
+    """Build a bounded decision packet, preserving its decision context before inventory."""
+    repo_path = Path(repo_path)
+    try:
+        cfg = tomllib.loads((repo_path / ".orchestrator" / "pool.toml").read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        cfg = {}
+    try:
+        cap = max(1, int(cfg.get("planner", {}).get("decision_packet_chars", 6000)))
+    except (TypeError, ValueError):
+        cap = 6000
+
+    expected = {"scouts_done": "write specs", "held": "write or approve a fix round",
+                "closable": "close the goal"}.get(kind, "make the requested decision")
+    try:
+        goal = bus.get(goal_id)
+    except KeyError:
+        goal = None
+    lines = [f"Decision: {kind} — expected to {expected}.", f"Goal id: {goal_id}", f"Payload id: {payload}"]
+    lines += _fenced("Goal title", goal.get("title", "") if goal else "")
+    if goal is None:
+        return "\n".join(lines)[:cap]
+
+    inventory = []
+    if kind == "held":
+        task_id = str(payload).split(":", 1)[0]
+        lines.append(f"Task id: {task_id}")
+        try:
+            task = bus.get(task_id)
+        except KeyError:
+            task = None
+        lines += _fenced("Task title", task.get("title", "") if task else "")
+        if task is not None:
+            lines += _fenced("Hold reason", task.get("hold_reason", ""))
+            failures = (task.get("resume_hint") or {}).get("failures")
+            if failures is None:
+                failures = (task.get("result") or {}).get("failures")
+            if failures:
+                lines += _fenced("Failures", failures, 1500)
+            comments = []
+            reviews = [r for r in bus.read(role="review") if (r.get("inputs") or [])[:1] == [task_id]]
+            for review in reviews:
+                for comment in (review.get("result") or {}).get("comments", []):
+                    comments.append(f"{comment.get('path', '?')}:{comment.get('line', '?')} "
+                                    f"{str(comment.get('issue', ''))[:200]}")
+            if comments:
+                lines += _fenced("Review comments", "\n".join(comments))
+            inventory = spawn.packet(task, repo_path).splitlines()
+    elif kind == "scouts_done":
+        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "scout"]
+        summaries = []
+        for scout in children:
+            summaries.append(f"{scout['id']}: " + str((scout.get("result") or {}).get("summary", ""))[:300])
+        if summaries:
+            lines += _fenced("Scout summaries", "\n".join(summaries))
+    elif kind == "closable":
+        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "execute"
+                    and t.get("merged_into")]
+        if children:
+            lines += _fenced("Merged tasks", "\n".join(f"{t['id']} {t.get('sha', '?')}" for t in children))
+
+    prefix = "\n".join(lines)
+    if inventory:
+        inventory_text = re.sub(r"`{3,}", "[backticks elided]", "\n".join(inventory))
+        empty_suffix = "\n" + "\n".join(_fenced("Spawn packet", ""))
+        room = cap - len(prefix) - len(empty_suffix)
+        suffix = empty_suffix if room < 0 else "\n" + "\n".join(_fenced("Spawn packet", inventory_text[:room]))
+        return prefix[:cap] if room < 0 else prefix + suffix
+    return prefix[:cap]
 
 # next_action options offered to Jev for a decision-point shadow triage (D3, T-0217). scouts_done gets its own
 # set (there is no held task/review to react to yet); held and closable share the fix_round/respec/escalate/noop
@@ -50,7 +138,8 @@ def _load_records():
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
+        return data.get("records", []) if isinstance(data, dict) else data
     except json.JSONDecodeError:
         backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
         try:
@@ -61,15 +150,18 @@ def _load_records():
         return []
 
 
-def _save_records(records):
+def _save_records(records, goal_launches=None):
     """mkstemp in the same directory + os.replace: a reader (another process's _load_records) never observes a
     partially-written file, only the old complete one or the new complete one."""
     path = _runs_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    if goal_launches is None:
+        goal_launches = _goal_launches()
+    data = {"records": records, "goal_launches": goal_launches} if goal_launches else records
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".planner_runs.json.")
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(records, indent=2) + "\n")
+            f.write(json.dumps(data, indent=2) + "\n")
         os.replace(tmp_name, path)
     except Exception:
         os.unlink(tmp_name)
@@ -145,6 +237,9 @@ def decision_points():
         for c in executes:
             if c["status"] != "held":
                 continue
+            if any(x.get("status") != "failed" and
+                   (x.get("constraints") or {}).get("fix_round_for") == c["id"] for x in all_tasks):
+                continue
             key = _held_key(c)
             if key is None:
                 continue
@@ -185,7 +280,7 @@ def _existing_attempts(goal_id, kind, payload_key):
     return r.get("attempts", 0) if r else 0
 
 
-def _claim(goal_id, kind, payload_key, attempts):
+def _claim(goal_id, kind, payload_key, attempts, route=None):
     """Write/refresh this key's record to status "claimed" (pid None) -- called only from inside run()'s own
     bus.locked() block, immediately after _blocked() found nothing there yet, so the check and the claim are
     atomic together. "claimed" is itself a blocking status (_BLOCKING_STATUSES), so a concurrent run() for the
@@ -196,7 +291,17 @@ def _claim(goal_id, kind, payload_key, attempts):
     if r is None:
         r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
         records.append(r)
-    r.update(status="claimed", pid=None, started_at=time.time())
+    r.update(status="claimed", pid=None, started_at=time.time(),
+             state_version=state_version(goal_id), cursor_at_launch=_cursor(),
+             launch_id=uuid.uuid4().hex, policy_version=bus.policy_version(), prompt_hash=None,
+             route=route.name if route is not None else "escalate",
+             reason=route.reason if route is not None else "legacy:autonomous",
+             evidence=list(route.evidence) if route is not None else [goal_id, payload_key],
+             cheaper_steps=list(route.cheaper_steps) if route is not None else [],
+             decision_requested={"held": "write or approve a fix round", "scouts_done": "write specs",
+                                 "closable": "close the goal"}.get(kind, "make the requested decision"))
+    for field in ("usage_logged", "tokens", "usd", "session_id"):
+        r.pop(field, None)
     _save_records(records)
 
 
@@ -229,8 +334,15 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts, jev
         if r is None:
             r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
             records.append(r)
+        defaults = {"launch_id": uuid.uuid4().hex, "state_version": state_version(goal_id),
+                    "cursor_at_launch": _cursor(), "route": "escalate", "reason": "legacy:autonomous",
+                    "evidence": [goal_id, payload_key], "cheaper_steps": []}
+        for field, value in defaults.items():
+            r.setdefault(field, value)
         r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
-                 account=acct_id, log=launched["log"], status="running", jev=jev_result, agreement=None)
+                 account=acct_id, log=launched["log"], stderr_log=launched.get("stderr_log"),
+                 status="running", jev=jev_result, agreement=None)
+        r.setdefault("launches", []).append({k: v for k, v in r.items() if k != "launches"})
         _save_records(records)
 
 
@@ -356,7 +468,7 @@ def _safe_jev_triage(goal_id, kind, payload_key, attempts):
         return None
 
 
-def run(goal_id, kind, payload_key):
+def run(goal_id, kind, payload_key, route=None, *, routed=False):
     """Launch a headless Planner for one decision, guarded against attaching alongside an interactive session or
     a saturated pool. The already-decided check and the claim that follows it run inside one bus.locked() block
     (T-0196 review item 2): two concurrent callers for the same key can never both pass the check, since whichever
@@ -372,8 +484,10 @@ def run(goal_id, kind, payload_key):
         if _blocked(goal_id, kind, payload_key):
             return {"launched": False, "reason": "already decided"}
         attempts = _existing_attempts(goal_id, kind, payload_key)
-        _claim(goal_id, kind, payload_key, attempts)
+        _claim(goal_id, kind, payload_key, attempts, route)
 
+    acct = None
+    pool = None
     try:
         if _session_attached():
             _record_skip(goal_id, kind, payload_key, "planner session attached")
@@ -394,7 +508,12 @@ def run(goal_id, kind, payload_key):
 
         handover.write(f"decision {kind}")
 
-        prompt = spawn.render("planner-decision", kind=kind, goal_id=goal_id, payload=payload_key)
+        prompt = spawn.render("planner-decision", packet=decision_packet(goal_id, kind, payload_key, ROOT))
+        with bus.locked():
+            records = _load_records()
+            record = _find_record(records, goal_id, kind, payload_key)
+            record["prompt_hash"] = hashlib.sha256(prompt.encode()).hexdigest()[:12]
+            _save_records(records)
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
 
@@ -403,15 +522,24 @@ def run(goal_id, kind, payload_key):
         # request, so skip records above never carry a jev field.
         jev_result = _safe_jev_triage(goal_id, kind, payload_key, attempts)
 
-        launched = goals.launch_planner(ROOT, prompt, acct.id, budget, log)
+        launched = (goals.launch_planner(ROOT, prompt, acct.id, budget, log) if not routed else
+                    launch_routed(pool, route, prompt, acct, budget, log))
     except (KeyboardInterrupt, SystemExit) as e:
         _record_failed_launch(goal_id, kind, payload_key, attempts, e)
         raise
     except Exception as e:
+        infra = _infra_kind(str(e))
+        if infra:
+            if pool is not None:
+                _cool_infra(pool, acct.id if acct else None, infra, goal_id)
+            with bus.locked():
+                records = _load_records()
+                _find_record(records, goal_id, kind, payload_key).update(status="infra_failure", infra_failure_kind=infra)
+                _save_records(records)
+            return {"launched": False, "reason": infra}
         status, new_attempts = _record_failed_launch(goal_id, kind, payload_key, attempts, e)
         if status == "gave_up":
-            from . import daemon  # deferred: daemon imports this module at load time
-            daemon.notify(f"{goal_id}: planner decision {kind} ({payload_key}) gave up after {new_attempts} "
+            notify.notify(f"{goal_id}: planner decision {kind} ({payload_key}) gave up after {new_attempts} "
                           f"attempts (last: launch failed)")
         return {"launched": False, "reason": "failed_launch", "error": str(e)[:300]}
 
@@ -433,6 +561,62 @@ def _bus_event_after(since, *task_ids):
     row = bus.db().execute(f"select 1 from events where task_id in ({placeholders}) and ts>? limit 1",
                            (*task_ids, since)).fetchone()
     return row is not None
+
+
+def _record_decision_usage(r):
+    """Parse a completed headless Claude JSON response once and account for its usage."""
+    if r.get("usage_logged"):
+        return
+    if not r.get("log"):
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print("[planner_runs] decision log missing; usage absent", file=sys.stderr)
+        return
+    try:
+        lines = Path(r["log"]).read_text(errors="replace").splitlines()
+    except OSError:
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print(f"[planner_runs] unable to read decision log {r['log']}; usage absent", file=sys.stderr)
+        return
+    output = None
+    for line in reversed(lines):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            output = candidate
+            break
+    if output is None:
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print(f"[planner_runs] no JSON usage record in {r['log']}", file=sys.stderr)
+        return
+    usage = output.get("usage") or {}
+    if not usage:
+        r["usage_logged"] = False
+        r["usage_warning_count"] = r.get("usage_warning_count", 0) + 1
+        print(f"[planner_runs] usage absent in {r['log']}", file=sys.stderr)
+        return
+    normalized = bus.normalize_usage("claude", usage)
+    tokens = normalized.get("total_tokens", 0)
+    usd = output.get("total_cost_usd")
+    bus.log_run(task=r["goal_id"], goal_id=r["goal_id"], role="planner_decision",
+                tier="planner", account=r.get("account"), provider="claude",
+                outcome="done" if not output.get("is_error") else "error", usd=usd,
+                tokens=tokens, **{**usage, **normalized,
+                    **{key: r.get(key) for key in ("launch_id", "route", "reason", "evidence",
+                       "cheaper_steps", "decision_requested", "policy_version", "prompt_hash", "payload_key")},
+                    "route_reason": r.get("reason"), "decision_kind": r["kind"],
+                    "attempt": r.get("attempts", 0) + 1, "started_at": r.get("started_at"),
+                    "session_id": output.get("session_id")})
+    r["tokens"] = tokens
+    r["usd"] = usd
+    r["usage_logged"] = True
+    r["session_id"] = output.get("session_id")
+    if r.get("launches"):
+        r["launches"][-1].update(usd=usd, **normalized, session_id=r["session_id"])
 
 
 def _condition_resolved(r, tasks_by_id, children_by_parent):
@@ -545,6 +729,11 @@ def reconcile():
             if goals.identity_of(r.get("pid"), r.get("pid_start")):
                 continue
             changed = True
+            if _reconcile_infra(r, records):
+                continue
+            if not any(other is not r and other.get("launch_id") == r.get("launch_id")
+                       and other.get("usage_logged") for other in records):
+                _record_decision_usage(r)
             outcome = _observed_outcome(r, tasks_by_id)
             r["agreement"] = (outcome == r["jev"]["choice"]) if (outcome is not None and r.get("jev")) else None
             if _condition_resolved(r, tasks_by_id, children_by_parent):
@@ -560,9 +749,8 @@ def reconcile():
             _save_records(records)
 
     if gave_up:
-        from . import daemon  # deferred: daemon imports this module at load time
         for r in gave_up:
-            daemon.notify(f"{r['goal_id']}: planner decision {r['kind']} ({r['payload_key']}) "
+            notify.notify(f"{r['goal_id']}: planner decision {r['kind']} ({r['payload_key']}) "
                           f"gave up after {r['attempts']} attempts")
 
 
@@ -587,3 +775,593 @@ def summary():
         "agreement_rate": (sum(1 for r in scored if r["agreement"]) / len(scored)) if scored else None,
         "mean_confidence": (sum(confidences) / len(confidences)) if confidences else None,
     }
+
+
+def _read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def _usage_buckets(row):
+    return {"input_tokens": int(row.get("input_uncached_tokens", row.get("input_tokens")) or 0),
+            "output_tokens": int(row.get("output_tokens") or 0),
+            "cache_read_tokens": int(row.get("cache_read_tokens", row.get("cache_read_input_tokens")) or 0),
+            "cache_write_tokens": int(row.get("cache_write_tokens", row.get("cache_creation_input_tokens")) or 0)}
+
+
+def _interactive_summary(root, cfg, cutoff, now, headless):
+    """Read only transcript bytes already accounted by Pool.tally_planner, without mutating offsets."""
+    from .pool import TZ, encode_project_dir
+    usage = _read_json(root / "planner_usage.json", {})
+    sessions, day_totals = [], {}
+    known = {r.get("session_id") for r in headless if r.get("session_id")}
+    for account in cfg.get("claude_accounts", []):
+        account_id = account["id"]
+        project = Path(account["config_dir"]).expanduser() / "projects" / encode_project_dir(str(ROOT.resolve()))
+        for name, offset in usage.get(account_id, {}).get("offsets", {}).items():
+            if Path(name).name != name or Path(name).stem in known:
+                continue
+            totals = _usage_buckets({})
+            daily = {}
+            try:
+                with (project / name).open("rb") as stream:
+                    raw = stream.read(max(0, int(offset)))
+            except (OSError, TypeError, ValueError):
+                continue
+            for line in raw.splitlines(keepends=True):
+                if not line.endswith(b"\n"):
+                    continue
+                try:
+                    row = json.loads(line)
+                    if row.get("type") != "assistant" or row.get("sessionId") in known:
+                        continue
+                    dt = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+                    if not cutoff <= dt.timestamp() <= now:
+                        continue
+                except (ValueError, KeyError, TypeError):
+                    continue
+                buckets = _usage_buckets((row.get("message") or {}).get("usage") or {})
+                day = dt.astimezone(TZ).date().isoformat()
+                day_row = daily.setdefault(day, _usage_buckets({}))
+                for key, value in buckets.items():
+                    totals[key] += value
+                    day_row[key] += value
+            if daily:
+                sessions.append({"label": "interactive", "account": account_id,
+                                 "session": Path(name).stem, **totals})
+                for day, buckets in daily.items():
+                    target = day_totals.setdefault((day, account_id), _usage_buckets({}))
+                    for key, value in buckets.items():
+                        target[key] += value
+    return {"label": "interactive", "sessions_count": len(sessions), "sessions": sessions,
+            "day_totals": [{"day": day, "account": account, **totals}
+                           for (day, account), totals in sorted(day_totals.items())]}
+
+
+def premium_summary(days=7, root=None):
+    """Rolling launch audit. Limits are advisory; this function never schedules or blocks work.
+
+    Ledger launch snapshots include unfinished/unmetered invocations. Finished run rows
+    supply usage and replace matching snapshots, so retries count without double counting.
+    Input means uncached input; cache share includes read and write input in its denominator.
+    """
+    root = Path(root) if root is not None else STATE
+    now = time.time()
+    cutoff = now - days * 86400
+    records = _read_json(root / "runs" / "planner_runs.json", [])
+    try:
+        cfg = tomllib.loads((root / "pool.toml").read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    if isinstance(records, dict):
+        records = records.get("records", [])
+    launches = []
+    for record in records:
+        if "launches" in record:
+            launches.extend(dict(r) for r in record["launches"])
+        elif record.get("pid") or record.get("status") in ("running", "exited_ok", "exited_early", "gave_up"):
+            launches.append(dict(record))
+    unique, seen_launches = [], set()
+    for launch in launches:
+        launch_id = launch.get("launch_id")
+        if launch_id and launch_id in seen_launches:
+            continue
+        if launch_id:
+            seen_launches.add(launch_id)
+        if launch.get("launch_route"):
+            launch["route"] = launch["launch_route"]
+        unique.append(launch)
+    launches = unique
+    for path in sorted((root / "runs").glob("*.jsonl")):
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("role") != "planner_decision":
+                continue
+            match = next((r for r in launches if
+                          (row.get("launch_id") and r.get("launch_id") == row["launch_id"]) or
+                          (not row.get("launch_id") and not r.get("_matched") and
+                           r.get("goal_id") == row.get("goal_id", row.get("task")) and
+                           (not row.get("payload_key") or r.get("payload_key") == row["payload_key"]))), None)
+            if match is None:
+                match = {}
+                launches.append(match)
+            match.update(row, _matched=True)
+    recent = [r for r in launches if cutoff <= (r.get("started_at") or r.get("ts") or 0) <= now]
+    kinds, routes, reasons = Counter(), Counter(), Counter()
+    totals = _usage_buckets({})
+    inputs, per_goal = [], {}
+    for row in recent:
+        kind = row.get("decision_kind", row.get("kind", "unknown"))
+        route = row.get("route") or "escalate"
+        reason = row.get("reason") or row.get("route_reason") or "legacy:autonomous"
+        kinds[kind] += 1
+        routes[route] += 1
+        reasons[reason] += 1
+        buckets = _usage_buckets(row)
+        # Missing usage is unknown, not a zero-token invocation.
+        if any(key in row for key in ("input_tokens", "input_uncached_tokens")):
+            inputs.append(buckets["input_tokens"])
+        for key, value in buckets.items():
+            totals[key] += value
+        if route == "escalate":
+            goal = row.get("goal_id", row.get("task"))
+            per_goal.setdefault(goal, []).append(reason)
+    limit = cfg.get("planner", {}).get("routes", {}).get("premium_launches_soft_per_goal", 2)
+    exceptions = [{"goal_id": goal, "launches": len(why), "limit": limit,
+                   "reasons": dict(Counter(why))} for goal, why in per_goal.items() if len(why) > limit]
+    input_total = totals["input_tokens"] + totals["cache_read_tokens"] + totals["cache_write_tokens"]
+    return {"days": days, "headless": {"count": len(recent), "by_kind": dict(kinds),
+            "by_route": dict(routes), "top_reasons": dict(reasons.most_common(5)),
+            "mean_input_tokens": sum(inputs) / len(inputs) if inputs else None,
+            "max_input_tokens": max(inputs) if inputs else None, **totals,
+            "cache_read_share": totals["cache_read_tokens"] / input_total if input_total else 0,
+            "usd": sum(r.get("usd") or 0 for r in recent),
+            "gave_up": sum(r.get("status") == "gave_up" and
+                           cutoff <= r.get("started_at", 0) <= now for r in records)},
+            "interactive": _interactive_summary(root, cfg, cutoff, now, launches),
+            "exceptions": exceptions}
+
+
+def _goal_launches():
+    data = _read_json(_runs_path(), {})
+    return data.get("goal_launches", {}) if isinstance(data, dict) else {}
+
+
+def _cursor():
+    return bus.db().execute("select coalesce(max(seq), 0) from events").fetchone()[0]
+
+
+def state_version(goal_id):
+    rows = []
+    for task in bus.read():
+        if task.get("parent") != goal_id:
+            continue
+        seq = bus.db().execute("select coalesce(max(seq), 0) from events where task_id=?",
+                               (task["id"],)).fetchone()[0]
+        rows.append((task["id"], task["status"], task.get("hold_reason"), task.get("merged_into"), seq))
+    return hashlib.sha256(json.dumps(sorted(rows), separators=(",", ":")).encode()).hexdigest()[:12]
+
+
+def _point(point):
+    if isinstance(point, dict):
+        return point
+    goal_id, kind, payload_key = point
+    return {"goal_id": goal_id, "kind": kind, "payload_key": payload_key,
+            "task_id": payload_key.split(":", 1)[0] if kind == "held" else goal_id}
+
+
+def _infra_kind(text):
+    text = str(text or "").lower()
+    if re.search(r"unauthori[sz]ed|authentication|invalid.api.key|oauth|permission denied|\bauth\b|\b40[13]\b", text):
+        return "auth"
+    if re.search(r"quota|usage.?limit|rate.?limit|hit your limit|out of usage credits|\b429\b|cooling", text):
+        return "quota"
+    if re.search(r"unavailable|overloaded|connection refused|connection reset|\b50[234]\b", text):
+        return "unavailable"
+    return None
+
+
+def _premium_launches(goal_id):
+    launches = set()
+    for record in _load_records():
+        if record["goal_id"] != goal_id:
+            continue
+        for row in record.get("launches", [record] if record.get("pid") else []):
+            if row.get("launch_route", row.get("route")) == "escalate":
+                launches.add(row.get("launch_id") or (record["kind"], record["payload_key"], row.get("started_at")))
+    return len(launches)
+
+
+def _gate_state(goal, children):
+    try:
+        result = gitutil._git_in(ROOT, "rev-parse", f"goal/{goal['id']}")
+        head = result.stdout.strip() if result.returncode == 0 else None
+    except OSError:
+        head = None
+    if not head:
+        return "unknown"
+    last = (goal.get("pipeline") or {}).get("last_merge") or {}
+    if last.get("status") == "tests_red" and last.get("head_sha") == head:
+        return "red"
+    if last:
+        return "green" if last.get("status") == "merged" and last.get("sha") == head else "unknown"
+    # merge.merge writes these fields only after its gate and fast-forward succeed.
+    merged = [t for t in children if t.get("sha") and t.get("merged_into") == f"goal/{goal['id']}"]
+    if merged:
+        def last_seq(t):
+            return bus.db().execute("select coalesce(max(seq),0) from events where task_id=?", (t["id"],)).fetchone()[0]
+        return "green" if max(merged, key=last_seq)["sha"] == head else "unknown"
+    return "unknown"
+
+
+def build_ctx(point, pool=None):
+    """Gather complete routing evidence without running tests or mutating tasks."""
+    point = _point(point)
+    pool = pool or Pool()
+    cfg = pool.cfg
+    goal = bus.get(point["goal_id"])
+    task = _decision_task(point["goal_id"], point["kind"], point["payload_key"]) or goal
+    children = [t for t in bus.read() if t.get("parent") == goal["id"]]
+    scouts = [t for t in children if t.get("role") == "scout"]
+    blocked = [t["id"] for t in scouts if t.get("status") in ("held", "failed")
+               or (t.get("result") or {}).get("blocked")]
+    kind = (task.get("pipeline") or {}).get("failure_kind")
+    infra = {"quota": "quota", "permissions": "auth"}.get(kind)
+    involved = {task.get("account"), task.get("assigned_to"), task.get("executor")}
+    for source in [*pool.accounts, *getattr(pool, "executors", {}).values()]:
+        if source.id in involved and (source.cooling() or "usage" in source.hold_reason.lower()):
+            infra = _infra_kind(source.hold_reason) or infra
+    ctx = {"routes": cfg.get("planner", {}).get("routes", {}), "infra_failure_kind": infra,
+           "premium_launches": _premium_launches(goal["id"]), "blocked_scouts": blocked}
+    if point["kind"] == "held":
+        chain = failures.lineage(task)
+        signature = failures.failure_signature(task)
+        comments = [c for _, cs in failures.rejecting_reviews(task) for c in cs]
+        chain_ids = {t["id"] for t in chain}
+        ctx.update(failing_ids=failures.test_ids((task.get("resume_hint") or {}).get("failures")) or [],
+                   in_scope_review_comments=bool(comments) and all(
+                       failures.path_in_scope(c.get("path"), task.get("scope") or []) for c in comments),
+                   auto_fix_rounds_used=sum((t.get("constraints") or {}).get("auto_round") is not None for t in chain),
+                   auto_fix_rounds=cfg.get("daemon", {}).get("auto_fix_rounds", 2),
+                   failure_signature=signature,
+                   signature_repeated=any((t.get("constraints") or {}).get("failure_signature") == signature for t in chain),
+                   spec_review_request_changes=sum(
+                       bool((r.get("inputs") or [])[:1] and r["inputs"][0] in chain_ids)
+                       and (r.get("review_verdict") or (r.get("result") or {}).get("verdict")) == "request_changes"
+                       for r in bus.read(role="spec_review")),
+                   hold_reason=task.get("hold_reason"))
+        ctx.update({f"touches_{area}": value for area, value in failures.touch_areas(task, cfg).items()})
+    elif point["kind"] == "scouts_done":
+        review = cfg.get("review", {})
+        scope = goal.get("scope") or []
+        patterns = review.get("semantic_patterns", {})
+        if isinstance(patterns, dict):
+            patterns = patterns.values()
+        semantic_text = str(goal.get("spec") or "") + "\n" + "\n".join(scope)
+        try:
+            semantic = any(re.search(pattern, semantic_text) for pattern in patterns)
+        except (TypeError, re.error):
+            semantic = True
+        ctx.update(goal_complexity=goal.get("complexity"), scout_count=len(scouts),
+                   all_scouts_posted=bool(scouts) and all(t["status"] in ("done", "failed") for t in scouts),
+                   security_trigger=any(fnmatch.fnmatch(path, glob) for path in scope
+                                        for glob in review.get("security_paths", [])),
+                   semantic_trigger=semantic or any(fnmatch.fnmatch(path, glob) for path in [*scope, str(goal.get("spec") or "")]
+                                                    for glob in review.get("semantic_paths", [])))
+    elif point["kind"] == "closable":
+        executes = [t for t in children if t["role"] == "execute"]
+        ctx.update(all_children_merged=bool(executes) and all(t["status"] == "done" and t.get("merged_into") for t in executes),
+                   gate_state=_gate_state(goal, children))
+    return ctx
+
+
+def grouped_packet(sections):
+    """Preserve one bounded evidence section for every covered point."""
+    result = []
+    for point, ctx, route in sections:
+        goal_id, kind, key = point["goal_id"], point["kind"], point["payload_key"]
+        result.append(f"Section: {kind}")
+        result.extend(_fenced("Route and reason", f"{route.name}: {route.reason}"))
+        if kind == "held":
+            task = _decision_task(goal_id, kind, key)
+            result.append(f"Task id: {task['id']}")
+            branch = task.get("branch") or f"task/{task['id']}"
+            try:
+                head = gitutil._git_in(task.get("worktree") or ROOT, "rev-parse", branch)
+                sha = head.stdout.strip() if head.returncode == 0 else "unknown"
+            except OSError:
+                sha = "unknown"
+            result.extend(_fenced("Branch and head sha", f"{branch} {sha}"))
+            result.extend(_fenced("Hold reason", task.get("hold_reason"), 1000))
+            result.extend(_fenced("Failure kind and signature", f"{(task.get('pipeline') or {}).get('failure_kind', 'unknown')} {ctx['failure_signature']}"))
+            result.extend(_fenced("Failing ids", "\n".join(ctx["failing_ids"]), 1500))
+            comments = [c for _, cs in failures.rejecting_reviews(task) for c in cs]
+            result.extend(_fenced("Review comments", json.dumps(comments), 2000))
+        else:
+            result.append(decision_packet(goal_id, kind, key))
+    return "\n".join(result)
+
+
+def launch_routed(pool, route, prompt, account, budget, log):
+    """Use the selected model without changing global config or the legacy launcher."""
+    tier = route.tier or "fable"
+    model = pool.cfg.get("models", {}).get("planner" if tier == "fable" else tier, tier)
+    if model == pool.cfg.get("models", {}).get("planner"):
+        return goals.launch_planner(ROOT, prompt, account.id, budget, log)
+    goals.trust_workspace(account.config_dir, ROOT)
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(account.config_dir), "ORCH_ROOT": str(ROOT)}
+    if account.oauth_token_env and os.environ.get(account.oauth_token_env):
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[account.oauth_token_env]
+    env.update(goals.resolve_secrets(goals._filter_target_secrets(pool.cfg.get("secrets", {}).get("planner", {}))))
+    system_prompt = (ROOT / ".orchestrator" / "prompts" / "planner.md").read_text()
+    argv = ["claude", "-p", prompt, "--model", model, "--output-format", "json",
+            "--max-budget-usd", str(budget), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
+            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]
+    log.parent.mkdir(parents=True, exist_ok=True)
+    stderr = log.with_suffix(log.suffix + ".stderr")
+    with log.open("w") as out, stderr.open("w") as err:
+        proc = goals.Popen(argv, cwd=str(ROOT), env=env, stdout=out, stderr=err, start_new_session=True)
+    return {"pid": proc.pid, "pid_start": goals._proc_start(proc.pid), "log": str(log), "stderr_log": str(stderr)}
+
+
+def _cool_infra(pool, account_id, kind, goal_id):
+    try:
+        account = pool.get(account_id)
+        pool.cooldown(account, 1800, reason=kind)
+    except (StopIteration, KeyError):
+        if account_id in getattr(pool, "executors", {}):
+            pool.cooldown_executor(account_id, 1800, reason=kind)
+    notify.notify_once(goal_id, f"infra:{account_id}:{kind}", f"{goal_id}: Planner {account_id} cooling ({kind})")
+
+
+def _reconcile_infra(record, records):
+    text = ""
+    for path in (record.get("log"), record.get("stderr_log") or (str(record.get("log")) + ".stderr")):
+        if path:
+            try:
+                content = Path(path).read_text(errors="replace")[-12000:]
+                if path == record.get("log"):
+                    for line in content.splitlines():
+                        try:
+                            output = json.loads(line)
+                        except ValueError:
+                            text += line + "\n"
+                            continue
+                        if isinstance(output, dict) and output.get("is_error"):
+                            text += str(output.get("result") or output.get("error") or "")
+                else:
+                    text += content
+            except OSError:
+                pass
+    kind = _infra_kind(text)
+    if not kind:
+        return False
+    _cool_infra(Pool(), record.get("account"), kind, record["goal_id"])
+    record.update(status="infra_failure", infra_failure_kind=kind)
+    guards = _goal_launches()
+    guard = guards.get(record["goal_id"], {})
+    if guard.get("launch_id") == record.get("launch_id"):
+        previous = record.get("previous_goal_launch")
+        if previous:
+            guards[record["goal_id"]] = previous
+        else:
+            guards.pop(record["goal_id"], None)
+        _save_records(records, guards)
+    return True
+
+
+def run_group(sections, pool):
+    goal_id = sections[0][0]["goal_id"]
+    route = max((section[2] for section in sections), key=lambda r: {"investigate": 1, "escalate": 2}[r.name])
+    with bus.locked():
+        version = state_version(goal_id)
+        guards = _goal_launches()
+        previous = guards.get(goal_id)
+        if previous and previous.get("last_state_version") == version:
+            return {"launched": False, "reason": "same state_version"}
+        records = _load_records()
+        if any(r["goal_id"] == goal_id and r.get("status") in ("claimed", "running") for r in records):
+            return {"launched": False, "reason": "goal launch active"}
+        sections = [s for s in sections if not _blocked(goal_id, s[0]["kind"], s[0]["payload_key"], records)]
+        if not sections:
+            return {"launched": False, "reason": "already decided"}
+        launch_id, cursor = uuid.uuid4().hex, _cursor()
+        for point, ctx, section_route in sections:
+            key, kind = point["payload_key"], point["kind"]
+            _claim(goal_id, kind, key, _existing_attempts(goal_id, kind, key), section_route)
+        records = _load_records()
+        for point, ctx, section_route in sections:
+            record = _find_record(records, goal_id, point["kind"], point["payload_key"])
+            record.update(launch_id=launch_id, state_version=version, cursor_at_launch=cursor,
+                          previous_goal_launch=previous, launch_route=route.name, tier=route.tier,
+                          exception=route.name == "escalate" and ctx["premium_launches"] >= ctx["routes"].get("premium_launches_soft_per_goal", 2))
+        _save_records(records)
+    account = None
+    try:
+        reason = "planner session attached" if _session_attached() else None
+        if not reason:
+            account = pool.pick("planner")
+            reason = "no account with headroom" if account is None else None
+        if reason:
+            for point, _, _ in sections:
+                _record_skip(goal_id, point["kind"], point["payload_key"], reason)
+            return {"launched": False, "reason": reason}
+        if not all(_SAFE_KEY.fullmatch(str(p[k])) for p, _, _ in sections for k in ("goal_id", "kind", "payload_key")):
+            raise ValueError("unsafe decision key")
+        handover.write("goal decision")
+        prompt = spawn.render("planner-decision", packet=grouped_packet(sections))
+        log = STATE / "runs" / f"planner-decision-{goal_id}-{launch_id}.log"
+        budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
+        launched = launch_routed(pool, route, prompt, account, budget, log)
+        infra = _infra_kind(launched.get("stderr") or launched.get("error"))
+        if infra:
+            raise RuntimeError(infra)
+    except (Exception, KeyboardInterrupt, SystemExit) as exc:
+        infra = _infra_kind(str(exc))
+        if infra:
+            _cool_infra(pool, account.id if account else None, infra, goal_id)
+            with bus.locked():
+                records = _load_records()
+                for point, _, _ in sections:
+                    _find_record(records, goal_id, point["kind"], point["payload_key"]).update(status="infra_failure", infra_failure_kind=infra)
+                _save_records(records)
+        else:
+            for point, _, _ in sections:
+                attempts = _existing_attempts(goal_id, point["kind"], point["payload_key"])
+                status, attempts = _record_failed_launch(goal_id, point["kind"], point["payload_key"], attempts, exc)
+                if status == "gave_up":
+                    notify.notify_once(goal_id, f"gave_up:{launch_id}", f"{goal_id}: Planner gave up after {attempts} attempts")
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        return {"launched": False, "reason": infra or "failed_launch"}
+    with bus.locked():
+        records = _load_records()
+        for point, _, _ in sections:
+            r = _find_record(records, goal_id, point["kind"], point["payload_key"])
+            r.update(status="running", pid=launched["pid"], pid_start=launched["pid_start"],
+                     log=launched["log"], stderr_log=launched.get("stderr_log"), account=account.id,
+                     prompt_hash=hashlib.sha256(prompt.encode()).hexdigest()[:12])
+            r.setdefault("launches", []).append({k: v for k, v in r.items() if k != "launches"})
+        guards = _goal_launches()
+        guards[goal_id] = {"last_state_version": version, "cursor": cursor, "launch_id": launch_id}
+        _save_records(records, guards)
+    return {"launched": True, **launched}
+
+
+def stamp(goal_id, stage):
+    """Claim close before any effects; evidence, not this stamp, reconciles crashes."""
+    with bus.locked():
+        goal = bus.get(goal_id)
+        pipeline = dict(goal.get("pipeline") or {})
+        if pipeline.get(stage):
+            return False
+        pipeline[stage] = time.time()
+        bus.update(goal_id, pipeline=pipeline)
+        return True
+
+
+def _retrospective(goal_id):
+    memory = STATE / "memory"
+    for path in memory.glob("*.md"):
+        if re.search(rf"\bgoal:\s*{re.escape(goal_id)}\b", path.read_text()):
+            return
+    plan = STATE / "plan.md"
+    text = plan.read_text() if plan.exists() else ""
+    marker = f"no learnings — goal: {goal_id}"
+    if marker not in text:
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        with plan.open("a") as stream:
+            stream.write(f"\n{datetime.now().date().isoformat()}: {marker}\n")
+
+
+def _open_pr(goal):
+    branch = f"goal/{goal['id']}"
+    listed = subprocess.run(["gh", "pr", "list", "--head", branch, "--base", "main", "--state", "all",
+                             "--json", "url"], cwd=ROOT, capture_output=True, text=True, timeout=60)
+    if listed.returncode:
+        raise RuntimeError(listed.stderr[:500] or "gh pr list failed")
+    prs = json.loads(listed.stdout)
+    if prs:
+        return prs[0]["url"]
+    body = (f"Goal: {goal['id']}\n\nAll execute children merged into `{branch}`. "
+            "The goal head passed the merge gate.\n\nValidation: tests-green before fast-forward.\n")
+    created = subprocess.run(["gh", "pr", "create", "--head", branch, "--base", "main",
+                              "--title", f"{goal['id']}: {goal['title'][:150]}", "--body", body],
+                             cwd=ROOT, capture_output=True, text=True, timeout=60)
+    if created.returncode or not created.stdout.strip():
+        raise RuntimeError(created.stderr[:500] or "gh pr create failed")
+    return created.stdout.strip()
+
+
+def routine_close(point, ctx, pool):
+    goal_id = point["goal_id"]
+    with bus.locked():
+        version = state_version(goal_id)
+        goal = bus.get(goal_id)
+        pipeline = dict(goal.get("pipeline") or {})
+        guard = _goal_launches().get(goal_id, {})
+        # A matching prior model launch owns this state. A stamped close can resume effects.
+        if guard.get("last_state_version") == version and not pipeline.get("closed_at"):
+            return
+        if ctx["gate_state"] != "green" or not ctx["all_children_merged"]:
+            return
+        stamp(goal_id, "closed_at")
+    _retrospective(goal_id)
+    with bus.locked():
+        goal = bus.get(goal_id)
+        pipeline = dict(goal.get("pipeline") or {})
+        if (goal.get("result") or {}).get("goal_closed"):
+            return
+        auto_pr = ctx["routes"].get("auto_open_pr", False)
+        if auto_pr and pipeline.get("close_error"):
+            if time.time() - pipeline.get("close_attempted_at", 0) < pool.cfg.get("daemon", {}).get("close_retry_s", 900):
+                return
+    try:
+        pr_url = _open_pr(goal) if auto_pr else None
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        with bus.locked():
+            goal = bus.get(goal_id)
+            if (goal.get("result") or {}).get("goal_closed"):
+                return
+            pipeline = dict(goal.get("pipeline") or {})
+            pipeline.update(close_error=str(exc)[:500], close_attempted_at=time.time(),
+                            close_attempts=pipeline.get("close_attempts", 0) + 1)
+            bus.update(goal_id, pipeline=pipeline)
+        notify.notify_once(goal_id, "close_error", f"{goal_id}: PR close failed: {str(exc)[:100]}")
+        return
+    with bus.locked():
+        goal = bus.get(goal_id)
+        if (goal.get("result") or {}).get("goal_closed"):
+            return
+        result = {"goal_closed": True, "pr_url": pr_url,
+                  "summary": "Goal complete", "note": "PR opened" if pr_url else "PR pending: Planner opens goal/<id> to main"}
+        bus.post_result(goal_id, result)
+    with bus.locked():
+        pipeline = dict(bus.get(goal_id).get("pipeline") or {})
+        pipeline.pop("close_error", None)
+        bus.update(goal_id, pipeline=pipeline)
+    notify.notify_once(goal_id, "closed", f"{goal_id}: {result['note']}")
+
+
+def tick(pool=None):
+    """Route ready points, performing routine effects and one grouped launch per goal."""
+    pool = pool or Pool()
+    config = pool.cfg.get("planner", {})
+    # Old configurations predate routing and retain their one-point tick contract.
+    if "routes" not in config:
+        for goal_id, kind, key in decision_points():
+            run(goal_id, kind, key)
+            break
+        return
+    groups = {}
+    enabled = decision.routes_enabled(config)
+    for raw in list(decision_points()):
+        point = _point(raw)
+        if point["kind"] == "held" and any(t.get("status") != "failed" and
+                (t.get("constraints") or {}).get("fix_round_for") == point["task_id"] for t in bus.read()):
+            continue
+        ctx = build_ctx(point, pool)
+        if point["kind"] == "closable" and ctx["gate_state"] == "unknown":
+            print(f"[planner_runs] {point['goal_id']}: unknown goal gate; skipping tick", file=sys.stderr)
+            continue
+        route = decision.route(point, ctx)
+        if point["kind"] == "closable" and route.name == "routine":
+            pipeline = bus.get(point["goal_id"]).get("pipeline") or {}
+            if pipeline.get("close_error") and pipeline.get("close_attempts", 0) >= pool.cfg.get("daemon", {}).get("close_max_attempts", 3):
+                route = decision.Route("escalate", "close_failed", [f"close_error:{pipeline['close_error']}"],
+                                       [f"close_attempts:{pipeline['close_attempts']}"], ctx["routes"].get("escalate_tier", "fable"))
+            else:
+                routine_close(point, ctx, pool)
+        if route.name in ("none", "routine"):
+            continue
+        if not enabled:
+            run(point["goal_id"], point["kind"], point["payload_key"], route, routed=True)
+        else:
+            groups.setdefault(point["goal_id"], []).append((point, ctx, route))
+    for sections in groups.values():
+        run_group(sections, pool)

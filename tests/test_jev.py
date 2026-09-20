@@ -79,6 +79,24 @@ class JevTests(unittest.TestCase):
         self.assertEqual(result, response)
         self.assertEqual(jev._day_tokens_used(), 123)
 
+    def test_jev_usage_row_carries_task_goal_bucket(self):
+        from unittest.mock import patch
+        from orchestrator import bus
+        goal = bus.create_task("Goal", "spec", ["ok"], ["src/**"])
+        task = bus.create_task("Child", "spec", ["ok"], ["src/**"], parent=goal["id"])
+        with patch.object(jev, "_cfg", return_value=ENABLED_CFG), \
+                patch.object(jev, "_api_key", return_value="fake-key"), \
+                patch.object(jev.urllib.request, "urlopen", return_value=FakeResp(
+                    {"answers": {}, "usage": {"input_tokens": 1}})):
+            jev.ask("state", {}, task=task["id"])
+        row = json.loads(next(jev.RUNS_DIR.glob("*.jsonl")).read_text())
+        self.assertEqual(row["task"], task["id"])
+        self.assertEqual(row["goal_id"], goal["id"])
+        self.assertEqual(row["role"], "jev")
+        self.assertEqual(row["bucket"], "jev")
+        self.assertEqual([row[k] for k in ("input_uncached_tokens", "cache_read_tokens",
+                                          "cache_write_tokens", "output_tokens", "total_tokens")], [1, 0, 0, 0, 1])
+
     def test_retry_then_none_on_429(self):
         jev._cfg = lambda: ENABLED_CFG
         jev._api_key = lambda: "fake-key"

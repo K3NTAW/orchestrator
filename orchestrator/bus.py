@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import atexit, contextlib, fcntl, json, sqlite3, subprocess, threading, time
+import atexit, contextlib, fcntl, hashlib, json, sqlite3, subprocess, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -114,7 +114,7 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
             get(dep)
         except KeyError:
             raise ValueError(f"depends_on references unknown task: {dep}")
-    t = {"id": tid, "parent": parent, "role": role, "tier": tier, "complexity": complexity,
+    t = {"id": tid, "created_at": time.time(), "parent": parent, "role": role, "tier": tier, "complexity": complexity,
          "title": title, "spec": spec, "inputs": inputs or [], "acceptance": list(acceptance), "scope": list(scope),
          "depends_on": deps,
          "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
@@ -198,15 +198,139 @@ def read(tid=None, status=None, status_not=None, role=None, compact=False):
     return [_compact_row(t) for t in filtered] if compact else filtered
 
 
-def events(since=0, limit=200):
-    rows = db().execute("select seq,task_id,ts,kind,data from events where seq>? order by seq limit ?", (since, limit)).fetchall()
-    return [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)} for s, t, ts, k, d in rows]
+def events(since=0, limit=200, role=None, task_ids=None):
+    """Events in sequence order, optionally filtered without changing their cursor."""
+    rows = db().execute("select seq,task_id,ts,kind,data from events where seq>? order by seq limit ?",
+                        (since, limit)).fetchall()
+    page = [{"seq": s, "task": t, "ts": ts, "kind": k, "data": json.loads(d)}
+            for s, t, ts, k, d in rows]
+    if role is None and task_ids is None:
+        return page
+    return _filter_events(page, role, task_ids)
 
 
-def log_run(**fields):
+def _filter_events(page, role=None, task_ids=None):
+    """Filter an already bounded page using the current task index, preserving seq."""
+    ids = set(task_ids) if task_ids is not None else None
+    roles = dict(db().execute("select id,role from tasks").fetchall()) if role is not None else {}
+    return [event for event in page
+            if (role is None or roles.get(event["task"]) == role)
+            and (ids is None or event["task"] in ids)]
+
+
+def normalize_usage(provider, usage):
+    """Return provider-independent token buckets.
+
+    Codex includes cached input in input_tokens. Its output_tokens is assumed to
+    already include reasoning, so reasoning_output_tokens is informational and
+    is deliberately not added to total_tokens a second time.
+    """
+    usage = usage or {}
+    if provider == "codex":
+        cache_read = usage.get("cached_input_tokens", 0) or 0
+        input_uncached = max(0, (usage.get("input_tokens", 0) or 0) - cache_read)
+        cache_write = 0
+        reasoning = usage.get("reasoning_output_tokens", 0) or 0
+    else:
+        input_uncached = usage.get("input_tokens", 0) or 0
+        cache_read = usage.get("cache_read_input_tokens", 0) or 0
+        cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+        reasoning = usage.get("reasoning_tokens", usage.get("reasoning_output_tokens", 0)) or 0
+    output = usage.get("output_tokens", 0) or 0
+    return {
+        "input_uncached_tokens": input_uncached, "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write, "output_tokens": output, "reasoning_tokens": reasoning,
+        "total_tokens": input_uncached + cache_read + cache_write + output,
+    }
+
+
+_policy_cache = None
+_policy_lock = threading.Lock()
+
+
+def policy_version():
+    """Hash policy bytes once, invalidating when policy paths or mtimes change."""
+    global _policy_cache
+    with _policy_lock:
+        pool = STATE / "pool.toml"
+        paths = [pool, *sorted((STATE / "prompts").glob("*.md"))]
+        try:
+            signature = tuple((path, path.stat().st_mtime_ns) for path in paths)
+            if _policy_cache is None or _policy_cache[0] != signature:
+                digest = hashlib.sha256()
+                for path in paths:
+                    digest.update(path.read_bytes())
+                _policy_cache = signature, digest.hexdigest()[:12]
+        except OSError:
+            return None
+        return _policy_cache[1]
+
+
+def pool_config():
+    """Load attribution policy without making telemetry depend on its availability."""
+    from .pool import config
+    try:
+        return config()
+    except (OSError, ValueError):
+        return {}
+
+
+def log_run(*, attempt=1, **fields):
     """Append one line per event to runs/<date>.jsonl: tokens, role, tier, account, executor, complexity, duration,
     outcome. Callers normalize cached tokens to cache_read_input_tokens so cli.cost sums one key across providers."""
-    RUNS.mkdir(exist_ok=True)
+    fields["attempt"] = attempt
+    fields.setdefault("policy_version", policy_version())
+    for key in ("attempt", "decision_kind", "payload_key", "route", "route_reason",
+                "client_version", "policy_version"):
+        if fields.get(key) is None:
+            fields.pop(key, None)
+    task_id = fields.get("task")
+    if task_id:
+        try:
+            task = get(task_id)
+            fields.setdefault("goal_id", task.get("parent") or task_id)
+        except Exception:
+            fields.setdefault("goal_id", None)
+        fields.setdefault("provider", "codex" if fields.get("account") == "codex" else "claude")
+    from . import attribution
+    task = {}
+    if task_id:
+        try:
+            task = get(task_id)
+        except (KeyError, OSError, ValueError):
+            pass
+        chain = attribution.lineage({"id": task_id, **task})
+        fields.setdefault("lineage_root", chain["root"])
+        fields.setdefault("round_index", chain["round_index"])
+        fields.setdefault("task_class", attribution.task_class(task))
+    cfg = pool_config()
+    provider = fields.get("provider") or ("codex" if fields.get("account") == "codex" else "claude")
+    tier = fields.get("tier", task.get("tier"))
+    fields.setdefault("bucket", attribution.bucket_of(fields.get("role", task.get("role")), task))
+    fields.setdefault("band", attribution.band(fields.get("complexity", task.get("complexity"))))
+    fields.setdefault("executor", task.get("executor") or (
+        tier if provider == "codex" else f"claude:{tier}" if tier else None))
+    fields.setdefault("model", attribution.model_of(fields["executor"], tier, cfg))
+    usage = fields.get("usage")
+    if not isinstance(usage, dict):
+        # Older callers (including planner decisions) expand provider usage into kwargs.
+        keys = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_read_input_tokens",
+                "cache_creation_input_tokens", "reasoning_output_tokens", "reasoning_tokens")
+        usage = {key: fields[key] for key in keys if key in fields}
+    if usage:
+        fields["usage"] = dict(usage)
+        fields.update(normalize_usage(provider, usage))
+        if provider == "codex":
+            from .pool import Pool
+            from types import SimpleNamespace
+            pricing = SimpleNamespace(cfg=cfg, _usage_tokens=Pool._usage_tokens)
+            source = next((row for row in cfg.get("executors", [])
+                           if row.get("id") == fields["executor"]), {})
+            fields.setdefault("usd", Pool.usd_of(pricing, {"usage": dict(usage)}, source))
+            fields.setdefault("usd_source", "token_estimate")
+        elif fields.get("usd") is not None:
+            fields.setdefault("usd_source", "reported")
+    RUNS.mkdir(parents=True, exist_ok=True)
     with open(RUNS / f"{date.today().isoformat()}.jsonl", "a") as f:
         f.write(json.dumps({"ts": time.time(), **fields}) + "\n")
 

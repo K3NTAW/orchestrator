@@ -1,6 +1,6 @@
 """Account pool selection (PoolSel), the [[executors]] routing table (Executors), and Planner-transcript token
 tallying (PlannerTally): bands, quota groups, cooldowns, budgets, scored ranking."""
-import io, json, shutil, sys, time, unittest
+import io, json, os, shutil, sys, tempfile, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -64,12 +64,156 @@ class PoolSel(unittest.TestCase):
         self.assertTrue(json.loads((cfg / ".claude.json").read_text())["projects"][str(TMP / "wt" / "T-0099")]["hasTrustDialogAccepted"])
 
 
+class Reservations(unittest.TestCase):
+    """Each run gets an isolated bus and ledger, including across fresh Pool instances."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="orch-reservations-")
+        self.addCleanup(directory.cleanup)
+        self.sandbox = Path(directory.name)
+        for module, name, value in (
+            (P.bus, "STATE", self.sandbox),
+            (P.bus, "TASKS", self.sandbox / "tasks"),
+            (P.bus, "RUNS", self.sandbox / "runs"),
+            (P, "PERSIST", self.sandbox / "pool_state.json"),
+            (P, "PLANNER_USAGE", self.sandbox / "planner_usage.json"),
+        ):
+            patcher = mock.patch.object(module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.cfg = P.config()
+        self.cfg["limits"]["reservations"] = True
+        self.cfg["limits"]["max_budget_usd"]["scout"] = 0.6
+        self.cfg["claude_accounts"][0].update(daily_budget_tokens=100, usd_per_token=0.01)
+        self.p = P.Pool(self.cfg)
+
+    def task(self):
+        return P.bus.create_task("reservation", "spec", ["works"], ["x.py"],
+                                 role="scout", parent="G-budget")
+
+    def test_parallel_reservations_cannot_exceed_daily_budget(self):
+        # Both callers loaded their pool before either claimed its share of the budget.
+        other = P.Pool(self.cfg)
+        first, second = self.task(), self.task()
+        reservation = self.p.reserve("run-1", "A", "scout", first)
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation["est_tokens"], 60)
+        self.assertIsNone(other.reserve("run-2", "A", "scout", second))
+        self.assertEqual(set(P.Pool(self.cfg).live_reservations()), {"run-1"})
+
+    def test_estimate_never_zero_without_history(self):
+        self.cfg["claude_accounts"][0].pop("usd_per_token")
+        self.cfg["limits"]["default_tokens_per_usd"] = 250000
+        tokens, usd = P.Pool(self.cfg)._reservation_estimate("A", "scout")
+        self.assertEqual(usd, 0.6)
+        self.assertEqual(tokens, 150000)
+
+    def test_estimate_uses_token_derived_usd_for_codex_rows(self):
+        self.cfg["limits"]["default_tokens_per_usd"] = 250000
+        self.cfg["limits"]["goal_budget_usd"] = {"execute": 0.25}
+        self.cfg["executors"] = [{"id": "codex-test", "provider": "codex",
+                                  "model": "test", "roles": ["execute"]}]
+        usage = {"input_tokens": 20000, "output_tokens": 5000}
+        for i in range(5):
+            task = P.bus.create_task(f"completed execute {i}", "spec", ["works"], ["x.py"],
+                                     role="execute", parent="G-history")
+            P.bus.update(task["id"], status="done", executor="codex-test", result={"usage": usage})
+
+        pool = P.Pool(self.cfg)
+        tokens, usd = pool._reservation_estimate("codex-test", "execute")
+        self.assertEqual(tokens, 25000)
+        self.assertAlmostEqual(usd, 0.1)
+        tasks = [P.bus.create_task(f"new execute {i}", "spec", ["works"], ["x.py"],
+                                   role="execute", parent="G-budget") for i in range(3)]
+        first = pool.reserve("run-1", "codex-test", "execute", tasks[0])
+        self.assertIsNotNone(first)
+        self.assertAlmostEqual(first["est_usd"], usd)
+        self.assertEqual(P.Pool(self.cfg).live_reservations()["run-1"]["est_usd_source"], "tokens")
+        pool.release("run-1", dict(usage))
+        self.assertAlmostEqual(pool.reservation_history()["goals"]["G-budget"]["execute"]["usd"], usd)
+        self.assertIsNotNone(pool.reserve("run-2", "codex-test", "execute", tasks[1]))
+        self.assertIsNone(P.Pool(self.cfg).reserve("run-3", "codex-test", "execute", tasks[2]))
+        self.assertEqual(set(pool.live_reservations()), {"run-2"})
+
+    def test_expired_lease_with_live_pid_still_counts(self):
+        first, second = self.task(), self.task()
+        self.p.reserve("run-1", "A", "scout", first)
+        P.bus.update(first["id"], status="running", pid=os.getpid())
+        expiry = self.p.live_reservations()["run-1"]["lease_until"]
+        with mock.patch.object(P.time, "time", return_value=expiry + 1):
+            self.assertEqual(self.p.sweep_reservations(), [])
+            self.assertIsNone(self.p.reserve("run-2", "A", "scout", second))
+            with mock.patch.object(P.os, "kill", side_effect=ProcessLookupError):
+                self.assertEqual(self.p.sweep_reservations(), ["run-1"])
+            self.assertIsNotNone(self.p.reserve("run-2", "A", "scout", second))
+            # A dead worker alone is insufficient: its unexpired lease still counts.
+            P.bus.update(second["id"], status="running", pid=os.getpid())
+            with mock.patch.object(P.os, "kill", side_effect=ProcessLookupError):
+                self.assertEqual(self.p.sweep_reservations(), [])
+        self.assertEqual(set(P.Pool(self.cfg).live_reservations()), {"run-2"})
+
+    def test_release_reconciles_estimate_with_actual(self):
+        self.p.reserve("run-1", "A", "scout", self.task())
+        self.assertEqual(self.p.live_reservations()["run-1"]["est_tokens"], 60)
+        self.p.release("run-1", {"input_tokens": 12, "output_tokens": 8, "usd": 0.2})
+        fresh = P.Pool(self.cfg)
+        self.assertEqual(fresh.live_reservations(), {})
+        history = fresh.reservation_history()
+        self.assertEqual(history["tokens"], 20)
+        self.assertAlmostEqual(history["usd"], 0.2)
+        self.assertEqual(history["roles"]["scout"], {"tokens": 20, "usd": 0.2})
+        self.assertEqual(history["goals"]["G-budget"]["scout"], {"tokens": 20, "usd": 0.2})
+        # Cleanup retries must not count the same actual usage a second time.
+        fresh.release("run-1", {"input_tokens": 12, "output_tokens": 8, "usd": 0.2})
+        self.assertEqual(P.Pool(self.cfg).reservation_history(), history)
+
+    def test_save_never_overwrites_concurrent_reservations(self):
+        first, = (self.task(),)
+        pool_a = P.Pool(self.cfg)
+        pool_b = P.Pool(self.cfg)
+        self.assertIsNotNone(pool_b.reserve("run-1", "A", "scout", first))
+        pool_a.get("A").cooldown_until = time.time() + 60
+        pool_a.save()
+        self.assertIn("run-1", pool_b.live_reservations())
+
+    def test_notified_state_survives_pool_save(self):
+        pool_a = P.Pool(self.cfg)
+        self.assertTrue(pool_a.notification_transition("daily_budget:A", True))
+        pool_b = P.Pool(self.cfg)
+        pool_b.get("A").cooldown_until = time.time() + 60
+        pool_b.save()
+        self.assertTrue(P.Pool(self.cfg).notified_state()["daily_budget:A"])
+
+    def test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap(self):
+        self.cfg["claude_accounts"][0]["daily_budget_tokens"] = 1000
+        self.cfg["limits"]["goal_budget_usd"] = {"scout": 1.3}
+        first, second, third = self.task(), self.task(), self.task()
+        self.assertIsNotNone(self.p.reserve("run-1", "A", "scout", first))
+        self.p.release("run-1", {"usd": 0.2})
+        self.assertIsNotNone(self.p.reserve("run-2", "A", "scout", second))
+        self.assertIsNone(P.Pool(self.cfg).reserve("run-3", "A", "scout", third))
+        self.cfg["limits"]["goal_budget_usd"]["scout"] = 1.5
+        self.assertIsNotNone(P.Pool(self.cfg).reserve("run-3", "A", "scout", third))
+
+    def test_two_parallel_execute_dispatches_allowed_without_goal_budget(self):
+        first = P.bus.create_task("first", "spec", ["works"], ["x.py"],
+                                  role="execute", parent="G-execute")
+        second = P.bus.create_task("second", "spec", ["works"], ["x.py"],
+                                   role="execute", parent="G-execute")
+        self.cfg["limits"].pop("goal_budget_usd", None)
+        self.assertIsNotNone(self.p.reserve("run-1", "astra", "execute", first))
+        self.assertIsNotNone(P.Pool(self.cfg).reserve("run-2", "astra", "execute", second))
+
+
 class Executors(unittest.TestCase):
     """[[executors]] routing: complexity bands, disabled placeholders, quota-group cooldowns, scored ranking."""
     LIVE = {"astra", "luna", "terra", "sol"}
 
     def setUp(self):
-        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
+        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
+        for task in P.bus.read(status="running", role="execute"):
+            P.bus.update(task["id"], status="done")
+        self.p = P.Pool()
 
     def test_bands_and_enabled(self):
         self.assertIn(self.p.pick_executor("execute", 3).id, self.LIVE)
@@ -98,6 +242,41 @@ class Executors(unittest.TestCase):
         st = self.p.status()
         self.assertEqual((len(st["executors"]), sum(e["enabled"] for e in st["executors"])), (7, 4))
 
+    def test_eligible_executors_matches_pick_executor_filter(self):
+        for complexity in (1, 3, 6, 8, 10):
+            eligible = self.p.eligible_executors("execute", complexity)
+            picked = self.p.pick_executor("execute", complexity)
+            self.assertEqual(picked is not None, bool(eligible))
+            if picked:
+                self.assertIn(picked, eligible)
+
+    def test_pick_by_expected_cost_with_floor(self):
+        from orchestrator import scorecard
+        task = {"title": "small", "complexity": 3}
+        old_cost, old_class_success = scorecard.expected_cost, scorecard.class_success
+        scorecard.expected_cost = lambda eid, cls: {"luna": 10, "terra": 20, "sol": 30, "astra": 40}.get(eid)
+        scorecard.class_success = lambda eid, cls: {"luna": 0.5, "terra": 1.0, "sol": 1.0, "astra": 1.0}.get(eid)
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.addCleanup(lambda: setattr(scorecard, "class_success", old_class_success))
+        self.assertEqual(self.p.pick_executor("execute", 3, task=task).id, "terra")
+
+    def test_pick_falls_back_when_all_below_floor(self):
+        from orchestrator import scorecard
+        task = {"title": "small", "complexity": 3}
+        old_cost, old_class_success = scorecard.expected_cost, scorecard.class_success
+        scorecard.expected_cost = lambda eid, cls: {"luna": 10, "terra": 20}.get(eid)
+        scorecard.class_success = lambda eid, cls: 0.2
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.addCleanup(lambda: setattr(scorecard, "class_success", old_class_success))
+        self.assertEqual(self.p.pick_executor("execute", 3, {"luna": 5.0, "terra": 1.0}, task).id, "luna")
+
+    def test_pick_falls_back_without_samples(self):
+        from orchestrator import scorecard
+        old_cost = scorecard.expected_cost
+        scorecard.expected_cost = lambda *args, **kwargs: None
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.assertEqual(self.p.pick_executor("execute", 3, {"terra": 3.0}, {"complexity": 3}).id, "terra")
+
     def test_missing_table_synthesizes_legacy_row(self):
         cfg = {k: v for k, v in P.config().items() if k != "executors"}
         old = P.Pool(cfg)
@@ -109,13 +288,34 @@ class Executors(unittest.TestCase):
         self.assertFalse(self.p.codex_available(8))   # only astra reaches band 8, and it's over budget
         self.assertTrue(self.p.codex_available(3))     # luna/terra/sol still have headroom at band 3
 
-    def test_legacy_running_syncs_down_not_just_up(self):
-        self.p.codex.running = 2; self.p.save()
-        fresh = P.Pool()
-        self.assertEqual(fresh.executors["astra"].running, 2)
-        fresh.codex.running = 0; fresh.save()
-        fresher = P.Pool()
-        self.assertEqual(fresher.executors["astra"].running, 0)  # regression: used to ratchet up only
+    def test_codex_available_uses_task_routing(self):
+        from orchestrator import scorecard
+        task = {"title": "small", "complexity": 3}
+        old_cost, old_class_success = scorecard.expected_cost, scorecard.class_success
+        scorecard.expected_cost = lambda eid, cls: {"luna": 10, "terra": 20, "sol": 30, "astra": 40}.get(eid)
+        scorecard.class_success = lambda eid, cls: {"luna": 0.5, "terra": 1.0, "sol": 1.0, "astra": 1.0}.get(eid)
+        self.addCleanup(lambda: setattr(scorecard, "expected_cost", old_cost))
+        self.addCleanup(lambda: setattr(scorecard, "class_success", old_class_success))
+        old_provider = self.p.executors["terra"].provider
+        self.p.executors["terra"].provider = "claude"
+        self.addCleanup(lambda: setattr(self.p.executors["terra"], "provider", old_provider))
+        routed = self.p.pick_executor("execute", task["complexity"], task=task)
+        self.assertEqual(routed.id, "terra")
+        self.assertEqual(self.p.codex_available(task["complexity"], task=task), routed.provider == "codex")
+
+    def test_running_counts_come_from_bus_not_state_file(self):
+        P.PERSIST.write_text(json.dumps({"executors": {"astra": {"running": 7}}}))
+        tasks = [{"status": "running", "role": "execute", "executor": "astra"}]
+        with mock.patch.object(P.bus, "read", return_value=tasks):
+            fresh = P.Pool()
+        self.assertEqual(fresh.executors["astra"].running, 1)
+
+    def test_restart_killed_process_leaks_no_slot(self):
+        P.PERSIST.write_text(json.dumps({"executors": {"astra": {"running": 7}}}))
+        with mock.patch.object(P.bus, "read", return_value=[]):
+            fresh = P.Pool()
+        self.assertEqual(fresh.executors["astra"].running, 0)
+        self.assertIsNotNone(fresh.pick_executor("execute", 8))
 
     def test_every_executor_row_has_a_quota_group(self):
         # enabling a disabled placeholder later must not silently drop it out of its cooldown group (review T-0030)
@@ -203,11 +403,21 @@ class PlannerTally(unittest.TestCase):
         self.assertEqual(self.p.pick("scout").id, "B")
 
     def test_tally_gates_day_and_window_independently(self):
-        self.a.window_started = self.now                     # window = [now, now+WINDOW_S)
-        three_h_ago = self.now - 3 * 3600                     # still today, but before window_started
+        now = datetime(2026, 9, 15, 12, 0, tzinfo=P.TZ).timestamp()
+        self.a.window_started = now                          # window = [now, now+WINDOW_S)
+        three_h_ago = now - 3 * 3600                         # still today, but before window_started
         self._write("a.jsonl", [_assistant(_iso(three_h_ago), 10, 5, 0)])
-        self.p.tally_planner()
+        self.p.tally_planner(now=now)
         self.assertEqual(self.a.planner_day_tokens, 15)
+        self.assertEqual(self.a.planner_window_tokens, 0)
+
+    def test_tally_day_boundary_three_hours_before_midnight_counts_yesterday(self):
+        now = datetime(2026, 9, 15, 0, 30, tzinfo=P.TZ).timestamp()
+        self.a.window_started = now
+        three_h_ago = now - 3 * 3600                         # previous local calendar day
+        self._write("a.jsonl", [_assistant(_iso(three_h_ago), 10, 5, 0)])
+        self.p.tally_planner(now=now)
+        self.assertEqual(self.a.planner_day_tokens, 0)
         self.assertEqual(self.a.planner_window_tokens, 0)
 
     def test_tally_skips_line_with_deleted_file_between_glob_and_read(self):

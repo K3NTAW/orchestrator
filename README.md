@@ -38,9 +38,100 @@ when it exists but has none for that goal, else `<n> runs`. Planner *transcript*
 daily, so they aren't a per-goal column; the table ends with one footer line, either
 `planner (transcripts, today): <tokens> tokens across <n> accounts` (summed from `.orchestrator/planner_usage.json`)
 or `planner: -` when that file is missing.
+Run rows in `.orchestrator/runs/<date>.jsonl` carry task/goal, role, tier, account, provider,
+outcome and token buckets, plus the following accounting fields (unknown optional values are omitted):
+
+- `attempt` (default 1), `decision_kind`, `payload_key`, `route`, `route_reason`, `client_version`,
+  `policy_version` (first 12 SHA-256 hex characters of pool.toml followed by sorted prompt Markdown bytes;
+  cached until a policy file's mtime or the file set changes).
+
+Goal token statistics count tasks with run rows, summing retries per task; fewer than five tasks show
+`n=<count> range <min>-<max>` instead of a median. The goal JSON includes a `tokens_per_accepted_goal`
+summary whose `tokens` ratio is `null` when no goals are accepted; text displays `undefined (0 accepted goals)`.
+
 `uv run orchestrator handover [--reason TEXT]` writes/replaces the `## Auto-handover` section at the end of
 `.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
 calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.
+
+## Phase H: efficiency
+
+### Accounting
+
+Run rows add `attempt` (default 1), `decision_kind`, `payload_key`, `route`, `route_reason`, `client_version`, and
+`policy_version`. `orchestrator scorecard --planner` reports Planner decision kinds, routes, reasons, premium
+exceptions, and token totals. Goal accounting sums retries per task: five or more tasks report the median, while
+smaller samples report `n=<count> range <min>-<max>`. Tokens per accepted goal are undefined when zero goals were
+accepted (`null` in JSON and `undefined (0 accepted goals)` in text), never zero or a division error.
+
+Rollback: set no flag; revert merged accounting commit `6d2824e`.
+
+### Decision routes
+
+`[planner.routes]` has `enabled = true`, `auto_open_pr = false`, `escalate_tier = "fable"`,
+`investigate_tier = "sonnet"`, `investigate_max_complexity = 4`, and
+`premium_launches_soft_per_goal = 2`. `routine` performs deterministic daemon work without a Planner;
+`investigate` launches the cheaper tier for a small, low-risk uncertainty; `escalate` launches the Planner tier
+for risk or incomplete evidence. The premium limit is soft: crossing it records a justified exception in the run
+ledger instead of blocking work. One launch coalesces all decision points for a goal and records its bus cursor;
+the child-state `state_version` prevents a second launch until state changes. Auth, quota, or availability failures
+cool the affected account, restore the prior cursor/state guard, and retry after infrastructure backoff. Set
+`enabled = false` to restore the per-point, always-escalate path.
+
+Rollback: set `[planner.routes] enabled = false`, or revert merged routing commits `e3b2b36`, `68ff495`, and `f2a1cf1`.
+
+### Budget reservations
+
+`[limits] reservations = true` atomically reserves daily tokens and optional per-goal role USD before a launch.
+Estimates use the role's last 20 runs once at least five exist (median tokens and USD); before that they use the
+role's `max_budget_usd` ceiling and `default_tokens_per_usd`. A reservation uses `[daemon].stage_lease_s` (default
+900 seconds), workers heartbeat it while alive, and completion releases it with actual usage. Refusal is `None`,
+so dispatch leaves the task queued and emits the budget notification rather than starting an unbudgeted worker.
+
+Rollback: set `[limits] reservations = false`, or revert merged reservation commit `668a9c1`.
+
+### Failure kinds and signatures
+
+`[daemon] flaky_rerun_max = 1` and `flaky_rerun_timeout_s = 600` bound evidence-only reruns. Kinds are
+`code_defect`, `invalid_spec`, `flaky`, `environment`, `conflict`, `quota`, `permissions`, and `unknown`.
+Signatures hash the kind, validated failing test ids, and normalized rejecting review comments. The automatic
+fix loop stops and escalates when a signature repeats, the lineage reaches `auto_fix_rounds`, evidence is unknown,
+or the failure is infrastructure/spec/risk work that requires intervention.
+
+Rollback: revert merged failure-classification commit `b9c2972`.
+
+### Gate checks acceptance-named tests
+
+The gate extracts `tests/path.py::test_name` references (and same-criterion `::test_name` shorthand) from each
+acceptance criterion and verifies that every named test function exists before accepting the result. A missing
+file or function makes the gate red, so a result cannot pass merely by omitting its promised regression test.
+
+Rollback: revert merged acceptance-gate commit `06b7ce4`.
+
+### Packet header and acceptance never dropped
+
+Every worker packet starts with `packet v<hash> base <sha> sources pool.toml@<policy> gotchas@<hash>` so its exact
+body, base, and policy inputs are auditable. Size trimming removes lower-priority evidence first; the complete
+acceptance section, base, and verification command are never dropped, even when that makes the packet exceed its
+nominal cap.
+
+Rollback: revert merged packet-contract commit `2868122`.
+
+### bus_events filters, ensure_worktree reuse and review re-spawn
+
+`bus_events(since, limit, role, task_ids)` filters by role and task id while `next_since` advances over every
+examined event, preventing filtered readers from looping over irrelevant rows. `ensure_worktree` reattaches an
+existing `task/<id>` branch after a stale worktree is pruned. Reconciliation re-spawns a missing review worker
+after its lease expires, but reuses the review task/branch and does not duplicate a live or completed review.
+
+Rollback: revert merged recovery commits `2868122` and `ec54196`.
+
+### Handover snapshot hash
+
+Handover hashes the sorted task id/status/hold/merge snapshot and stores it in `handover_state.json`. An unchanged
+snapshot skips rendering and leaves `plan.md` untouched; a changed snapshot is still written atomically under the
+bus compare-and-swap lock.
+
+Rollback: revert merged handover-recovery commit `ec54196`.
 
 ## Planner usage is counted from transcripts
 The Planner itself is an interactive `claude` session, not a worker spawned by `run_claude`, so it never posts a JSON
@@ -58,26 +149,54 @@ through to the pool's stored numbers rather than crashing pick) for callers that
 a running daemon.
 
 ## Pipeline
+Each execute or fix round starts with a **Worker packet** assembled from repository data. Its ordered sections are
+objective, acceptance, base, write scope, read scope, relevant tests, symbols, gotchas, decisions, verify, and
+evidence. The packet is capped at 4,800 characters, trimming the bottom sections first and pointing to
+`bus_read(task_id)` when the full task is needed.
+
 Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
+
+Bounded outputs: review diffs are capped at `[limits].review_diff_chars` (12,000 by default; expand with the displayed
+`git -C <worktree> diff -- <paths>` command), spec-review code at `[limits].spec_review_code_chars` (8,000; expand with
+`git -C <worktree> show HEAD:<path>`), test failures retain the full log at the printed `.orchestrator/runs/tests/` path,
+and recall shows `[limits].recall_hits` (30; expand with `recall.sh index "<terms>" --limit N`). For bus state deltas,
+use `bus_events(since)`.
+
+### Routes
+
+| Goal type | Route |
+| --- | --- |
+| Clear, localized change | Brief spec, one executor, deterministic gates, human PR. |
+| Uncertain location or behaviour | One targeted investigation for a named uncertainty in plan.md, then spec. |
+| Independent changes | Separate workers with an explicit interface contract in each spec. |
+| High-risk or architectural | Detailed planning, spec review, execution, independent review. |
+
+The default is zero scouts: the Planner greps for what it needs first. Warn above five files; split by independently verifiable behaviour and dependency boundaries, never merely to satisfy the count.
 State machine per execute task: `queued` → (depends_on merged, complexity ≥ `spec_review_min` → `spec_review` first,
 on `spec_review_tier`) → dispatched to an executor → `done` → gated (`tests-green.sh` passing is the merge bar).
 By default (`[review].code_review = "security_paths"`) a task merges straight through unless its merged diff
-touches a `security_paths` glob, or the daemon couldn't diff it at all (fails closed, `pipeline.review_reason`
-`diff_unavailable`, or `security_paths_empty` if the glob list itself is missing) — either way that's exactly one
-review, on `security_review_tier`, never the model that executed the task, with the security checklist always
-forced on. `code_review = "never"` drops review entirely; `code_review = "always"` is the pre-2026-09-19
+touches a `security_paths` glob, a `semantic_paths` glob, or an added diff line matches a named
+`semantic_patterns` regex. Security paths are evaluated first, then semantic paths and semantic patterns; any
+match requires exactly one review on `security_review_tier`, never the model that executed the task, with the
+security checklist always forced on. `code_review = "never"` drops review entirely; `code_review = "always"` is the pre-2026-09-19
 complexity-driven split (`direct_merge_max`/`two_reviews_from` thresholds), still available but not the default.
 An orphaned result (executor died, daemon re-gated its commit) gets exactly one review whatever `code_review`
 says. `pipeline.review_reason` on the gated task records which branch fired (`none`, `security_paths:<glob>`,
-`security_paths_empty`, `diff_unavailable`, `orphaned`, or `always`) so a later change to `[review]` can't move the
-goalposts on a task already past this stage. A task with one review merges on its first `approve`; a task with two
+`semantic_path:<glob>`, `semantic_pattern:<name>`, `security_paths_empty`, `diff_unavailable`, `orphaned`, or
+`always`) so a later change to `[review]` can't move the goalposts on a task already past this stage. Approval is
+bound to the task branch head in `reviewed_sha`; if that head moves, the approval is void and the daemon opens a
+fresh review. A task with one review merges on its first `approve`; a task with two
 (only possible under `code_review = "always"`) merges once every review has approved, and any single
 `request_changes` holds it for the Planner to re-spec regardless of what the other review said. Policy and the
 cost measurement that motivated dropping code review by default are noted next to `[review]` in `pool.toml`. The
 human reviews every merged PR regardless of pipeline outcome.
 `daemon.tick()` drives every stage: `dispatch()` (spec review or executor), `gate()` (tests-green, then merge or
-review), `merge_reviewed()` (merge once every review of a task has approved). Each stage stamps `pipeline.<stage>_at`
-on the task json under the bus lock before acting, so a crash-and-retry never re-runs a stage.
+review), `merge_reviewed()` (merge once every review of a task has approved). Each side-effecting stage stamps a
+lease (`[daemon].stage_lease_s`, 900 seconds by default) and writes a done marker after issuing its action; old
+pre-lease stamps are deliberately not reconciled. On expiry, a queued dispatch is retried (a running dispatch is
+left to dead-pid requeue; Codex runs carry no pid), direct merges are retried, and unclaimed child reviews are
+re-spawned or missing reviews created. Already-landed merges are marked done. Held tasks are excluded from lease
+reconciliation.
 Run it: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart` in `pool.toml` (`ORCH_DAEMON=0`
 or `autostart = false` disables it), and `uv run orchestrator daemon` takes the same single-instance lock so two loops
 never run at once; `orchestrator daemon --once` runs a single pass without the lock.
@@ -91,6 +210,12 @@ which. The Planner clears a hold by writing a new spec with `depends_on=[held_ta
 task directly.
 A filtered `bus_read` (no `task_id`) returns compact rows by default — no spec, events, acceptance or scope — pass
 `full=True` or `bus_read(task_id=...)` for the full task.
+
+Automatic fix rounds run after dispatch, gate, and reviewed merges, before the autonomous Planner. Gate failures
+are routine only when pytest `FAILED <nodeid>` or unittest `FAIL`/`ERROR` lines can be extracted; unknown runner
+output escalates. Review holds are routine only when every rejecting review comment is inside scope. Rounds follow
+the fix lineage and stop at `[daemon].auto_fix_rounds` (default 2). Each hold uses `planner_runs._held_at(task)` as
+its deduplication key; skipped/escalated holds notify once per key.
 
 ### Autonomous decisions
 `pool.toml`'s `[planner] autonomous` (default `false`) lets `daemon.tick()` launch a short-lived headless Planner on
@@ -112,6 +237,8 @@ a human: `ORCH_DAEMON_HOST=mcp` (set by the orchestrator MCP server's `main()` e
 the daemon) and `.orchestrator/planner_session.json` (written atomically by that same call, removed at exit, and
 named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
 interactive Planner session ever attaches -- leave it off anywhere one might.
+Each run receives a compact decision packet assembled from bus and run data; the interactive handover threshold is
+`[planner].handover_context_tokens` and packet size is bounded by `[planner].decision_packet_chars`.
 
 ### Jev
 Jev (TypeSafe AI) answers typed questions about a piece of state with calibrated probabilities instead of free
@@ -125,7 +252,9 @@ JSON, daily budget exhausted -- makes `ask()` return `None` (fail-open) instead 
 `noul()`, `choice()` and `score()` wrap `ask()` for yes/no, multiple-choice and leveled-score questions. Egress
 note: task specs, tool-call metadata and memory titles leave the machine; file contents never do.
 
-Jev API confidence is optional: with confidence at least 0.6 the gate blocks at P(redundant) ≥ 0.85 or P(needed) ≤ 0.15; without confidence it uses stricter thresholds of 0.92 and 0.08, respectively. Enable block mode only after a week of log-mode rows.
+Jev API confidence is optional: with confidence at least 0.6 the gate blocks at P(redundant) ≥ 0.85 or P(needed) ≤ 0.15; without confidence it uses stricter thresholds of 0.92 and 0.08. The gate defaults to deterministic `sample` mode (10% of calls), detects repeated inputs while tracking target mtimes, and `orchestrator jev diagnose` reports waste, repeats, latency and role/tool splits. Use its JSONL export for hand labelling before enabling any block rule; `block_repeats` can then deny unchanged repeats locally without a network call.
+
+Executor routing can collect Jev evidence with `[jev.routing] mode = "shadow"`. It batches seven task-shape questions, compares a deliberately simple hypothetical choice with the unchanged pool choice, and logs both under the Jev attribution bucket. Only redacted task metadata and memory titles are sent—never repository file contents or diffs—and hard eligibility constraints remain authoritative. The code default is `off`; `active` is accepted as a shadow-mode preview until active ranking lands in P5.
 
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),
@@ -135,7 +264,12 @@ in `~/.codex/models_cache.json`.
 `quota_group`: a usage-limit hit on one enabled member cools every other enabled row sharing the group (e.g. all
 `chatgpt` rows today). Whether the underlying limit is scoped per account or per model is unconfirmed (2026-09-17),
 so the whole group is treated as cooling either way.
-`pick_executor(role, complexity, scores)` ranks enabled, in-range rows by `weight × score`. `score` comes from
+`pick_executor(role, complexity, scores, task)` first uses the task's explicit `constraints.task_class`, or infers
+`security` for configured security paths, `architectural` at complexity 7+, `debugging` for fix tasks, `mechanical`
+at complexity 3 or below, and `unfamiliar` otherwise. Once an executor has at least `[models].min_samples` merged
+tasks in that class, routing selects the lowest local expected token cost that clears `[models].success_floor`:
+initial execution median plus repair probability times repair median, plus review and spec-review medians. Until then,
+it ranks enabled, in-range rows by `weight × score`. `score` comes from
 `orchestrator scorecard`: a live success rate (merged / (merged + failed)) once an executor has enough resolved
 tasks, halved if its quota group hit a usage limit 3+ times today. Below that sample size it falls back to a
 cold-start prior built from `orchestrator bench show` numbers — an executor's model coding (or intelligence) score,
@@ -184,8 +318,7 @@ Hooks live: guardrails, scope-guard, tests-green, loop-guard, require-acceptance
 ## Memory (skill `memory`)
 Layered, cheapest first: notes (`.orchestrator/memory/*.md`, dated `## YYYY-MM-DD title` entries) · bus results · claude-mem
 observations (read-only FTS over `~/.claude-mem/claude-mem.db`; the plugin is on `~/.claude`, not the worker accounts) · graphify code
-graph (`graphify-out/`, gitignored, AST only, no LLM). `recall.sh index "<terms>"` then `recall.sh get <id>...`; `record.sh draft <GOAL>` /
-`add` / `set architecture` at retrospective; `graph.sh update|query|affected|explain|summary` after merges and for scouts.
+graph (`graphify-out/`, gitignored, AST only, no LLM). Progressive recall stops once its hit or character budget is met and never consults a richer layer merely because it exists; unavailable layers are recorded but skipped. `recall.sh index --progressive "<terms>"` reports consulted layers and records attributable memory usage; worker packets deliberately use notes and bus only. `record.sh draft <GOAL>` / `add` / `set architecture` at retrospective; `graph.sh update|query|affected|explain|summary` after merges and for scouts.
 
 ## CLI
 ```
@@ -203,3 +336,78 @@ uv run orchestrator status | cost --by role|tier|account|task | hold A --minutes
 - `window_cap_tokens` in `pool.toml` is a calibration knob: set it from observed 5h-window resets. Raised from 2M to
   10M on 2026-09-17 after 2M was reached in 2.2h with zero real rate limits; real limits still cool an account via
   the reset-hint parser.
+
+## Efficiency telemetry (Phase I P0)
+
+Run rows record `bucket` (planner, scout, execute, fix_round, spec_review, review,
+challenge, jev, memory, or other), `lineage_root` (initial execute task), `round_index`,
+`band` (1-3, 4-6, 7-10), `task_class`, `executor`, and `model`.
+Normalized usage fields are `input_uncached_tokens`, `cache_read_tokens`,
+`cache_write_tokens`, `output_tokens`, `reasoning_tokens`, and `total_tokens`.
+Raw total = uncached + cache read + cache write + output; reasoning is informational,
+already included in output. `usd_source` distinguishes `reported` from `token_estimate`.
+Efficiency uses effective tokens E = uncached + output + floor(cache read / 10) + cache write.
+Legacy total-only rows retain their recorded total rather than inventing token buckets.
+
+Lifecycle stamps: task `created_at`; pipeline `first_green_at`, `gate_attempts`,
+`gate_reds`; `lineage_fix_rounds`; and task `accepted_at`. Missing stamps remain
+undefined, never zero. Acceptance means a merged initial execute lineage; repairs,
+reviews, and spec reviews contribute usage to that lineage without extra acceptances.
+
+`orchestrator scorecard --efficiency [--by goal|executor|band|class|role] [--json]`
+reports the following (a zero denominator produces an undefined ratio):
+
+| Metric | Formula |
+| --- | --- |
+| tokens / usd | Sum E / sum recorded or estimated USD in the selected rows |
+| calls / turns | Usage row count / sum recorded turns (missing turns contribute zero) |
+| accepted_tasks | Count accepted initial execute lineages |
+| tokens / usd / calls / turns per accepted task | Mean corresponding lineage total over accepted tasks |
+| tokens / usd per accepted goal | Mean accepted-goal total: accepted lineage usage plus goal planner/scout usage |
+| tokens_to_first_green | Sum lineage E with timestamp ≤ first_green_at; baseline reports mean over accepted tasks |
+| time_to_first_green_s / time_to_accepted_s | Corresponding stamp minus created_at |
+| fix_rounds / fix_round_tokens | Recorded lineage count (else linked descendants) / sum fix_round E |
+| first_pass_rate | Accepted tasks with first green, zero fixes and zero gate reds / tasks with defined first-pass evidence |
+| fix_round_rate / avg_fix_rounds | Tasks with ≥1 fix / defined tasks; mean fix count over defined tasks |
+| first_pass_defined_count / fix_round_defined_count | Number of accepted tasks with the respective evidence |
+| median_tokens_per_accepted_task / max_tokens_per_accepted_task | Median / maximum accepted lineage E |
+| gate_success_share | Sum(gate_attempts − gate_reds) / sum(gate_attempts), for tasks recording both |
+| review_request_changes_rate | Review tasks with request_changes / review tasks with approve or request_changes |
+| model_distribution | Row count and sum E per model and bucket |
+| breakdown | Sum E by Planner, Scout, Execution, Fix rounds, Spec review, Code review, Challenge, Jev, Other; Total is their sum |
+| pipeline_amplification / Amplification | Total E / initial Execution E |
+
+Amplification is an observation metric, not a target: reducing necessary review can
+lower it while worsening quality. Read it alongside first-pass and repair outcomes.
+The `unknown` group retains unattributed usage; unaccepted usage remains in window
+breakdowns. Unknown models are explicit, and unrecognized buckets contribute to Other.
+Legacy rows receive read-time attribution from task metadata and fix/review links,
+with explicit recorded attribution preserved; history is never rewritten.
+Review quality is reported with `orchestrator scorecard --reviews`.
+Use `--by role|packet_version|tier|band|reviewed_executor` to select the cohort.
+JSON output is available with `--json` for analysis and baseline tooling.
+The `pre-packet` packet-version bucket keeps reviews predating packet metadata comparable.
+Verdicts and severity totals show what reviewers found, not merely what they cost.
+Finding rates use review counts; missing denominators remain undefined rather than zero.
+Token and USD medians expose the review-context cost for each cohort.
+Findings per million tokens helps compare differently sized review packets.
+Two completed reviews also report deduplicated defects, overlap, and pass-two additions.
+Compare packet-version cohorts alongside those quality measures; reviews are never removed to save tokens.
+Missing lifecycle evidence stays undefined. Role groups measure usage rather than outcomes.
+
+Before any P1+ change, run `orchestrator baseline save phase-h-code`.
+Snapshots live in `.orchestrator/baselines/<label>.json` and freeze all six groupings,
+window row counts, and the pool, Jev, review, executor, planner-route, packet, client,
+policy, git and package fingerprint. Mixed recorded client/policy versions remain lists.
+Use `baseline save phase-i-shadow --since 2026-09-20T00:00:00Z` for a usage window;
+undated/out-of-window rows and out-of-window acceptances are excluded. Lineage totals
+then cover only that window; lifecycle stamps remain lifetime observations. Without
+`--since`, all available history is measured. Naive ISO timestamps are interpreted as UTC.
+Use `baseline show phase-h-code [--json]`, `baseline list`, then
+`baseline compare phase-h-code phase-i-shadow [--json]` after the change.
+Deltas are after − before; percent is 100 × delta / |before|, undefined at zero.
+Lower primary metrics and repair/rejection rates are flagged better; higher first-pass
+and gate success rates are better. Worse non-inferiority metrics have `*` in text.
+The footer is `non-inferior: no` for any regression, `undefined` for missing evidence,
+or `yes` when all non-inferiority metrics are defined and unchanged or improved.
+Fingerprint diffs name changed leaf keys, so configuration changes remain visible.

@@ -1,9 +1,77 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ... | planner-runs --summary"""
-import argparse, json, os, sys
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
+import argparse, json, os, random, sys
 from collections import defaultdict
-from . import bus, scorecard
+from datetime import datetime
+from . import ROOT, bus, scorecard
 from .bus import RUNS
 from .pool import Pool
+
+
+def _percentile(values, percentile):
+    if not values:
+        return "-"
+    values = sorted(values)
+    index = (len(values) - 1) * percentile / 100
+    low, high = int(index), min(int(index) + 1, len(values) - 1)
+    return round(values[low] + (values[high] - values[low]) * (index - low), 1)
+
+
+def _jev_diagnose(since=None, export=None, n=10):
+    path = ROOT / ".orchestrator" / "runs" / "jev" / "gate.jsonl"
+    rows = []
+    if path.exists():
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if since and datetime.fromtimestamp(row.get("ts", 0)).date().isoformat() < since:
+                continue
+            rows.append(row)
+
+    roles = {}
+    tasks = {}
+    for row in rows:
+        tid = row.get("task")
+        if tid not in tasks:
+            try:
+                tasks[tid] = bus.get(tid).get("role") or "?"
+            except Exception:
+                tasks[tid] = "?"
+        row["role"] = tasks[tid]
+
+    def bucket(key):
+        out = {}
+        for row in rows:
+            name = row.get(key) or "?"
+            item = out.setdefault(name, {"calls": 0, "scored": 0, "waste": 0, "repeat": 0})
+            item["calls"] += 1
+            item["scored"] += bool(row.get("scored"))
+            item["repeat"] += bool(row.get("repeat"))
+            if row.get("scored") and ((row.get("p_needed") is not None and row["p_needed"] < 0.3) or
+                                       (row.get("p_redundant") is not None and row["p_redundant"] > 0.7)):
+                item["waste"] += 1
+        for item in out.values():
+            item["waste_pct"] = round(item["waste"] / item["scored"] * 100, 1) if item["scored"] else 0.0
+            item["repeat_pct"] = round(item["repeat"] / item["calls"] * 100, 1) if item["calls"] else 0.0
+        return out
+
+    scored = [r for r in rows if r.get("scored")]
+    latencies = [float(r.get("latency_ms") or 0) for r in scored]
+    startup = [float(r.get("startup_ms") or 0) for r in scored]
+    network = [max(0.0, l - s) for l, s in zip(latencies, startup)]
+    print(f"calls={len(rows)} scored={len(scored)} sampled_share={round(len(scored) / len(rows) * 100, 1) if rows else 0.0}%")
+    print(f"blocked={sum(bool(r.get('blocked')) for r in rows)}")
+    print(f"latency_ms_p50={_percentile(latencies, 50)} latency_ms_p95={_percentile(latencies, 95)} "
+          f"startup_ms_p50={_percentile(startup, 50)} network_ms_p50={_percentile(network, 50)}")
+    print("by_tool=" + json.dumps(bucket("tool"), sort_keys=True))
+    print("by_role=" + json.dumps(bucket("role"), sort_keys=True))
+    if export:
+        chosen = random.sample(scored, min(max(0, n), len(scored)))
+        with open(export, "w") as fh:
+            for row in chosen:
+                fh.write(json.dumps({**row, "label": ""}) + "\n")
+        print(f"exported {len(chosen)} rows to {export}")
 
 
 def _format_goal_line(e):
@@ -61,12 +129,21 @@ def main():
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
+    rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
+    rm.add_argument("--stdout", action="store_true")
     ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard")
-    sc.add_argument("--by", default="executor", choices=["executor", "tier", "task", "goal"])
+    sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role", "packet_version", "reviewed_executor"])
+    sc.add_argument("--efficiency", action="store_true")
+    sc.add_argument("--economics", action="store_true")
+    sc.add_argument("--routing", action="store_true")
+    sc.add_argument("--reviews", action="store_true")
     sc.add_argument("--json", action="store_true")
+    sc.add_argument("--planner", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
+    j = sub.add_parser("jev"); jsub = j.add_subparsers(dest="jev_cmd", required=True)
+    jd = jsub.add_parser("diagnose"); jd.add_argument("--since"); jd.add_argument("--export"); jd.add_argument("--n", type=int, default=10)
     g = sub.add_parser("goal"); gsub = g.add_subparsers(dest="goal_cmd", required=True)
     gs = gsub.add_parser("start"); gs.add_argument("repo"); gs.add_argument("text")
     gs.add_argument("--account", default="A"); gs.add_argument("--reinstall", action="store_true")
@@ -79,7 +156,31 @@ def main():
     bf = bsub.add_parser("fetch"); bf.add_argument("--force", action="store_true"); bf.add_argument("--by", default="orchestrator")
     bsub.add_parser("show")
     bs = bsub.add_parser("set"); bs.add_argument("model_id"); bs.add_argument("--by", required=True); bs.add_argument("metrics", nargs="+", metavar="key=value")
+    bl = sub.add_parser("baseline"); blsub = bl.add_subparsers(dest="baseline_cmd", required=True)
+    blsave = blsub.add_parser("save"); blsave.add_argument("label"); blsave.add_argument("--since")
+    blshow = blsub.add_parser("show"); blshow.add_argument("label"); blshow.add_argument("--json", action="store_true")
+    blsub.add_parser("list")
+    blcompare = blsub.add_parser("compare"); blcompare.add_argument("a"); blcompare.add_argument("b")
+    blcompare.add_argument("--json", action="store_true")
     a = ap.parse_args()
+    if a.cmd == "scorecard":
+        if sum((a.economics, a.efficiency, a.routing, a.reviews)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews")
+        groupings = {
+            "default": ("executor", "tier", "task", "goal"),
+            "--efficiency": ("goal", "executor", "band", "class", "role"),
+            "--economics": ("executor", "band", "class"),
+            "--routing": (),
+            "--reviews": ("role", "packet_version", "tier", "band", "reviewed_executor"),
+        }
+        mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews")
+                     if getattr(a, name)), "default")
+        allowed = groupings[mode]
+        if a.by is not None and a.by not in allowed:
+            choices = "|".join(allowed) if allowed else "none (omit --by)"
+            ap.error(f"--by {a.by} is not supported by {mode}; {mode} supports --by {choices}")
+        if mode == "default":
+            a.by = a.by or "executor"
     if a.cmd == "status":
         if a.plain:
             s = Pool().status()
@@ -90,6 +191,24 @@ def main():
             print(f"codex\tavailable={c['available']}\trunning={c['running']}\tday_tasks={c['day_tasks']}\tcooling={c['cooling_s']}s")
         else:
             print(json.dumps({**Pool().status(), "queue": {s: len(bus.read(status=s)) for s in ("queued", "held", "running")}}, indent=1))
+    elif a.cmd == "baseline":
+        from . import baseline
+        try:
+            if a.baseline_cmd == "save":
+                print(baseline.save(a.label, since=a.since))
+            elif a.baseline_cmd == "list":
+                print("label\tsaved_at")
+                for label in baseline.list_labels():
+                    print(f"{label}\t{baseline.load(label)['saved_at']}")
+            elif a.baseline_cmd == "show":
+                snapshot = baseline.load(a.label)
+                print(json.dumps(snapshot, indent=2) if a.json else
+                      scorecard.format_efficiency(snapshot['efficiency']['all']))
+            else:
+                result = baseline.compare(a.a, a.b)
+                print(json.dumps(result, indent=2) if a.json else baseline.format_comparison(result))
+        except (ValueError, OSError) as error:
+            ap.error(str(error))
     elif a.cmd == "cost":
         print(json.dumps(cost(a.by), indent=1))
     elif a.cmd == "hold":
@@ -114,6 +233,17 @@ def main():
         print(handover.write(a.reason))
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
+    elif a.cmd == "repomap":
+        from .repomap import build
+        # Leave a little room for command wrappers while keeping the requested value an upper bound.
+        result = build(ROOT, max(0, a.budget - 100))
+        if a.stdout:
+            print(result, end="")
+        else:
+            output = ROOT / ".orchestrator" / "memory" / "architecture.md"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(result)
+            print(output)
     elif a.cmd == "install":
         from .install import install
         for line in install(a.target):
@@ -151,7 +281,29 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.by in ("executor", "tier"):
+        if a.reviews:
+            card = scorecard.review_quality(root=scorecard.STATE, by=a.by or "role")
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_review_quality(card))
+        elif a.routing:
+            card = scorecard.routing_eval(root=scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_routing_eval(card))
+        elif a.economics:
+            grouping = a.by or "executor"
+            card = scorecard.executor_economics(root=scorecard.STATE, by=grouping)
+            if a.json:
+                serializable = {("/".join(key) if isinstance(key, tuple) else key): value
+                                for key, value in card.items()}
+                print(json.dumps(serializable, indent=1))
+            else:
+                print(scorecard.format_executor_economics(card))
+        elif a.efficiency:
+            card = scorecard.efficiency(root=scorecard.STATE, by=a.by)
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_efficiency(card))
+        elif a.planner:
+            from . import planner_runs
+            summary = planner_runs.premium_summary(root=scorecard.STATE)
+            print(json.dumps(summary, indent=1) if a.json else scorecard.format_premium_summary(summary))
+        elif a.by in ("executor", "tier"):
             card = scorecard.build(by=a.by)
             sc = scorecard.scores(card)
             if a.json:
@@ -178,27 +330,40 @@ def main():
                       f"{totals['calls']}\t{totals['waste_pct']}\t{totals['blocked']}\t{totals['turns']}")
         elif a.by == "goal":
             card = scorecard.by_goal()
+            accepted_tokens = scorecard.tokens_per_accepted_goal(root=scorecard.STATE)
             if a.json:
-                print(json.dumps(card, indent=1))
+                print(json.dumps({**card, "tokens_per_accepted_goal": accepted_tokens}, indent=1))
             else:
-                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\tcalls\twaste_pct\tturns")
+                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\troute\tcalls\twaste_pct\tturns")
                 total_usd = 0.0
                 for gid, r in sorted(card.items(), key=lambda kv: kv[1]["total_usd"], reverse=True):
                     pct = scorecard.goal_percentages(r)
                     runs_cell = scorecard.format_planner_runs_cell(r)
+                    route_cell = ", ".join(f"{name}={count}" for name, count in sorted(r.get("routes", {}).items())) or "-"
                     print(f"{gid}\t{round(r['total_usd'], 2)}\t{round(pct['execute'], 1)}%\t"
                           f"{round(pct['review'], 1)}%\t{round(pct['spec_review'], 1)}%\t{round(pct['scout'], 1)}%\t"
-                          f"{round(pct['other'], 1)}%\t{runs_cell}\t{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
+                          f"{round(pct['other'], 1)}%\t{runs_cell}\t{r['total_tokens']}\t{r['tokens_uncached']}\t"
+                          f"{r['tokens_cache_read']}\t{r['tokens_output']}\t{r['jev_tokens']}\t{r['planner_tokens']}\t"
+                          f"{route_cell}\t{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
                     total_usd += r["total_usd"]
                 totals = _scorecard_measurement_totals(card, "goal")
-                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t"
-                      f"{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
+                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t"
+                      f"-\t{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
+                for gid, r in sorted(card.items()):
+                    print(f"tokens per task ({gid}): {scorecard.format_task_tokens_cell(r)}")
                 print(scorecard.planner_footer())
+                accepted_usd = scorecard.usd_per_accepted_goal(root=scorecard.STATE)
+                ratio = ("undefined (0 accepted goals)" if accepted_tokens['tokens'] is None
+                         else str(round(accepted_tokens['tokens'])))
+                print(f"tokens per accepted goal: {ratio} over {accepted_tokens['count']} goals "
+                      f"(usd {round(accepted_usd['usd'], 2)})")
     elif a.cmd == "planner-runs":
         from . import planner_runs
         s = planner_runs.summary()
         print(f"decisions={s['decisions']}\tjev_scored={s['jev_scored']}\t"
               f"agreement_rate={s['agreement_rate']}\tmean_confidence={s['mean_confidence']}")
+    elif a.cmd == "jev" and a.jev_cmd == "diagnose":
+        _jev_diagnose(a.since, a.export, a.n)
     elif a.cmd == "bench":
         from . import bench
         if a.bench_cmd == "fetch":

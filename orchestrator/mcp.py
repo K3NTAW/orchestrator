@@ -49,6 +49,14 @@ def deregister_planner_session():
 
 
 def _bg(task_id):
+    try:
+        spawn.ensure_worktree(task_id)
+    except Exception as exc:
+        reason = str(exc)
+        task = bus.get(task_id)
+        bus.log_run(task=task_id, role=task["role"], tier=task.get("tier"),
+                    complexity=task.get("complexity"), outcome="spawn_error", reason=reason)
+        return {"status": "error", "reason": reason}
     threading.Thread(target=spawn.run_worker, args=(task_id,), daemon=True).start()
     return {"task": task_id, "status": "spawned; result arrives on the bus"}
 
@@ -90,13 +98,17 @@ def spawn_spec_review(task_id: str) -> dict:
 @srv.tool()
 def codex(task_id: str, prompt: str) -> dict:
     """Executor: start a fresh GPT-6 Astra thread (`codex exec`) for one atomic execute task in its worktree. Returns thread id + final message; held if Codex is cooling."""
-    return executor.start(task_id, prompt)
+    result = executor.start(task_id, prompt)
+    posted, reason = executor.post_tool_result(task_id, result)
+    return {**result, "posted": posted, "posted_reason": reason}
 
 
 @srv.tool()
 def codex_reply(task_id: str, delta: str) -> dict:
     """Fix-loop round on the task's existing thread (`codex exec resume`). Send deltas only: failing test names + assertion lines. Max 5 rounds."""
-    return executor.reply(task_id, delta)
+    result = executor.reply(task_id, delta)
+    posted, reason = executor.post_tool_result(task_id, result, replace_result=True)
+    return {**result, "posted": posted, "posted_reason": reason}
 
 
 @srv.tool()

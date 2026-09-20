@@ -15,6 +15,26 @@ from orchestrator import pool as P
 
 
 class Handover(unittest.TestCase):
+    def test_unchanged_state_writes_nothing(self):
+        goal = self.goal()
+        child = self.child(goal, "Implement feature")
+        with mock.patch.object(handover.os, "replace", wraps=handover.os.replace) as replace:
+            plan = handover.write("first tick")
+            first = plan.read_bytes()
+            first_mtime = plan.stat().st_mtime_ns
+            self.assertEqual(replace.call_count, 1)
+            handover.write("later tick")
+            self.assertEqual(replace.call_count, 1)
+            self.assertEqual(plan.read_bytes(), first)
+            self.assertEqual(plan.stat().st_mtime_ns, first_mtime)
+            state_path = handover.STATE / "handover_state.json"
+            first_hash = json.loads(state_path.read_text())["snapshot_hash"]
+            bus.update(child, status="held", hold_reason="awaiting input")
+            handover.write("changed tick")
+            self.assertEqual(replace.call_count, 2)
+            self.assertNotEqual(json.loads(state_path.read_text())["snapshot_hash"], first_hash)
+            self.assertIn("hold_reason=awaiting input", plan.read_text())
+
     def setUp(self):
         sandbox = Path(tempfile.mkdtemp(prefix="orch-handover-"))
         for mod, name, value in (
@@ -173,8 +193,7 @@ class Handover(unittest.TestCase):
         self.assertEqual(text2.count("## Auto-handover "), 1)
         self.assertEqual(before1, before2)                 # everything above the section is byte-identical
         self.assertIn("first pass", section1.splitlines()[0])
-        self.assertIn("second pass", section2.splitlines()[0])
-        self.assertNotIn("first pass", text2)
+        self.assertEqual(section2, section1)               # reason alone is not a goal-state change
 
     def test_daemon_throttles_to_15_min(self):
         calls = []
@@ -297,6 +316,7 @@ class Handover(unittest.TestCase):
 
         for target in ("orchestrator.jev.ask", "orchestrator.handover.jev_rank.rank"):
             with self.subTest(target=target):
+                (handover.STATE / "handover_state.json").unlink(missing_ok=True)
                 stderr = io.StringIO()
                 with mock.patch(target, side_effect=RuntimeError("jev endpoint exploded\nmore detail")) as rank:
                     with redirect_stderr(stderr):

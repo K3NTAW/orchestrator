@@ -1,7 +1,8 @@
 """spawn.run_worker's review-verdict propagation, prompt template rendering / result fitting, base-branch
 selection for stacked/challenge/review tasks (review T-0026, T-0030), and headless-host secret/token wiring
 (env-form secrets, CLAUDE_CODE_OAUTH_TOKEN injection)."""
-import json, os, subprocess, sys, unittest
+import json, os, subprocess, sys, tempfile, unittest
+from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_spawn.py` doesn't add this dir itself
 from _harness import TMP, g, scratch_repo
@@ -23,6 +24,72 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_review_run_row_and_task_carry_review_facts(self):
+        reviewed = bus.create_task("review facts target", "s", ["a"], ["facts.py"], role="execute")
+        bus.update(reviewed["id"], pipeline={"reviews_expected": 1})
+        review = bus.create_task("review facts", "s", ["a"], ["facts.py"], role="review",
+                                 inputs=[reviewed["id"]], complexity=7,
+                                 constraints={"reviewed_sha": "deadbeef", "reviewer_role": "security"})
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)
+        original_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", original_pick))
+        comments = [{"severity": "high"}, {"severity": "medium"}, {"severity": "info"}]
+        original = spawn.run_claude
+        spawn.run_claude = lambda *a, **k: {"status": "done", "output": {
+            "result": json.dumps({"verdict": "request_changes", "comments": comments}), "usage": {}}}
+        self.addCleanup(lambda: setattr(spawn, "run_claude", original))
+        with mock.patch.object(spawn, "ensure_worktree", return_value=TMP / "wt" / review["id"]):
+            spawn.run_worker(review["id"])
+        updated = bus.get(review["id"])
+        facts = updated["review_facts"]
+        self.assertEqual(facts["findings_count"], 3)
+        self.assertEqual(facts["packet_version"], updated["result"]["packet_version"])
+        for key in ("verdict", "findings_count", "findings_by_severity", "reviewer_role", "checklist_used",
+                    "reviewed_sha", "packet_version", "review_pass_index"):
+            self.assertIn(key, updated)
+
+    def test_packet_dependencies_section_lists_depends_on(self):
+        dep = bus.create_task("D" * 110, "s", ["a"], ["x.py"], role="execute")
+        bus.update(dep["id"], status="done", merged_into="goal/G", sha="abc12345")
+        task = bus.create_task("dependent", "s", ["keep every criterion"], ["x.py"],
+                               role="execute", depends_on=[dep["id"]])
+        text = spawn.packet(task, TMP)
+        self.assertGreater(text.index("## dependencies"), text.index("## evidence"))
+        for value in (dep["id"], "D" * 90, "status: done", "merged_into: goal/G", "merged sha: abc12345"):
+            self.assertIn(value, text)
+        self.assertNotIn("D" * 91, text)
+        self.assertNotIn("## dependencies", spawn.packet({**task, "depends_on": []}, TMP))
+        large = {**task, "acceptance": ["criterion " + "x" * 5000]}
+        bounded = spawn.packet(large, TMP)
+        self.assertNotIn("## dependencies", bounded)
+        self.assertIn(large["acceptance"][0], bounded)
+        self.assertIn(".claude/hooks/tests-green.sh .", bounded)
+
+    def test_render_flags_unfilled_placeholder(self):
+        with self.assertRaisesRegex(ValueError, "unfilled_placeholder: packet"):
+            spawn.render("execute", spec="s", acceptance=["a"], scope=["x.py"])
+        text = spawn.render("execute", packet="brief", spec="s", acceptance=["a"], scope=["x.py"])
+        self.assertNotIn("{{", text)
+
+    def test_ensure_worktree_reuses_existing_task_branch(self):
+        with tempfile.TemporaryDirectory(prefix="orch-worktree-") as directory:
+            root = Path(directory)
+            wt = root / "wt" / "T-x"
+            self.assertFalse(wt.exists())
+
+            def git(*args, **kwargs):
+                if args[:2] == ("worktree", "add"):
+                    self.assertEqual(args, ("worktree", "add", str(wt), "task/T-x"))
+                    wt.mkdir()
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with mock.patch.object(spawn, "ROOT", root), mock.patch.object(spawn, "git", side_effect=git) as run:
+                self.assertEqual(spawn.ensure_worktree("T-x", base="HEAD"), wt)
+            self.assertTrue(wt.is_dir())
+            run.assert_any_call("rev-parse", "--verify", "task/T-x", check=False)
+            self.assertEqual(sum(call.args[:2] == ("worktree", "add") for call in run.call_args_list), 1)
+
     def test_run_worker_captures_verdict_on_review_and_reviewed_task(self):
         reviewed = bus.create_task("feat-rv", "s", ["a"], ["rv.py"], role="execute")
         review = bus.create_task("review feat-rv", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])
@@ -40,6 +107,39 @@ class ReviewVerdict(unittest.TestCase):
         spawn.run_worker(review["id"])
         self.assertEqual(bus.get(review["id"])["review_verdict"], "request_changes")
         self.assertEqual(bus.get(reviewed["id"])["review_verdict"], "request_changes")
+
+
+class ReviewWithoutInputs(unittest.TestCase):
+    def test_review_without_inputs_falls_back_to_task(self):
+        review = bus.create_task("review-without-inputs", "task spec", ["task acceptance"], ["task.py"],
+                                 role="review", inputs=[])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+
+        orig_pick = P.Pool.pick
+        P.Pool.pick = lambda self, role, avoid=None: self.get("A")
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+
+        seen = {}
+        orig_scoped_diff = spawn.scoped_diff
+        def fake_scoped_diff(src):
+            seen["src"] = src
+            return "TASK_FALLBACK_DIFF"
+        spawn.scoped_diff = fake_scoped_diff
+        self.addCleanup(lambda: setattr(spawn, "scoped_diff", orig_scoped_diff))
+
+        captured = {}
+        orig_run_claude = spawn.run_claude
+        def fake_run_claude(*args, **kwargs):
+            captured["prompt"] = args[3]
+            return {"status": "done", "output": {"result": json.dumps({"verdict": "approve", "comments": []}),
+                                                       "usage": {}}}
+        spawn.run_claude = fake_run_claude
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run_claude))
+
+        spawn.run_worker(review["id"])
+
+        self.assertEqual(seen["src"]["id"], review["id"])
+        self.assertIn("task acceptance", captured["prompt"])
 
 
 class ReviewAvoidsAccount(unittest.TestCase):
@@ -273,6 +373,38 @@ class RunRecordHasTurns(unittest.TestCase):
         self.assertEqual(json.loads(last_line)["turns"], 7)
 
 
+class RunClaudeNormalisedUsage(unittest.TestCase):
+    class UsagePopen(FakePopen):
+        def communicate(self, timeout=None):
+            return json.dumps({"result": "ok", "usage": {"input_tokens": 10,
+                               "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2,
+                               "output_tokens": 5, "reasoning_tokens": 4}}), ""
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = self.UsagePopen
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_run_row_has_normalised_tokens(self):
+        goal = bus.create_task("usage-goal", "s", ["a"], ["x.py"])
+        task = bus.create_task("usage-task", "s", ["a"], ["x.py"], role="execute", parent=goal["id"])
+        task["worktree"] = str(TMP)
+        account = P.Account("A", "~/.claude-a", ["execute"])
+        result = spawn.run_claude(P.Pool(), account, task, "prompt", "claude-sonnet-5",
+                                  spawn.TOOLS["execute"], 2.0, 60)
+        self.assertEqual(result["status"], "done")
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(row["goal_id"], goal["id"])
+        self.assertEqual(row["provider"], "claude")
+        self.assertEqual({key: row[key] for key in ("input_uncached_tokens", "cache_read_tokens",
+                         "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens")},
+                         {"input_uncached_tokens": 10, "cache_read_tokens": 3, "cache_write_tokens": 2,
+                          "output_tokens": 5, "reasoning_tokens": 4, "total_tokens": 20})
+
+
 class RunWorkerMissingReason(unittest.TestCase):
     """T-0134: run_worker must not KeyError when run_claude returns a failure dict without a "reason" key, and
     should preserve any partial output as a resume_hint for the next attempt."""
@@ -297,7 +429,7 @@ class RunWorkerMissingReason(unittest.TestCase):
 
 
 class SpecReview(unittest.TestCase):
-    def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_spec_and_code_excerpt(self):
+    def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_minimal_packet(self):
         scratch_repo(TMP)
         (TMP / "spec_review_target.py").write_text("def handler():\n    return 1\n")
 
@@ -330,16 +462,327 @@ class SpecReview(unittest.TestCase):
         self.assertEqual(bus.get(execute["id"])["spec_review_verdict"], "request_changes")
         self.assertEqual(bus.get(execute["id"])["spec_review_risks"][0]["severity"], "med")
         self.assertIn("implement the thing precisely", captured["prompt"])
-        self.assertIn("def handler():", captured["prompt"])
-        self.assertRegex(captured["prompt"], r"(?m)^\s*\d+\| ")
+        self.assertIn("## existing tests", captured["prompt"])
+        self.assertIn("tests/test_spec_review_target.py: missing", captured["prompt"])
+        self.assertNotIn("def handler():", captured["prompt"])
 
 
 class Render(unittest.TestCase):
+    def packet_fixture(self):
+        scratch_repo(TMP)
+        (TMP / "widget.py").write_text("import json\n\ndef build_widget():\n    return json.dumps({})\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_widget.py").write_text(
+            "from widget import build_widget\n\ndef test_build_widget():\n    assert build_widget()\n")
+        return {"id": "T-P", "title": "Build widget", "acceptance": ["works"],
+                "scope": ["widget.py"], "parent": "G", "inputs": []}
+
+    def test_packet_sections_in_order(self):
+        text = spawn.packet(self.packet_fixture(), TMP)
+        names = ["objective", "acceptance", "base", "write_scope", "read_scope", "relevant_tests",
+                 "symbols", "gotchas", "decisions", "verify", "evidence"]
+        positions = [text.index(f"## {name}") for name in names]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("tests/test_widget.py", text)
+        self.assertIn("widget.py:3 build_widget", text)
+
+    def test_review_packet_has_spec_acceptance_diff_tests_gate_in_order(self):
+        task = self.packet_fixture()
+        task.update(spec="precise spec", pipeline={"gated_at": "now", "gate_attempts": 2,
+                    "gate_reds": 1, "first_green_at": None, "last_failure_text": "boom\ndetail"},
+                    acceptance=["tests/test_widget.py::test_build_widget passes"])
+        text = spawn.review_packet(task, task)
+        names = ["spec", "acceptance", "scope", "diff", "changed tests", "gate"]
+        self.assertEqual([text.index(f"## {n}") for n in names], sorted(text.index(f"## {n}") for n in names))
+        self.assertIn("test_build_widget: present", text)
+        self.assertIn("last_failure_head: boom", text)
+
+    def test_review_packet_role_section_for_each_role(self):
+        reviewed = {**self.packet_fixture(), "spec": "ordinary change"}
+        packets = {}
+        for role in ("acceptance", "adversarial"):
+            task = {**reviewed, "constraints": {"reviewer_role": role}}
+            packets[role] = spawn.review_packet(task, reviewed)
+            self.assertIn("## role", packets[role])
+            self.assertIn(f"reviewer-role@{role}", packets[role].splitlines()[0])
+        self.assertIn("every acceptance criterion", packets["acceptance"])
+        self.assertIn("adversarial reasoning", packets["adversarial"])
+        self.assertNotEqual(spawn.packet_run_meta(packets["acceptance"])["version"],
+                            spawn.packet_run_meta(packets["adversarial"])["version"])
+
+    def test_review_packet_security_section_present_for_both_roles_on_security_path(self):
+        reviewed = {**self.packet_fixture(), "spec": "ordinary change", "scope": ["auth/login.py"]}
+        cfg = {**P.config(), "review": {"security_paths": ["auth/*"]}}
+        with mock.patch.object(P, "config", return_value=cfg):
+            for role in ("acceptance", "adversarial"):
+                task = {**reviewed, "constraints": {"reviewer_role": role}}
+                text = spawn.review_packet(task, reviewed)
+                self.assertGreater(text.index("## security"), text.index("## role"))
+
+    def test_review_packet_without_role_unchanged(self):
+        task = {**self.packet_fixture(), "spec": "ordinary change"}
+        without_constraints = spawn.review_packet(task, task)
+        with_empty_constraints = spawn.review_packet({**task, "constraints": {}}, task)
+        self.assertEqual(without_constraints, with_empty_constraints)
+        self.assertNotIn("## role", without_constraints)
+        self.assertNotIn("reviewer-role@", without_constraints.splitlines()[0])
+
+    def test_review_packet_security_section_only_on_security_path(self):
+        task = {**self.packet_fixture(), "spec": "ordinary change"}
+        cfg = {**P.config(), "review": {"security_paths": ["auth/*"]}}
+        with mock.patch.object(P, "config", return_value=cfg):
+            self.assertNotIn("## security", spawn.review_packet(task, task))
+            task["scope"] = ["auth/login.py"]
+            self.assertIn("## security", spawn.review_packet(task, task))
+
+    def test_review_packet_security_section_on_complexity_bump_and_fail_closed_reasons(self):
+        cfg = {**P.config(), "review": {"security_paths": ["auth/*"]}}
+        reviewed = {**self.packet_fixture(), "spec": "ordinary change", "complexity": 4}
+        with mock.patch.object(P, "config", return_value=cfg):
+            review = {**reviewed, "complexity": 7}
+            self.assertIn("## security", spawn.review_packet(review, reviewed))
+            reviewed["pipeline"] = {"review_reason": "diff_unavailable"}
+            text = spawn.review_packet({**reviewed, "complexity": 4}, reviewed)
+            self.assertIn("## security", text)
+            self.assertIn("review_reason: diff_unavailable", text)
+            reviewed["pipeline"] = {}
+            self.assertNotIn("## security", spawn.review_packet({**reviewed, "complexity": 4}, reviewed))
+        empty_cfg = {**P.config(), "review": {"security_paths": []}}
+        with mock.patch.object(P, "config", return_value=empty_cfg):
+            text = spawn.review_packet({**reviewed, "complexity": 4}, reviewed)
+            self.assertIn("## security", text)
+            self.assertIn("review_reason: security_paths_empty", text)
+
+    def test_review_packet_single_bounding_pass_no_nested_truncation(self):
+        task = {**self.packet_fixture(), "spec": "ordinary change",
+                "acceptance": ["a" * 1500], "scope": ["widget.py", "x" * 1500],
+                "pipeline": {"last_failure_text": "g" * 1500}}
+        raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i} " + "x" * 80 for i in range(400))
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw):
+            text = spawn.review_packet(task, task)
+        self.assertLessEqual(len(text), 8200)
+        self.assertEqual(text.count("expand with:"), 1)
+        self.assertIn(f"expand with: git -C {TMP} diff -- widget.py {'x' * 1500}", text)
+
+    def test_review_packet_excludes_other_tasks_and_memory(self):
+        task = {**self.packet_fixture(), "spec": "only this task"}
+        memory = TMP / ".orchestrator/memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "gotchas.md").write_text("## SECRET GOTCHA\nbody that must not leak\n")
+        bus.create_task("OTHER FINISHED TASK", "other text", ["other acceptance"], ["other.py"])
+        text = spawn.review_packet(task, task)
+        self.assertNotIn("OTHER FINISHED TASK", text)
+        self.assertNotIn("SECRET GOTCHA", text)
+
+    def test_spec_review_packet_minimal_fields(self):
+        task = {**self.packet_fixture(), "spec": "review me", "complexity": 4, "tier": "sonnet"}
+        text = spawn.spec_review_packet(task)
+        for name in ("spec", "acceptance", "scope", "depends_on", "existing tests", "complexity", "tier"):
+            self.assertIn(f"## {name}", text)
+        self.assertNotIn("## diff", text)
+
+    def test_scout_packet_bounded_tree_and_memory_titles_only(self):
+        memory = TMP / ".orchestrator/memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "index.md").write_text("## Useful title\nPRIVATE BODY\n")
+        task = {**self.packet_fixture(), "spec": "find facts"}
+        text = spawn.scout_packet(task)
+        self.assertIn("Useful title", text)
+        self.assertNotIn("PRIVATE BODY", text)
+        tree = text.split("## scope tree\n", 1)[1].split("\n## ", 1)[0]
+        self.assertLessEqual(len(tree.splitlines()), 60)
+
+    def test_role_prompts_have_no_unfilled_placeholder(self):
+        task = {**self.packet_fixture(), "spec": "s", "complexity": 3, "tier": "sonnet"}
+        packets = {"review": spawn.review_packet(task, task),
+                   "spec-review": spawn.spec_review_packet(task), "scout": spawn.scout_packet(task)}
+        for role, role_packet in packets.items():
+            self.assertNotIn("{{", spawn.render(role, packet=role_packet))
+
+    def test_packet_meta_logged_for_review_and_scout(self):
+        for role, builder in (("review", lambda t: spawn.review_packet(t, t)),
+                              ("scout", spawn.scout_packet)):
+            task = {**self.packet_fixture(), "spec": "s", "role": role}
+            meta = {**spawn.packet_run_meta(builder(task)), "role": role}
+            self.assertEqual(meta["role"], role)
+            self.assertGreater(meta["chars"], 0)
+            self.assertEqual(meta["hash"], meta["version"])
+
+    def test_packet_over_cap_keeps_every_acceptance_criterion(self):
+        task = self.packet_fixture()
+        task["acceptance"] = [f"criterion {i} " + "x" * 100 for i in range(100)]
+        text = spawn.packet(task, TMP)
+        acceptance = text.split("## acceptance\n", 1)[1].split("\n## ", 1)[0]
+        self.assertEqual(acceptance.count("criterion "), 100)
+        self.assertNotIn("more" + " in task", acceptance)
+        self.assertIn("over cap by", text.splitlines()[0])
+        self.assertNotIn("widget.py:3 build_widget", text)
+
+    def test_packet_header_has_hash_base_and_sources(self):
+        text = spawn.packet(self.packet_fixture(), TMP)
+        meta = spawn.packet_meta(self.packet_fixture(), TMP)
+        self.assertEqual(text.splitlines()[0],
+                         f"packet v{meta['hash']} base {meta['base']} sources "
+                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@notes,bus")
+
+    def test_packet_hash_changes_when_body_changes(self):
+        task = self.packet_fixture()
+        first = spawn.packet_meta(task, TMP)["hash"]
+        task["acceptance"].append("another criterion")
+        self.assertNotEqual(first, spawn.packet_meta(task, TMP)["hash"])
+
+    def test_packet_never_trims_base_or_verify(self):
+        task = self.packet_fixture()
+        task["acceptance"] = [f"criterion {i} " + "x" * 100 for i in range(100)]
+        text = spawn.packet(task, TMP)
+        base = text.split("## base\n", 1)[1].split("\n## ", 1)[0]
+        verify = text.split("## verify\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("- branch:", base)
+        self.assertIn("- merge-base", base)
+        self.assertEqual(verify, "- .claude/hooks/tests-green.sh .\n- On failure, report only scripts/failures_only.sh output.")
+
+    def test_relevant_tests_scope_files_first(self):
+        scratch_repo(TMP)
+        (TMP / "widget.py").write_text("def inspect_widget():\n    return True\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_scoped.py").write_text("def test_scoped():\n    assert True\n")
+        (TMP / "tests" / "test_widget.py").write_text(
+            "from widget import inspect_widget\n\ndef test_symbol_match():\n    assert inspect_widget()\n")
+        task = {"title": "x", "acceptance": [], "scope": ["tests/test_scoped.py", "widget.py"], "inputs": []}
+        relevant = spawn.packet(task, TMP).split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0].splitlines()
+        self.assertEqual(relevant[:2], ["- tests/test_scoped.py", "- tests/test_widget.py"])
+
+    def test_relevant_tests_ignores_short_symbols(self):
+        scratch_repo(TMP)
+        (TMP / "tiny.py").write_text("def get():\n    return True\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_other.py").write_text("def test_ordinary_word():\n    assert get is not None\n")
+        task = {"title": "x", "acceptance": [], "scope": ["tiny.py"], "inputs": []}
+        relevant = spawn.packet(task, TMP).split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0]
+        self.assertNotIn("test_other.py::test_ordinary_word", relevant)
+
+    def test_relevant_tests_ranked_by_specificity(self):
+        scratch_repo(TMP)
+        (TMP / "widget.py").write_text("def build_widget():\n    return True\n\ndef inspect_widget():\n    return True\n")
+        (TMP / "tests").mkdir(exist_ok=True)
+        (TMP / "tests" / "test_other.py").write_text(
+            "from widget import build_widget, inspect_widget\n\ndef test_one():\n    assert build_widget()\n\ndef test_two():\n    assert build_widget() and inspect_widget()\n")
+        task = {"title": "x", "acceptance": [], "scope": ["widget.py"], "inputs": []}
+        relevant = spawn.packet(task, TMP).split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0].splitlines()
+        self.assertEqual(relevant[1:3], ["- tests/test_other.py::test_two", "- tests/test_other.py::test_one"])
+
+    def test_execute_prompt_contains_packet(self):
+        p = spawn.packet(self.packet_fixture(), TMP)
+        text = spawn.render("execute", packet=p, spec="s", acceptance=["a"], scope=["widget.py"])
+        self.assertTrue(text.startswith("packet v"))
+        self.assertIn("Build widget", text)
+
+    def test_execute_prompt_names_gate_and_commit(self):
+        text = spawn.render("execute", packet="", spec="s", acceptance=["a"], scope=["widget.py"])
+        self.assertIn(".claude/hooks/tests-green.sh", text)
+        self.assertIn("git commit", text)
+        self.assertNotIn("scripts/tests_green.sh", text)
+
+    def test_fix_delta_prompt_names_gate_and_commit(self):
+        text = spawn.render("fix-delta", packet="brief", n=1, failing_tests="x", assertion_lines="y")
+        self.assertIn(".claude/hooks/tests-green.sh", text)
+        self.assertIn("git commit", text)
+        self.assertNotIn("scripts/tests_green.sh", text)
+
+    def test_packet_gotcha_match_by_path(self):
+        task = self.packet_fixture()
+        memory = TMP / ".orchestrator" / "memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "gotchas.md").write_text("## Widget cache\nFacts: changing widget.py needs a cache reset.\n")
+        text = spawn.packet(task, TMP)
+        self.assertRegex(text, r"mem:gotchas\.md:1 Widget cache")
+
+    def test_packet_memory_reads_from_monkeypatched_state(self):
+        task = self.packet_fixture()
+        memory = TMP / ".orchestrator" / "memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "gotchas.md").write_text("## 2026-09-20 Widget cache\nFacts: widget.py needs a cache reset.\n")
+        with mock.patch.object(spawn, "STATE", TMP / ".orchestrator"):
+            text = spawn.packet(task, TMP)
+        self.assertIn("Widget cache", text.split("## gotchas", 1)[1].split("## decisions", 1)[0])
+
+    def test_packet_memory_uses_notes_and_bus_only(self):
+        seen = {}
+        def fake_recall(query, **kwargs):
+            seen.update(kwargs)
+            return {"hits": [], "layers_consulted": ["notes", "bus"], "stopped_at": None, "chars": 0}
+        with mock.patch.object(spawn, "memory_recall", side_effect=fake_recall):
+            text = spawn.packet(self.packet_fixture(), TMP)
+        self.assertEqual(seen["layers"], ("notes", "bus"))
+        self.assertEqual(seen["budget_hits"], 5)
+        self.assertIn("memory@notes,bus", text.splitlines()[0])
+
     def test_templates_fill(self):
-        s = spawn.render("scout", id="T-1", title="t", spec="q", acceptance=["a"], turns="20")
+        task = {**self.packet_fixture(), "id": "T-1", "spec": "q", "acceptance": ["a"]}
+        s = spawn.render("scout", packet=spawn.scout_packet(task), id="T-1", title="t", turns="20")
         self.assertIn("T-1", s); self.assertNotIn("{{", s)
         self.assertEqual(spawn.extract_json('here: {"summary":"x"} bye')["summary"], "x")
         self.assertTrue(spawn.extract_json("no json")["summary"])
+
+    def test_bounded_diff_summary_first(self):
+        diff = "diff --git a/widget.py b/widget.py\nindex 1..2 100644\n--- a/widget.py\n+++ b/widget.py\n@@ -1 +1 @@\n-old\n+new\n"
+        bounded = spawn.bounded_diff(diff)
+        self.assertTrue(bounded.startswith("Diffstat: "))
+        self.assertLess(bounded.index("Diffstat: "), bounded.index("@@"))
+
+    def test_bounded_diff_expansion_hint(self):
+        diff = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(2000))
+        hint = f"git -C {TMP} diff -- widget.py"
+        bounded = spawn.bounded_diff(diff, 300, hint)
+        self.assertLessEqual(len(bounded), 300)
+        self.assertTrue(bounded.endswith(f"expand with: {hint}"))
+
+    def test_review_prompt_diff_is_bounded(self):
+        reviewed = bus.create_task("bounded review target", "s", ["a"], ["widget.py"], role="execute")
+        bus.update(reviewed["id"], worktree=str(TMP))
+        review = bus.create_task("review bounded target", "s", ["a"], ["widget.py"],
+                                 role="review", inputs=[reviewed["id"]])
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)  # short-circuits ensure_worktree's git calls
+        raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(5000))
+        captured = {}
+        orig_diff, orig_pick, orig_run = spawn.scoped_diff, P.Pool.pick, spawn.run_claude
+        spawn.scoped_diff = lambda task: raw
+        P.Pool.pick = lambda pool, role, avoid=None: pool.get("A")
+        def fake_run_claude(*args, **kwargs):
+            captured["prompt"] = args[3]
+            return {"status": "done", "output": {"result": "{}"}}
+        spawn.run_claude = fake_run_claude
+        self.addCleanup(lambda: setattr(spawn, "scoped_diff", orig_diff))
+        self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
+        self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run))
+
+        spawn.run_worker(review["id"])
+        prompt = captured["prompt"]
+        hint = f"git -C {TMP} diff -- widget.py"
+        self.assertIn("Diffstat: ", prompt)
+        self.assertLessEqual(len(prompt), P.Pool().cfg["limits"].get("review_diff_chars", 12000) + 2000)
+        self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
+
+    def test_bounded_diff_hunk_header_once(self):
+        diff = "diff --git a/widget.py b/widget.py\n@@ -1 +1 @@\n-old\n+new\n"
+        self.assertEqual(sum(line.startswith("@@") for line in spawn.bounded_diff(diff).splitlines()), 1)
+
+    def test_render_does_not_rebound_diff(self):
+        hint = f"git -C {TMP} diff -- widget.py"
+        raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(1000))
+        task = {**self.packet_fixture(), "spec": "ordinary", "complexity": 1}
+        cfg = {**P.config(), "limits": {**P.config().get("limits", {}), "review_diff_chars": 100}}
+        with mock.patch.object(P, "config", return_value=cfg), \
+                mock.patch.object(spawn, "scoped_diff", return_value=raw):
+            packet = spawn.review_packet(task, task)
+        prompt = spawn.render("review", packet=packet, complexity="1")
+        self.assertEqual(prompt.count("Diffstat: "), 1)
+        self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
+
+    def test_render_requires_packet_for_review_spec_review_scout(self):
+        for role in ("review", "spec-review", "scout"):
+            with self.subTest(role=role), self.assertRaisesRegex(ValueError, role):
+                spawn.render(role)
 
     def test_fit_result_shrinks_oversize(self):
         big = {"summary": "s" * 3000, "findings": [{"claim": "c" * 380, "confidence": 0.5} for _ in range(40)]}
@@ -403,6 +846,22 @@ class SpawnBase(unittest.TestCase):
                                       inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
         self.assertEqual(spawn.base_for(challenge2), "origin/main")
 
+    def test_scout_bases_on_goal_branch(self):
+        scout = bus.create_task("scout x", "s", ["a"], ["x.py"], role="scout", parent="G")
+        self.assertEqual(spawn.base_for(scout), "goal/G")
+
+    def test_scout_without_goal_branch_uses_origin_main(self):
+        scout = bus.create_task("scout y", "s", ["a"], ["y.py"], role="scout", parent="ghost")
+        self.assertEqual(spawn.base_for(scout), "origin/main")
+
+    def test_scout_prompt_names_base(self):
+        task = {"id": "T-1", "title": "scout", "spec": "q", "acceptance": ["a"],
+                "scope": [], "worktree": str(TMP)}
+        packet = spawn.scout_packet(task)
+        prompt = spawn.render("scout", packet=packet, id="T-1", title="scout", turns="20",
+                              base_branch="goal/G", base_sha="abc123")
+        self.assertEqual(prompt.splitlines()[0], packet.splitlines()[0])
+
     def test_base_for_prefers_fix_round_parent(self):
         """A fix-round execute task (constraints.fix_round_for names the task it's fixing) must cut its worktree
         from that task's own task/<id> branch, not the goal branch -- the original task's commits may not have
@@ -443,7 +902,7 @@ class SpawnBase(unittest.TestCase):
         self.g("add", "-A", cwd=wt); self.g("commit", "-qm", "stack2 add B", cwd=wt)
 
         review = bus.create_task("review stack2", "s", ["a"], ["shared.py"], role="review", inputs=[t["id"]])
-        diff = spawn.scoped_diff(review)
+        diff = spawn.scoped_diff(bus.get(t["id"]))
         self.assertIn("+B = 1", diff)
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
 

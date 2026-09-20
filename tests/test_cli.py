@@ -1,5 +1,5 @@
 """orchestrator.cli: `status`, `scorecard` and `pick` subcommands, plain-text and JSON output."""
-import contextlib, io, json, os, sys, time, unittest
+import contextlib, io, json, os, sys, tempfile, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -10,6 +10,50 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_jev_diagnose_summary(self):
+        from orchestrator import jev
+        execute = bus.create_task("diagnose execute", "s", ["a"], ["x"], role="execute")["id"]
+        review = bus.create_task("diagnose review", "s", ["a"], ["x"], role="review")["id"]
+        stamp = datetime(2026, 9, 20, 12).timestamp()
+        rows = [
+            {"ts": stamp, "task": execute, "tool": "Read", "scored": True, "sampled": True,
+             "p_needed": 0.1, "repeat": False, "latency_ms": 100, "startup_ms": 10},
+            {"ts": stamp, "task": review, "tool": "Bash", "scored": True, "sampled": True,
+             "p_needed": 0.9, "repeat": False, "latency_ms": 300, "startup_ms": 30},
+            {"ts": stamp, "task": review, "tool": "Read", "scored": False, "sampled": False,
+             "p_needed": None, "repeat": True, "blocked": True, "latency_ms": 0},
+            {"ts": 0, "task": execute, "tool": "Write", "scored": True, "p_needed": 0.1},
+        ]
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            gate = root / ".orchestrator/runs/jev/gate.jsonl"
+            gate.parent.mkdir(parents=True)
+            gate.write_text("\n".join(json.dumps(row) for row in rows) + "\ninvalid json\n")
+            export = root / "labels.jsonl"
+            out = io.StringIO()
+            with mock.patch.object(cli, "ROOT", root), mock.patch.object(sys, "argv", [
+                "orchestrator", "jev", "diagnose", "--since", "2026-09-19", "--export", str(export), "--n", "1"
+            ]), mock.patch.object(jev, "ask", side_effect=AssertionError("network forbidden")), contextlib.redirect_stdout(out):
+                cli.main()
+            lines = out.getvalue().splitlines()
+            self.assertIn("calls=3 scored=2 sampled_share=66.7%", lines)
+            self.assertIn("blocked=1", lines)
+            self.assertIn("latency_ms_p50=200.0 latency_ms_p95=290.0", lines[2])
+            self.assertIn("startup_ms_p50=20.0", lines[2])
+            self.assertIn("network_ms_p50=", lines[2])
+            tools = json.loads(next(line.removeprefix("by_tool=") for line in lines if line.startswith("by_tool=")))
+            roles = json.loads(next(line.removeprefix("by_role=") for line in lines if line.startswith("by_role=")))
+            self.assertEqual(set(tools), {"Read", "Bash"})
+            self.assertEqual((tools["Read"]["calls"], tools["Read"]["scored"], tools["Read"]["waste_pct"]), (2, 1, 100.0))
+            self.assertEqual(roles["execute"]["waste_pct"], 100.0)
+            self.assertEqual(roles["review"]["waste_pct"], 0.0)
+            self.assertEqual(roles["review"]["repeat_pct"], 50.0)
+            self.assertIn(f"exported 1 rows to {export}", lines)
+            labelled, = [json.loads(line) for line in export.read_text().splitlines()]
+            self.assertEqual(labelled.pop("label"), "")
+            self.assertIn(labelled.pop("role"), {"execute", "review"})
+            self.assertIn(labelled, rows[:2])
+
     def _scorecard_fixture(self):
         import test_scorecard
         fixture = test_scorecard.Scorecard()
@@ -39,7 +83,7 @@ class Cli(unittest.TestCase):
     def _scorecard_text_rows(self, fixture, by):
         build = getattr(cli.scorecard, "by_" + by)
         with mock.patch.object(cli.scorecard, "STATE", fixture.root), mock.patch.object(
-            cli.scorecard, "by_" + by, side_effect=lambda: build(root=fixture.root)
+            cli.scorecard, "by_" + by, side_effect=lambda *args, **kwargs: build(root=fixture.root)
         ), mock.patch.object(cli.scorecard, "planner_footer", return_value="planner: -"):
             output = self._scorecard_output("--by", by)
         lines = output.splitlines()
@@ -73,6 +117,120 @@ class Cli(unittest.TestCase):
         _, rows = self._scorecard_text_rows(fixture, "goal")
         self.assertEqual([rows["T-0241"][key] for key in header[-3:]], ["-", "-", "-"])
         self.assertEqual(rows["total"]["waste_pct"], "-")
+
+    def test_scorecard_goal_footer(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-0240", status="done", result={"pr": "https://github.com/acme/repo/pull/24"})
+        build = cli.scorecard.by_goal
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root), mock.patch.object(
+            cli.scorecard, "by_goal", side_effect=lambda *args, **kwargs: build(root=fixture.root)
+        ):
+            output = self._scorecard_output("--by", "goal")
+        self.assertIn("tokens per accepted goal: 0 over 1 goals (usd 2.0)", output)
+
+    def test_cli_scorecard_efficiency_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            text = self._scorecard_output("--efficiency", "--by", "band")
+            self.assertIn("n/a", text)
+            self.assertIn("Amplification=", text)
+            self.assertIn("unknown", text)
+            card = json.loads(self._scorecard_output("--efficiency", "--json"))
+            self.assertIsNone(card["by"])
+            self.assertEqual(card["tokens"], 0)
+            self.assertIn("unknown", card["groups"])
+
+    def test_cli_scorecard_economics_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-econ", executor="cheap", status="done", merged_into="goal/G",
+                           pipeline={"first_green_at": "2026-01-01T00:00:00Z", "gate_reds": 0})
+        fixture.write_runs({"task": "T-econ", "role": "execute", "executor": "cheap",
+                            "input_tokens": 10, "usd": 1})
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            text = self._scorecard_output("--economics")
+            self.assertIn("cost_to_accepted", text)
+            self.assertIn("cheap", text)
+            card = json.loads(self._scorecard_output("--economics", "--by", "band", "--json"))
+            self.assertIn("cheap/1-3", card)
+
+    def test_cli_scorecard_routing_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-route", executor="worker", merged_into="main",
+                           pipeline={"first_green_at": 1, "gate_reds": 0}, lineage_fix_rounds=0)
+        fixture.write_task("T-route-agree", executor="worker", status="failed",
+                           pipeline={"gate_reds": 1}, lineage_fix_rounds=0)
+        fixture.write_runs({"task": "T-route", "role": "execute"},
+                           {"task": "T-route", "role": "jev_route", "baseline": "worker",
+                            "hypothetical": "other", "signals": {"fit": .7}, "latency_ms": 5,
+                            "usage": {"tokens": 3, "usd": .001}},
+                           {"task": "T-route-agree", "role": "execute"},
+                           {"task": "T-route-agree", "role": "jev_route", "baseline": "worker",
+                            "hypothetical": "worker", "signals": {"fit": .4}, "latency_ms": 5,
+                            "usage": {"tokens": 3, "usd": .001}})
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            text = self._scorecard_output("--routing")
+            rows = [line.split("\t") for line in text.splitlines()]
+            self.assertEqual([row[:2] for row in rows if row[0] == "agree"], [["agree", "1"]])
+            self.assertEqual([row[:2] for row in rows if row[0] == "disagree"], [["disagree", "1"]])
+            self.assertIn("evidence verdict: insufficient", text)
+            card = json.loads(self._scorecard_output("--routing", "--json"))
+            self.assertEqual(card["groups"]["agree"]["n"], 1)
+            self.assertEqual(card["groups"]["disagree"]["n"], 1)
+
+    def test_cli_scorecard_reviews_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-reviewed", executor="worker")
+        fixture.write_task("T-review-quality", role="review", status="done", inputs=["T-reviewed"],
+                           result={"verdict": "approve", "comments": []})
+        fixture.write_runs({"task": "T-review-quality", "role": "review", "total_tokens": 10})
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            self.assertIn("findings_per_review", self._scorecard_output("--reviews"))
+            self.assertEqual(json.loads(self._scorecard_output("--reviews", "--json"))["general"]["n_reviews"], 2)
+
+    def test_cli_scorecard_rejects_two_modes_and_names_by_modes(self):
+        for modes in (("--economics", "--efficiency"),
+                      ("--economics", "--routing"),
+                      ("--efficiency", "--routing")):
+            err = io.StringIO()
+            with self.subTest(modes=modes), mock.patch.object(
+                sys, "argv", ["orchestrator", "scorecard", *modes]
+            ), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                cli.main()
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("choose one of --economics, --efficiency, --routing", err.getvalue())
+
+        for by in ("band", "class", "role"):
+            err = io.StringIO()
+            with self.subTest(by=by), mock.patch.object(
+                sys, "argv", ["orchestrator", "scorecard", "--by", by]
+            ), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                cli.main()
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("default supports --by executor|tier|task|goal", err.getvalue())
+
+    def test_cli_scorecard_by_validation_per_mode(self):
+        cases = (
+            ((), "default", "executor|tier|task|goal", ("packet_version", "reviewed_executor")),
+            (("--efficiency",), "--efficiency", "goal|executor|band|class|role",
+             ("packet_version", "reviewed_executor", "tier", "task")),
+            (("--economics",), "--economics", "executor|band|class", ("packet_version", "role")),
+            (("--routing",), "--routing", "none (omit --by)", ("packet_version", "executor")),
+            (("--reviews",), "--reviews", "role|packet_version|tier|band|reviewed_executor",
+             ("executor", "goal", "class", "task")),
+        )
+        for flags, mode, allowed, invalid in cases:
+            for by in invalid:
+                err = io.StringIO()
+                with self.subTest(mode=mode, by=by), mock.patch.object(
+                    sys, "argv", ["orchestrator", "scorecard", *flags, "--by", by]
+                ), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn(f"{mode} supports --by {allowed}", err.getvalue())
+        fixture = self._scorecard_fixture()
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            card = json.loads(self._scorecard_output("--reviews", "--by", "packet_version", "--json"))
+        self.assertIn("pre-packet", card)
 
     def test_scorecard_default_output_unchanged(self):
         with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):

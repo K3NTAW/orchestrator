@@ -41,9 +41,15 @@ def bus_read(task_id: str | None = None, status: str | None = None, status_not: 
 
 
 @srv.tool()
-def bus_events(since: int = 0, limit: int = 200) -> list:
-    """Events after sequence number `since`. Batch this instead of polling tasks."""
-    return bus.events(since, limit)
+def bus_events(since: int = 0, limit: int = 200, role: str | None = None,
+               task_ids: list[str] | None = None) -> dict:
+    """Events after `since`, optionally by role or task id, with cursor metadata."""
+    raw = bus.events(since, limit)
+    events = bus._filter_events(raw, role, task_ids)
+    # The cursor advances past the last sequence examined, even when role/task
+    # filters omit events, so callers never reread the unfiltered stream.
+    next_since = raw[-1]["seq"] if raw else since
+    return {"events": events, "next_since": next_since, "truncated": len(raw) == limit}
 
 
 if __name__ == "__main__":

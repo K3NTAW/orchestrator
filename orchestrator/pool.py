@@ -1,11 +1,11 @@
 """Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with-headroom selection. State persists to
 pool_state.json so MCP server restarts don't forget cooldowns."""
-import fcntl, json, os, re, sys, time, tomllib
+import fcntl, json, os, re, statistics, sys, time, tomllib
 from dataclasses import dataclass, field, asdict, fields
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from . import ROOT, STATE
+from . import ROOT, STATE, bus
 
 WINDOW_S = 5 * 3600
 TZ = ZoneInfo("Europe/Zurich")
@@ -138,7 +138,7 @@ class Executor:
 
 
 EXEC_FIELDS = {f.name for f in fields(Executor)}
-EXEC_STATE_FIELDS = {"cooldown_until", "day_tasks", "running", "day", "hold_reason"}
+EXEC_STATE_FIELDS = {"cooldown_until", "day_tasks", "day", "hold_reason"}
 LEGACY_EXECUTOR_ID = "astra"
 
 
@@ -179,6 +179,9 @@ class Pool:
             self.codex.__dict__.update(st.get("codex", {}))
             for eid, ex in self.executors.items():
                 ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
+        for ex in self.executors.values():
+            ex.running = sum(1 for task in bus.read(status="running", role="execute")
+                             if task.get("executor", task.get("tier")) == ex.id)
         pu = _load_planner_usage()
         for a in self.accounts:
             entry = pu.get(a.id, {})
@@ -187,12 +190,215 @@ class Pool:
             a.planner_offsets = entry.get("offsets", {})
 
     def save(self):
-        PERSIST.write_text(json.dumps({"accounts": {a.id: {k: v for k, v in asdict(a).items()
-                                                            if k not in PLANNER_ACCOUNT_FIELDS}
-                                                     for a in self.accounts},
-                                       "codex": asdict(self.codex),
-                                       "executors": {eid: {k: getattr(ex, k) for k in sorted(EXEC_STATE_FIELDS)}
-                                                     for eid, ex in self.executors.items()}}, indent=1))
+        def mutate(state):
+            state.update({"accounts": {a.id: {k: v for k, v in asdict(a).items()
+                                               if k not in PLANNER_ACCOUNT_FIELDS}
+                                      for a in self.accounts},
+                          "codex": {k: v for k, v in asdict(self.codex).items() if k != "running"},
+                          "executors": {eid: {k: getattr(ex, k) for k in sorted(EXEC_STATE_FIELDS)}
+                                        for eid, ex in self.executors.items()}})
+
+        self._reservation_file(mutate)
+
+    def _reservation_estimate(self, account_id, role):
+        limit = float(self.cfg.get("limits", {}).get("max_budget_usd", {}).get(role, 0))
+        rows = []
+        sources = []
+        for task in bus.read(role=role)[-20:]:
+            result = task.get("result") or {}
+            usage = result.get("usage") or {}
+            tokens = self._usage_tokens(usage)
+            if usage:
+                sample = dict(result)
+                sample["usage"] = usage
+                executor = task.get("executor") or result.get("executor") or account_id
+                usd = self.usd_of(sample, executor)
+                sources.append(sample.get("est_usd_source", "recorded"))
+                rows.append((tokens, usd))
+        if len(rows) >= 5:
+            self._last_estimate_usd_source = "tokens" if "tokens" in sources else "recorded"
+            return int(statistics.median(row[0] for row in rows)), float(statistics.median(row[1] for row in rows))
+        source = next((a for a in self.cfg.get("claude_accounts", []) if a.get("id") == account_id), None)
+        if source is None:
+            source = next((e for e in self.cfg.get("executors", []) if e.get("id") == account_id), {})
+        ratio = (source or {}).get("usd_per_token") or (source or {}).get("usd-per-token")
+        if ratio:
+            self._last_estimate_usd_source = "tokens"
+            return int(limit / float(ratio)), limit
+        # This is only a conservative estimate for cold roles, until five completed runs provide a median.
+        # A positive estimate is essential: zero would make the daily-token reservation cap ineffective.
+        default_ratio = float(self.cfg.get("limits", {}).get("default_tokens_per_usd", 250000))
+        self._last_estimate_usd_source = "tokens"
+        return max(1, int(limit * default_ratio)), limit
+
+    def usd_of(self, row_or_usage, executor_or_account=None):
+        """Return recorded cost, or derive it from usage tokens and the configured model rate."""
+        row = row_or_usage if isinstance(row_or_usage, dict) else {}
+        output = row.get("output") if isinstance(row.get("output"), dict) else {}
+        usage = row.get("usage") if isinstance(row.get("usage"), dict) else None
+        if usage is None and isinstance(output.get("usage"), dict):
+            usage = output["usage"]
+        if usage is None:
+            usage = row
+        for container in (row, output, usage):
+            for key in ("usd", "total_cost_usd"):
+                if key in container and container[key] is not None:
+                    return float(container[key] or 0)
+
+        source = executor_or_account
+        source_id = getattr(source, "id", None) if source is not None else None
+        if isinstance(source, dict):
+            source_id = source.get("id")
+        if source_id:
+            source = next((a for a in self.cfg.get("claude_accounts", []) if a.get("id") == source_id), None)
+            source = source or next((e for e in self.cfg.get("executors", []) if e.get("id") == source_id), None)
+        source = source if isinstance(source, dict) else getattr(source, "__dict__", {})
+        ratio = source.get("usd_per_token") or source.get("usd-per-token")
+        if ratio is None:
+            ratio = 1 / float(self.cfg.get("limits", {}).get("default_tokens_per_usd", 250000))
+        if isinstance(row_or_usage, dict):
+            row_or_usage["est_usd_source"] = "tokens"
+        return self._usage_tokens(usage) * float(ratio)
+
+    @staticmethod
+    def _usage_tokens(usage):
+        if not isinstance(usage, dict):
+            return 0
+        return int(sum(usage.get(k, 0) or 0 for k in
+                       ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                        "cache_read_input_tokens", "cached_input_tokens")))
+
+    def _reservation_file(self, mutate=None):
+        PERSIST.parent.mkdir(parents=True, exist_ok=True)
+        with open(PERSIST, "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            fh.seek(0)
+            try:
+                state = json.loads(fh.read() or "{}")
+            except json.JSONDecodeError:
+                state = {}
+            result = mutate(state) if mutate else state
+            if mutate:
+                fh.seek(0); fh.truncate(); fh.write(json.dumps(state, indent=1))
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        return result
+
+    def live_reservations(self):
+        return self._reservation_file(lambda state: dict(state.get("reservations", {})))
+
+    @property
+    def reservations(self):
+        """Backward-compatible read-only view; reservation state is never held by the Pool instance."""
+        return self.live_reservations()
+
+    def reservation_history(self):
+        return self._reservation_file(lambda state: state.get("reservation_history", {
+            "tokens": 0, "usd": 0.0, "roles": {}, "goals": {}}))
+
+    def notified_state(self):
+        return self._reservation_file(lambda state: dict(state.get("notified_state", {})))
+
+    def reserve(self, run_key, account_id, role, task):
+        """Atomically reserve a run's worst-case budget; repeated calls for the same run are idempotent."""
+        if self.cfg.get("limits", {}).get("reservations", True) is False:
+            return {"run_key": run_key, "disabled": True}
+        task_row = task if isinstance(task, dict) else bus.get(task)
+        est_tokens, est_usd = self._reservation_estimate(account_id, role)
+        est_usd_source = getattr(self, "_last_estimate_usd_source", "tokens")
+        now = time.time()
+        lease_s = self.cfg.get("daemon", {}).get("stage_lease_s", 900)
+        account = next((a for a in self.accounts if a.id == account_id), None)
+        daily = account.daily_budget if account else 0
+        day_used = (account.day_tokens + account.planner_day_tokens) if account else 0
+        goal = task_row.get("parent") or task_row.get("id")
+
+        def mutate(state):
+            reservations = state.setdefault("reservations", {})
+            if run_key in reservations:
+                return reservations[run_key]
+            live_tokens = sum(int(r.get("est_tokens", 0)) for r in reservations.values()
+                              if not daily or r.get("account") == account_id)
+            if daily and day_used + live_tokens + est_tokens > daily:
+                return None
+            role_cap = self.cfg.get("limits", {}).get("goal_budget_usd", {}).get(role)
+            if role_cap is None and role == "review":
+                role_cap = self.cfg.get("review", {}).get("budget_usd")
+            history = state.setdefault("reservation_history", {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}})
+            goal_spend = history.get("goals", {}).get(goal, {}).get(role, {}).get("usd", 0)
+            goal_reserved = sum(float(r.get("est_usd", 0)) for r in reservations.values()
+                                if r.get("goal") == goal and r.get("role") == role)
+            if role_cap and goal_spend + goal_reserved + est_usd > role_cap:
+                return None
+            row = {"account": account_id, "role": role, "task": task_row.get("id"), "goal": goal,
+                   "est_tokens": est_tokens, "est_usd": est_usd, "claimed_at": now,
+                   "lease_until": now + lease_s}
+            if est_usd_source == "tokens":
+                row["est_usd_source"] = "tokens"
+            reservations[run_key] = row
+            return row
+        return self._reservation_file(mutate)
+
+    def release(self, run_key, actual_usage=None):
+        def mutate(state):
+            row = state.setdefault("reservations", {}).pop(run_key, None)
+            if row is None:
+                return None
+            usage = actual_usage or {}
+            usd = self.usd_of(usage, row.get("account"))
+            tokens = self._usage_tokens(usage.get("usage", usage) if isinstance(usage, dict) else {})
+            history = state.setdefault("reservation_history", {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}})
+            history["tokens"] = history.get("tokens", 0) + tokens
+            history["usd"] = history.get("usd", 0) + usd
+            role = history.setdefault("roles", {}).setdefault(row["role"], {"tokens": 0, "usd": 0.0})
+            role["tokens"] += tokens; role["usd"] += usd
+            goal = history.setdefault("goals", {}).setdefault(row["goal"], {}).setdefault(row["role"],
+                                                                                         {"tokens": 0, "usd": 0.0})
+            goal["tokens"] += tokens; goal["usd"] += usd
+            return row
+        return self._reservation_file(mutate)
+
+    def heartbeat(self, run_key):
+        def mutate(state):
+            row = state.setdefault("reservations", {}).get(run_key)
+            if row:
+                row["lease_until"] = time.time() + self.cfg.get("daemon", {}).get("stage_lease_s", 900)
+            return row
+        return self._reservation_file(mutate)
+
+    def sweep_reservations(self, now=None):
+        now = now or time.time()
+        dropped = []
+        def mutate(state):
+            reservations = state.setdefault("reservations", {})
+            for key, row in list(reservations.items()):
+                if row.get("lease_until", 0) >= now:
+                    continue
+                try:
+                    task = bus.get(row.get("task") or key)
+                except KeyError:
+                    task = {}
+                pid = task.get("pid")
+                live = False
+                if pid:
+                    try:
+                        os.kill(pid, 0); live = True
+                    except (OSError, TypeError):
+                        pass
+                if live and task.get("status") == "running":
+                    continue
+                dropped.append(key); del reservations[key]
+            return dropped
+        self._reservation_file(mutate)
+        return dropped
+
+    def notification_transition(self, key, active):
+        """Persist condition state and report whether its boolean changed."""
+        def mutate(state):
+            notified = state.setdefault("notified_state", {})
+            previous = bool(notified.get(key, False))
+            notified[key] = bool(active)
+            return previous != bool(active)
+        return self._reservation_file(mutate)
 
     # selection ---------------------------------------------------------------------------------
     def pick(self, role, avoid=None):
@@ -313,9 +519,8 @@ class Pool:
                                    a.window_started, today)
 
     # executors ---------------------------------------------------------------------------------
-    def pick_executor(self, role, complexity, scores=None):
-        """Highest weight x score wins; ties to the fewest tasks today, then id. None -> caller holds the task."""
-        scores = scores or {}
+    def eligible_executors(self, role, complexity, task=None):
+        """Return executors satisfying every hard routing constraint, without ranking them."""
         ok = []
         for ex in self.executors.values():
             if not ex.enabled or role not in ex.roles or ex.cooling():
@@ -328,8 +533,29 @@ class Pool:
             if ex.daily_budget_tasks and ex.day_tasks >= ex.daily_budget_tasks:
                 continue
             ok.append(ex)
+        return ok
+
+    def pick_executor(self, role, complexity, scores=None, task=None):
+        """Choose the cheapest proven-safe executor, otherwise retain the established score ranking."""
+        scores = scores or {}
+        ok = self.eligible_executors(role, complexity, task)
         if not ok:
             return None
+        if task is not None:
+            from . import scorecard
+            task_class_name = scorecard.task_class(task)
+            floor = self.cfg.get("models", {}).get("success_floor", 0.6)
+            measured = []
+            for ex in ok:
+                cost = scorecard.expected_cost(ex.id, task_class_name)
+                if cost is None:
+                    continue
+                success = scorecard.class_success(ex.id, task_class_name)
+                measured.append((ex, cost, success))
+            safe = [(ex, cost) for ex, cost, success in measured
+                    if success is not None and success >= floor]
+            if safe:
+                return sorted(safe, key=lambda item: (item[1], item[0].day_tasks, item[0].id))[0][0]
         return sorted(ok, key=lambda e: (-(e.weight * scores.get(e.id, 1.0)), e.day_tasks, e.id))[0]
 
     def cooldown_executor(self, ex_id, secs, reason=""):
@@ -352,21 +578,16 @@ class Pool:
                     self.executors.get(LEGACY_EXECUTOR_ID))
 
     def _sync_legacy_codex(self):
-        """Bridge until executor.py routes through executors (B2): it still writes self.codex, so fold that
-        state into the row it belongs to. running is mirrored, not maxed, because executor.py builds a fresh
-        Pool() per call and its decrements must be able to bring the row back down. day_tasks stays a max
-        (monotonic within a day) and only applies when the legacy day matches today. This whole method goes
-        away once B2 routes executor.py through the executors table directly."""
+        """Bridge legacy Codex cooldown and daily usage into its executor row."""
         ex = self._legacy_executor()
         if ex is None:
             return
         if self.codex.cooldown_until > ex.cooldown_until:
             self._cool_group(ex, self.codex.cooldown_until, "codex usage limit")
-        ex.running = self.codex.running
         if self.codex.day == date.today().isoformat():
             ex.roll_day(); ex.day_tasks = max(ex.day_tasks, self.codex.day_tasks)
 
-    def codex_available(self, complexity: int = 1) -> bool:
+    def codex_available(self, complexity: int = 1, task=None) -> bool:
         """True iff some enabled executor can take an "execute" task at this complexity right now. Default
         complexity=1 keeps pre-B2 callers (mcp.status, cli, executor.start) working; B2 must pass the task's
         real complexity so a busy/exhausted high-complexity executor doesn't get masked by idle low-band ones."""
@@ -374,7 +595,7 @@ class Pool:
         if c.day != date.today().isoformat():
             c.day_tasks, c.day = 0, date.today().isoformat()
         self._sync_legacy_codex()
-        ex = self.pick_executor("execute", complexity)
+        ex = self.pick_executor("execute", complexity, task=task)
         return bool(ex and ex.provider == "codex")
 
     def both_cooling_minutes(self):
@@ -392,10 +613,16 @@ class Pool:
                               "reason": a.hold_reason} for a in self.accounts],
                 "executors": [{"id": e.id, "model": e.model, "enabled": e.enabled,
                                "cooling_s": max(0, int(e.cooldown_until - time.time())), "running": e.running,
-                               "day_tasks": e.day_tasks} for e in self.executors.values()],
+                               "day_tasks": e.day_tasks,
+                               "expected_cost": self._expected_costs(e.id)} for e in self.executors.values()],
                 "codex": {"available": avail, "running": legacy.running, "day_tasks": legacy.day_tasks,
                           "cooling_s": max(0, int(legacy.cooldown_until - time.time())),
                           "on_exhausted": self.cfg["codex"]["on_exhausted"]}}
+
+    def _expected_costs(self, executor_id):
+        from . import scorecard
+        return {name: cost for name in scorecard.TASK_CLASSES
+                if (cost := scorecard.expected_cost(executor_id, name)) is not None}
 
 
 RATE_LIMIT = re.compile(r"rate.?limit|usage.?limit|hit your limit|limit reached|out of usage credits|too many requests|429", re.I)

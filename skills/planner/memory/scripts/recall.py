@@ -1,7 +1,7 @@
 """Layered recall over orchestrator memory: notes (memory/*.md), bus (tasks/*.json), cmem (claude-mem sqlite, read-only),
 graph (graphify LESSONS.md). `index` prints one line per hit; `get` prints full entries for chosen ids. Stdlib only,
 save for jev_rank -- imported from the orchestrator package on ROOT, which is itself stdlib-only."""
-import datetime, json, os, re, sqlite3, sys
+import datetime, json, os, re, sqlite3, sys, time
 from pathlib import Path
 
 ROOT = Path(os.environ.get("ORCH_ROOT") or Path.cwd())
@@ -9,8 +9,48 @@ MEM = ROOT / ".orchestrator" / "memory"
 TASKS = ROOT / ".orchestrator" / "tasks"
 CMEM = Path(os.environ.get("CLAUDE_MEM_DB") or Path.home() / ".claude-mem" / "claude-mem.db")
 LESSONS = Path(os.environ.get("GRAPHIFY_OUT") or ROOT / "graphify-out") / "reflections" / "LESSONS.md"
-HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (.+)$")
+HEAD = re.compile(r"^## (?:(\d{4}-\d{2}-\d{2}) )?(.+)$")
 MAX_GET_CHARS = 6000  # same cap as a bus result; one `get` never exceeds it
+DEFAULT_BUDGET_HITS = 8
+DEFAULT_MIN_SCORE = 0.5
+DEFAULT_BUDGET_CHARS = 6000
+
+
+def resolve_root(root=None):
+    return Path(root) if root is not None else Path(os.environ.get("ORCH_ROOT") or Path.cwd())
+
+
+def configured_hits(root, setting="budget_hits"):
+    """Read recall settings from one root's pool, retaining the legacy hits key."""
+    defaults = {
+        "budget_hits": DEFAULT_BUDGET_HITS,
+        "min_score": DEFAULT_MIN_SCORE,
+        "budget_chars": DEFAULT_BUDGET_CHARS,
+    }
+    try:
+        import tomllib
+        with (Path(root) / ".orchestrator" / "pool.toml").open("rb") as f:
+            pool = tomllib.load(f)
+    except (OSError, ValueError, TypeError):
+        return defaults[setting]
+    memory = pool.get("memory")
+    if isinstance(memory, dict):
+        value = memory.get(setting, defaults[setting])
+    elif setting == "budget_hits":
+        value = pool.get("limits", {}).get("recall_hits", defaults[setting])
+    else:
+        value = defaults[setting]
+    try:
+        return int(value) if setting != "min_score" else float(value)
+    except (ValueError, TypeError):
+        return defaults[setting]
+
+
+def age(date):
+    try:
+        return f"{max(0, (datetime.date.today() - datetime.date.fromisoformat(date[:10])).days)}d"
+    except (ValueError, TypeError):
+        return "-"
 
 
 # ORCH_ROOT (above) is the *state* root -- any project's .orchestrator dir -- not necessarily this repo, so it's
@@ -20,6 +60,7 @@ _SRC_ROOT = Path(__file__).resolve().parents[4]
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 from orchestrator import jev_rank  # noqa: E402 -- needs _SRC_ROOT on sys.path first
+from orchestrator import bus  # noqa: E402 -- needs _SRC_ROOT on sys.path first
 
 
 def terms_of(q):
@@ -45,16 +86,16 @@ def note_entries(f):
     for n, i in enumerate(idx):
         end = idx[n + 1] if n + 1 < len(idx) else len(lines)
         m = HEAD.match(lines[i])
-        yield i + 1, m.group(1), m.group(2), "\n".join(lines[i:end]).rstrip()
+        yield i + 1, m.group(1) or "", m.group(2), "\n".join(lines[i:end]).rstrip()
 
 
-def index_notes(terms):
+def index_notes(terms, memory_dir=MEM):
     out = []
-    for f in sorted(MEM.glob("*.md")) if MEM.exists() else []:
+    for f in sorted(memory_dir.glob("*.md")) if memory_dir.exists() else []:
         for ln, date, title, body in note_entries(f):
             s = score(title, terms) * 3 + score(body, terms)
-            if s:
-                out.append((s, f"mem:{f.name}:{ln}", date, "mem", title))
+            # Keep zero-score entries visible, but never manufacture relevance for them.
+            out.append((s, f"mem:{f.name}:{ln}", date, "mem", title))
     return out
 
 
@@ -63,9 +104,9 @@ def _date(t):
     return datetime.date.fromtimestamp(ts).isoformat() if ts else ""
 
 
-def index_bus(terms):
+def index_bus(terms, tasks_dir=TASKS):
     out = []
-    for p in sorted(TASKS.glob("T-*.json")) if TASKS.exists() else []:
+    for p in sorted(tasks_dir.glob("T-*.json")) if tasks_dir.exists() else []:
         t = json.loads(p.read_text())
         if t.get("status") not in {"done", "failed"}:
             continue
@@ -94,35 +135,110 @@ def index_cmem(terms, project, limit):
     return [(1, f"cmem:{i}", (d or "")[:10], "cmem", f"[{ty}/{pr}] {ti or ''}") for i, d, ty, ti, pr in rows]
 
 
-def index_graph(terms):
-    if not LESSONS.exists():
+def index_graph(terms, lessons=LESSONS):
+    if not lessons.exists():
         return []
     out = []
-    for n, l in enumerate(LESSONS.read_text(errors="replace").splitlines(), 1):
+    for n, l in enumerate(lessons.read_text(errors="replace").splitlines(), 1):
         if l.startswith(("-", "*")) and score(l, terms):
             out.append((score(l, terms), f"graph:lesson:{n}", "", "graph", l.lstrip("-* ")[:100]))
     return out
 
 
+def _layer_hits(layer, terms, *, task, limit, paths=None):
+    """Return one layer's index hits, or ``None`` when the source is unavailable."""
+    if layer == "notes":
+        return index_notes(terms) if paths is None else index_notes(terms, paths["memory"])
+    if layer == "bus":
+        return index_bus(terms) if paths is None else index_bus(terms, paths["tasks"])
+    if layer == "claude-mem":
+        if not CMEM.exists():
+            return None
+        return index_cmem(terms, task, limit)
+    if layer == "graph":
+        lessons = LESSONS if paths is None else paths["lessons"]
+        if not lessons.exists():
+            return None
+        return index_graph(terms) if paths is None else index_graph(terms, lessons)
+    raise ValueError(f"unknown recall layer: {layer}")
+
+
+def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), budget_hits=None,
+           min_score=None, budget_chars=None, task=None):
+    """Recall progressively, avoiding richer layers once the cheap answer is sufficient."""
+    started = time.monotonic()
+    root = resolve_root(root)
+    budget_hits = configured_hits(root) if budget_hits is None else budget_hits
+    min_score = configured_hits(root, "min_score") if min_score is None else min_score
+    budget_chars = configured_hits(root, "budget_chars") if budget_chars is None else budget_chars
+    terms = terms_of(query)
+    state_root = Path(root)
+    graph_root = Path(os.environ.get("GRAPHIFY_OUT") or state_root / "graphify-out")
+    paths = {"memory": state_root / ".orchestrator" / "memory",
+             "tasks": state_root / ".orchestrator" / "tasks",
+             "lessons": graph_root / "reflections" / "LESSONS.md"}
+    hits, consulted, chars, stopped_at = [], [], 0, None
+    for layer in layers:
+        layer_hits = _layer_hits(layer, terms, task=task, limit=budget_hits, paths=paths)
+        if layer_hits is None:
+            consulted.append(f"{layer} unavailable")
+            continue
+        consulted.append(layer)
+        for score_, id_, date, provenance, title in sorted(layer_hits, key=lambda h: (-h[0], h[2])):
+            if chars + len(title) > budget_chars:
+                stopped_at = layer
+                break
+            hits.append({"score": score_, "id": id_, "date": date, "layer": provenance, "title": title,
+                         "relevant": score_ >= min_score})
+            chars += len(title)
+        sufficient = sum(hit["score"] >= min_score for hit in hits) >= budget_hits
+        if sufficient or chars >= budget_chars or stopped_at:
+            stopped_at = layer
+            break
+    hits.sort(key=lambda hit: (not hit["relevant"], -hit["score"], hit["date"]))
+    result = {"hits": hits, "layers_consulted": consulted, "stopped_at": stopped_at, "chars": chars}
+    bus.log_run(task=task, role="memory", outcome="recalled", layers_consulted=consulted,
+                stopped_at=stopped_at, hits=hits, chars=chars, est_tokens=chars // 4,
+                duration_s=time.monotonic() - started)
+    return result
+
+
 def cmd_index(argv):
-    q, project, limit, goal_text = "", None, 20, os.environ.get("ORCH_GOAL_TEXT")
+    root = resolve_root()
+    memory_dir = root / ".orchestrator" / "memory"
+    tasks_dir = root / ".orchestrator" / "tasks"
+    lessons = Path(os.environ.get("GRAPHIFY_OUT") or root / "graphify-out") / "reflections" / "LESSONS.md"
+    q, project, limit, goal_text, progressive = "", None, configured_hits(root), os.environ.get("ORCH_GOAL_TEXT"), False
     i = 0
     while i < len(argv):
         if argv[i] == "--project": project = argv[i + 1]; i += 2
         elif argv[i] == "--limit": limit = int(argv[i + 1]); i += 2
         elif argv[i] == "--goal": goal_text = argv[i + 1]; i += 2
+        elif argv[i] == "--progressive": progressive = True; i += 1
         else: q += " " + argv[i]; i += 1
     terms = terms_of(q)
     if not terms:
         sys.exit("usage: recall.sh index \"<terms>\" [--project NAME] [--limit N] [--goal \"<text>\"]")
-    hits = index_notes(terms) + index_bus(terms) + index_cmem(terms, project, limit) + index_graph(terms)
+    if progressive:
+        result = recall(q, root=root, budget_hits=limit, task=project)
+        hits = result["hits"]
+        print(f"# {len(hits)} progressive hits for {terms} — layers_consulted: {', '.join(result['layers_consulted']) or '(none)'}")
+        for hit in hits:
+            print(f"{hit['id']} · {hit['date'] or '-'} · {hit['layer']} · {age(hit['date'])} · {hit['title']}")
+        return
+    hits = (index_notes(terms, memory_dir) + index_bus(terms, tasks_dir) +
+            index_cmem(terms, project, limit) + index_graph(terms, lessons))
+    hits = [hit for hit in hits if hit[0] > 0]
     hits.sort(key=lambda h: (-h[0], h[2]))
     if not hits:
         print(f"no hits for {terms} in notes/bus/cmem/graph"); return
     if not goal_text:
-        print(f"# {len(hits)} hits for {terms} (showing {min(len(hits), limit)}) — id · date · layer · title")
-        for s, id_, date, layer, title in hits[:limit]:
-            print(f"{id_} · {date or '-'} · {layer} · {title}")
+        shown = hits[:limit]
+        print(f"# {len(hits)} hits for {terms} (showing {len(shown)}) — id · date · provenance · age · title")
+        for s, id_, date, layer, title in shown:
+            print(f"{id_} · {date or '-'} · {layer} · {age(date)} · {title}")
+        if len(hits) > len(shown):
+            print(f"{len(hits) - len(shown)} more hits; use: recall.sh index \"{' '.join(terms)}\" --limit {len(hits)}")
         return
 
     shown = hits[:limit]
@@ -131,12 +247,14 @@ def cmd_index(argv):
     ranked = jev_rank.rank(items, goal_text)
     if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
         print("jev: off")
-    print(f"# {len(ranked)} hits for {terms} (showing {len(ranked)}) — id · date · layer · title · p")
+    print(f"# {len(ranked)} hits for {terms} (showing {len(ranked)}) — id · date · provenance · age · title · p")
     for it in ranked:
         s, id_, date, layer, title = by_id[it["id"]]
         p = it["p_relevant"]
-        print(f"{id_} · {date or '-'} · {layer} · {title} · {p:.2f}" if p is not None
-              else f"{id_} · {date or '-'} · {layer} · {title} · -")
+        print(f"{id_} · {date or '-'} · {layer} · {age(date)} · {title} · {p:.2f}" if p is not None
+              else f"{id_} · {date or '-'} · {layer} · {age(date)} · {title} · -")
+    if len(hits) > len(ranked):
+        print(f"{len(hits) - len(ranked)} more hits; use: recall.sh index \"{' '.join(terms)}\" --limit {len(hits)}")
 
 
 def _jl(s):

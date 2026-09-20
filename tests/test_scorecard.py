@@ -18,11 +18,115 @@ class Scorecard(unittest.TestCase):
     def write_task(self, tid, **fields):
         base = {"id": tid, "role": "execute", "tier": "sonnet", "complexity": 3, "status": "queued",
                 "acceptance": ["a"], "scope": ["x"], "spec": "s", "title": tid}
+        result = fields.get("result")
+        if "role" not in fields and fields.get("parent") is None and isinstance(result, dict) and any(
+                result.get(key) for key in ("pr", "pr_url", "url")):
+            base["role"] = "triage"
         (self.root / "tasks" / f"{tid}.json").write_text(json.dumps({**base, **fields}))
+
+    def test_scorecard_planner_text_and_json(self):
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        from orchestrator import planner_runs as PR
+        config_dir = self.root / "claude"
+        project = config_dir / "projects" / P.encode_project_dir(str(PR.ROOT.resolve()))
+        project.mkdir(parents=True)
+        self.root.joinpath("pool.toml").write_text(
+            '[[claude_accounts]]\nid = "A"\nconfig_dir = ' + json.dumps(str(config_dir)) + '\n')
+        transcript = json.dumps({"type": "assistant", "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "message": {"usage": {"input_tokens": 50, "output_tokens": 10,
+                                                      "cache_read_input_tokens": 100}}}) + "\n"
+        (project / "session.jsonl").write_text(transcript + transcript)
+        (self.root / "planner_usage.json").write_text(json.dumps({"A": {"offsets": {
+            "session.jsonl": len(transcript.encode())}}}))
+        rows = [{"goal_id": "G", "kind": "held", "route": "escalate", "reason": "review",
+                 "status": "exited_ok", "started_at": time.time(), "input_tokens": 100,
+                 "output_tokens": 20, "cache_read_input_tokens": 100, "usd": 1} for _ in range(3)]
+        (self.root / "runs" / "planner_runs.json").write_text(json.dumps(rows))
+        for json_output in (False, True):
+            output = io.StringIO()
+            argv = ["orchestrator", "scorecard", "--planner"] + (["--json"] if json_output else [])
+            with patch.object(sys, "argv", argv), patch.object(scorecard, "STATE", self.root), \
+                    contextlib.redirect_stdout(output):
+                cli.main()
+            if json_output:
+                summary = json.loads(output.getvalue())
+                self.assertEqual(summary["headless"]["count"], 3)
+                self.assertEqual(summary["interactive"]["sessions_count"], 1)
+                self.assertEqual(summary["interactive"]["sessions"][0]["input_tokens"], 50)
+                self.assertEqual(summary["interactive"]["day_totals"][0]["cache_read_tokens"], 100)
+                self.assertEqual(summary["exceptions"][0]["goal_id"], "G")
+            else:
+                for value in ("3 invocations", "mean input 100", "output 60", "cache share 50.0%",
+                              "usd 3.00", "top reasons: review=3", "interactive A session",
+                              "soft-budget exception G", "advisory"):
+                    self.assertIn(value, output.getvalue())
+        self.write_task("T-child", parent="G")
+        card = scorecard.by_goal(self.root)
+        self.assertEqual(card["G"]["routes"], {"escalate": 3})
 
     def write_runs(self, *lines):
         (self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl").write_text(
             "\n".join(json.dumps(l) for l in lines) + "\n")
+
+    def test_tokens_per_accepted_goal_undefined_at_zero(self):
+        from unittest.mock import patch
+        self.write_task("T-goal", role="triage")
+        self.write_task("T-child", parent="T-goal")
+        self.write_runs({"task": "T-child", "role": "execute", "total_tokens": 42})
+        result = scorecard.tokens_per_accepted_goal(self.root)
+        self.assertIsNone(result["tokens"])
+        self.assertEqual(result["count"], 0)
+        card = scorecard.by_goal(self.root)
+        self.assertEqual(card["T-goal"]["total_tokens"], 42)
+        for json_output in (False, True):
+            output = io.StringIO()
+            argv = ["orchestrator", "scorecard", "--by", "goal"] + (["--json"] if json_output else [])
+            with patch.object(sys, "argv", argv), patch.object(scorecard, "STATE", self.root), \
+                    patch.object(scorecard, "by_goal", return_value=card), contextlib.redirect_stdout(output):
+                cli.main()
+            if json_output:
+                self.assertIsNone(json.loads(output.getvalue())["tokens_per_accepted_goal"]["tokens"])
+            else:
+                self.assertIn("tokens per accepted goal: undefined (0 accepted goals)", output.getvalue())
+                self.assertIn("n=1 range 42-42", output.getvalue())
+        self.write_task("T-goal", role="triage", status="done")
+        self.write_task("T-child", parent="T-goal", merged_into="goal/G")
+        self.assertEqual(scorecard.tokens_per_accepted_goal(self.root)["tokens"], 42)
+
+    def test_tokens_of_discounts_cache_read_on_normalised_rows(self):
+        row = {"total_tokens": 1_000, "input_uncached_tokens": 100,
+               "cache_read_tokens": 200, "cache_write_tokens": 30, "output_tokens": 10}
+        self.assertEqual(scorecard._tokens_of(row), 160)
+
+    def test_by_goal_buckets_exact_for_normalised_rows(self):
+        self.write_task("T-goal")
+        self.write_task("T-child", parent="T-goal")
+        self.write_runs({"task": "T-child", "role": "execute", "total_tokens": 1_000,
+                         "input_uncached_tokens": 100, "cache_read_tokens": 200,
+                         "cache_write_tokens": 30, "output_tokens": 10})
+        row = scorecard.by_goal(self.root)["T-goal"]
+        self.assertEqual((row["tokens_uncached"], row["tokens_cache_read"],
+                          row["tokens_cache_write"], row["tokens_output"]), (100, 200, 30, 10))
+        self.assertEqual(row["total_tokens"], 160)
+
+    def test_by_goal_median_and_range_small_sample(self):
+        rows = []
+        for i, amount in enumerate((10, 20, 30, 40, 100)):
+            tid = f"T-child{i}"
+            self.write_task(tid, parent="T-goal")
+            # Include a legacy total-only row and a retry for the same task.
+            rows.append({"task": tid, "role": "execute", "total_tokens": amount - 2})
+            rows.append({"task": tid, "role": "execute", **bus.normalize_usage("codex", {"output_tokens": 2})})
+            self.write_runs(*rows)
+            entry = scorecard.by_goal(self.root)["T-goal"]
+            self.assertEqual(entry["n_tasks"], i + 1)
+            self.assertEqual(entry["tokens_max_per_task"], amount)
+            if i < 4:
+                self.assertEqual(scorecard.format_task_tokens_cell(entry), f"n={i + 1} range 10-{amount}")
+        self.assertEqual(entry["tokens_median_per_task"], 30)
+        self.assertEqual(scorecard.format_task_tokens_cell(entry), "30")
+        self.assertEqual(entry["total_tokens"], 200)
 
     def test_build_counts_and_scores(self):
         self.write_task("T-9001", executor="good", complexity=3, status="done", merged_into="goal/G", rounds=1)
@@ -39,10 +143,149 @@ class Scorecard(unittest.TestCase):
         self.assertLess(tight["bad"], 1.0)                     # 0 merged / 1 failed -> success=0, score=0.5
         self.assertGreater(tight["good"], 1.0)                 # 1 merged / 0 failed -> success=1, score=1.5
 
+    def test_task_class_inference(self):
+        self.assertEqual(scorecard.task_class({"constraints": {"task_class": "security"}}), "security")
+        self.assertEqual(scorecard.task_class({"scope": ["docs/design.md"], "complexity": 7}), "architectural")
+        self.assertEqual(scorecard.task_class({"title": "Fix timeout", "complexity": 1}), "debugging")
+        self.assertEqual(scorecard.task_class({"title": "new", "complexity": 3}), "mechanical")
+        self.assertEqual(scorecard.task_class({"title": "new", "complexity": 4}), "unfamiliar")
+
+    def test_class_success_is_per_class(self):
+        for n in range(3):
+            self.write_task(f"T-mech{n}", executor="good", status="done", merged_into="goal/G",
+                            constraints={"task_class": "mechanical"})
+            self.write_task(f"T-sec{n}", executor="good", status="failed" if n else "done",
+                            merged_into="goal/G" if n == 0 else None,
+                            constraints={"task_class": "security"})
+        self.write_runs(*([{"task": f"T-mech{n}", "role": "execute"} for n in range(3)] +
+                          [{"task": f"T-sec{n}", "role": "execute"} for n in range(3)]))
+        self.assertEqual(scorecard.class_success("good", "mechanical", self.root), 1.0)
+        self.assertAlmostEqual(scorecard.class_success("good", "security", self.root), 1 / 3)
+
+    def test_expected_cost_needs_samples(self):
+        for n in range(2):
+            self.write_task(f"T-ec{n}", executor="cheap", status="done", merged_into="goal/G")
+        self.write_runs(*[{"task": f"T-ec{n}", "role": "execute", "input_tokens": 100} for n in range(2)])
+        self.assertIsNone(scorecard.expected_cost("cheap", "mechanical", self.root, min_samples=3))
+
+    def test_expected_cost_includes_repairs(self):
+        for n in range(3):
+            self.write_task(f"T-base{n}", executor="cheap", status="done", merged_into="goal/G")
+        self.write_task("T-fix", executor="cheap", status="done", merged_into="goal/G",
+                        constraints={"fix_round_for": "T-base0"})
+        self.write_task("T-review", role="review", constraints={"review_for": "T-base0"})
+        self.write_task("T-spec", role="spec_review", constraints={"spec_review_for": "T-base0"})
+        self.write_runs(
+            *[{"task": f"T-base{n}", "role": "execute", "input_tokens": 100} for n in range(3)],
+            {"task": "T-fix", "role": "execute", "input_tokens": 60},
+            {"task": "T-review", "role": "review", "input_tokens": 10},
+            {"task": "T-spec", "role": "spec_review", "input_tokens": 20},
+        )
+        self.assertEqual(scorecard.expected_cost("cheap", "mechanical", self.root, min_samples=3), 150)
+
     def test_review_verdict_rolls_up(self):
         self.write_task("T-9003", executor="reviewed-by", status="done", review_verdict="request_changes")
         card = scorecard.build(root=self.root)
         self.assertEqual(card["reviewed-by"]["review_request_changes"], 1)
+
+    def _routing_fixture(self):
+        self.write_task("T-route-a", executor="worker-a", merged_into="main", complexity=2,
+                        accepted_at=200, pipeline={"first_green_at": 150, "gate_reds": 0},
+                        lineage_fix_rounds=0, constraints={"task_class": "mechanical"})
+        self.write_task("T-route-b", executor="worker-b", status="failed", complexity=7,
+                        pipeline={"gate_reds": 2}, lineage_fix_rounds=1,
+                        constraints={"task_class": "architectural"})
+        self.write_task("T-route-review", role="review", inputs=["T-route-b"],
+                        review_verdict="request_changes")
+        self.write_runs(
+            {"task": "T-route-a", "role": "execute", "input_tokens": 100, "usd": 1},
+            {"task": "T-route-b", "role": "execute", "input_tokens": 200, "usd": 2},
+            {"task": "T-route-a", "goal_id": "G", "role": "jev_route", "mode": "shadow",
+             "eligible": ["worker-a", "worker-b"], "baseline": "worker-a", "hypothetical": "worker-a",
+             "signals": {"risk": {"p": .8}}, "latency_ms": 10, "usage": {"tokens": 5, "usd": .01}},
+            {"task": "T-route-b", "goal_id": "G", "role": "jev_route", "mode": "shadow",
+             "eligible": ["worker-a", "worker-b"], "baseline": "worker-b", "hypothetical": "worker-a",
+             "signals": {"risk": {"p": .4}}, "latency_ms": 30, "usage": {"tokens": 7, "usd": .02},
+             "reason": "budget"})
+        return scorecard.routing_eval(self.root, min_samples=2)
+
+    def test_routing_eval_joins_rows_to_outcomes_by_lineage_root(self):
+        card = self._routing_fixture()
+        rows = {row["task"]: row for row in card["rows"]}
+        self.assertTrue(rows["T-route-a"]["accepted"])
+        self.assertEqual((rows["T-route-a"]["executor"], rows["T-route-a"]["tokens"]), ("worker-a", 100))
+        self.assertEqual(rows["T-route-b"]["review_request_changes"], 1)
+
+    def test_routing_eval_agree_vs_disagree_groups_and_defined_counts(self):
+        groups = self._routing_fixture()["groups"]
+        self.assertEqual((groups["agree"]["n"], groups["disagree"]["n"]), (1, 1))
+        self.assertEqual(groups["agree"]["first_pass_defined_count"], 1)
+        self.assertEqual(groups["disagree"]["gate_red_defined_count"], 1)
+
+    def test_routing_eval_per_signal_threshold_split(self):
+        signal = self._routing_fixture()["groups"]["signals"]["risk"]
+        self.assertEqual((signal["p>=0.6"]["n"], signal["p<0.6"]["n"]), (1, 1))
+
+    def test_routing_eval_coverage_and_skip_reasons(self):
+        card = self._routing_fixture()
+        self.assertEqual(card["coverage"], {"classified": 2, "execute_dispatches": 2, "share": 1})
+        self.assertEqual(card["skip_reasons"], {"budget": 1})
+        self.assertEqual((card["jev_latency_ms"]["median"], card["jev_usage"]["tokens"]), (20, 12))
+
+    def test_routing_eval_insufficient_below_min_samples(self):
+        self.assertEqual(self._routing_fixture()["evidence_verdict"], "insufficient")
+
+    def test_routing_eval_none_when_no_rows(self):
+        self.write_task("T-no-route", executor="worker")
+        self.write_runs({"task": "T-no-route", "role": "execute"})
+        self.assertIsNone(scorecard.routing_eval(self.root))
+
+    def _economics_fixture(self):
+        self.write_task("T-root", executor="cheap", status="done", merged_into="goal/G", complexity=4,
+                        pipeline={"first_green_at": "2026-01-01T00:00:00Z", "gate_reds": 0})
+        self.write_task("T-failed", executor="cheap", status="failed", complexity=4,
+                        pipeline={"gate_reds": 1, "failure_kind": "lint"})
+        self.write_task("T-fix", executor="cheap", status="done", constraints={"fix_round_for": "T-failed"})
+        self.write_task("T-review", role="review", inputs=["T-root"], review_verdict="request_changes")
+        self.write_runs(
+            {"task": "T-root", "role": "execute", "executor": "cheap", "input_tokens": 100, "usd": 2},
+            {"task": "T-failed", "role": "execute", "executor": "cheap", "input_tokens": 200, "usd": 3},
+            {"task": "T-fix", "role": "execute", "executor": "cheap", "input_tokens": 50, "usd": 1},
+            {"task": "T-review", "role": "review", "input_tokens": 10, "usd": .5})
+        return scorecard.executor_economics(self.root)
+
+    def test_executor_economics_first_pass_and_fix_round_probability(self):
+        row = self._economics_fixture()["cheap"]
+        self.assertEqual(row["first_pass_green_rate"], 1)
+        self.assertEqual(row["first_pass_defined_count"], 1)
+        self.assertEqual(row["fix_round_probability"], .5)
+
+    def test_executor_economics_tokens_and_cost_to_accepted_median(self):
+        row = self._economics_fixture()["cheap"]
+        self.assertEqual(row["initial_execution_tokens"], {"median": 150.0, "mean": 150})
+        self.assertEqual((row["tokens_to_accepted"], row["cost_to_accepted"]), (110, 2.5))
+
+    def test_executor_economics_gate_failure_reasons_histogram(self):
+        self.assertEqual(self._economics_fixture()["cheap"]["gate_failure_reasons"], {"lint": 1})
+
+    def test_executor_economics_review_request_changes_rate(self):
+        row = self._economics_fixture()["cheap"]
+        self.assertEqual((row["review_request_changes_rate"], row["review_request_changes_defined_count"]), (1, 1))
+
+    def test_executor_economics_by_band_and_class(self):
+        self._economics_fixture()
+        self.assertIn(("cheap", "4-6"), scorecard.executor_economics(self.root, by="band"))
+        self.assertIn(("cheap", "unfamiliar"), scorecard.executor_economics(self.root, by="class"))
+
+    def test_scores_rank_by_cost_to_accepted_falls_back_below_min_samples(self):
+        card = {"cheap": {"merged": 1, "failed": 0, "cost_to_accepted": 2,
+                           "cost_to_accepted_defined_count": 2}}
+        self.assertEqual(scorecard.scores(card, min_runs=1, rank_by="cost_to_accepted")["cheap"],
+                         scorecard.scores(card, min_runs=1)["cheap"])
+
+    def test_scores_default_rank_unchanged(self):
+        card = {"x": {"merged": 3, "failed": 2}}
+        self.assertEqual(scorecard.scores(card), scorecard.scores(card, rank_by="success"))
 
     def test_review_task_does_not_double_count_verdict(self):
         # review T-0031: a review task has no executor and used to bucket under claude:<tier>, double-counting
@@ -216,13 +459,81 @@ class Scorecard(unittest.TestCase):
         lines = out.getvalue().splitlines()
         self.assertEqual(
             lines[0],
-            "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\tcalls\twaste_pct\tturns",
+                "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\troute\tcalls\twaste_pct\tturns",
         )
         row = next(l for l in lines[1:] if l.startswith("T-9600\t"))
         cells = row.split("\t")
-        self.assertEqual(len(cells), 11)
+        self.assertEqual(len(cells), 18)
         self.assertEqual(float(cells[1]), 2.5)                        # a real numeric cell, not just shape
         self.assertEqual(cells[-3:], ["-", "-", "-"])
+
+    def test_by_goal_token_buckets(self):
+        self.write_task("T-9930", status="done", result={"pr": "https://github.com/acme/repo/pull/3"})
+        self.write_task("T-9931", parent="T-9930", role="execute")
+        self.write_task("T-9932", parent="T-9930", role="review", status="failed")
+        self.write_task("T-9940", status="queued")
+        self.write_task("T-9941", parent="T-9940", role="execute")  # no run rows must still appear
+        self.write_runs(
+            {"task": "T-9931", "role": "execute", "input_tokens": 100, "output_tokens": 20,
+             "cache_read_input_tokens": 100},
+            {"task": "T-9932", "role": "review", "input_tokens": 30},  # Codex/no-usd failure
+        )
+        (self.root / "runs" / "jev").mkdir()
+        (self.root / "runs" / "jev" / "2026-01-01.jsonl").write_text("\n".join(json.dumps(row) for row in (
+            {"goal_id": "T-9930", "caller": "gate", "input_tokens": 7},
+            {"goal_id": "T-9930", "caller": "rank", "input_tokens": 11},
+        )))
+        (self.root / "runs" / "planner_runs.json").write_text(json.dumps([
+            {"goal_id": "T-9930", "tokens": 5},
+        ]))
+        card = scorecard.by_goal(root=self.root)
+        row = card["T-9930"]
+        self.assertEqual(row["tokens_by_role"], {"execute": 130, "review": 30, "spec_review": 0, "scout": 0, "other": 0})
+        self.assertEqual((row["tokens_uncached"], row["tokens_cache_read"], row["tokens_output"]), (130, 100, 20))
+        self.assertEqual((row["jev_tokens"], row["jev_tokens_gate"], row["jev_tokens_rank"]), (18, 7, 11))
+        self.assertEqual((row["planner_tokens"], row["failed_tokens"], row["total_tokens"]), (5, 30, 183))
+        self.assertEqual(card["T-9940"]["total_tokens"], 0)
+
+    def test_tokens_per_accepted_goal(self):
+        self.write_task("T-9950", role="triage", status="done", result={"url": "https://github.com/acme/repo/pull/5"})
+        self.write_task("T-9951", parent="T-9950", role="execute")
+        self.write_task("T-9960", status="queued")
+        self.write_task("T-9961", parent="T-9960", role="execute")
+        self.write_runs(
+            {"task": "T-9951", "role": "execute", "usd": 2, "input_tokens": 20},
+            {"task": "T-9961", "role": "execute", "usd": 9, "input_tokens": 90},
+        )
+        self.assertEqual(scorecard.accepted_goals(root=self.root), ["T-9950"])
+        self.assertEqual(scorecard.tokens_per_accepted_goal(root=self.root),
+                         {"tokens": 20.0, "count": 1, "goal_ids": ["T-9950"]})
+        self.assertEqual(scorecard.usd_per_accepted_goal(root=self.root)["usd"], 2.0)
+
+    def test_accepted_goals_ignores_non_goal_tasks_with_pr_url(self):
+        self.write_task("T-goal", role="triage", result={"pr_url": "https://example.test/pull/1"})
+        self.write_task("T-execute", merged_into="main", pr_url="https://example.test/pull/2")
+        self.assertEqual(scorecard.accepted_goals(root=self.root), ["T-goal"])
+
+    def test_tokens_per_accepted_goal_scans_runs_once(self):
+        from unittest.mock import patch
+        self.write_task("T-goal", role="triage", result={"pr_url": "https://example.test/pull/1"})
+        self.write_task("T-child", parent="T-goal", merged_into="main")
+        self.write_runs({"task": "T-child", "role": "execute", "total_tokens": 42})
+        original = scorecard._efficiency_rows
+        calls = []
+        with patch.object(scorecard, "_efficiency_rows",
+                          side_effect=lambda *args: calls.append(args) or original(*args)):
+            self.assertEqual(scorecard.tokens_per_accepted_goal(self.root)["tokens"], 42)
+        self.assertEqual(len(calls), 1)
+
+    def test_scorecard_by_goal_footer_unaffected_by_efficiency(self):
+        runs_file = self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl"
+        runs_file.write_text('{not valid json\n')
+        scorecard.efficiency(self.root)
+        self.assertEqual(scorecard.malformed_run_lines(), 0)
+        scorecard.by_goal(self.root)
+        self.assertEqual(scorecard.malformed_run_lines(), 1)
+        scorecard.efficiency(self.root)
+        self.assertEqual(scorecard.malformed_run_lines(), 1)
 
     def test_malformed_jsonl_line_skipped_and_counted(self):
         self.write_task("T-9800", executor="good", complexity=3, status="done", merged_into="goal/G")
@@ -571,3 +882,121 @@ class Bench(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Efficiency(unittest.TestCase):
+    write_task = Scorecard.write_task
+    write_runs = Scorecard.write_runs
+
+    def setUp(self):
+        Scorecard.setUp(self)
+        self.write_task("T-goal", role="goal", pr_url="https://example.test/pull/1")
+        self.write_task("T-root", parent="T-goal", merged_into="main", executor="worker", complexity=5,
+                        created_at=100, accepted_at=160, pipeline={"first_green_at": 130, "gate_reds": 0})
+        self.write_task("T-fix", parent="T-goal", constraints={"fix_round_for": "T-root"})
+        self.write_task("T-review", parent="T-goal", role="review", inputs=["T-fix"])
+        self.write_runs(
+            {"task": "T-root", "role": "execute", "total_tokens": 100, "ts": 110, "usd": 1, "model": "m", "turns": 2},
+            {"task": "T-fix", "role": "execute", "total_tokens": 20, "ts": 120, "usd": 2, "model": "m"},
+            {"task": "T-review", "role": "review", "total_tokens": 30, "ts": 140, "usd": 3},
+            {"role": "planner", "goal_id": "T-goal", "total_tokens": 10},
+            {"total_tokens": 7})
+
+    def test_efficiency_legacy_rows_attributed_at_read_time(self):
+        tasks = {"T-root": {"id": "T-root"}, "T-fix": {"id": "T-fix", "constraints": {"fix_round_for": "T-root"}}}
+        row = scorecard._attributed({"task": "T-fix", "role": "execute"}, tasks)
+        self.assertEqual((row["bucket"], row["lineage_root"], row["round_index"]), ("fix_round", "T-root", 1))
+        self.assertIs(scorecard._attributed(row, tasks), row)
+
+    def test_efficiency_collapses_fix_round_lineage_into_root(self):
+        jev = self.root / "runs/jev"
+        jev.mkdir()
+        (jev / "usage.jsonl").write_text(json.dumps({"task": "T-fix", "input_tokens": 4}) + "\n")
+        card = scorecard.efficiency(self.root)
+        self.assertEqual(set(card["tasks"]), {"T-root"})
+        task = card["tasks"]["T-root"]
+        self.assertEqual((task["tokens"], task["usd"], task["calls"], task["turns"]), (154, 6, 4, 2))
+        self.assertEqual(task["fix_round_tokens"], 20)
+
+    def test_efficiency_first_pass_and_fix_round_rates(self):
+        self.write_task("T-clean", merged_into="main", pipeline={"first_green_at": 120, "gate_reds": 0}, lineage_fix_rounds=0)
+        card = scorecard.efficiency(self.root)
+        self.assertEqual((card["first_pass_rate"], card["fix_round_rate"], card["avg_fix_rounds"]), (.5, .5, .5))
+        self.assertEqual(card["first_pass_defined_count"], 2)
+        self.assertEqual(card["fix_round_defined_count"], 2)
+
+    def test_efficiency_tokens_and_time_to_first_green_use_stamps(self):
+        task = scorecard.efficiency(self.root)["tasks"]["T-root"]
+        self.assertEqual((task["tokens_to_first_green"], task["time_to_first_green_s"], task["time_to_accepted_s"]), (120, 30, 60))
+        self.assertEqual(scorecard._stamp("1970-01-01T00:02:10Z"), 130)
+
+    def test_efficiency_missing_stamps_give_none_not_crash(self):
+        self.write_task("T-root", merged_into="main")
+        task = scorecard.efficiency(self.root)["tasks"]["T-root"]
+        for key in ("tokens_to_first_green", "time_to_first_green_s", "time_to_accepted_s", "first_pass"):
+            self.assertIsNone(task[key])
+        self.assertEqual(task["fix_rounds"], 1)
+
+    def test_efficiency_amplification_breakdown_sums_to_total_and_none_at_zero_execution(self):
+        card = scorecard.efficiency(self.root)
+        breakdown = card["breakdown"]
+        self.assertEqual(list(breakdown), ["Planner", "Scout", "Execution", "Fix rounds", "Spec review", "Code review", "Challenge", "Jev", "Other", "Total", "Amplification"])
+        self.assertEqual(sum(breakdown[key] for key in list(breakdown)[:9]), 167)
+        self.assertEqual(card["pipeline_amplification"], 1.67)
+        self.write_runs({"role": "review", "total_tokens": 2})
+        self.assertIsNone(scorecard.efficiency(self.root)["pipeline_amplification"])
+
+    def test_efficiency_unknown_bucket_is_reported(self):
+        card = scorecard.efficiency(self.root, by="goal")
+        self.assertEqual(card["groups"]["unknown"]["tokens"], 7)
+        self.assertEqual(sum(g["tokens"] for g in card["groups"].values()), card["tokens"])
+
+    def test_efficiency_goal_total_matches_tokens_per_accepted_goal(self):
+        card = scorecard.efficiency(self.root)
+        self.assertEqual(card["goals"]["T-goal"]["tokens"], scorecard.tokens_per_accepted_goal(self.root)["tokens"])
+        self.assertEqual(card["usd_per_accepted_goal"], scorecard.usd_per_accepted_goal(self.root)["usd"])
+
+    def test_efficiency_group_by_band_class_executor_role(self):
+        for by, key in (("band", "4-6"), ("class", "unfamiliar"), ("executor", "worker"), ("role", "execute")):
+            card = scorecard.efficiency(self.root, by=by)
+            self.assertEqual(card["groups"][key]["tokens"], 120 if by == "role" else 150)
+            self.assertEqual(sum(g["tokens"] for g in card["groups"].values()), 167)
+            self.assertIn("unknown", card["groups"])
+
+    def test_efficiency_model_distribution(self):
+        model = scorecard.efficiency(self.root)["model_distribution"]["m"]
+        self.assertEqual(model, {"execute": {"rows": 1, "tokens": 100}, "fix_round": {"rows": 1, "tokens": 20}})
+
+    def _review(self, tid, packet=None, pass_index=1, comments=(), tokens=100):
+        self.write_task(tid, role="review", status="done", inputs=["T-root"],
+                        result={"verdict": "request_changes", "comments": list(comments)},
+                        packet_version=packet, review_pass_index=pass_index)
+        self.write_runs({"task": tid, "role": "review", "total_tokens": tokens, "usd": 1,
+                         "packet_version": packet, "review_pass_index": pass_index})
+
+    def test_review_quality_counts_verdicts_and_findings_by_severity(self):
+        self._review("T-review-high", comments=[{"path": "a.py", "line": 1, "issue": "bug", "severity": "high"}])
+        row = scorecard.review_quality(self.root)["general"]
+        self.assertEqual((row["n_reviews"], row["verdicts"]["request_changes"]), (2, 1))
+        self.assertEqual(row["findings_by_severity"]["high"], 1)
+
+    def test_review_quality_distinct_defects_and_overlap_for_two_reviews(self):
+        self.write_task("T-review", role="review", status="done", inputs=["T-root"], result={"verdict": "request_changes", "comments": [
+            {"path": "same.py", "line": 2, "issue": "shared defect"}]}, review_pass_index=1)
+        self._review("T-review-2", pass_index=2, comments=[
+            {"path": "same.py", "line": 2, "issue": "different wording"},
+            {"path": "new.py", "line": 3, "issue": "new defect"}])
+        row = scorecard.review_quality(self.root)["general"]
+        self.assertEqual((row["distinct_defects"], row["overlap_share"], row["second_review_added"]), (2, .5, 1))
+
+    def test_review_quality_groups_by_packet_version_with_pre_packet_bucket(self):
+        self._review("T-review-packet", packet="p2")
+        self.assertEqual(set(scorecard.review_quality(self.root, by="packet_version")), {"pre-packet", "p2"})
+
+    def test_review_quality_findings_per_million_tokens_and_none_when_no_tokens(self):
+        self._review("T-review-token", comments=[{"issue": "one"}], tokens=500_000)
+        self.write_task("T-review-empty", role="review", inputs=["T-root"], result={"verdict": "approve"})
+        by_packet = scorecard.review_quality(self.root, by="packet_version")
+        self.assertGreater(by_packet["pre-packet"]["findings_per_million_tokens"], 0)
+        self.write_task("T-only", role="review", inputs=["T-root"], result={"verdict": "approve", "packet_version": "empty"})
+        self.assertIsNone(scorecard.review_quality(self.root, by="packet_version")["empty"]["findings_per_million_tokens"])
