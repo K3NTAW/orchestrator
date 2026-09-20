@@ -203,25 +203,62 @@ class Pool:
     def _reservation_estimate(self, account_id, role):
         limit = float(self.cfg.get("limits", {}).get("max_budget_usd", {}).get(role, 0))
         rows = []
+        sources = []
         for task in bus.read(role=role)[-20:]:
             result = task.get("result") or {}
             usage = result.get("usage") or {}
             tokens = self._usage_tokens(usage)
             if usage:
-                usd = float(result.get("total_cost_usd", usage.get("usd", usage.get("total_cost_usd", 0))) or 0)
+                sample = dict(result)
+                sample["usage"] = usage
+                executor = task.get("executor") or result.get("executor") or account_id
+                usd = self.usd_of(sample, executor)
+                sources.append(sample.get("est_usd_source", "recorded"))
                 rows.append((tokens, usd))
         if len(rows) >= 5:
+            self._last_estimate_usd_source = "tokens" if "tokens" in sources else "recorded"
             return int(statistics.median(row[0] for row in rows)), float(statistics.median(row[1] for row in rows))
         source = next((a for a in self.cfg.get("claude_accounts", []) if a.get("id") == account_id), None)
         if source is None:
             source = next((e for e in self.cfg.get("executors", []) if e.get("id") == account_id), {})
         ratio = (source or {}).get("usd_per_token") or (source or {}).get("usd-per-token")
         if ratio:
+            self._last_estimate_usd_source = "tokens"
             return int(limit / float(ratio)), limit
         # This is only a conservative estimate for cold roles, until five completed runs provide a median.
         # A positive estimate is essential: zero would make the daily-token reservation cap ineffective.
         default_ratio = float(self.cfg.get("limits", {}).get("default_tokens_per_usd", 250000))
+        self._last_estimate_usd_source = "tokens"
         return max(1, int(limit * default_ratio)), limit
+
+    def usd_of(self, row_or_usage, executor_or_account=None):
+        """Return recorded cost, or derive it from usage tokens and the configured model rate."""
+        row = row_or_usage if isinstance(row_or_usage, dict) else {}
+        output = row.get("output") if isinstance(row.get("output"), dict) else {}
+        usage = row.get("usage") if isinstance(row.get("usage"), dict) else None
+        if usage is None and isinstance(output.get("usage"), dict):
+            usage = output["usage"]
+        if usage is None:
+            usage = row
+        for container in (row, output, usage):
+            for key in ("usd", "total_cost_usd"):
+                if key in container and container[key] is not None:
+                    return float(container[key] or 0)
+
+        source = executor_or_account
+        source_id = getattr(source, "id", None) if source is not None else None
+        if isinstance(source, dict):
+            source_id = source.get("id")
+        if source_id:
+            source = next((a for a in self.cfg.get("claude_accounts", []) if a.get("id") == source_id), None)
+            source = source or next((e for e in self.cfg.get("executors", []) if e.get("id") == source_id), None)
+        source = source if isinstance(source, dict) else getattr(source, "__dict__", {})
+        ratio = source.get("usd_per_token") or source.get("usd-per-token")
+        if ratio is None:
+            ratio = 1 / float(self.cfg.get("limits", {}).get("default_tokens_per_usd", 250000))
+        if isinstance(row_or_usage, dict):
+            row_or_usage["est_usd_source"] = "tokens"
+        return self._usage_tokens(usage) * float(ratio)
 
     @staticmethod
     def _usage_tokens(usage):
@@ -267,6 +304,7 @@ class Pool:
             return {"run_key": run_key, "disabled": True}
         task_row = task if isinstance(task, dict) else bus.get(task)
         est_tokens, est_usd = self._reservation_estimate(account_id, role)
+        est_usd_source = getattr(self, "_last_estimate_usd_source", "tokens")
         now = time.time()
         lease_s = self.cfg.get("daemon", {}).get("stage_lease_s", 900)
         account = next((a for a in self.accounts if a.id == account_id), None)
@@ -294,6 +332,8 @@ class Pool:
             row = {"account": account_id, "role": role, "task": task_row.get("id"), "goal": goal,
                    "est_tokens": est_tokens, "est_usd": est_usd, "claimed_at": now,
                    "lease_until": now + lease_s}
+            if est_usd_source == "tokens":
+                row["est_usd_source"] = "tokens"
             reservations[run_key] = row
             return row
         return self._reservation_file(mutate)
@@ -304,11 +344,8 @@ class Pool:
             if row is None:
                 return None
             usage = actual_usage or {}
-            if isinstance(usage, dict) and isinstance(usage.get("output"), dict):
-                usage = {**usage.get("output", {}).get("usage", {}),
-                         "usd": usage.get("output", {}).get("total_cost_usd", 0)}
-            tokens = self._usage_tokens(usage)
-            usd = float(usage.get("usd", usage.get("total_cost_usd", 0)) or 0) if isinstance(usage, dict) else 0
+            usd = self.usd_of(usage, row.get("account"))
+            tokens = self._usage_tokens(usage.get("usage", usage) if isinstance(usage, dict) else {})
             history = state.setdefault("reservation_history", {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}})
             history["tokens"] = history.get("tokens", 0) + tokens
             history["usd"] = history.get("usd", 0) + usd

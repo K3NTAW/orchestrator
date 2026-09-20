@@ -518,7 +518,7 @@ def reconcile_dead(t, pool=None):
     Everything else (scout/review/etc, or an execute task with no worktree or no commits ahead) requeues as
     before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
     tid, worktree = t["id"], t.get("worktree")
-    (pool or Pool()).release(tid, (t.get("result") or {}).get("usage", {}))
+    (pool or Pool()).release(tid, t.get("result") or {})
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
         return _requeue(tid, t.get("pipeline"))
 
