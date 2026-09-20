@@ -1,6 +1,6 @@
 """Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with-headroom selection. State persists to
 pool_state.json so MCP server restarts don't forget cooldowns."""
-import fcntl, json, os, re, sys, time, tomllib
+import fcntl, json, os, re, statistics, sys, time, tomllib
 from dataclasses import dataclass, field, asdict, fields
 from datetime import date, datetime
 from pathlib import Path
@@ -151,6 +151,9 @@ class Pool:
                          for a in self.cfg["claude_accounts"]]
         self.codex = Codex()
         self.executors = self._read_executors()
+        self.reservations = {}
+        self.reservation_history = {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}}
+        self.notified_state = {}
         self._load()
         self._sync_legacy_codex()
 
@@ -177,6 +180,9 @@ class Pool:
                                    if k not in {"id", "config_dir", "affinity", "reserve", "daily_budget",
                                                 "oauth_token_env", *PLANNER_ACCOUNT_FIELDS}})
             self.codex.__dict__.update(st.get("codex", {}))
+            self.reservations = st.get("reservations", {})
+            self.reservation_history = st.get("reservation_history", self.reservation_history)
+            self.notified_state = st.get("notified_state", {})
             for eid, ex in self.executors.items():
                 ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
         for ex in self.executors.values():
@@ -195,7 +201,153 @@ class Pool:
                                                      for a in self.accounts},
                                        "codex": {k: v for k, v in asdict(self.codex).items() if k != "running"},
                                        "executors": {eid: {k: getattr(ex, k) for k in sorted(EXEC_STATE_FIELDS)}
-                                                     for eid, ex in self.executors.items()}}, indent=1))
+                                                     for eid, ex in self.executors.items()},
+                                       "reservations": self.reservations,
+                                       "reservation_history": self.reservation_history,
+                                       "notified_state": self.notified_state}, indent=1))
+
+    def _reservation_estimate(self, account_id, role):
+        limit = float(self.cfg.get("limits", {}).get("max_budget_usd", {}).get(role, 0))
+        rows = []
+        for task in bus.read(role=role)[-20:]:
+            usage = (task.get("result") or {}).get("usage") or {}
+            tokens = self._usage_tokens(usage)
+            if tokens:
+                rows.append(tokens)
+        source = next((a for a in self.cfg.get("claude_accounts", []) if a.get("id") == account_id), None)
+        if source is None:
+            source = next((e for e in self.cfg.get("executors", []) if e.get("id") == account_id), {})
+        ratio = (source or {}).get("usd_per_token") or (source or {}).get("usd-per-token")
+        if ratio:
+            return int(limit / float(ratio)), limit
+        if rows:
+            return int(statistics.median(rows)), limit
+        return 0, limit
+
+    @staticmethod
+    def _usage_tokens(usage):
+        if not isinstance(usage, dict):
+            return 0
+        return int(sum(usage.get(k, 0) or 0 for k in
+                       ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                        "cache_read_input_tokens", "cached_input_tokens")))
+
+    def _reservation_file(self, mutate):
+        PERSIST.parent.mkdir(parents=True, exist_ok=True)
+        with open(PERSIST, "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            fh.seek(0)
+            try:
+                state = json.loads(fh.read() or "{}")
+            except json.JSONDecodeError:
+                state = {}
+            result = mutate(state)
+            fh.seek(0); fh.truncate(); fh.write(json.dumps(state, indent=1))
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        self.reservations = state.get("reservations", {})
+        self.reservation_history = state.get("reservation_history", self.reservation_history)
+        self.notified_state = state.get("notified_state", self.notified_state)
+        return result
+
+    def reserve(self, run_key, account_id, role, task):
+        """Atomically reserve a run's worst-case budget; repeated calls for the same run are idempotent."""
+        if self.cfg.get("limits", {}).get("reservations", True) is False:
+            return {"run_key": run_key, "disabled": True}
+        task_row = task if isinstance(task, dict) else bus.get(task)
+        est_tokens, est_usd = self._reservation_estimate(account_id, role)
+        now = time.time()
+        lease_s = self.cfg.get("daemon", {}).get("stage_lease_s", 900)
+        account = next((a for a in self.accounts if a.id == account_id), None)
+        daily = account.daily_budget if account else 0
+        day_used = (account.day_tokens + account.planner_day_tokens) if account else 0
+        goal = task_row.get("parent") or task_row.get("id")
+
+        def mutate(state):
+            reservations = state.setdefault("reservations", {})
+            if run_key in reservations:
+                return reservations[run_key]
+            live_tokens = sum(int(r.get("est_tokens", 0)) for r in reservations.values()
+                              if not daily or r.get("account") == account_id)
+            if daily and day_used + live_tokens + est_tokens > daily:
+                return None
+            role_cap = self.cfg.get("review", {}).get("max_budget_usd", {}).get(role)
+            history = state.setdefault("reservation_history", {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}})
+            goal_spend = history.get("goals", {}).get(goal, {}).get(role, {}).get("usd", 0)
+            goal_reserved = sum(float(r.get("est_usd", 0)) for r in reservations.values()
+                                if r.get("goal") == goal and r.get("role") == role)
+            if role_cap and goal_spend + goal_reserved + est_usd > role_cap:
+                return None
+            row = {"account": account_id, "role": role, "task": task_row.get("id"), "goal": goal,
+                   "est_tokens": est_tokens, "est_usd": est_usd, "claimed_at": now,
+                   "lease_until": now + lease_s}
+            reservations[run_key] = row
+            return row
+        return self._reservation_file(mutate)
+
+    def release(self, run_key, actual_usage=None):
+        def mutate(state):
+            row = state.setdefault("reservations", {}).pop(run_key, None)
+            if row is None:
+                return None
+            usage = actual_usage or {}
+            if isinstance(usage, dict) and isinstance(usage.get("output"), dict):
+                usage = {**usage.get("output", {}).get("usage", {}),
+                         "usd": usage.get("output", {}).get("total_cost_usd", 0)}
+            tokens = self._usage_tokens(usage)
+            usd = float(usage.get("usd", usage.get("total_cost_usd", 0)) or 0) if isinstance(usage, dict) else 0
+            history = state.setdefault("reservation_history", {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}})
+            history["tokens"] = history.get("tokens", 0) + tokens
+            history["usd"] = history.get("usd", 0) + usd
+            role = history.setdefault("roles", {}).setdefault(row["role"], {"tokens": 0, "usd": 0.0})
+            role["tokens"] += tokens; role["usd"] += usd
+            goal = history.setdefault("goals", {}).setdefault(row["goal"], {}).setdefault(row["role"],
+                                                                                         {"tokens": 0, "usd": 0.0})
+            goal["tokens"] += tokens; goal["usd"] += usd
+            return row
+        return self._reservation_file(mutate)
+
+    def heartbeat(self, run_key):
+        def mutate(state):
+            row = state.setdefault("reservations", {}).get(run_key)
+            if row:
+                row["lease_until"] = time.time() + self.cfg.get("daemon", {}).get("stage_lease_s", 900)
+            return row
+        return self._reservation_file(mutate)
+
+    def sweep_reservations(self, now=None):
+        now = now or time.time()
+        dropped = []
+        def mutate(state):
+            reservations = state.setdefault("reservations", {})
+            for key, row in list(reservations.items()):
+                if row.get("lease_until", 0) >= now:
+                    continue
+                try:
+                    task = bus.get(row.get("task") or key)
+                except KeyError:
+                    task = {}
+                pid = task.get("pid")
+                live = False
+                if pid:
+                    try:
+                        os.kill(pid, 0); live = True
+                    except (OSError, TypeError):
+                        pass
+                if live and task.get("status") == "running":
+                    continue
+                dropped.append(key); del reservations[key]
+            return dropped
+        self._reservation_file(mutate)
+        return dropped
+
+    def notification_transition(self, key, active):
+        """Persist condition state and report whether its boolean changed."""
+        def mutate(state):
+            notified = state.setdefault("notified_state", {})
+            previous = bool(notified.get(key, False))
+            notified[key] = bool(active)
+            return previous != bool(active)
+        return self._reservation_file(mutate)
 
     # selection ---------------------------------------------------------------------------------
     def pick(self, role, avoid=None):

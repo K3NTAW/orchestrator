@@ -217,12 +217,22 @@ def start(task_id, prompt):
     ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
     if ex is None or ex.provider != "codex":
         return _exhausted(pool, t)
+    if pool.reserve(task_id, ex.id, "execute", t) is None:
+        pipeline = dict(t.get("pipeline") or {})
+        pipeline["hold_note"] = "budget"
+        bus.update(task_id, status="queued", pipeline=pipeline)
+        return {"status": "budget", "reason": "budget reservation refused"}
     from .spawn import ensure_worktree
-    wt = Path(t.get("worktree") or ensure_worktree(task_id))
-    bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
-    ex.roll_day(); ex.day_tasks += 1
-    pool.codex.day_tasks += 1; pool.save()       # legacy mirror, until B3 drops pool.codex
-    return _run(pool, t, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
+    result = None
+    try:
+        wt = Path(t.get("worktree") or ensure_worktree(task_id))
+        bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
+        ex.roll_day(); ex.day_tasks += 1
+        pool.codex.day_tasks += 1; pool.save()       # legacy mirror, until B3 drops pool.codex
+        result = _run(pool, t, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
+        return result
+    finally:
+        pool.release(task_id, (result or {}).get("usage", {}))
 
 
 def _exhausted(pool, t, run=None):

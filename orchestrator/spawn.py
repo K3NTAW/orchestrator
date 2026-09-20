@@ -541,11 +541,18 @@ def run_worker(task_id):
         base_sha = git("rev-parse", base, check=False).stdout.strip() or "(unavailable)"
         prompt = render("scout", id=t["id"], title=t["title"], spec=t["spec"], acceptance=t["acceptance"],
                         turns=str(lim["max_turns"].get(role, 20)), base_branch=base, base_sha=base_sha)
+    if pool.reserve(task_id, acct.id, role, t) is None:
+        pipeline = dict(t.get("pipeline") or {})
+        pipeline["hold_note"] = "budget"
+        bus.update(task_id, status="queued", pipeline=pipeline)
+        return {"status": "budget"}
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
     bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
-    r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
-                   lim["max_budget_usd"].get(role, 2.0), t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
+    r = None
     try:
+        r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
+                       lim["max_budget_usd"].get(role, 2.0),
+                       t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
         if r["status"] == "done" and role == "execute":
             bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
                                       "review": "other account, different model; label PR same-family-review"}), "done")
@@ -588,6 +595,8 @@ def run_worker(task_id):
         bus.log_run(task=task_id, role=role, outcome="post_failed",
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
         bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
+    finally:
+        pool.release(task_id, r or {})
     return r
 
 

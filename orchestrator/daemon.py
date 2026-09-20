@@ -518,6 +518,7 @@ def reconcile_dead(t):
     Everything else (scout/review/etc, or an execute task with no worktree or no commits ahead) requeues as
     before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
     tid, worktree = t["id"], t.get("worktree")
+    Pool().release(tid, (t.get("result") or {}).get("usage", {}))
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
         return _requeue(tid, t.get("pipeline"))
 
@@ -689,6 +690,7 @@ def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
+    budget_refused = False
     for t in bus.read(status="queued", role="execute"):
         if stale(t) or not bus.ready(t):
             continue
@@ -698,6 +700,18 @@ def dispatch(pool):
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if slots <= 0:
                 break
+            if fallback:
+                acct = pool.pick("execute")
+                account_id = acct.id if acct else "claude"
+            else:
+                ex = pool.pick_executor("execute", t["complexity"], task=t)
+                account_id = ex.id if ex else "codex"
+            if pool.reserve(t["id"], account_id, "execute", t) is None:
+                budget_refused = True
+                pipeline = dict(t.get("pipeline") or {})
+                pipeline["hold_note"] = "budget"
+                bus.update(t["id"], pipeline=pipeline)
+                continue
             if stamp(t["id"], "dispatched_at"):
                 slots -= 1
                 prompt = spawn.render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"])
@@ -716,6 +730,8 @@ def dispatch(pool):
                     complete(t["id"], "spec_review_at")
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
+    if pool.notification_transition("budget_refusals", budget_refused) and budget_refused:
+        notify("budget reservation refused; tasks remain queued")
 
     # Reviews are normally spawned when they are created, so they are not part of the execute loop above.
     # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread
@@ -1155,6 +1171,8 @@ def _merged_target(t):
 def sweep_leases(pool):
     """Reconcile expired post-lease claims. Old timestamp-only claims intentionally remain untouched."""
     now = time.time()
+    for run_key in pool.sweep_reservations(now):
+        print(f"[daemon] dropped dead expired budget reservation {run_key}", file=sys.stderr)
     for status in ("queued", "running", "done"):
         for t in bus.read(status=status):
             pipeline = t.get("pipeline") or {}
@@ -1290,12 +1308,15 @@ def tick(pool=None, stop_event=None):
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
     m = pool.both_cooling_minutes()
-    if m > 30:
+    cooling = m > 30
+    if pool.notification_transition("cooling", cooling) and cooling:
         notify(f"both Claude accounts cooling for {m:.0f} more min")
     for a in pool.accounts:
-        if a.daily_budget and a.day_tokens >= a.daily_budget:
+        over_budget = bool(a.daily_budget and a.day_tokens + a.planner_day_tokens >= a.daily_budget)
+        if pool.notification_transition(f"daily_budget:{a.id}", over_budget) and over_budget:
             notify(f"account {a.id} hit its daily budget; tasks held")
-    if not pool.codex_available() and pool.codex.cooling():
+    codex_cooling = not pool.codex_available() and pool.codex.cooling()
+    if pool.notification_transition("codex_cooling", codex_cooling) and codex_cooling:
         notify("Executor (Codex) cooling; execute tasks held, refill the pipeline")
     maybe_handover("daemon tick")
 
