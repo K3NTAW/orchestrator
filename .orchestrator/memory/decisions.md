@@ -281,3 +281,8 @@ type: decision · goal: T-0445 · tasks: T-0445,T-0446,T-0447,T-0448 · provenan
 - two Planner sessions raced on H3b (T-0435 vs T-0437); ownership split: 6410 closes Phase H, 7155 runs Phase I; recorded in plan.md
 - docs goal T-0007: one-shot headless Planner exits on wait (2.44 USD); fresh worktree gate red without node_modules; PR 2 open, artifact published
 outcome: revert path: bus.update('T-0445', status='failed'); git revert the plan commit
+
+## 2026-09-20 Phase H close checkpoint: plan.md rewritten for the closed goal, PR 12, docs goal T-0007 handled by the launcher session
+type: decision · goal: T-0353 · tasks: T-0353,T-0366,T-0439 · provenance: repo
+- PR 12 https://github.com/K3NTAW/orchestrator/pull/12 open; T-0353 done; the launcher session ran the docs system-map goal T-0007 in the docs repo (PR 2 there); this session deploys it and publishes the artifact
+outcome: revert path: git revert the checkpoint commit (plan.md and decisions.md only); Phase H itself: close PR 12 unmerged
