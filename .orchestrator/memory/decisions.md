@@ -293,3 +293,10 @@ type: decision · goal: T-0353 · tasks: T-0353,T-0366 · provenance: repo
 - the T-0007 page predates Phase H (no decision routes, reservations, failure kinds, acceptance gate), has no phase timeline or measured numbers and uses its own palette; follow-up goal T-0012 (headless Planner pid 69926, account B, branch goal/T-0012 from goal/T-0007) adds them and the site tokens; its PR will base on PR 2; deploy from goal/T-0012 or after merge is the next session's call
 - the launcher session published the map as artifact https://claude.ai/artifact/WVgUMFJ1eWxFGTqVTxdUtt and owns Phase I (T-0445, brief .orchestrator/phase-i-program.md); plan.md OWNER header says session 6410 closes
 outcome: Session 6410 stops here: no more tasks, deploys or plan.md writes from it. Revert paths: vercel rollback on project docs-kentawaibel; T-0012 can be stopped with orchestrator goal stop in the docs repo
+
+## 2026-09-20 Phase I P0 merged on goal/T-0445 and baseline phase-h-code saved
+type: decision · goal: T-0445 · tasks: T-0449,T-0450,T-0454,T-0458,T-0455 · provenance: repo
+- run rows now carry bucket, lineage_root, band, task_class, executor, model, normalized tokens and usd_source (attribution.py); tasks carry created_at, first_green_at, gate_attempts, gate_reds, lineage_fix_rounds, accepted_at
+- baseline phase-h-code over all history: 127 accepted tasks, 152.7M tokens, 230.7 USD, median 308k tokens per accepted task, fix_round_rate 0.315, amplification 1.93, fix rounds 56.7M vs execution 79.2M
+- Codex shipped P0b without its six named tests (tenth instance); P0c review found phantom goals from pr_url on non-goal tasks
+outcome: revert path: git branch -f goal/T-0445 0d7bf09 (before P0) or git revert the four merge commits; baseline file is data, delete .orchestrator/baselines/phase-h-code.json
