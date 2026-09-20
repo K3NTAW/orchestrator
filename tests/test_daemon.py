@@ -315,6 +315,25 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("flaky", messages[0])
 
+    def test_flaky_rerun_has_timeout_and_timeout_is_not_flaky(self):
+        tid = self.held_for_fix()
+        bus.update(tid, worktree=str(self.sandbox))
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {})["flaky_rerun_timeout_s"] = 17
+
+        def timed_out(cmd, **kwargs):
+            self.assertEqual(kwargs["timeout"], 17)
+            raise subprocess.TimeoutExpired(cmd, 17, output="hung test")
+
+        self.swap(daemon.subprocess, "run", timed_out)
+        daemon.auto_fix_round(pool)
+
+        task = bus.get(tid)
+        self.assertEqual(task["pipeline"]["failure_kind"], "code_defect")
+        self.assertEqual(task["resume_hint"]["flaky_runs"], [{
+            "ids": ["tests/test_x.py::test_x"], "timed_out": True,
+            "timeout_s": 17, "output": "hung test"}])
+
     def test_quota_hold_creates_no_round(self):
         messages = []
         self.swap(daemon, "notify", messages.append)

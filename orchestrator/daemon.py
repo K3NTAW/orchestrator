@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, fnmatch, hashlib, json, os, re, subprocess, sys, threading, time, urllib.request
+import fcntl, fnmatch, hashlib, importlib.util, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, acceptance, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
@@ -118,7 +118,14 @@ def _failure_text(task):
         else str(hint.get("failures") or "")
 
 
-def failure_kind(task, worktree, *, rerun_max=1):
+def _flaky_rerun_command(ids):
+    """Match the project's test convention, including its unittest fallback."""
+    if importlib.util.find_spec("pytest") is not None:
+        return ["pytest", "-q", *ids]
+    return [sys.executable, "-m", "unittest", *ids]
+
+
+def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     """Classify a held execution failure without relying on an LLM judgment."""
     reason = str(task.get("hold_reason") or "").lower()
     text = (reason + "\n" + _failure_text(task)).lower()
@@ -143,7 +150,17 @@ def failure_kind(task, worktree, *, rerun_max=1):
     if (reason == "gate_red" and ids and worktree and Path(worktree).is_dir()
             and len(runs) < min(1, rerun_max)):
         try:
-            rerun = subprocess.run(["pytest", "-q", *ids], cwd=worktree, capture_output=True, text=True)
+            rerun = subprocess.run(_flaky_rerun_command(ids), cwd=worktree, capture_output=True, text=True,
+                                   timeout=rerun_timeout)
+        except subprocess.TimeoutExpired as exc:
+            hint = dict(task.get("resume_hint") or {})
+            runs = list(hint.get("flaky_runs") or [])
+            output = (str(getattr(exc, "stdout", "") or getattr(exc, "output", "")) +
+                      str(getattr(exc, "stderr", "") or ""))[-4000:]
+            runs.append({"ids": ids, "timed_out": True, "timeout_s": rerun_timeout, "output": output})
+            hint["flaky_runs"] = runs
+            bus.update(task["id"], resume_hint=hint)
+            return "code_defect"
         except OSError:
             return "code_defect"
         hint = dict(task.get("resume_hint") or {})
@@ -206,7 +223,8 @@ def auto_fix_round(pool):
             continue
         reason = held.get("hold_reason", "")
         kind = failure_kind(held, held.get("worktree"),
-                            rerun_max=pool.cfg.get("daemon", {}).get("flaky_rerun_max", 1))
+                            rerun_max=pool.cfg.get("daemon", {}).get("flaky_rerun_max", 1),
+                            rerun_timeout=pool.cfg.get("daemon", {}).get("flaky_rerun_timeout_s", 600))
         with bus.locked():
             current = bus.get(held["id"])
             pipeline = dict(current.get("pipeline") or {})
