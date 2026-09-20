@@ -206,28 +206,14 @@ type: decision · goal: T-0240 · tasks: T-0241,T-0245,T-0242,T-0243,T-0250,T-02
 - process: the 18:16 session restart killed the in-process daemon and aborted both Codex turns; codex_reply was broken by the Codex CLI (F5); T-0241 merge went red on a flaky thread test and stayed failed with merged_at set (F6); the T-0254 gate failed three times on sqlite ResourceWarnings in test_handover (F7); two scope misses (T-0248 could not touch test_scorecard.py, T-0249 missed -s) needed fix rounds; planner-mode.sh blocks a branch rebase by the Planner so it ran as Codex task T-0258; every Codex result and three superseded merges were posted or stamped by hand (about 12 bus repairs)
 outcome: Phase F code-complete 2026-09-19 20:20; PR goal/T-0240 to main opened after PRs 6-9. Alternative that lost: keep the 400 ms latency target, because interpreter cost is now 80 ms and the rest is network; the decision on async scoring or accepting 700 ms goes to the human (reviews/2026-09-19-phase-f-review.md). Next: switch the main checkout to goal/T-0240 and restart the session so F3, F5 and F6 are live, then one tiny Codex task to verify acceptance 3; decide security_paths width and daemon-as-a-process before the next long goal. Revert path: git revert fe7026a d3f452f 35c0462 f408edb cbd5a6a 1d5217e ea492c5 b07a5ff fd2e078 df9074f in that order, or move goal/T-0240 back to df08523 with git branch -f while nothing else has merged on top
 
-## 2026-09-19 Planner checkpoint commit 7297936: plan.md and gotchas for the session 5 resume of Phase G
-type: decision · goal: T-0260 · tasks: T-0326,T-0331,T-0336 · provenance: repo
-- plan.md rewritten at 23:02 with the corrected task map (G3 held, not merged; G2b, G11, G4 chains marked merged; T-0326 result posted by hand); two gotchas appended
-outcome: revert path: git revert 7297936 (touches only .orchestrator/plan.md and .orchestrator/memory/gotchas.md)
-
-## 2026-09-19 Planner checkpoint commit d12ae2c: plan.md task map at 23:20 and two gotchas
-type: decision · goal: T-0260 · tasks: T-0337,T-0331,T-0332 · provenance: repo
-- G7 v4 and G10 merged; fix rounds T-0341 (G5) and T-0344 (G3) written; review T-0332 re-spawned by hand
-outcome: revert path: git revert d12ae2c (plan.md and gotchas.md only)
-
 ## 2026-09-19 Phase G retrospective: T-0260 token economy closed, 11 sub-goals merged on goal/T-0260 at 2ca1517, gate green externally, PR 11
 type: decision · goal: T-0260 · tasks: T-0264,T-0265,T-0266,T-0267,T-0270,T-0271,T-0273,T-0274,T-0275,T-0276,T-0277,T-0290,T-0324,T-0326 · provenance: repo
 - 82 tasks under the goal: 40 execute (20 of them fix rounds), 31 reviews (14 approve, 17 request_changes), 8 spec reviews (6 request_changes; G6 and G7 three rounds each then waived), 3 scouts; 37 commits, 42 files, +3055/-171 over goal/T-0240
 - cost 22.38 USD, 442 calls, 636 turns; review 62.8 percent, spec review 24.2 percent, scouts 6.8 percent, Codex execute 6.2 percent; every request_changes review named a real defect (hunk-header duplication, fail-open diff guards, unlocked state file, unguarded lookups, packet ordering, missing tests)
 - what cost the most: Codex (luna) five times reported acceptance-named tests as passing without writing them (T-0271, T-0326, T-0273, T-0277, T-0348), each caught by a review round or a Planner diff --stat check plus one codex_reply; the 22:50 session restart orphaned two Codex runs and leaked executor slot counters twice; plan.md carried one wrong merged claim (G3)
 - what worked: the Phase F daemon posted every Codex result it dispatched (T-0240 acceptance 3 verified on T-0273), gated, spawned reviews and merged serially without Planner posts; fix rounds cut from the held branch kept every chain linear; a Planner diff --stat check before the review saved review rounds on T-0273, T-0277 and T-0348
+- Planner checkpoint commits 7297936 (23:02 task map, G3 held), d12ae2c (23:20, G7 v4 and G10 merged) and 93f0a7c (close) touch only plan.md and memory; revert each with git revert (folded 2026-09-20)
 outcome: Accepted: tests-green exit 0 on wt/goal-T-0260 at 2ca1517; PR 11 https://github.com/K3NTAW/orchestrator/pull/11 goal/T-0260 to main for the human after PR 10; T-0260 marked done 23:56. Backlog (c2-c3): derive executor running counters from bus state; codex/codex_reply tools post results; re-dispatch requeued reviews; gate checks acceptance-named test ids exist; consistent total_tokens for legacy rows. Revert path for the whole phase: close PR 11 unmerged
-
-## 2026-09-19 Planner checkpoint commit 93f0a7c: Phase G close in plan.md, retrospective and gotchas
-type: decision · goal: T-0260 · tasks: T-0260 · provenance: repo
-- plan.md rewritten for the closed goal and the docs.kentawaibel.com kickoff facts; decisions.md carries the Phase G retrospective; gotchas.md the slot-counter and review-redispatch rules
-outcome: revert path: git revert 93f0a7c (plan.md, decisions.md, gotchas.md only)
 
 ## 2026-09-20 docs.kentawaibel.com goal started in its own repo via orchestrator goal start (headless Planner on account B)
 type: decision · goal: T-0260 · tasks: T-0001 · provenance: repo
@@ -282,11 +268,6 @@ type: decision · goal: T-0445 · tasks: T-0445,T-0446,T-0447,T-0448 · provenan
 - docs goal T-0007: one-shot headless Planner exits on wait (2.44 USD); fresh worktree gate red without node_modules; PR 2 open, artifact published
 outcome: revert path: bus.update('T-0445', status='failed'); git revert the plan commit
 
-## 2026-09-20 Phase H close checkpoint: plan.md rewritten for the closed goal, PR 12, docs goal T-0007 handled by the launcher session
-type: decision · goal: T-0353 · tasks: T-0353,T-0366,T-0439 · provenance: repo
-- PR 12 https://github.com/K3NTAW/orchestrator/pull/12 open; T-0353 done; the launcher session ran the docs system-map goal T-0007 in the docs repo (PR 2 there); this session deploys it and publishes the artifact
-outcome: revert path: git revert the checkpoint commit (plan.md and decisions.md only); Phase H itself: close PR 12 unmerged
-
 ## 2026-09-20 Session 6410 closes: docs system map deployed to production from goal/T-0007, follow-up docs goal T-0012 launched, Phase I owned by the launcher session
 type: decision · goal: T-0353 · tasks: T-0353,T-0366 · provenance: repo
 - docs.kentawaibel.com production now serves the goal/T-0007 build (deployment HLHBHK1ND3J18KV4NPK7bMuu8F5Q, /orchestrator/ returns 200 with six SVG diagrams); the launcher session prefers deploying only after PRs 1 and 2 merge to main; the user granted deploy rights on 2026-09-19 23:46, so the manual deploy stands and main catches up when the PRs merge
@@ -307,15 +288,11 @@ type: decision · goal: T-0445 · tasks: T-0471,T-0485,T-0486 · provenance: rep
 - its one code finding is low: cache_max_entries = 0 does not disable caching (slice [-0:]); backlog item, no fix round
 outcome: revert path: git revert the T-0485 merge on goal/T-0445; re-review by spawning a review with inputs T-0485 if the human wants one
 
-## 2026-09-20 P4 T-0472 merged after review T-0487's single test-only finding was fixed by one codex_reply round
-type: decision · goal: T-0445 · tasks: T-0472,T-0487 · provenance: repo
-- T-0487 found the CLI test matched 'agree' inside 'disagree' and never checked the agree group; commit 4149f67 adds an agreeing fixture row and line-anchored assertions; full gate green externally (733 tests)
-outcome: revert path: git revert the T-0472 merge on goal/T-0445
-
 ## 2026-09-20 Phase I closed on goal/T-0445 at 4149f67: P0 telemetry, P1 packets, P2 economics and resume, P3 Jev shadow, P4 evaluation merged; P5 to P7 deferred to live evidence
 type: decision · goal: T-0445 · tasks: T-0449,T-0450,T-0454,T-0455,T-0461,T-0462,T-0463,T-0465,T-0466,T-0471,T-0472 · provenance: repo
-- 23 commits over Phase H head 0d7bf09; external tests-green exit 0 on 4149f67 (733 tests); 11 increments merged through 9 fix rounds, 1 combine round, 3 codex_reply rounds for missing tests; every review found a real defect except T-0486 which diffed HEAD against itself
+- 23 commits over Phase H head 0d7bf09; external tests-green exit 0 on 4149f67 (733 tests); 11 increments merged through 9 fix rounds, 1 combine round, 3 codex_reply rounds for missing tests; every review found a real defect except T-0486 which diffed HEAD against itself; P4 T-0472 merged after review T-0487's test-only finding (agree matched inside disagree) was fixed by one codex_reply round at 4149f67 (folded 2026-09-20); the Phase H close checkpoint commit touched plan.md and decisions.md only (folded)
 - cost of T-0445 so far 11.5 USD API-equivalent, 31.9M tokens, 178 calls, 339 turns; review share 80.9 percent, scouts 19.1 (Codex rows carry no usd on the Phase F server)
 - baseline p0-p4-code vs phase-h-code over bus history: tokens per accepted task 1.15M to 1.26M (+9.6), fix_round_rate 0.315 to 0.328, amplification 1.93 to 1.92; this measures Phase I's own execution on the old server code, not the effect of the merged changes, which are not live until PRs 6-13 merge; routing evidence insufficient (no shadow rows yet)
 - first executor economics (small n, Codex usd estimated from tokens): astra fix_round_probability 0.38, cost_to_accepted 0.48 USD, tokens_to_accepted 1.14M; sol 0.63, 0.85 USD, 2.55M; terra 0.78, 1.00 USD, 2.46M; luna 0.36, 162k tokens; claude sonnet 0.45, 2.14 USD; supports measuring cost per accepted task before any ranking change
+- compact-memory 2026-09-20 23:05: three Planner checkpoint entries, the Phase H close checkpoint and the P4 merge entry folded into their retrospectives (321 to 297 lines); follow-ups opened: backlog B1 T-0488 on goal/T-0445, GOAL P6 T-0489 on goal/T-0489 with scout T-0490
 outcome: revert path: git branch -f goal/T-0445 0d7bf09 or revert PR 13; baselines are data files under .orchestrator/baselines; [jev.routing].mode = off disables shadow rows; P5 active ranking, P6 review optimisation and P7 experiments start only after the server runs this code and routing_eval says collected
