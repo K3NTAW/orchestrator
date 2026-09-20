@@ -573,7 +573,7 @@ def dispatch(pool):
         if pipeline.get("respawned_at", 0) > requeued_at:
             continue
         died = any(event.get("reason") == "process died; requeued" for event in events)
-        created_at = min((event.get("ts", 0) for event in events), default=0)
+        created_at = task.get("created_at") or min((event.get("ts", 0) for event in events), default=0)
         if not created_at:
             try:
                 created_at = (bus.TASKS / f"{task['id']}.json").stat().st_mtime
@@ -801,6 +801,11 @@ def gate(pool):
     for t in bus.read(status="done", role="execute"):
         if stale(t) or (t.get("pipeline") or {}).get("gated_at") or t.get("merged_into"):
             continue
+        with bus.locked():
+            t = bus.get(t["id"])
+            pipeline = dict(t.get("pipeline") or {})
+            pipeline["gate_attempts"] = pipeline.get("gate_attempts", 0) + 1
+            bus.update(t["id"], pipeline=pipeline)
         worktree = t.get("worktree")
         if worktree and not Path(worktree).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
@@ -820,20 +825,33 @@ def gate(pool):
             missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
             if missing:
                 failures = [f"FAILED {path}::{name} (missing: test not defined)" for path, name in missing]
-                if stamp(t["id"], "gated_at", status="held", hold_reason="gate_red",
+                gate_reds = pipeline.get("gate_reds", 0) + 1
+                if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
+                         status="held", hold_reason="gate_red",
                          resume_hint={"failures": failures, "missing_tests": missing}):
                     print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
                 continue
         tg = subprocess.run([str(merge.TESTS_GREEN), worktree], capture_output=True, text=True, input="{}")
         if tg.returncode:
-            if stamp(t["id"], "gated_at", status="held", hold_reason="gate_red",
+            gate_reds = pipeline.get("gate_reds", 0) + 1
+            if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
+                     status="held", hold_reason="gate_red",
                      resume_hint={"failures": tg.stderr[-4000:]}):
                 notify(f"{t['id']}: tests red at the gate; held")
             continue
         n_reviews, review_reason = _review_plan(t)
-        if not stamp(t["id"], "gated_at",
-                     pipeline_fields={"reviews_expected": n_reviews, "review_reason": review_reason}):
-            continue
+        now = time.time()
+        green_fields = {"first_green_at": pipeline.get("first_green_at", now),
+                        "reviews_expected": n_reviews, "review_reason": review_reason}
+        with bus.locked():
+            if not stamp(t["id"], "gated_at", pipeline_fields=green_fields):
+                continue
+            lineage_root = root(t)
+            if lineage_root["id"] != t["id"]:
+                root_pipeline = dict(lineage_root.get("pipeline") or {})
+                root_pipeline.setdefault("first_green_at", now)
+                root_pipeline["lineage_fix_rounds"] = root_pipeline.get("lineage_fix_rounds", 0) + 1
+                bus.update(lineage_root["id"], pipeline=root_pipeline)
         try:
             if n_reviews == 0:
                 report_merge(t["id"], merge.merge(t["id"]))
@@ -859,16 +877,27 @@ def report_merge(task_id, r):
         except (KeyError, OSError):
             pass
     if r.get("status") == "merged":
-        current = bus.get(task_id)
-        if (current.get("constraints") or {}).get("fix_round_for"):
-            fix_id = task_id
-            while (current.get("constraints") or {}).get("fix_round_for"):
-                ancestor = bus.get(current["constraints"]["fix_round_for"])
-                bus.update(ancestor["id"], status="done", merged_into=r["target"],
+        merged_at = time.time()
+        with bus.locked():
+            current = bus.get(task_id)
+            task_pipeline = dict(current.get("pipeline") or {})
+            task_pipeline.setdefault("accepted_at", merged_at)
+            bus.update(task_id, pipeline=task_pipeline)
+            if (current.get("constraints") or {}).get("fix_round_for"):
+                fix_id = task_id
+                lineage_root = root(current)
+                root_pipeline = dict(lineage_root.get("pipeline") or {})
+                root_pipeline.setdefault("accepted_at", merged_at)
+                while (current.get("constraints") or {}).get("fix_round_for"):
+                    ancestor = bus.get(current["constraints"]["fix_round_for"])
+                    fields = {"status": "done", "merged_into": r["target"],
+                              "merged_via": f"fix round {fix_id} {r['sha']}", "hold_reason": None}
+                    if ancestor["id"] == lineage_root["id"]:
+                        fields["pipeline"] = root_pipeline
+                    bus.update(ancestor["id"], **fields)
+                    current = ancestor
+                bus.update(task_id, status="done", merged_into=r["target"],
                            merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
-                current = ancestor
-            bus.update(task_id, status="done", merged_into=r["target"],
-                       merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
         notify(f"{task_id} merged into {r['target']} ({r['sha'][:8]})")
     else:                                  # merge.merge already set the task failed with a resume_hint
         notify(f"{task_id} merge failed: {r.get('status')} {r.get('reason', '')}".strip())

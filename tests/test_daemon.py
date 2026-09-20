@@ -108,6 +108,10 @@ class Daemon(unittest.TestCase):
         now = time.time()
         old = self.task("abandoned spec review", role="spec_review")
         young = self.task("new spec review", role="spec_review")
+        for tid in (old, young):
+            task = bus.get(tid)
+            task.pop("created_at")
+            bus._save(task)
         os.utime(bus.TASKS / f"{old}.json", (now - 31, now - 31))
         os.utime(bus.TASKS / f"{young}.json", (now - 29, now - 29))
         self.swap(daemon.time, "time", lambda: now)
@@ -127,6 +131,9 @@ class Daemon(unittest.TestCase):
         for _ in range(10_001):
             bus._event(filler, "updated")
         old = self.task("old unclaimed spec review", role="spec_review")
+        task = bus.get(old)
+        task.pop("created_at")
+        bus._save(task)
         os.utime(bus.TASKS / f"{old}.json", (now - 31, now - 31))
         pool = P.Pool()
         pool.cfg.setdefault("daemon", {})["respawn_after_s"] = 30

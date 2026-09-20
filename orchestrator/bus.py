@@ -114,7 +114,7 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
             get(dep)
         except KeyError:
             raise ValueError(f"depends_on references unknown task: {dep}")
-    t = {"id": tid, "parent": parent, "role": role, "tier": tier, "complexity": complexity,
+    t = {"id": tid, "created_at": time.time(), "parent": parent, "role": role, "tier": tier, "complexity": complexity,
          "title": title, "spec": spec, "inputs": inputs or [], "acceptance": list(acceptance), "scope": list(scope),
          "depends_on": deps,
          "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
