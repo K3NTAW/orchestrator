@@ -270,3 +270,9 @@ type: gotcha · goal: T-0445 · provenance: repo
 - external tests-green on goal/T-0445 head d7b942a: FAIL test_run_claims_before_launch_so_concurrent_callers_launch_once and test_tick_autonomous_launches_at_most_one_decision_per_tick; the two alone, the module alone and a second full run were all green; the merge queue's gate on the same sha was green
 - treat as flaky under full-suite timing (thread or shared-state leak from an earlier module, same family as the tests.test_cli autostart leak); rerun once before writing any fix round; candidate for the H7 flaky rerun list
 outcome: no fix round; if it recurs twice more, spec an isolation fix in tests/test_planner_runs.py setUp
+
+## 2026-09-20 Fix rounds on the Phase F daemon can land on different branches: one fix round commits on its own task branch, the next may commit on the parent branch
+type: gotcha · goal: T-0445 · tasks: T-0463,T-0473,T-0475,T-0476 · provenance: repo
+- T-0473 committed 62d26f1 on its own branch (cut from the parent); T-0475 committed e5e1689 directly on the parent branch and left its own worktree at the stale base 9e4257e, so the second fix lacked the first
+- compare the parent and fix branch heads after every fix round; when they diverge, spec one combine task that cherry-picks the other commit before any merge
+outcome: T-0476 combines both; the merge target is the combined branch
