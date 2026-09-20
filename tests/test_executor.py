@@ -32,6 +32,74 @@ class Executor(unittest.TestCase):
                                     '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}'])
         self.assertEqual((ok["message"], ok["usage"]["input_tokens"], ok["error"]), ("done", 10, None))
 
+    def test_resume_argv_has_no_C_flag_and_uses_cwd(self):
+        access = ["-s", "workspace-write"]
+        self.assertEqual(executor.argv_for("resume", ["thread-1", "fix it"], TMP, access),
+                         ["codex", "exec", "resume", "thread-1", "fix it", "--json",
+                          "--config", 'sandbox_mode="workspace-write"'])
+        self.assertNotIn("-C", executor.argv_for("resume", ["thread-1", "fix it"], TMP, access))
+
+    def test_resume_argv_translates_sandbox_to_config(self):
+        cmd = executor.argv_for("resume", ["thread-1", "fix it"], TMP, ["-s", "workspace-write"])
+        self.assertIn("--config", cmd)
+        self.assertIn('sandbox_mode="workspace-write"', cmd)
+        self.assertNotIn("-s", cmd)
+        self.assertNotIn("--sandbox", cmd)
+
+    def test_resume_argv_keeps_bypass_flag(self):
+        access = ["--dangerously-bypass-approvals-and-sandbox"]
+        cmd = executor.argv_for("resume", ["thread-1", "fix it"], TMP, access)
+        self.assertIn(access[0], cmd)
+        self.assertNotIn("-s", cmd)
+        self.assertNotIn("--sandbox", cmd)
+
+    def test_exec_argv_unchanged(self):
+        access = ["-s", "workspace-write"]
+        args = ["-m", "gpt-6-astra", "do it"]
+        self.assertEqual(executor.argv_for("exec", args, TMP, access),
+                         ["codex", "exec", *args, "--json", "-C", str(TMP), *access])
+
+    def test_usage_error_does_not_count_round(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(title="argv-error")
+        bus.update(tid, codex_thread="thread-1", rounds=0, executor="astra")
+        seen = {}
+        orig = executor.subprocess.run
+
+        def usage_error(cmd, **kwargs):
+            seen.update(cmd=cmd, kwargs=kwargs)
+            return type("Proc", (), {"stdout": "", "stderr": "error: unexpected argument '-C' found\nUsage: codex exec resume",
+                                      "returncode": 2})()
+
+        executor.subprocess.run = usage_error
+        self.addCleanup(lambda: setattr(executor.subprocess, "run", orig))
+        result = executor.reply(tid, "fix it")
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["reason"].startswith("codex argv error:"))
+        self.assertEqual(bus.get(tid).get("rounds"), 0)
+        self.assertEqual(seen["kwargs"]["cwd"], str(TMP))
+        self.assertNotIn("-C", seen["cmd"])
+
+    def test_argv_error_logs_run_and_hint(self):
+        P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task(title="argv-error-visible")
+        bus.update(tid, codex_thread="thread-1", rounds=0, executor="astra")
+        orig = executor.subprocess.run
+
+        def argv_error(cmd, **kwargs):
+            return type("Proc", (), {"stdout": "", "stderr": "error: unexpected argument '-s' found\nUsage: codex exec resume",
+                                      "returncode": 2})()
+
+        executor.subprocess.run = argv_error
+        self.addCleanup(lambda: setattr(executor.subprocess, "run", orig))
+        result = executor.reply(tid, "fix it")
+        reason = result["reason"]
+        task = bus.get(tid)
+        line = json.loads((bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((line["task"], line["outcome"], line["reason"]), (tid, "failed", reason))
+        self.assertEqual(task["resume_hint"], {"argv_error": reason[:300]})
+        self.assertEqual(task.get("rounds"), 0)
+
     def test_reply_requires_thread_and_caps_rounds(self):
         t = bus.create_task("exec", "s", ["a"], ["x.py"], role="execute")
         self.assertEqual(executor.reply(t["id"], "d")["status"], "failed")

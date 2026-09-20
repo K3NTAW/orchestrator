@@ -4,6 +4,8 @@ real network. Covers the transcript reader's error correlation, gate_mode="log" 
 blocking a confident redundant call and allowing a needed one, the protected-call allowlist, a missing
 transcript, and the shell hook exiting 0 for a Planner session (no task id)."""
 import contextlib, io, json, sys, unittest
+import os, subprocess, tempfile
+from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_jev_gate.py` doesn't add this dir itself
 from _harness import TMP, hook
@@ -90,6 +92,50 @@ class JevGateTests(unittest.TestCase):
 
     # -- gate_mode ----------------------------------------------------------
 
+    def test_block_without_confidence_uses_strict_thresholds(self):
+        jev_gate._cfg = lambda: BLOCK_CFG
+        for key, probability, blocked in (("redundant", 0.92, True), ("redundant", 0.919, False),
+                                           ("needed", 0.08, True), ("needed", 0.081, False)):
+            with self.subTest(key=key, probability=probability):
+                value = {key: {"p": probability, "confidence": None}}
+                self.assertEqual(jev_gate.decide(value, "block"), (blocked, key if blocked else None))
+                self.assertEqual(jev_gate.decide(value, "log"), (False, None))
+        jev_gate._cfg = lambda: {**BLOCK_CFG, "block_redundant_p_noconf": 0.99,
+                                "block_needed_p_noconf": 0.01}
+        self.assertEqual(jev_gate.decide({"redundant": {"p": 0.95}}, "block"), (False, None))
+        self.assertEqual(jev_gate.decide({"needed": {"p": 0.05}}, "block"), (False, None))
+
+    def test_block_with_confidence_uses_default_thresholds(self):
+        jev_gate._cfg = lambda: BLOCK_CFG
+        for key, probability, blocked in (("redundant", 0.85, True), ("redundant", 0.849, False),
+                                           ("needed", 0.15, True), ("needed", 0.151, False)):
+            with self.subTest(key=key, probability=probability):
+                value = {key: {"p": probability, "confidence": 0.6}}
+                self.assertEqual(jev_gate.decide(value, "block"), (blocked, key if blocked else None))
+                value[key]["confidence"] = 0.59
+                self.assertEqual(jev_gate.decide(value, "block"), (False, None))
+        jev_gate._cfg = lambda: {**BLOCK_CFG, "block_redundant_p": 0.99, "block_needed_p": 0.01}
+        for key, probability in (("redundant", 0.95), ("needed", 0.05)):
+            self.assertEqual(jev_gate.decide({key: {"p": probability, "confidence": 0.9}}, "block"),
+                             (False, None))
+
+    def test_rule_logged(self):
+        jev_gate._cfg = lambda: LOG_CFG
+        for confidence, probability, rule in ((None, 0.92, "noconf"), (0.6, 0.85, "conf"),
+                                               (None, 0.9, "none"), (0.59, 0.99, "none")):
+            self._clean_log()
+            response = answers(redundant=(probability, confidence))
+            if confidence is None:
+                del response["answers"]["redundant"]["confidence"]
+            jev.ask = lambda state, questions: response
+            self.assertEqual(self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}},
+                                       self._task()["id"]), 0)
+            self.assertEqual(self._log_lines()[0]["rule"], rule)
+        self._clean_log()
+        jev.ask = lambda state, questions: None
+        self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}}, self._task()["id"])
+        self.assertEqual(self._log_lines()[0]["rule"], "none")
+
     def test_log_mode_never_blocks(self):
         jev_gate._cfg = lambda: LOG_CFG
         jev.ask = lambda state, questions: answers(needed=(0.05, 0.9), redundant=(0.95, 0.9))
@@ -165,6 +211,89 @@ class JevGateTests(unittest.TestCase):
         out = hook("jev-gate.sh", {"tool_name": "Read", "tool_input": {"file_path": "/x.py"}},
                     cwd=TMP, env={"ORCH_TASK_ID": ""})
         self.assertEqual(out.returncode, 0)
+
+    def test_disabled_exits_before_network_imports(self):
+        code = '''
+import builtins, io, os
+original = builtins.__import__
+attempted = []
+def sentinel(name, *args, **kwargs):
+    if name.startswith("urllib") or name == "jev" or "jev" in (args[2] if len(args) > 2 and args[2] else ()):
+        attempted.append(name)
+        raise AssertionError("network import before gate check")
+    return original(name, *args, **kwargs)
+builtins.__import__ = sentinel
+from orchestrator import jev_gate
+jev_gate.P.config = lambda: {"jev": {"enabled": False}}
+os.environ["ORCH_TASK_ID"] = "T-test"
+assert jev_gate.main([]) == 0
+assert attempted == []
+assert not any(k.startswith("urllib") for k in jev_gate.sys.modules)
+jev_gate._cfg.cache_clear()
+jev_gate.P.config = lambda: {"jev": {"enabled": True, "gate_roles": ["execute"]}}
+jev_gate.load_task = lambda _: {"role": "review"}
+jev_gate.read_transcript = lambda _: (_ for _ in ()).throw(AssertionError("transcript read"))
+assert jev_gate.run({"tool_name": "Read", "tool_input": {"file_path": "/x"}}) == 0
+assert attempted == []
+'''
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_hook_single_invocation(self):
+        payload = {"tool_name": "Read", "tool_input": {"file_path": "/x.py"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".orchestrator").mkdir()
+            bin_dir = root / ".venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            counter, received = root / "counter", root / "received"
+            spy = '#!/bin/bash\nprintf "%s\\n" "$*" >> "$COUNTER"\ncat > "$RECEIVED"\nexit "${SPY_RC:-0}"\n'
+            for executable in (bin_dir / "python", bin_dir / "uv"):
+                executable.write_text(spy)
+                executable.chmod(0o755)
+            env = {"ORCH_ROOT": str(root), "ORCH_TASK_ID": "T-test", "COUNTER": str(counter),
+                   "RECEIVED": str(received), "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
+            for fallback in (False, True):
+                if fallback:
+                    (bin_dir / "python").unlink()
+                for rc in (0, 2, 1):
+                    counter.unlink(missing_ok=True)
+                    out = hook("jev-gate.sh", payload, env={**env, "SPY_RC": str(rc)})
+                    self.assertEqual(out.returncode, 2 if rc == 2 else 0)
+                    self.assertEqual(counter.read_text().splitlines(),
+                                     [("run python " if fallback else "") + "-m orchestrator.jev_gate"])
+                    self.assertEqual(json.loads(received.read_text()), payload)
+
+    def test_startup_ms_logged(self):
+        jev_gate._cfg = lambda: LOG_CFG
+        jev.ask = lambda state, questions: answers()
+        with patch.dict(os.environ, {"ORCH_JEV_STARTED_AT": str(jev_gate.time.time() - 0.1)}):
+            self.assertEqual(self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}},
+                                       self._task()["id"]), 0)
+        entry = self._log_lines()[0]
+        self.assertGreaterEqual(entry["startup_ms"], 100)
+        self.assertGreaterEqual(entry["latency_ms"], 0)
+
+    def test_skip_list(self):
+        self.assertEqual(jev_gate.SKIP_RULES, ("empty_input", "bare_glob"))
+        jev_gate._cfg = lambda: LOG_CFG
+        with patch.object(jev, "ask", side_effect=AssertionError("unexpected scoring")), \
+                patch.object(jev_gate, "read_transcript", side_effect=AssertionError("unexpected transcript")):
+            for name, value in (("Read", {}), ("Bash", None), ("Glob", {"pattern": "**/*.py"})):
+                self.assertEqual(self._run({"tool_name": name, "tool_input": value}, "T-test"), 0)
+        self.assertEqual(self._log_lines(), [])
+        self.assertFalse(jev_gate.should_skip("Glob", {"pattern": "*.py", "path": "/src"}))
+        self.assertFalse(jev_gate.should_skip("Grep", {"pattern": "TODO"}))
+
+    def test_config_cached(self):
+        self._orig_cfg.cache_clear()
+        try:
+            with patch.object(jev_gate.P, "config", return_value={"jev": LOG_CFG}) as config:
+                self.assertEqual(jev_gate._cfg(), LOG_CFG)
+                self.assertEqual(jev_gate._cfg(), LOG_CFG)
+                config.assert_called_once_with()
+        finally:
+            self._orig_cfg.cache_clear()
 
 
 if __name__ == "__main__":

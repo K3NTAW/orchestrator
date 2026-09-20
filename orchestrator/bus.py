@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import contextlib, fcntl, json, sqlite3, subprocess, threading, time
+import atexit, contextlib, fcntl, json, sqlite3, subprocess, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -39,12 +39,39 @@ def locked():
             _held.depth = 0
 
 
+_connection = None
+_connection_path = None
+_connection_lock = threading.Lock()
+
+
+def _close_db():
+    global _connection, _connection_path
+    if _connection is not None:
+        _connection.close()
+        _connection = None
+        _connection_path = None
+
+
+atexit.register(_close_db)
+
+
 def db():
-    STATE.mkdir(exist_ok=True); TASKS.mkdir(exist_ok=True)
-    c = sqlite3.connect(STATE / "bus.sqlite", isolation_level=None)
-    c.execute("create table if not exists tasks(id text primary key, status, role, tier, assigned_to, updated real)")
-    c.execute("create table if not exists events(seq integer primary key autoincrement, task_id, ts real, kind, data)")
-    return c
+    global _connection, _connection_path
+    with _connection_lock:
+        path = STATE / "bus.sqlite"
+        if _connection is None or _connection_path != path:
+            _close_db()
+            STATE.mkdir(exist_ok=True); TASKS.mkdir(exist_ok=True)
+            # The daemon and its worker threads share the cache; writes use locked().
+            c = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+            try:
+                c.execute("create table if not exists tasks(id text primary key, status, role, tier, assigned_to, updated real)")
+                c.execute("create table if not exists events(seq integer primary key autoincrement, task_id, ts real, kind, data)")
+            except BaseException:
+                c.close()
+                raise
+            _connection, _connection_path = c, path
+        return _connection
 
 
 def _save(t):

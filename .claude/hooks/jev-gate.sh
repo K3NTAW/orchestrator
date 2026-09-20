@@ -8,12 +8,10 @@ set -u; . "$(dirname "$0")/_lib.sh"
 in=$(cat)
 task=$(task_id); [ -z "$task" ] && exit 0
 root=$(orch_root)
-enabled=$(cd "$root" && uv run python -m orchestrator.jev_gate --enabled 2>/dev/null)
-[ "$enabled" = "1" ] || exit 0
-
-tmp=$(mktemp); printf '%s' "$in" >"$tmp"
-out=$(cd "$root" && ORCH_TASK_ID="$task" perl -e 'alarm shift; exec @ARGV' 3 uv run python -m orchestrator.jev_gate <"$tmp" 2>&1)
+python=(uv run python)
+[ -x "$root/.venv/bin/python" ] && python=("$root/.venv/bin/python")
+out=$(printf '%s' "$in" | (cd "$root" && ORCH_TASK_ID="$task" perl -MTime::HiRes=time -e \
+  '$ENV{ORCH_JEV_STARTED_AT}=time; alarm shift; exec @ARGV' 3 "${python[@]}" -m orchestrator.jev_gate) 2>&1)
 rc=$?
-rm -f "$tmp"
 [ "$rc" -eq 2 ] && { echo "$out" >&2; exit 2; }
 exit 0

@@ -27,6 +27,9 @@ class Daemon(unittest.TestCase):
         P.PERSIST.unlink(missing_ok=True)                 # a cooldown another test persisted would zero free_slots
         self.addCleanup(P.PERSIST.unlink, True)
         self.started, self.workers, self.merged = [], [], []
+        # Keep daemon work inside the test that dispatched it.  A real daemon thread can outlive cleanup,
+        # after which the restored executor mock and the next test's bus sandbox make it post into the wrong bus.
+        self.swap(daemon, "spawn_async", lambda fn, *args: fn(*args))
         self.swap(executor, "start", lambda tid, prompt: self.started.append(tid))
         self.swap(spawn, "run_worker", lambda tid: self.workers.append(tid))
         self.swap(merge, "merge", lambda tid, target=None: (self.merged.append(tid),
@@ -685,6 +688,52 @@ class Daemon(unittest.TestCase):
         self.assertTrue(bus.get(ok)["pipeline"].get("merged_at"))
         self.assertFalse((bus.get(r_ok).get("pipeline") or {}).get("merged_at"))
 
+    def test_merge_tests_red_holds_task(self):
+        t = self.gated_execute("merge tests red")
+        review = self.task("review merge tests red", complexity=5, role="review", inputs=[t])
+        bus.update(review, status="done", review_verdict="approve")
+
+        def tests_red(tid, target=None):
+            bus.update(tid, status="failed", reason="rebased suite red",
+                       resume_hint={"failures": "flaky thread test"})
+            return {"status": "tests_red", "reason": "rebased suite red"}
+
+        self.swap(merge, "merge", tests_red)
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "merge tests_red"))
+        self.assertEqual(held["reason"], "rebased suite red")
+        self.assertEqual(held["resume_hint"], {"failures": "flaky thread test"})
+        self.assertNotIn("merged_at", held["pipeline"])
+
+    def test_merge_conflict_holds_and_keeps_merged_at(self):
+        t = self.gated_execute("merge conflict")
+        review = self.task("review merge conflict", complexity=5, role="review", inputs=[t])
+        bus.update(review, status="done", review_verdict="approve")
+
+        def conflict(tid, target=None):
+            bus.update(tid, status="failed", reason="merge conflict",
+                       resume_hint={"files": ["orchestrator/daemon.py"]})
+            return {"status": "conflict", "reason": "merge conflict"}
+
+        self.swap(merge, "merge", conflict)
+        daemon.tick()
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "merge conflict"))
+        self.assertEqual(held["reason"], "merge conflict")
+        self.assertEqual(held["resume_hint"], {"files": ["orchestrator/daemon.py"]})
+        self.assertTrue(held["pipeline"].get("merged_at"))
+
+    def test_merge_ok_unchanged(self):
+        t = self.gated_execute("merge ok")
+        review = self.task("review merge ok", complexity=5, role="review", inputs=[t])
+        bus.update(review, status="done", review_verdict="approve")
+        daemon.tick()
+        merged = bus.get(t)
+        self.assertEqual(merged["status"], "done")
+        self.assertNotIn("hold_reason", merged)
+        self.assertTrue(merged["pipeline"].get("merged_at"))
+
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")
         r_ok = self.task("review ok", complexity=5, role="review", inputs=[ok])
@@ -803,6 +852,13 @@ class Daemon(unittest.TestCase):
 
     def test_dispatch_does_not_block(self):
         a = self.task("A")
+        threads = []
+        def async_for_test(fn, *args):
+            thread = threading.Thread(target=fn, args=args, daemon=True)
+            threads.append(thread)
+            thread.start()
+        self.swap(daemon, "spawn_async", async_for_test)
+        self.addCleanup(lambda: [thread.join() for thread in threads])
         self.swap(executor, "start", lambda tid, prompt: (time.sleep(2), self.started.append(tid)))
         t0 = time.time()
         daemon.tick()
@@ -1302,3 +1358,76 @@ class DirtyScopePaths(unittest.TestCase):
                              ["src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
             self.assertEqual(daemon._dirty_scope_paths(root, ["*"]),
                              ["outside.py", "src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
+
+
+class DispatchWorker(unittest.TestCase):
+    def setUp(self):
+        from contextlib import nullcontext
+        from unittest.mock import patch
+
+        self.task_id = "T-dispatch"
+        self.state = {"id": self.task_id, "status": "running", "pid": None,
+                      "executor": "astra", "pipeline": {"dispatched_at": 123}}
+
+        def update(task_id, **fields):
+            self.assertEqual(task_id, self.task_id)
+            self.state.update(fields)
+            return dict(self.state)
+
+        for target, kwargs in (
+            (bus, {"get": lambda task_id: dict(self.state), "update": update,
+                   "locked": nullcontext}),
+        ):
+            p = patch.multiple(target, **kwargs)
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch.object(daemon.executor, "start")
+        self.start = p.start()
+        self.addCleanup(p.stop)
+
+    def test_dispatch_worker_posts_codex_done(self):
+        usage = {"input_tokens": 100, "output_tokens": 20}
+        self.start.return_value = {"status": "done", "message": "x" * 6000,
+                                   "thread": "thread-1", "usage": usage}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.start.assert_called_once_with(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "done")
+        result = self.state["result"]
+        self.assertEqual(result["summary"], "x" * 3000)
+        self.assertEqual(result["executed_by"], "codex:astra")
+        self.assertEqual(result["thread"], "thread-1")
+        self.assertEqual(result["usage"], usage)
+        self.assertEqual(self.state["pipeline"], {"dispatched_at": 123})
+
+    def test_dispatch_worker_posts_codex_failed(self):
+        self.start.return_value = {"status": "failed", "reason": "executor timeout"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "failed")
+        self.assertEqual(self.state["result"]["reason"], "executor timeout")
+
+    def test_dispatch_worker_leaves_held(self):
+        def held(*args):
+            bus.update(self.task_id, status="held", hold_reason="quota exhausted",
+                       resume_hint={"thread": "thread-1"})
+            return {"status": "held", "reason": "quota exhausted"}
+        self.start.side_effect = held
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "held")
+        self.assertEqual(self.state["hold_reason"], "quota exhausted")
+        self.assertEqual(self.state["resume_hint"], {"thread": "thread-1"})
+        self.assertNotIn("result", self.state)
+        self.assertEqual(self.state["pipeline"], {"dispatched_at": 123})
+
+    def test_dispatch_worker_exception_marks_failed(self):
+        self.start.side_effect = RuntimeError("launch failed")
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "failed")
+        self.assertEqual(self.state["result"]["reason"], "dispatch error: launch failed")
+        self.assertEqual(self.state["pipeline"],
+                         {"dispatched_at": 123, "dispatch_error": "launch failed"})
+
+    def test_dispatch_worker_leaves_claude_fallback(self):
+        self.start.return_value = {"status": "fallback", "tier": "sonnet"}
+        before = dict(self.state)
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state, before)

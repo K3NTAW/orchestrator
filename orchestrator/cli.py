@@ -31,6 +31,26 @@ def cost(by):
     return dict(agg)
 
 
+def _scorecard_measurement_totals(card, by):
+    totals = {}
+    for field in ("calls", "blocked", "turns"):
+        values = [r[field] for r in card.values() if r[field] != "-"]
+        totals[field] = sum(values) if values else "-"
+    task_ids = set(card)
+    if by == "goal":
+        task_ids = set()
+        for path in (scorecard.STATE / "tasks").glob("T-*.json"):
+            task = json.loads(path.read_text())
+            if task.get("parent") in card:
+                task_ids.add(task["id"])
+        task_ids.intersection_update(scorecard.by_task(root=scorecard.STATE))
+    gate = scorecard._gate_stats(scorecard.STATE) or {}
+    counts = [r for tid, r in gate.items() if tid in task_ids]
+    calls = sum(r["calls"] for r in counts)
+    totals["waste_pct"] = round(sum(r["waste"] for r in counts) / calls * 100, 1) if calls else "-"
+    return totals
+
+
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator"); sub = ap.add_subparsers(dest="cmd", required=True)
     st = sub.add_parser("status"); st.add_argument("--plain", action="store_true")
@@ -146,28 +166,33 @@ def main():
             if a.json:
                 print(json.dumps(card, indent=1))
             else:
-                print("task\trole\ttier\tusd\ttokens\twall_s")
+                print("task\trole\ttier\tusd\ttokens\twall_s\tcalls\twaste_pct\tblocked\tturns")
                 total_usd = total_tokens = total_wall = 0.0
                 for tid, r in sorted(card.items(), key=lambda kv: kv[1]["usd"], reverse=True):
                     print(f"{tid}\t{r['role'] or '-'}\t{r['tier'] or '-'}\t{round(r['usd'], 2)}\t"
-                          f"{r['tokens']}\t{round(r['wall_s'])}")
+                          f"{r['tokens']}\t{round(r['wall_s'])}\t{r['calls']}\t{r['waste_pct']}\t"
+                          f"{r['blocked']}\t{r['turns']}")
                     total_usd += r["usd"]; total_tokens += r["tokens"]; total_wall += r["wall_s"]
-                print(f"total\t-\t-\t{round(total_usd, 2)}\t{total_tokens}\t{round(total_wall)}")
+                totals = _scorecard_measurement_totals(card, "task")
+                print(f"total\t-\t-\t{round(total_usd, 2)}\t{total_tokens}\t{round(total_wall)}\t"
+                      f"{totals['calls']}\t{totals['waste_pct']}\t{totals['blocked']}\t{totals['turns']}")
         elif a.by == "goal":
             card = scorecard.by_goal()
             if a.json:
                 print(json.dumps(card, indent=1))
             else:
-                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs")
+                print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\tcalls\twaste_pct\tturns")
                 total_usd = 0.0
                 for gid, r in sorted(card.items(), key=lambda kv: kv[1]["total_usd"], reverse=True):
                     pct = scorecard.goal_percentages(r)
                     runs_cell = scorecard.format_planner_runs_cell(r)
                     print(f"{gid}\t{round(r['total_usd'], 2)}\t{round(pct['execute'], 1)}%\t"
                           f"{round(pct['review'], 1)}%\t{round(pct['spec_review'], 1)}%\t{round(pct['scout'], 1)}%\t"
-                          f"{round(pct['other'], 1)}%\t{runs_cell}")
+                          f"{round(pct['other'], 1)}%\t{runs_cell}\t{r['calls']}\t{r['waste_pct']}\t{r['turns']}")
                     total_usd += r["total_usd"]
-                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-")
+                totals = _scorecard_measurement_totals(card, "goal")
+                print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t"
+                      f"{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
                 print(scorecard.planner_footer())
     elif a.cmd == "planner-runs":
         from . import planner_runs

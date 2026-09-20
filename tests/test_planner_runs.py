@@ -75,6 +75,13 @@ class PlannerRunsBase(unittest.TestCase):
 
 
 class DecisionPoints(PlannerRunsBase):
+    def test_merge_hold_is_a_decision_point(self):
+        goal_id = self.goal("merge hold")
+        tid = self.execute_child(goal_id)
+        bus.update(tid, status="held", hold_reason="merge tests_red")
+        held_key = PR._held_key(bus.get(tid))
+        self.assertIn((goal_id, "held", held_key), list(PR.decision_points()))
+
     def test_decision_points_scouts_done_held_closable(self):
         g1 = self.goal("scouts")
         self.scout_child(g1, "done")
