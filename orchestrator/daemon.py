@@ -562,9 +562,12 @@ def dispatch(pool):
         if task.get("role") not in ("review", "spec_review"):
             continue
         pipeline = task.get("pipeline") or {}
-        if pipeline or pipeline.get("respawned_at"):
-            continue
         events = task.get("events") or []
+        requeued_at = max((event.get("ts", 0) for event in events
+                           if event.get("reason") == "process died; requeued"),
+                          default=task.get("claimed_at") or 0)
+        if pipeline.get("respawned_at", 0) > requeued_at:
+            continue
         died = any(event.get("reason") == "process died; requeued" for event in events)
         bus_events = bus.events(limit=10000, task_ids=[task["id"]])
         created_at = min((event["ts"] for event in bus_events), default=now)
@@ -573,7 +576,11 @@ def dispatch(pool):
         with bus.locked():
             current = bus.get(task["id"])
             current_pipeline = dict(current.get("pipeline") or {})
-            if current_pipeline:
+            current_events = current.get("events") or []
+            current_requeued_at = max((event.get("ts", 0) for event in current_events
+                                       if event.get("reason") == "process died; requeued"),
+                                      default=current.get("claimed_at") or 0)
+            if current_pipeline.get("respawned_at", 0) > current_requeued_at:
                 continue
             current_pipeline["respawned_at"] = now
             bus.update(task["id"], pipeline=current_pipeline)

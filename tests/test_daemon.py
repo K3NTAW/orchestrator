@@ -33,6 +33,27 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.workers, [review])
         self.assertEqual(bus.get(review)["pipeline"]["respawned_at"], stamp)
 
+    def test_respawn_ignores_unrelated_pipeline_keys(self):
+        review = self.task("dead review", role="review")
+        bus.claim(review, "claude:A")
+        daemon.reconcile_dead(bus.get(review))
+        bus.update(review, pipeline={"spec_review_error": "leftover"})
+
+        pool = P.Pool()
+        daemon.dispatch(pool)
+        first = bus.get(review)["pipeline"]["respawned_at"]
+        self.assertEqual(self.workers, [review])
+
+        daemon.dispatch(pool)
+        self.assertEqual(self.workers, [review])
+        self.assertEqual(bus.get(review)["pipeline"]["respawned_at"], first)
+
+        bus.claim(review, "claude:A")
+        daemon.reconcile_dead(bus.get(review))
+        daemon.dispatch(pool)
+        self.assertEqual(self.workers, [review, review])
+        self.assertGreater(bus.get(review)["pipeline"]["respawned_at"], first)
+
     def test_dispatch_respawns_unclaimed_spec_review_after_delay(self):
         now = time.time()
         self.swap(daemon.time, "time", lambda: now - 31)
