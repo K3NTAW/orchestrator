@@ -416,6 +416,20 @@ class Daemon(unittest.TestCase):
         want = pool.cfg["limits"]["max_parallel_claude_workers"] - 2
         self.assertEqual(daemon.free_slots(pool), want)
 
+    def test_respawn_counts_claude_fallback_executors(self):
+        review = self.task("dead review", role="review")
+        bus.claim(review, "claude:A")
+        daemon.reconcile_dead(bus.get(review))
+        fallback = self.task("running Claude fallback", complexity=3)
+        bus.update(fallback, status="running", assigned_to="codex:astra", executor="claude:sonnet")
+
+        pool = P.Pool()
+        pool.cfg["limits"]["max_parallel_claude_workers"] = 1
+        daemon.dispatch(pool)
+
+        self.assertEqual(self.workers, [])
+        self.assertFalse(bus.get(review).get("pipeline"))
+
     def test_fallback_skips_complexity_without_tier(self):
         pool = P.Pool()
         pool.cooldown_executor("astra", 600)

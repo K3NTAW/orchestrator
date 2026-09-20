@@ -451,6 +451,20 @@ def _fallback_mode(pool):
     return not _codex_available(pool) and pool.cfg.get("codex", {}).get("on_exhausted", "hold") == "fallback_claude"
 
 
+def running_claude_workers(pool):
+    """Count claimed Claude workers, including fallback executes marked on executor."""
+    return sum(1 for task in bus.read(status="running")
+               if any((task.get(field) or "").startswith("claude:")
+                      for field in ("assigned_to", "executor")))
+
+
+def inflight_claude_dispatches():
+    """Count execute dispatches whose worker has not claimed its task yet."""
+    return sum(1 for task in bus.read(status="queued", role="execute")
+               if (task.get("pipeline") or {}).get("dispatched_at")
+               and not (task.get("pipeline") or {}).get("gated_at"))
+
+
 def free_slots(pool):
     """How many execute dispatches this tick may make: the executor pool's idle parallelism. Bounds tick()'s work
     so a queue of forty ready tasks does not fork forty subprocesses at once.
@@ -465,14 +479,8 @@ def free_slots(pool):
                       if ex.enabled and "execute" in ex.roles and not ex.cooling())
     if not _fallback_mode(pool):
         return codex_slots
-    running_claude = sum(1 for t in bus.read(status="running")
-                         if (t.get("assigned_to") or "").startswith("claude:")
-                         or (t.get("executor") or "").startswith("claude:"))
-    inflight_dispatches = sum(1 for t in bus.read(status="queued", role="execute")
-                              if (t.get("pipeline") or {}).get("dispatched_at")
-                              and not (t.get("pipeline") or {}).get("gated_at"))
     max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
-    return max(0, max_workers - running_claude - inflight_dispatches)
+    return max(0, max_workers - running_claude_workers(pool) - inflight_claude_dispatches())
 
 
 def spawn_async(fn, *args):
@@ -549,9 +557,7 @@ def dispatch(pool):
     # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread
     # that vanished before bus.claim.  The per-requeue stamp prevents every daemon tick spawning another copy.
     max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
-    running = sum(1 for task in bus.read(status="running")
-                  if (task.get("assigned_to") or "").startswith("claude:"))
-    review_slots = max(0, max_workers - running)
+    review_slots = max(0, max_workers - running_claude_workers(pool) - inflight_claude_dispatches())
     respawn_after = pool.cfg.get("daemon", {}).get("respawn_after_s", 120)
     now = time.time()
     for task in bus.read(status="queued"):
