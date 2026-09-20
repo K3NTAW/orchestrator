@@ -210,18 +210,20 @@ class Pool:
         limit = float(self.cfg.get("limits", {}).get("max_budget_usd", {}).get(role, 0))
         rows = []
         for task in bus.read(role=role)[-20:]:
-            usage = (task.get("result") or {}).get("usage") or {}
+            result = task.get("result") or {}
+            usage = result.get("usage") or {}
             tokens = self._usage_tokens(usage)
-            if tokens:
-                rows.append(tokens)
+            if usage:
+                usd = float(result.get("total_cost_usd", usage.get("usd", usage.get("total_cost_usd", 0))) or 0)
+                rows.append((tokens, usd))
+        if len(rows) >= 5:
+            return int(statistics.median(row[0] for row in rows)), float(statistics.median(row[1] for row in rows))
         source = next((a for a in self.cfg.get("claude_accounts", []) if a.get("id") == account_id), None)
         if source is None:
             source = next((e for e in self.cfg.get("executors", []) if e.get("id") == account_id), {})
         ratio = (source or {}).get("usd_per_token") or (source or {}).get("usd-per-token")
         if ratio:
             return int(limit / float(ratio)), limit
-        if rows:
-            return int(statistics.median(rows)), limit
         return 0, limit
 
     @staticmethod
@@ -270,7 +272,7 @@ class Pool:
                               if not daily or r.get("account") == account_id)
             if daily and day_used + live_tokens + est_tokens > daily:
                 return None
-            role_cap = self.cfg.get("limits", {}).get("max_budget_usd", {}).get(role)
+            role_cap = self.cfg.get("limits", {}).get("goal_budget_usd", {}).get(role)
             if role_cap is None and role == "review":
                 role_cap = self.cfg.get("review", {}).get("budget_usd")
             history = state.setdefault("reservation_history", {"tokens": 0, "usd": 0.0, "roles": {}, "goals": {}})

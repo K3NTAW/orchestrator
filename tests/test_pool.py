@@ -135,14 +135,23 @@ class Reservations(unittest.TestCase):
 
     def test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap(self):
         self.cfg["claude_accounts"][0]["daily_budget_tokens"] = 1000
-        self.cfg["limits"]["max_budget_usd"]["scout"] = 1.3
+        self.cfg["limits"]["goal_budget_usd"] = {"scout": 1.3}
         first, second, third = self.task(), self.task(), self.task()
         self.assertIsNotNone(self.p.reserve("run-1", "A", "scout", first))
         self.p.release("run-1", {"usd": 0.2})
         self.assertIsNotNone(self.p.reserve("run-2", "A", "scout", second))
         self.assertIsNone(P.Pool(self.cfg).reserve("run-3", "A", "scout", third))
-        self.cfg["limits"]["max_budget_usd"]["scout"] = 1.5
+        self.cfg["limits"]["goal_budget_usd"]["scout"] = 1.5
         self.assertIsNotNone(P.Pool(self.cfg).reserve("run-3", "A", "scout", third))
+
+    def test_two_parallel_execute_dispatches_allowed_without_goal_budget(self):
+        first = P.bus.create_task("first", "spec", ["works"], ["x.py"],
+                                  role="execute", parent="G-execute")
+        second = P.bus.create_task("second", "spec", ["works"], ["x.py"],
+                                   role="execute", parent="G-execute")
+        self.cfg["limits"].pop("goal_budget_usd", None)
+        self.assertIsNotNone(self.p.reserve("run-1", "astra", "execute", first))
+        self.assertIsNotNone(P.Pool(self.cfg).reserve("run-2", "astra", "execute", second))
 
 
 class Executors(unittest.TestCase):
