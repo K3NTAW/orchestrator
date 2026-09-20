@@ -11,16 +11,39 @@ CMEM = Path(os.environ.get("CLAUDE_MEM_DB") or Path.home() / ".claude-mem" / "cl
 LESSONS = Path(os.environ.get("GRAPHIFY_OUT") or ROOT / "graphify-out") / "reflections" / "LESSONS.md"
 HEAD = re.compile(r"^## (?:(\d{4}-\d{2}-\d{2}) )?(.+)$")
 MAX_GET_CHARS = 6000  # same cap as a bus result; one `get` never exceeds it
+DEFAULT_BUDGET_HITS = 8
+DEFAULT_MIN_SCORE = 0.5
+DEFAULT_BUDGET_CHARS = 6000
 
 
-def configured_hits(root=None):
-    state_root = Path(root) if root is not None else ROOT
+def resolve_root(root=None):
+    return Path(root) if root is not None else ROOT
+
+
+def configured_hits(root, setting="budget_hits"):
+    """Read recall settings from one root's pool, retaining the legacy hits key."""
+    defaults = {
+        "budget_hits": DEFAULT_BUDGET_HITS,
+        "min_score": DEFAULT_MIN_SCORE,
+        "budget_chars": DEFAULT_BUDGET_CHARS,
+    }
     try:
         import tomllib
-        with (state_root / ".orchestrator" / "pool.toml").open("rb") as f:
-            return int(tomllib.load(f).get("limits", {}).get("recall_hits", 30))
+        with (Path(root) / ".orchestrator" / "pool.toml").open("rb") as f:
+            pool = tomllib.load(f)
     except (OSError, ValueError, TypeError):
-        return 30
+        return defaults[setting]
+    memory = pool.get("memory")
+    if isinstance(memory, dict):
+        value = memory.get(setting, defaults[setting])
+    elif setting == "budget_hits":
+        value = pool.get("limits", {}).get("recall_hits", defaults[setting])
+    else:
+        value = defaults[setting]
+    try:
+        return int(value) if setting != "min_score" else float(value)
+    except (ValueError, TypeError):
+        return defaults[setting]
 
 
 def age(date):
@@ -71,9 +94,8 @@ def index_notes(terms, memory_dir=MEM):
     for f in sorted(memory_dir.glob("*.md")) if memory_dir.exists() else []:
         for ln, date, title, body in note_entries(f):
             s = score(title, terms) * 3 + score(body, terms)
-            if s or f.name == "index.md":
-                s = max(1, s)
-                out.append((s, f"mem:{f.name}:{ln}", date, "mem", title))
+            # Keep zero-score entries visible, but never manufacture relevance for them.
+            out.append((s, f"mem:{f.name}:{ln}", date, "mem", title))
     return out
 
 
@@ -141,13 +163,18 @@ def _layer_hits(layer, terms, *, task, limit, paths=None):
     raise ValueError(f"unknown recall layer: {layer}")
 
 
-def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), budget_hits=8,
-           min_score=0.5, budget_chars=6000, task=None):
+def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), budget_hits=None,
+           min_score=None, budget_chars=None, task=None):
     """Recall progressively, avoiding richer layers once the cheap answer is sufficient."""
     started = time.monotonic()
+    explicit_root = root is not None
+    root = resolve_root(root)
+    budget_hits = configured_hits(root) if budget_hits is None else budget_hits
+    min_score = configured_hits(root, "min_score") if min_score is None else min_score
+    budget_chars = configured_hits(root, "budget_chars") if budget_chars is None else budget_chars
     terms = terms_of(query)
     paths = None
-    if root is not None:
+    if explicit_root:
         state_root = Path(root)
         graph_root = Path(os.environ.get("GRAPHIFY_OUT") or state_root / "graphify-out")
         paths = {"memory": state_root / ".orchestrator" / "memory",
@@ -164,12 +191,14 @@ def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), 
             if chars + len(title) > budget_chars:
                 stopped_at = layer
                 break
-            hits.append({"score": score_, "id": id_, "date": date, "layer": provenance, "title": title})
+            hits.append({"score": score_, "id": id_, "date": date, "layer": provenance, "title": title,
+                         "relevant": score_ >= min_score})
             chars += len(title)
         sufficient = sum(hit["score"] >= min_score for hit in hits) >= budget_hits
         if sufficient or chars >= budget_chars or stopped_at:
             stopped_at = layer
             break
+    hits.sort(key=lambda hit: (not hit["relevant"], -hit["score"], hit["date"]))
     result = {"hits": hits, "layers_consulted": consulted, "stopped_at": stopped_at, "chars": chars}
     bus.log_run(task=task, role="memory", outcome="recalled", layers_consulted=consulted,
                 stopped_at=stopped_at, hits=hits, chars=chars, est_tokens=chars // 4,
@@ -178,7 +207,8 @@ def recall(query, *, root=None, layers=("notes", "bus", "claude-mem", "graph"), 
 
 
 def cmd_index(argv):
-    q, project, limit, goal_text, progressive = "", None, configured_hits(), os.environ.get("ORCH_GOAL_TEXT"), False
+    root = resolve_root()
+    q, project, limit, goal_text, progressive = "", None, configured_hits(root), os.environ.get("ORCH_GOAL_TEXT"), False
     i = 0
     while i < len(argv):
         if argv[i] == "--project": project = argv[i + 1]; i += 2
@@ -190,7 +220,7 @@ def cmd_index(argv):
     if not terms:
         sys.exit("usage: recall.sh index \"<terms>\" [--project NAME] [--limit N] [--goal \"<text>\"]")
     if progressive:
-        result = recall(q, budget_hits=limit, task=project)
+        result = recall(q, root=root, budget_hits=limit, task=project)
         hits = result["hits"]
         print(f"# {len(hits)} progressive hits for {terms} — layers_consulted: {', '.join(result['layers_consulted']) or '(none)'}")
         for hit in hits:

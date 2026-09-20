@@ -151,6 +151,42 @@ class MemorySkill(unittest.TestCase):
             self.assertEqual({hit["layer"] for hit in result["hits"]}, {"mem", "bus"})
             self.assertTrue(all("root-only" in hit["title"].lower() for hit in result["hits"]))
 
+    def test_recall_budget_from_root_pool_toml(self):
+        recall = self.load_recall()
+        calls = {"bus": 0}
+        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "one"),
+                                            (1, "mem:x:2", "", "mem", "two")]
+        recall.index_bus = lambda terms: calls.__setitem__("bus", calls["bus"] + 1) or []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pool = root / ".orchestrator" / "pool.toml"
+            pool.parent.mkdir()
+            pool.write_text("[memory]\nbudget_hits = 2\n")
+            first = recall.recall("one two", root=root, layers=("notes", "bus"))
+            self.assertEqual(first["layers_consulted"], ["notes"])
+            pool.write_text("[memory]\nbudget_hits = 10\n")
+            second = recall.recall("one two", root=root, layers=("notes", "bus"))
+        self.assertEqual(second["layers_consulted"], ["notes", "bus"])
+        self.assertEqual(calls["bus"], 1)
+
+    def test_recall_index_entries_without_relevance_do_not_satisfy_budget(self):
+        recall = self.load_recall()
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = Path(tmp) / "memory"
+            memory.mkdir()
+            unrelated = "\n".join(f"## 2026-01-01 unrelated entry {n}\nnoise" for n in range(20))
+            (memory / "index.md").write_text(unrelated + "\n## 2026-01-01 cache timeout gotcha\ncache timeout\n")
+            recall.MEM = memory
+            calls = {"bus": 0}
+            recall.index_bus = lambda terms: calls.__setitem__("bus", calls["bus"] + 1) or [
+                (1, "bus:T-1", "", "bus", "timeout workaround")]
+            result = recall.recall("cache timeout", layers=("notes", "bus"), budget_hits=2, min_score=1)
+        self.assertEqual(calls["bus"], 1)
+        self.assertEqual([hit["id"] for hit in result["hits"][:2]],
+                         [next(hit["id"] for hit in result["hits"] if hit["id"].startswith("mem:")), "bus:T-1"])
+        self.assertTrue(all(hit["relevant"] for hit in result["hits"][:2]))
+        self.assertTrue(all(not hit["relevant"] for hit in result["hits"][2:]))
+
 
 if __name__ == "__main__":
     unittest.main()
