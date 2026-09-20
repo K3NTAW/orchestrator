@@ -261,8 +261,9 @@ def main():
                       f"{totals['calls']}\t{totals['waste_pct']}\t{totals['blocked']}\t{totals['turns']}")
         elif a.by == "goal":
             card = scorecard.by_goal()
+            accepted_tokens = scorecard.tokens_per_accepted_goal(root=scorecard.STATE)
             if a.json:
-                print(json.dumps(card, indent=1))
+                print(json.dumps({**card, "tokens_per_accepted_goal": accepted_tokens}, indent=1))
             else:
                 print("goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs\ttotal_tokens\tuncached\tcache_read\toutput\tjev\tplanner\tcalls\twaste_pct\tturns")
                 total_usd = 0.0
@@ -278,10 +279,13 @@ def main():
                 totals = _scorecard_measurement_totals(card, "goal")
                 print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t"
                       f"{totals['calls']}\t{totals['waste_pct']}\t{totals['turns']}")
+                for gid, r in sorted(card.items()):
+                    print(f"tokens per task ({gid}): {scorecard.format_task_tokens_cell(r)}")
                 print(scorecard.planner_footer())
-                accepted_tokens = scorecard.tokens_per_accepted_goal(root=scorecard.STATE)
                 accepted_usd = scorecard.usd_per_accepted_goal(root=scorecard.STATE)
-                print(f"tokens per accepted goal: {round(accepted_tokens['tokens'])} over {accepted_tokens['count']} goals "
+                ratio = ("undefined (0 accepted goals)" if accepted_tokens['tokens'] is None
+                         else str(round(accepted_tokens['tokens'])))
+                print(f"tokens per accepted goal: {ratio} over {accepted_tokens['count']} goals "
                       f"(usd {round(accepted_usd['usd'], 2)})")
     elif a.cmd == "planner-runs":
         from . import planner_runs

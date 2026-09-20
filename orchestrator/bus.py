@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import atexit, contextlib, fcntl, json, sqlite3, subprocess, threading, time
+import atexit, contextlib, fcntl, hashlib, json, sqlite3, subprocess, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -229,9 +229,37 @@ def normalize_usage(provider, usage):
     }
 
 
-def log_run(**fields):
+_policy_cache = None
+_policy_lock = threading.Lock()
+
+
+def policy_version():
+    """Hash policy bytes once, invalidating when policy paths or mtimes change."""
+    global _policy_cache
+    with _policy_lock:
+        pool = STATE / "pool.toml"
+        paths = [pool, *sorted((STATE / "prompts").glob("*.md"))]
+        try:
+            signature = tuple((path, path.stat().st_mtime_ns) for path in paths)
+            if _policy_cache is None or _policy_cache[0] != signature:
+                digest = hashlib.sha256()
+                for path in paths:
+                    digest.update(path.read_bytes())
+                _policy_cache = signature, digest.hexdigest()[:12]
+        except OSError:
+            return None
+        return _policy_cache[1]
+
+
+def log_run(*, attempt=1, **fields):
     """Append one line per event to runs/<date>.jsonl: tokens, role, tier, account, executor, complexity, duration,
     outcome. Callers normalize cached tokens to cache_read_input_tokens so cli.cost sums one key across providers."""
+    fields["attempt"] = attempt
+    fields.setdefault("policy_version", policy_version())
+    for key in ("attempt", "decision_kind", "payload_key", "route", "route_reason",
+                "client_version", "policy_version"):
+        if fields.get(key) is None:
+            fields.pop(key, None)
     task_id = fields.get("task")
     if task_id:
         try:

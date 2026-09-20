@@ -38,6 +38,17 @@ when it exists but has none for that goal, else `<n> runs`. Planner *transcript*
 daily, so they aren't a per-goal column; the table ends with one footer line, either
 `planner (transcripts, today): <tokens> tokens across <n> accounts` (summed from `.orchestrator/planner_usage.json`)
 or `planner: -` when that file is missing.
+Run rows in `.orchestrator/runs/<date>.jsonl` carry task/goal, role, tier, account, provider,
+outcome and token buckets, plus the following accounting fields (unknown optional values are omitted):
+
+- `attempt` (default 1), `decision_kind`, `payload_key`, `route`, `route_reason`, `client_version`,
+  `policy_version` (first 12 SHA-256 hex characters of pool.toml followed by sorted prompt Markdown bytes;
+  cached until a policy file's mtime or the file set changes).
+
+Goal token statistics count tasks with run rows, summing retries per task; fewer than five tasks show
+`n=<count> range <min>-<max>` instead of a median. The goal JSON includes a `tokens_per_accepted_goal`
+summary whose `tokens` ratio is `null` when no goals are accepted; text displays `undefined (0 accepted goals)`.
+
 `uv run orchestrator handover [--reason TEXT]` writes/replaces the `## Auto-handover` section at the end of
 `.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
 calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.

@@ -7,6 +7,53 @@ from orchestrator import bus
 
 
 class Bus(unittest.TestCase):
+    def test_log_run_carries_decision_identity_and_versions(self):
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory, patch.object(bus, "RUNS", Path(directory)):
+            fields = dict(attempt=3, decision_kind="held", payload_key="hold:123", route="codex",
+                          route_reason="lowest_cost", client_version="2.1.273", policy_version="abc123")
+            bus.log_run(**fields)
+            bus.log_run(**dict.fromkeys(fields))
+            bus.log_run(policy_version=None)
+            rows = [json.loads(line) for line in next(Path(directory).glob("*.jsonl")).read_text().splitlines()]
+            for key, value in fields.items():
+                self.assertEqual(rows[0][key], value)
+                self.assertNotIn(key, rows[1])
+            self.assertEqual(rows[2]["attempt"], 1)
+
+    def test_policy_version_stable_until_prompt_or_pool_changes(self):
+        import hashlib
+        import os
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory, patch.object(bus, "STATE", Path(directory)), \
+                patch.object(bus, "_policy_cache", None):
+            pool = Path(directory) / "pool.toml"
+            prompts = Path(directory) / "prompts"
+            prompts.mkdir()
+            pool.write_bytes(b"pool")
+            (prompts / "b.md").write_bytes(b"b")
+            prompt = prompts / "a.md"
+            prompt.write_bytes(b"a")
+            first = bus.policy_version()
+            self.assertEqual(first, hashlib.sha256(b"poolab").hexdigest()[:12])
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("cache reread")):
+                self.assertEqual(bus.policy_version(), first)
+            for path, content in ((prompt, b"changed"), (pool, b"new pool")):
+                previous_mtime = path.stat().st_mtime_ns
+                path.write_bytes(content)
+                os.utime(path, ns=(previous_mtime + 1_000_000, previous_mtime + 1_000_000))
+                current = bus.policy_version()
+                self.assertNotEqual(current, first)
+                first = current
+            (prompts / "c.md").write_bytes(b"c")
+            self.assertNotEqual(bus.policy_version(), first)
+            (prompts / "c.md").unlink()
+            self.assertEqual(bus.policy_version(), first)
+            pool.unlink()
+            self.assertIsNone(bus.policy_version())
+
     def test_normalize_usage_claude(self):
         self.assertEqual(bus.normalize_usage("claude", {"input_tokens": 10, "cache_read_input_tokens": 3,
                          "cache_creation_input_tokens": 2, "output_tokens": 5}),

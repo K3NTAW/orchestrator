@@ -24,6 +24,49 @@ class Scorecard(unittest.TestCase):
         (self.root / "runs" / f"{time.strftime('%Y-%m-%d')}.jsonl").write_text(
             "\n".join(json.dumps(l) for l in lines) + "\n")
 
+    def test_tokens_per_accepted_goal_undefined_at_zero(self):
+        from unittest.mock import patch
+        self.write_task("T-goal")
+        self.write_task("T-child", parent="T-goal")
+        self.write_runs({"task": "T-child", "role": "execute", "total_tokens": 42})
+        result = scorecard.tokens_per_accepted_goal(self.root)
+        self.assertIsNone(result["tokens"])
+        self.assertEqual(result["count"], 0)
+        card = scorecard.by_goal(self.root)
+        self.assertEqual(card["T-goal"]["total_tokens"], 42)
+        for json_output in (False, True):
+            output = io.StringIO()
+            argv = ["orchestrator", "scorecard", "--by", "goal"] + (["--json"] if json_output else [])
+            with patch.object(sys, "argv", argv), patch.object(scorecard, "STATE", self.root), \
+                    patch.object(scorecard, "by_goal", return_value=card), contextlib.redirect_stdout(output):
+                cli.main()
+            if json_output:
+                self.assertIsNone(json.loads(output.getvalue())["tokens_per_accepted_goal"]["tokens"])
+            else:
+                self.assertIn("tokens per accepted goal: undefined (0 accepted goals)", output.getvalue())
+                self.assertIn("n=1 range 42-42", output.getvalue())
+        self.write_task("T-goal", status="done")
+        self.write_task("T-child", parent="T-goal", merged_into="goal/G")
+        self.assertEqual(scorecard.tokens_per_accepted_goal(self.root)["tokens"], 42)
+
+    def test_by_goal_median_and_range_small_sample(self):
+        rows = []
+        for i, amount in enumerate((10, 20, 30, 40, 100)):
+            tid = f"T-child{i}"
+            self.write_task(tid, parent="T-goal")
+            # Include a legacy total-only row and a retry for the same task.
+            rows.append({"task": tid, "role": "execute", "total_tokens": amount - 2})
+            rows.append({"task": tid, "role": "execute", **bus.normalize_usage("codex", {"output_tokens": 2})})
+            self.write_runs(*rows)
+            entry = scorecard.by_goal(self.root)["T-goal"]
+            self.assertEqual(entry["n_tasks"], i + 1)
+            self.assertEqual(entry["tokens_max_per_task"], amount)
+            if i < 4:
+                self.assertEqual(scorecard.format_task_tokens_cell(entry), f"n={i + 1} range 10-{amount}")
+        self.assertEqual(entry["tokens_median_per_task"], 30)
+        self.assertEqual(scorecard.format_task_tokens_cell(entry), "30")
+        self.assertEqual(entry["total_tokens"], 200)
+
     def test_build_counts_and_scores(self):
         self.write_task("T-9001", executor="good", complexity=3, status="done", merged_into="goal/G", rounds=1)
         self.write_task("T-9002", executor="bad", complexity=4, status="failed")

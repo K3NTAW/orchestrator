@@ -381,6 +381,11 @@ def jev_footer(root=STATE):
 def _tokens_of(e):
     """int cast on each field: a run logged with a float token count (e.g. cache_read_input_tokens=20.0)
     would otherwise make // 10 return a float and poison every downstream sum with a trailing ".0"."""
+    if e.get("total_tokens") is not None:
+        return int(e["total_tokens"])
+    if "input_uncached_tokens" in e:
+        return sum(int(e.get(key) or 0) for key in
+                   ("input_uncached_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens"))
     inp = int(e.get("input_tokens") or 0)
     out = int(e.get("output_tokens") or 0)
     cache_read = int(e.get("cache_read_input_tokens") or 0)
@@ -518,6 +523,8 @@ def by_goal(root=STATE):
         runs_no_usd = 0
         token_buckets = {"uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0, "reasoning": 0}
         failed_tokens = 0
+        task_tokens = []
+        legacy_tokens = 0
         calls = waste = blocked = turns = 0
         has_turns = False
         for t in tasks:
@@ -526,6 +533,7 @@ def by_goal(root=STATE):
             totals = task_totals.get(t["id"])
             if not totals:
                 continue
+            task_tokens.append(totals["tokens"])
             bucket = t.get("role") if t.get("role") in ROLE_BUCKETS else "other"
             roles[bucket]["usd"] += totals["usd"]
             roles[bucket]["tokens"] += totals["tokens"]
@@ -534,10 +542,14 @@ def by_goal(root=STATE):
                 if entry.get("task") != t["id"]:
                     continue
                 raw = tokens(entry)
+                if entry.get("total_tokens") is not None or "input_uncached_tokens" in entry:
+                    # Preserve the recorded total, including legacy total-only rows.
+                    legacy_tokens += _tokens_of(entry) - effective(raw)
                 for key, value in raw.items():
                     token_buckets[key] += value
                 if t.get("status") == "failed" or t.get("merged_via") == "superseded":
-                    failed_tokens += effective(raw)
+                    failed_tokens += (_tokens_of(entry) if entry.get("total_tokens") is not None
+                                      or "input_uncached_tokens" in entry else effective(raw))
             if gate is not None:
                 g = gate.get(t["id"], {"calls": 0, "waste": 0, "blocked": 0})
                 calls += g["calls"]; waste += g["waste"]; blocked += g["blocked"]
@@ -545,7 +557,7 @@ def by_goal(root=STATE):
                 turns += totals.get("turns") or 0
                 has_turns = True
         total_usd = sum(r["usd"] for r in roles.values())
-        worker_tokens = effective(token_buckets)
+        worker_tokens = effective(token_buckets) + legacy_tokens
         if runs_path.exists():
             runs = _planner_runs_for_goal(root, gid)
             usd_vals = [r["usd"] for r in runs if "usd" in r]
@@ -565,6 +577,10 @@ def by_goal(root=STATE):
         # total_tokens keeps the established discounted cache-read convention.
         total_tokens = worker_tokens + jev["gate"] + jev["rank"] + planner_tokens
         card[gid] = {"roles": roles, "total_usd": total_usd, "total_tokens": total_tokens, "planner": planner,
+                      "n_tasks": len(task_tokens),
+                      "tokens_median_per_task": statistics.median(task_tokens) if task_tokens else None,
+                      "tokens_min_per_task": min(task_tokens) if task_tokens else None,
+                      "tokens_max_per_task": max(task_tokens) if task_tokens else None,
                       "tokens_by_role": {name: roles[name]["tokens"] for name in ALL_BUCKETS},
                       "tokens_uncached": token_buckets["uncached"], "tokens_cache_read": token_buckets["cache_read"],
                       "tokens_cache_write": token_buckets["cache_write"], "tokens_output": token_buckets["output"],
@@ -600,7 +616,16 @@ def tokens_per_accepted_goal(root=STATE):
     goal_ids = accepted_goals(root)
     count = len(goal_ids)
     total = sum(card.get(goal_id, {}).get("total_tokens", 0) for goal_id in goal_ids)
-    return {"tokens": total / count if count else 0, "count": count, "goal_ids": goal_ids}
+    return {"tokens": total / count if count else None, "count": count, "goal_ids": goal_ids}
+
+
+def format_task_tokens_cell(entry):
+    """Small samples show their size and range rather than a median."""
+    n = entry["n_tasks"]
+    if n < 5:
+        low, high = entry["tokens_min_per_task"], entry["tokens_max_per_task"]
+        return f"n={n} range {low if low is not None else '-'}-{high if high is not None else '-'}"
+    return str(entry["tokens_median_per_task"])
 
 
 def usd_per_accepted_goal(root=STATE):
