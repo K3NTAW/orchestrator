@@ -206,7 +206,31 @@ class Cli(unittest.TestCase):
             ), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
                 cli.main()
             self.assertEqual(cm.exception.code, 2)
-            self.assertIn("--by band|class|role requires --efficiency or --economics", err.getvalue())
+            self.assertIn("default supports --by executor|tier|task|goal", err.getvalue())
+
+    def test_cli_scorecard_by_validation_per_mode(self):
+        cases = (
+            ((), "default", "executor|tier|task|goal", ("packet_version", "reviewed_executor")),
+            (("--efficiency",), "--efficiency", "goal|executor|band|class|role",
+             ("packet_version", "reviewed_executor", "tier", "task")),
+            (("--economics",), "--economics", "executor|band|class", ("packet_version", "role")),
+            (("--routing",), "--routing", "none (omit --by)", ("packet_version", "executor")),
+            (("--reviews",), "--reviews", "role|packet_version|tier|band|reviewed_executor",
+             ("executor", "goal", "class", "task")),
+        )
+        for flags, mode, allowed, invalid in cases:
+            for by in invalid:
+                err = io.StringIO()
+                with self.subTest(mode=mode, by=by), mock.patch.object(
+                    sys, "argv", ["orchestrator", "scorecard", *flags, "--by", by]
+                ), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                    cli.main()
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn(f"{mode} supports --by {allowed}", err.getvalue())
+        fixture = self._scorecard_fixture()
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            card = json.loads(self._scorecard_output("--reviews", "--by", "packet_version", "--json"))
+        self.assertIn("pre-packet", card)
 
     def test_scorecard_default_output_unchanged(self):
         with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):

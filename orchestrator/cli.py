@@ -166,16 +166,21 @@ def main():
     if a.cmd == "scorecard":
         if sum((a.economics, a.efficiency, a.routing, a.reviews)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews")
-        if a.reviews and a.by not in (None, "role", "packet_version", "tier", "band", "reviewed_executor"):
-            ap.error("--reviews supports --by role|packet_version|tier|band|reviewed_executor")
-        if a.economics and a.by not in (None, "executor", "band", "class"):
-            ap.error("--economics supports --by executor|band|class")
-        if a.efficiency and a.by in ("tier", "task"):
-            ap.error("--efficiency supports --by goal|executor|band|class|role")
-        if not a.efficiency and not a.economics and not a.routing and not a.reviews:
+        groupings = {
+            "default": ("executor", "tier", "task", "goal"),
+            "--efficiency": ("goal", "executor", "band", "class", "role"),
+            "--economics": ("executor", "band", "class"),
+            "--routing": (),
+            "--reviews": ("role", "packet_version", "tier", "band", "reviewed_executor"),
+        }
+        mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews")
+                     if getattr(a, name)), "default")
+        allowed = groupings[mode]
+        if a.by is not None and a.by not in allowed:
+            choices = "|".join(allowed) if allowed else "none (omit --by)"
+            ap.error(f"--by {a.by} is not supported by {mode}; {mode} supports --by {choices}")
+        if mode == "default":
             a.by = a.by or "executor"
-            if a.by in ("band", "class", "role"):
-                ap.error("--by band|class|role requires --efficiency or --economics")
     if a.cmd == "status":
         if a.plain:
             s = Pool().status()
@@ -284,8 +289,6 @@ def main():
             print(json.dumps(card, indent=1) if a.json else scorecard.format_routing_eval(card))
         elif a.economics:
             grouping = a.by or "executor"
-            if grouping not in ("executor", "band", "class"):
-                ap.error("--economics --by must be executor, band, or class")
             card = scorecard.executor_economics(root=scorecard.STATE, by=grouping)
             if a.json:
                 serializable = {("/".join(key) if isinstance(key, tuple) else key): value
