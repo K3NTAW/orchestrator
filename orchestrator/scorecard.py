@@ -145,3 +145,121 @@ def write(card):
     payload = {"generated_at": datetime.now().astimezone().isoformat(), "executors": card}
     (STATE / "scorecard.json").write_text(json.dumps(payload, indent=2))
     return payload
+
+
+ROLE_BUCKETS = ("execute", "review", "spec_review", "scout")
+ALL_BUCKETS = ROLE_BUCKETS + ("other",)
+
+
+def _tokens_of(e):
+    return (e.get("input_tokens") or 0) + (e.get("output_tokens") or 0) + (e.get("cache_read_input_tokens") or 0) // 10
+
+
+def by_task(root=STATE):
+    """usd/tokens/wall_s per task id, summed across every runs/*.jsonl line naming that task (task, role, tier,
+    duration_s, usd, input_tokens/output_tokens/cache_read_input_tokens -- the fields bus.log_run writes).
+    tokens uses the same input+output+cache_read//10 formula pool.record and Pool.tally_planner use elsewhere."""
+    totals = {}
+    runs_dir = root / "runs"
+    for p in sorted(runs_dir.glob("*.jsonl")) if runs_dir.exists() else []:
+        for line in p.read_text().splitlines():
+            if not line.strip():
+                continue
+            e = json.loads(line)
+            tid = e.get("task")
+            if not tid:
+                continue
+            t = totals.setdefault(tid, {"usd": 0.0, "tokens": 0, "wall_s": 0.0, "role": None, "tier": None})
+            t["usd"] += e.get("usd") or 0
+            t["tokens"] += _tokens_of(e)
+            t["wall_s"] += e.get("duration_s") or 0
+            t["role"] = t["role"] or e.get("role")
+            t["tier"] = t["tier"] or e.get("tier")
+    return totals
+
+
+def _planner_runs_for_goal(root, goal_id):
+    try:
+        runs = json.loads((root / "runs" / "planner_runs.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    return [r for r in runs if r.get("goal_id") == goal_id]
+
+
+def _planner_usage_totals(root):
+    """(day_tokens summed, n_accounts) from planner_usage.json -- the field pool._save_planner_account actually
+    writes per account ({"window_tokens", "day_tokens", "offsets"}), not "planner_day_tokens" (that name only
+    exists on the in-memory Account object). This is a pool-wide daily transcript tally that resets at midnight
+    and isn't tied to any one goal. None when the file is missing/unreadable so callers can print a dash instead
+    of a misleading 0."""
+    try:
+        data = json.loads((root / "planner_usage.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    return sum(v.get("day_tokens", 0) for v in data.values()), len(data)
+
+
+def planner_footer(root=STATE):
+    """One footer line for the --by goal table: today's pool-wide planner transcript tokens, or "planner: -"
+    when planner_usage.json is missing. Never per-goal -- see by_goal's docstring for why."""
+    totals = _planner_usage_totals(root)
+    if totals is None:
+        return "planner: -"
+    tokens, n_accounts = totals
+    return f"planner (transcripts, today): {tokens} tokens across {n_accounts} accounts"
+
+
+def by_goal(root=STATE):
+    """Roll task-level run costs up to the goal (parent task id) that owns them, split by role bucket plus an
+    "other" bucket for any role outside the four (challenge, triage, ...) so total_usd covers every child task
+    with a run, and that goal's own planner decision-run count/usd from runs/planner_runs.json (D3/T-0122; may
+    not exist yet). Planner *transcript* tokens (planner_usage.json) are pool-wide and reset daily -- they have
+    no meaningful per-goal share, so they never land in a goal row; see planner_footer() for those."""
+    task_totals = by_task(root)
+    tasks_dir = root / "tasks"
+    tasks = [json.loads(p.read_text()) for p in sorted(tasks_dir.glob("T-*.json"))] if tasks_dir.exists() else []
+    goal_ids = sorted({t["parent"] for t in tasks if t.get("parent")})
+    runs_path = root / "runs" / "planner_runs.json"
+
+    card = {}
+    for gid in goal_ids:
+        roles = {b: {"usd": 0.0, "tokens": 0} for b in ALL_BUCKETS}
+        for t in tasks:
+            if t.get("parent") != gid:
+                continue
+            totals = task_totals.get(t["id"])
+            if not totals:
+                continue
+            bucket = t.get("role") if t.get("role") in ROLE_BUCKETS else "other"
+            roles[bucket]["usd"] += totals["usd"]
+            roles[bucket]["tokens"] += totals["tokens"]
+        total_usd = sum(r["usd"] for r in roles.values())
+        total_tokens = sum(r["tokens"] for r in roles.values())
+        if runs_path.exists():
+            runs = _planner_runs_for_goal(root, gid)
+            usd_vals = [r["usd"] for r in runs if "usd" in r]
+            planner = {"n_runs": len(runs), "usd": sum(usd_vals) if usd_vals else None}
+        else:
+            planner = None
+        card[gid] = {"roles": roles, "total_usd": total_usd, "total_tokens": total_tokens, "planner": planner}
+    return card
+
+
+def goal_percentages(entry):
+    """Each bucket (execute/review/spec_review/scout/other) as percent of the goal's total usd."""
+    total_usd = entry["total_usd"]
+    return {b: (entry["roles"][b]["usd"] / total_usd * 100 if total_usd else 0.0) for b in ALL_BUCKETS}
+
+
+def format_planner_runs_cell(entry):
+    """Per-goal planner column: that goal's own decision runs from runs/planner_runs.json -- a count, plus their
+    usd sum when the records carry one. "-" when the file is missing entirely, "0 runs" when it exists but has
+    none for this goal -- that distinction matters (missing means we never wrote it; zero means genuinely none)."""
+    planner = entry.get("planner")
+    if planner is None:
+        return "-"
+    n = planner["n_runs"]
+    if n == 0:
+        return "0 runs"
+    usd = planner.get("usd")
+    return f"{n} runs (${round(usd, 2)})" if usd is not None else f"{n} runs"

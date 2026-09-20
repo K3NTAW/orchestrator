@@ -1,11 +1,11 @@
 """orchestrator.scorecard (build/scores/prior_weights) and orchestrator.bench (RSC chunk parsing, display-hint
 matching, the 20h fetch gate). Scorecard uses its own scratch root under TMP so counts are exact regardless of
 what other test files created; Bench never fetches over the network (fetch_html is monkeypatched)."""
-import inspect, json, sys, time, unittest
+import contextlib, inspect, io, json, sys, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_scorecard.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
-from orchestrator import STATE, bench, bus, executor, pool as P, scorecard
+from orchestrator import STATE, bench, bus, cli, executor, pool as P, scorecard
 
 
 class Scorecard(unittest.TestCase):
@@ -67,6 +67,142 @@ class Scorecard(unittest.TestCase):
         payload = scorecard.write(scorecard.build(root=self.root))
         self.assertIn("generated_at", payload)
         self.assertIn("generated_at", json.loads((STATE / "scorecard.json").read_text()))
+
+    def test_by_task_sums_runs(self):
+        self.write_runs(
+            {"task": "T-9010", "role": "execute", "tier": "sonnet", "duration_s": 10.0, "usd": 0.5,
+             "input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 20},
+            {"task": "T-9010", "role": "execute", "tier": "sonnet", "duration_s": 5.0, "usd": 0.25,
+             "input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0},
+        )
+        card = scorecard.by_task(root=self.root)
+        self.assertEqual(card["T-9010"]["usd"], 0.75)
+        self.assertEqual(card["T-9010"]["wall_s"], 15.0)
+        self.assertEqual(card["T-9010"]["tokens"], 167)              # (100+50+20//10) + (10+5+0//10)
+        self.assertEqual(card["T-9010"]["role"], "execute")
+        self.assertEqual(card["T-9010"]["tier"], "sonnet")
+
+    def test_by_goal_splits_by_role_and_includes_planner_runs(self):
+        goal = "T-9100"
+        self.write_task(goal, role="triage", parent=None)
+        self.write_task("T-9101", role="execute", parent=goal)
+        self.write_task("T-9102", role="review", parent=goal)
+        self.write_task("T-9103", role="scout", parent=goal)
+        self.write_runs(
+            {"task": "T-9101", "role": "execute", "usd": 3.0, "duration_s": 1,
+             "input_tokens": 100, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"task": "T-9102", "role": "review", "usd": 1.0, "duration_s": 1,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"task": "T-9103", "role": "scout", "usd": 0.0, "duration_s": 1,
+             "input_tokens": 50, "output_tokens": 0, "cache_read_input_tokens": 0},
+        )
+        (self.root / "runs" / "planner_runs.json").write_text(json.dumps(
+            [{"goal_id": goal, "kind": "goal", "payload_key": "x", "pid": 1, "started_at": 0, "log": "l"}]))
+        card = scorecard.by_goal(root=self.root)
+        g = card[goal]
+        self.assertEqual(g["total_usd"], 4.0)
+        self.assertEqual(g["roles"]["execute"]["usd"], 3.0)
+        self.assertEqual(g["roles"]["review"]["usd"], 1.0)
+        self.assertEqual(g["roles"]["scout"]["usd"], 0.0)
+        self.assertEqual(g["planner"]["n_runs"], 1)
+        self.assertIsNone(g["planner"]["usd"])                        # decision runs here carry no usd field
+        pct = scorecard.goal_percentages(g)
+        self.assertAlmostEqual(pct["execute"], 75.0)
+        self.assertAlmostEqual(pct["review"], 25.0)
+        self.assertEqual(scorecard.format_planner_runs_cell(g), "1 runs")
+
+    def test_planner_runs_cell_distinguishes_missing_from_zero(self):
+        goal = "T-9200"
+        self.write_task("T-9201", role="execute", parent=goal)
+        self.write_runs({"task": "T-9201", "role": "execute", "usd": 2.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        card = scorecard.by_goal(root=self.root)
+        self.assertIsNone(card[goal]["planner"])                      # planner_runs.json missing entirely
+        self.assertEqual(scorecard.format_planner_runs_cell(card[goal]), "-")
+
+        (self.root / "runs" / "planner_runs.json").write_text(json.dumps(
+            [{"goal_id": "T-other", "kind": "goal", "payload_key": "x", "pid": 1, "started_at": 0, "log": "l"}]))
+        card = scorecard.by_goal(root=self.root)
+        self.assertEqual(card[goal]["planner"]["n_runs"], 0)          # file exists, none for this goal
+        self.assertEqual(scorecard.format_planner_runs_cell(card[goal]), "0 runs")
+
+    def test_planner_runs_cell_sums_usd_when_present(self):
+        goal = "T-9300"
+        self.write_task("T-9301", role="execute", parent=goal)
+        self.write_runs({"task": "T-9301", "role": "execute", "usd": 1.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        (self.root / "runs" / "planner_runs.json").write_text(json.dumps([
+            {"goal_id": goal, "kind": "goal", "usd": 0.4},
+            {"goal_id": goal, "kind": "goal", "usd": 0.1},
+        ]))
+        card = scorecard.by_goal(root=self.root)
+        self.assertAlmostEqual(card[goal]["planner"]["usd"], 0.5)
+        self.assertEqual(scorecard.format_planner_runs_cell(card[goal]), "2 runs ($0.5)")
+
+    def test_planner_usage_totals_read_from_pool_shape(self):
+        goal = "T-9400"
+        self.write_task("T-9401", role="execute", parent=goal)
+        self.write_runs({"task": "T-9401", "role": "execute", "usd": 1.0, "duration_s": 1,
+                          "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0})
+        from orchestrator.pool import _save_planner_account
+        orig_usage = P.PLANNER_USAGE
+        P.PLANNER_USAGE = self.root / "planner_usage.json"
+        self.addCleanup(lambda: setattr(P, "PLANNER_USAGE", orig_usage))
+        _save_planner_account("A", 10, 400, {})
+        _save_planner_account("B", 5, 100, {})
+        self.assertEqual(scorecard.planner_footer(root=self.root),
+                          "planner (transcripts, today): 500 tokens across 2 accounts")
+
+    def test_planner_footer_dash_when_usage_file_missing(self):
+        self.assertEqual(scorecard.planner_footer(root=self.root), "planner: -")
+
+    def test_other_bucket_covers_non_standard_roles(self):
+        goal = "T-9500"
+        self.write_task("T-9501", role="execute", parent=goal)
+        self.write_task("T-9502", role="challenge", parent=goal)
+        self.write_runs(
+            {"task": "T-9501", "role": "execute", "usd": 2.0, "duration_s": 1,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+            {"task": "T-9502", "role": "challenge", "usd": 5.0, "duration_s": 1,
+             "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0},
+        )
+        card = scorecard.by_goal(root=self.root)
+        g = card[goal]
+        self.assertEqual(g["total_usd"], 7.0)
+        self.assertEqual(g["roles"]["other"]["usd"], 5.0)
+        pct = scorecard.goal_percentages(g)
+        self.assertAlmostEqual(pct["other"], 500 / 7, places=3)       # ~71%
+
+    def test_default_output_unchanged(self):
+        self.addCleanup(setattr, sys, "argv", sys.argv)
+        bus.create_task("default-unchanged", "s", ["a"], ["x.py"], role="execute", complexity=3)
+        bus.post_result(bus.read(role="execute")[-1]["id"], {"summary": "ok"})
+        sys.argv = ["orchestrator", "scorecard"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore")
+        self.assertGreaterEqual(len(lines), 2)
+        for line in lines[1:]:
+            self.assertEqual(len(line.split("\t")), 8)
+
+    def test_by_goal_cli_output_has_numeric_cell(self):
+        self.addCleanup(setattr, sys, "argv", sys.argv)
+        t = bus.create_task("goal-cli-numeric", "s", ["a"], ["x.py"], role="execute", complexity=3,
+                             parent="T-9600")
+        bus.log_run(task=t["id"], role="execute", usd=2.5, duration_s=1,
+                    input_tokens=10, output_tokens=0, cache_read_input_tokens=0)
+        sys.argv = ["orchestrator", "scorecard", "--by", "goal"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "goal\tusd\texecute%\treview%\tspec_review%\tscout%\tother%\tplanner_runs")
+        row = next(l for l in lines[1:] if l.startswith("T-9600\t"))
+        cells = row.split("\t")
+        self.assertEqual(len(cells), 8)
+        self.assertEqual(float(cells[1]), 2.5)                        # a real numeric cell, not just shape
 
     def write_bench(self, models):
         bench.STATE.mkdir(parents=True, exist_ok=True)

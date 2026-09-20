@@ -5,14 +5,31 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, json, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, bus, executor, handover, merge, spawn
+from . import STATE, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
 
-SPEC_REVIEW_MIN = 5   # complexity at which a spec must be reviewed before an executor sees it
-DIRECT_MERGE_MAX = 3  # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
+SPEC_REVIEW_MIN = 6    # complexity at which a spec must be reviewed before an executor sees it
+DIRECT_MERGE_MAX = 3   # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
+TWO_REVIEWS_FROM = 7   # complexity at which merge waits for two review approvals instead of one
+SPEC_REVIEW_TIER = "sonnet"  # tier the spec review worker runs on
+# The four constants above are defaults; _load_review_cfg() overwrites them from pool.toml's [review] table
+# at the top of every tick() so dispatch()/gate()/merge_reviewed() (which read them as plain module globals,
+# not through a Pool argument) always see the current policy without threading pool.cfg through every call.
 LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
+
+
+def _load_review_cfg(pool):
+    """Refresh the review-policy thresholds from pool.cfg's [review] table. Missing table or keys fall back to
+    the defaults set on the module above -- so a pool.toml without [review] behaves exactly as if it had one
+    with these values (§review policy, 2026-09-18: reviews were costing as much as execution)."""
+    global SPEC_REVIEW_MIN, DIRECT_MERGE_MAX, TWO_REVIEWS_FROM, SPEC_REVIEW_TIER
+    review = pool.cfg.get("review", {})
+    SPEC_REVIEW_MIN = review.get("spec_review_min", 6)
+    DIRECT_MERGE_MAX = review.get("direct_merge_max", 3)
+    TWO_REVIEWS_FROM = review.get("two_reviews_from", 7)
+    SPEC_REVIEW_TIER = review.get("spec_review_tier", "sonnet")
 
 
 def notify(msg):
@@ -42,15 +59,19 @@ def alive(pid):
         return False
 
 
-def stamp(tid, stage, **fields):
+def stamp(tid, stage, pipeline_fields=None, **fields):
     """Claim one pipeline stage for one task. Returns False when another tick already claimed it. The read of the
-    existing stamp and the write of the new one happen under the same bus lock, so two ticks cannot both win."""
+    existing stamp and the write of the new one happen under the same bus lock, so two ticks cannot both win.
+    pipeline_fields merges extra keys into the same pipeline dict as the stage timestamp (e.g. reviews_expected
+    at gate time) so they land atomically with the stamp instead of racing a second bus.update."""
     with bus.locked():
         t = bus.get(tid)
         pipeline = dict(t.get("pipeline") or {})
         if pipeline.get(stage):
             return False
         pipeline[stage] = time.time()
+        if pipeline_fields:
+            pipeline.update(pipeline_fields)
         bus.update(tid, pipeline=pipeline, **fields)
     return True
 
@@ -258,7 +279,7 @@ def dispatch(pool):
                 try:
                     sr = bus.create_task(f"spec review: {t['title']}", t["spec"], t["acceptance"], t["scope"],
                                          role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
-                                         complexity=t["complexity"])
+                                         complexity=t["complexity"], tier=SPEC_REVIEW_TIER)
                     spawn_async(spawn.run_worker, sr["id"])
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
@@ -277,11 +298,34 @@ def review_tier(t):
     return "sonnet"
 
 
+def _other_tier(tier):
+    return "sonnet" if tier == "opus" else "opus"
+
+
+def reviews_expected(t):
+    """How many review approvals an execute task needs before merge_reviewed() may merge it -- the single source
+    of truth gate() also uses to decide how many review tasks to open. An orphaned result (reconcile_dead
+    re-gating a dead worker's last commit) always needs exactly one, whatever the task's complexity: the orphaned
+    warning is what needs the second pair of eyes, not the model split (T-0150 review: an orphaned complexity-7
+    task was stuck waiting on a second review gate() never opens)."""
+    if (t.get("result") or {}).get("orphaned") or t["complexity"] < TWO_REVIEWS_FROM:
+        return 1
+    return 2
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
-    open a review task (everything else)."""
+    open the number of review tasks reviews_expected() says (one for complexity between DIRECT_MERGE_MAX and
+    TWO_REVIEWS_FROM, or any orphaned result; two otherwise). The second review must never run on the model that
+    executed: when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on
+    review_tier(t) -- the non-executing tier (both reviews may land on the same account; only the model differs
+    from the executor); when the executor is Codex, the second review runs on whichever tier the first one
+    didn't get. The successful gate stamp also freezes pipeline.reviews_expected = reviews_expected(t) so a later
+    change to the [review] two_reviews_from threshold can't change how many approvals merge_reviewed() waits for
+    on a task already past this stage. Filters run cheap-first, already_merged() (which shells out to git) last,
+    so a task the other checks would skip anyway never pays for a git call."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or already_merged(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree"):
+        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree") or already_merged(t):
             continue
         if not Path(t["worktree"]).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
@@ -293,24 +337,45 @@ def gate(pool):
                      resume_hint={"failures": tg.stderr[-4000:]}):
                 notify(f"{t['id']}: tests red at the gate; held")
             continue
-        if not stamp(t["id"], "gated_at"):
+        if not stamp(t["id"], "gated_at", pipeline_fields={"reviews_expected": reviews_expected(t)}):
             continue
         orphaned = bool((t.get("result") or {}).get("orphaned"))
         try:
             if not orphaned and t["complexity"] <= DIRECT_MERGE_MAX:
                 report_merge(t["id"], merge.merge(t["id"]))
-            else:
-                spec = t["spec"]
-                if orphaned:
-                    # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
-                    # not from an executor that actually finished: never let complexity alone route it straight
-                    # to merge, whatever the task's normal tier would be.
-                    spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
-                            f"have died mid-task\n\n{spec}")
+                continue
+            spec = t["spec"]
+            if orphaned:
+                # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
+                # not from an executor that actually finished: never let complexity alone route it straight
+                # to merge, whatever the task's normal tier would be. One review is enough here regardless of
+                # complexity -- the orphaned warning is what needs a second pair of eyes, not the model split.
+                spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
+                        f"have died mid-task\n\n{spec}")
                 r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
                                     tier=review_tier(t))
                 spawn_async(spawn.run_worker, r["id"])
+                continue
+            # Any status counts here, not just "done": a review that's still queued/running already claims the
+            # one (or first of two) slot, so a re-entry must not spawn a duplicate on top of it.
+            existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
+            if not existing:
+                r1 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
+                                     tier=review_tier(t))
+                spawn_async(spawn.run_worker, r1["id"])
+                existing = [r1]
+            if reviews_expected(t) == 2 and len(existing) == 1:
+                executor_field = t.get("executor") or ""
+                if executor_field.startswith("claude:"):
+                    tier2 = review_tier(t)
+                else:
+                    tier2 = _other_tier(existing[0]["tier"])
+                r2 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+                                     inputs=[t["id"]], parent=t.get("parent"), complexity=t["complexity"],
+                                     tier=tier2)
+                spawn_async(spawn.run_worker, r2["id"])
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
 
@@ -323,30 +388,96 @@ def report_merge(task_id, r):
     return r
 
 
+def _review_verdict(r, src, allow_src_fallback):
+    """A review task's own review_verdict/result -- not src's -- is the reliable source once a task can carry two
+    reviews: spawn.run_worker writes review_verdict onto both the review task and src, so with two reviews the
+    second to finish clobbers src's field with its own verdict. Each review's own field is never touched by its
+    sibling, so it is checked first; src is only a fallback for older data that predates this field existing on
+    r, and only when allow_src_fallback is true -- callers pass that as (len(reviews) == 1), since with two or
+    more reviews src's single field cannot speak for more than one of them."""
+    v = r.get("review_verdict") or (r.get("result") or {}).get("verdict")
+    if v:
+        return v
+    return src.get("review_verdict") if allow_src_fallback else None
+
+
 def merge_reviewed(pool):
-    """done review tasks: approve -> serial merge of the reviewed task; request_changes -> hold it for the Planner,
-    which writes the fix-round spec (a daemon must not invent a spec)."""
-    for r in bus.read(status="done", role="review"):
-        if stale(r) or not (r.get("inputs") and isinstance(r["inputs"][0], str)):
-            continue
+    """done, unmerged execute tasks with at least one review: merge once reviews_expected() of their reviews have
+    approved; anything else about a done review's verdict holds the task for the Planner to write the fix-round
+    spec (a daemon must not invent a spec). gated_at is not required -- a hand-gated task the Planner spawned
+    reviews for directly still gets swept -- only "has at least one review" gates entry, same as gate() itself
+    creating them. Walking execute tasks (not done review tasks) is what closes the escape hatch T-0159 review
+    item 1 found: a review that never reaches done -- every review of the task failed or was held -- used to
+    never get iterated at all, leaving the task stuck done+gated forever. Every review bucketed by verdict, not
+    just "approve" vs "request_changes": done+approve is approved, done with any other verdict (including a
+    missing or off-vocabulary one) is rejected, queued/running is pending, failed/held is stuck -- exhaustive
+    over the statuses bus tasks can actually carry, so a done review can never fall through every bucket and
+    trip an IndexError on an empty stuck list (T-0164 review item 1: a done sibling with an unrecognised verdict
+    used to satisfy none of the old checks). needed comes from pipeline.reviews_expected, stamped by gate() at
+    gate time, falling back to reviews_expected(t) only for tasks gated before that stamp existed -- so a later
+    change to the [review] two_reviews_from threshold cannot move the goalposts on a task already past gate().
+    Each task's body runs in its own try/except: a bad review record or an unexpected raise prints one stderr
+    line and moves on, so one task can never stop the sweep for the others in the same tick. Filters run
+    cheap-first, already_merged() (which shells out to git) last."""
+    for t in bus.read(status="done", role="execute"):
         try:
-            src = bus.get(r["inputs"][0])
-        except KeyError:
-            continue
-        if already_merged(src):
-            continue
-        verdict = src.get("review_verdict") or r.get("review_verdict") or (r.get("result") or {}).get("verdict")
-        if verdict == "approve":
-            # stamped before the merge, not after: a conflict leaves merged_into unset, and retrying it every tick
-            # would just rebuild the same conflict
-            if stamp(r["id"], "merged_at"):
-                try:
-                    report_merge(src["id"], merge.merge(src["id"]))
-                except Exception as e:
-                    hold_failed(src["id"], "merged_error", "merge", e)
-        elif verdict == "request_changes":
-            if stamp(src["id"], "review_held_at", status="held", hold_reason="review request_changes"):
-                notify(f"{src['id']}: review asked for changes; Planner writes the fix round")
+            _merge_reviewed_one(t)
+        except Exception as e:
+            print(f"[daemon] merge_reviewed {t['id']} failed: {e}", file=sys.stderr)
+
+
+def _merge_reviewed_one(t):
+    if stale(t):
+        return
+    reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
+    if not reviews:
+        return  # gate() creates them; nothing to act on yet
+    if already_merged(t):
+        return
+    single = len(reviews) == 1
+    approved, rejected, pending, stuck, unknown = [], [], [], [], []
+    for r in reviews:
+        status = r["status"]
+        if status == "done":
+            verdict = _review_verdict(r, t, single)
+            (approved if verdict == "approve" else rejected).append((r, verdict))
+        elif status in ("queued", "running"):
+            pending.append(r)
+        elif status in ("failed", "held"):
+            stuck.append(r)
+        else:
+            unknown.append(r)  # should be impossible: every bus status is one of the above
+    if rejected:
+        r, verdict = rejected[0]
+        reason = f"review request_changes: {r['id']} ({verdict})"
+        if stamp(t["id"], "review_held_at", status="held", hold_reason=reason):
+            notify(f"{t['id']}: {reason}")
+        return
+    needed = (t.get("pipeline") or {}).get("reviews_expected")
+    if needed is None:
+        needed = reviews_expected(t)
+    if len(approved) >= needed:
+        # stamped on the source task before the merge, not after: a conflict leaves merged_into unset, and
+        # retrying it every tick would just rebuild the same conflict; stamping here means a task with two
+        # reviews attempts the merge exactly once no matter which review finishes last
+        if stamp(t["id"], "merged_at"):
+            try:
+                report_merge(t["id"], merge.merge(t["id"]))
+            except Exception as e:
+                hold_failed(t["id"], "merged_error", "merge", e)
+        return
+    if len(approved) + len(pending) >= needed:
+        return  # a still-live sibling could yet supply the missing approval(s); keep waiting
+    if stuck:
+        if approved:
+            first = stuck[0]
+            reason = f"review {first['status']}: {first['id']}"
+        else:
+            reason = f"reviews failed: {', '.join(sorted(r['id'] for r in stuck))}"
+    else:
+        reason = f"review state unknown: {', '.join(sorted(r['id'] for r in unknown))}"
+    if stamp(t["id"], "review_held_at", status="held", hold_reason=reason):
+        notify(f"{t['id']}: {reason}")
 
 
 def _handover_last_at():
@@ -401,6 +532,7 @@ def tick(pool=None):
         pool.tally_planner()
     except Exception as e:
         print(f"[daemon] tally_planner failed: {e}", file=sys.stderr)
+    _load_review_cfg(pool)
     for t in bus.read(status="running"):
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:
@@ -413,6 +545,14 @@ def tick(pool=None):
             stage(pool)
         except Exception as e:
             print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
+    if pool.cfg.get("planner", {}).get("autonomous", False):
+        try:
+            planner_runs.reconcile()
+            for goal_id, kind, payload_key in planner_runs.decision_points():
+                planner_runs.run(goal_id, kind, payload_key)
+                break  # at most one autonomous Planner launch per tick
+        except Exception as e:
+            print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
     m = pool.both_cooling_minutes()
     if m > 30:
         notify(f"both Claude accounts cooling for {m:.0f} more min")

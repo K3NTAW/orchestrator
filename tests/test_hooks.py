@@ -123,5 +123,15 @@ class PlannerMode(unittest.TestCase):
         self.assertEqual(hook("planner-prompt.sh", {"prompt": "x"}, cwd=TMP, env={"ORCH_TASK_ID": "T-0001"}).stdout, "")
 
 
+class SessionRules(unittest.TestCase):
+    def test_orchestrate_skill_copies_identical(self):
+        a = (REPO / ".claude" / "skills" / "orchestrate" / "SKILL.md").read_text()
+        b = (REPO / "skills" / "planner" / "orchestrate" / "SKILL.md").read_text()
+        self.assertEqual(a, b)
+
+    def test_claude_md_has_150k_handover_rule(self):
+        self.assertIn("150k", (REPO / "CLAUDE.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,14 @@ Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` t
 `orchestrator pick planner|scout|review|execute` tallies Planner usage fresh, then prints `<account_id>\t<config_dir>`
 for `pool.pick(role)`, or exits 3 with `hold: no account with headroom`; a launcher not running the daemon calls this
 so its account choice still reflects current Planner usage.
+`orchestrator scorecard --by task|goal` rolls runs/*.jsonl up by task or by goal (role split in percent of usd,
+with an `other` bucket for any role outside execute/review/spec_review/scout so the percentages always cover
+every child task). Each goal row's `planner_runs` column is that goal's own decision-run count from
+`runs/planner_runs.json` (plus their usd sum when the records carry one): `-` when the file is missing, `0 runs`
+when it exists but has none for that goal, else `<n> runs`. Planner *transcript* tokens are pool-wide and reset
+daily, so they aren't a per-goal column; the table ends with one footer line, either
+`planner (transcripts, today): <tokens> tokens across <n> accounts` (summed from `.orchestrator/planner_usage.json`)
+or `planner: -` when that file is missing.
 `uv run orchestrator handover [--reason TEXT]` writes/replaces the `## Auto-handover` section at the end of
 `.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
 calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.
@@ -50,12 +58,21 @@ through to the pool's stored numbers rather than crashing pick) for callers that
 a running daemon.
 
 ## Pipeline
-State machine per execute task: `queued` → (depends_on merged, complexity ≥5 → `spec_review` first) → dispatched to
-an executor → `done` → gated (`tests-green.sh`) → complexity ≤3 merges straight away, else a `review` task spawns →
-`review` approve merges, `request_changes` holds it for the Planner to re-spec.
+Scouts are capped (2 per goal, 12 turns, $1.00, 600s) and open with a memory recall step; see `.orchestrator/prompts/scout.md`.
+State machine per execute task: `queued` → (depends_on merged, complexity ≥ `spec_review_min` → `spec_review` first,
+on `spec_review_tier`) → dispatched to an executor → `done` → gated (`tests-green.sh`) → complexity ≤
+`direct_merge_max` merges straight away; complexity between `direct_merge_max` and `two_reviews_from` spawns one
+`review` task, tiered to whichever model did not execute the task; complexity ≥ `two_reviews_from` spawns two,
+the second on a different model than the executor (both reviews may run on the same account; the model differs
+from the executor). A task with one review merges on its first `approve`; a task with two merges only once every
+review of it has approved, and any single `request_changes` holds it for the Planner to re-spec regardless of
+what the other review said. These four thresholds live in `pool.toml`'s `[review]` table (defaults:
+`spec_review_min = 6`, `direct_merge_max = 3`, `two_reviews_from = 7`, `spec_review_tier = "sonnet"`); policy and
+the cost measurement that motivated it are noted there. An orphaned result (executor died, daemon re-gated its
+commit) gets exactly one review whatever its complexity.
 `daemon.tick()` drives every stage: `dispatch()` (spec review or executor), `gate()` (tests-green, then merge or
-review), `merge_reviewed()` (merge on approve). Each stage stamps `pipeline.<stage>_at` on the task json under the
-bus lock before acting, so a crash-and-retry never re-runs a stage.
+review), `merge_reviewed()` (merge once every review of a task has approved). Each stage stamps `pipeline.<stage>_at`
+on the task json under the bus lock before acting, so a crash-and-retry never re-runs a stage.
 Run it: the daemon autostarts inside the orchestrator MCP server per `[daemon] autostart` in `pool.toml` (`ORCH_DAEMON=0`
 or `autostart = false` disables it), and `uv run orchestrator daemon` takes the same single-instance lock so two loops
 never run at once; `orchestrator daemon --once` runs a single pass without the lock.
@@ -67,6 +84,27 @@ Holds (`status="held"`) mean the daemon stopped and a human/Planner must act: `s
 request_changes`, or `gate_red` (tests failed at the gate). The `hold_reason` field and `resume_hint` on the task say
 which. The Planner clears a hold by writing a new spec with `depends_on=[held_task_id]`, never by editing the held
 task directly.
+
+### Autonomous decisions
+`pool.toml`'s `[planner] autonomous` (default `false`) lets `daemon.tick()` launch a short-lived headless Planner on
+its own, without an interactive session, to act on one of three decision points: `scouts_done` (a goal's scouts are
+all done/failed and no execute task has split off yet), `held` (an execute task is held), or `closable` (every
+execute task of a goal is merged and nothing is left queued or running). `orchestrator/planner_runs.py` tracks one
+record per `(goal_id, kind, payload_key)` in `.orchestrator/runs/planner_runs.json`; `reconcile()` (called first
+every tick) resolves a running record whose process has exited to `exited_ok` (something already finished the
+decision -- for `held`, that means a fix-round task now exists with `depends_on`/`constraints.fix_round_for`
+pointing at the held task, created after this decision run started), `exited_early` (retry, up to one more
+attempt), or `gave_up` (two early exits; notifies once and blocks that key for good); `decision_points()` then
+yields every key with no blocking (`running`/`claimed`/`exited_ok`/`gave_up`) record. `run()` claims a key --
+writing a `claimed` row, itself blocking -- inside the same `bus.locked()` block as the check that it isn't
+already decided, before it runs either guard or `goals.launch_planner`, so two callers racing for the same key
+(`daemon --once` and the background loop, say) can never both launch; a guard skip afterwards flips that same
+row to `skipped` (never blocking, one row per key with a running `skip_count`) instead of leaving it stuck
+`claimed`. `tick()` launches at most one per pass. Two guards make sure an autonomous launch never runs alongside
+a human: `ORCH_DAEMON_HOST=mcp` (set by the orchestrator MCP server's `main()` entrypoint, before it autostarts
+the daemon) and `.orchestrator/planner_session.json` (written atomically by that same call, removed at exit, and
+named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
+interactive Planner session ever attaches -- leave it off anywhere one might.
 
 ## Executors and routing
 `[[executors]]` rows in `pool.toml` are the routable Codex models: `id`, `provider`, `model` (provider's model id),
