@@ -242,3 +242,9 @@ type: decision · goal: T-0260 · tasks: T-0001 · provenance: repo
 - interactive Planner verified tests-green exit 0 and npm run build on wt/deploy, then vercel link --yes --project docs-kentawaibel (prj_ilqCa6qLBtvLKxhi0Mrs0PoT1E2R, created), vercel domains add docs.kentawaibel.com, vercel deploy --prod: deployment FPadPdHG8eNm4Qi1fbCyzV8dMrKu Ready, https://docs.kentawaibel.com 200 with title Docs, /orchestrator 200 via the SPA rewrite
 - the deploy was made from the goal branch worktree, not from main; main in the docs repo still holds only the scaffold until the human merges PR 1
 outcome: Revert path: vercel rollback (or vercel remove the deployment) on project docs-kentawaibel, domain removal and project deletion are deletes for the human; the repo itself: close PR 1 unmerged. Follow-ups: connect the Vercel project to the GitHub repo for automatic deploys, add a second entry, .vercel/ is untracked in wt/deploy and should be gitignored by a task
+
+## 2026-09-20 Vercel project docs-kentawaibel connected to GitHub K3NTAW/docs-kentawaibel (user request 2026-09-20 00:33)
+type: decision · goal: T-0260 · tasks: T-0001 · provenance: repo
+- vercel git connect needs the repo URL when run from a git worktree (the CLI reports no local Git repository because a worktree has a .git file, not a directory); vercel git connect https://github.com/K3NTAW/docs-kentawaibel.git --yes from wt/deploy connected it
+- production branch is main, which still holds only the scaffold; merging PR 1 triggers the first automatic production deploy and replaces the manual deployment FPadPdHG8eNm4Qi1fbCyzV8dMrKu; pushes to other branches create preview deployments
+outcome: Revert path: vercel git disconnect in the linked directory (or the project's Git settings), no repo change involved
