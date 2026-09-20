@@ -20,6 +20,119 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def metric_gate_task(self, **fields):
+        tid = self.task("gate metrics", **fields)
+        bus.update(tid, status="done", worktree=str(self.sandbox))
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+        self.swap(daemon, "_review_plan", lambda task: (1, "always"))
+        self.swap(daemon, "_open_reviews", lambda *args: [])
+        return tid
+
+    def test_gate_sets_first_green_once_and_counts_attempts(self):
+        tid = self.metric_gate_task()
+        clock = [1000.0]
+        self.swap(daemon.time, "time", lambda: clock[0])
+        daemon.gate(P.Pool())
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertEqual(pipeline["first_green_at"], 1000.0)
+        self.assertEqual(pipeline["gate_attempts"], 1)
+        self.assertEqual(pipeline.get("gate_reds", 0), 0)
+        self.assertEqual(pipeline.get("lineage_fix_rounds", 0), 0)
+        daemon.gate(P.Pool())
+        self.assertEqual(bus.get(tid)["pipeline"]["gate_attempts"], 1)
+        daemon.clear_stage(tid, "gated_at")
+        clock[0] = 2000.0
+        daemon.gate(P.Pool())
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertEqual(pipeline["gated_at"], 2000.0)
+        self.assertEqual(pipeline["first_green_at"], 1000.0)
+        self.assertEqual(pipeline["gate_attempts"], 2)
+
+    def test_gate_red_increments_reds_and_keeps_hold(self):
+        tid = self.metric_gate_task()
+        self.gate_green(False)
+        for attempt in (1, 2):
+            daemon.gate(P.Pool())
+            task = bus.get(tid)
+            self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_red"))
+            self.assertEqual(task["pipeline"]["gate_attempts"], attempt)
+            self.assertEqual(task["pipeline"]["gate_reds"], attempt)
+            self.assertNotIn("first_green_at", task["pipeline"])
+            daemon.gate(P.Pool())
+            self.assertEqual(bus.get(tid)["pipeline"]["gate_attempts"], attempt)
+            if attempt == 1:
+                daemon.clear_stage(tid, "gated_at", status="done")
+        daemon.clear_stage(tid, "gated_at", status="done")
+        self.gate_green(True)
+        daemon.gate(P.Pool())
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertEqual(pipeline["gate_attempts"], 3)
+        self.assertEqual(pipeline["gate_reds"], 2)
+        self.assertGreater(pipeline["first_green_at"], 0)
+
+    def test_fix_round_gate_marks_root_first_green_and_lineage_count(self):
+        root_id = self.task("root")
+        middle = self.task("first fix", constraints={"fix_round_for": root_id, "auto_round": 1})
+        bus.update(root_id, status="held", pipeline={"gate_reds": 1})
+        bus.update(middle, status="held")
+        tid = self.metric_gate_task(constraints={"fix_round_for": middle, "auto_round": 2})
+        clock = [1000.0]
+        self.swap(daemon.time, "time", lambda: clock[0])
+        for count in (1, 2):
+            daemon.gate(P.Pool())
+            pipeline = bus.get(root_id)["pipeline"]
+            self.assertEqual(pipeline["first_green_at"], 1000.0)
+            self.assertEqual(pipeline["lineage_fix_rounds"], count)
+            self.assertEqual(pipeline["gate_reds"], 1)
+            self.assertEqual(bus.get(tid)["pipeline"]["first_green_at"], 1000.0)
+            daemon.clear_stage(tid, "gated_at")
+            clock[0] = 2000.0
+
+    def test_report_merge_sets_accepted_at_on_task_and_root_without_overwrite(self):
+        root_id = self.task("root")
+        tid = self.task("fix", constraints={"fix_round_for": root_id})
+        standalone = self.task("standalone")
+        clock = [1000.0]
+        self.swap(daemon.time, "time", lambda: clock[0])
+        result = {"status": "merged", "target": "goal/G", "sha": "abc12345"}
+        daemon.report_merge(tid, {"status": "failed"})
+        for task_id in (tid, root_id):
+            self.assertNotIn("accepted_at", bus.get(task_id).get("pipeline", {}))
+        daemon.report_merge(tid, result)
+        daemon.report_merge(standalone, result)
+        for task_id in (tid, root_id, standalone):
+            self.assertEqual(bus.get(task_id)["pipeline"]["accepted_at"], 1000.0)
+        self.assertEqual(bus.get(root_id)["merged_into"], "goal/G")
+        clock[0] = 2000.0
+        daemon.report_merge(tid, result)
+        daemon.report_merge(standalone, result)
+        for task_id in (tid, root_id, standalone):
+            self.assertEqual(bus.get(task_id)["pipeline"]["accepted_at"], 1000.0)
+        later = self.task("later fix", constraints={"fix_round_for": root_id})
+        daemon.report_merge(later, result)
+        self.assertEqual(bus.get(later)["pipeline"]["accepted_at"], 2000.0)
+        self.assertEqual(bus.get(root_id)["pipeline"]["accepted_at"], 1000.0)
+
+    def test_respawn_check_prefers_stored_created_at(self):
+        now = time.time()
+        old = self.task("old creation, recent events", role="spec_review")
+        young = self.task("recent creation, old events", role="spec_review")
+        for tid, created_at, event_at in ((old, now - 60, now - 1),
+                                          (young, now - 1, now - 60)):
+            task = bus.get(tid)
+            task.update(created_at=created_at, events=[{"ts": event_at}])
+            bus._save(task)
+        os.utime(bus.TASKS / f"{old}.json", (now - 1, now - 1))
+        os.utime(bus.TASKS / f"{young}.json", (now - 60, now - 60))
+        self.swap(daemon.time, "time", lambda: now)
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {})["respawn_after_s"] = 30
+        daemon.dispatch(pool)
+        self.assertEqual(self.workers, [old])
+        self.assertEqual(bus.get(old)["pipeline"]["respawned_at"], now)
+        self.assertFalse(bus.get(young).get("pipeline"))
+
     def test_reconcile_dead_release_keeps_top_level_cost(self):
         self.swap(P, "PERSIST", self.sandbox / "pool_state.json")
         self.swap(P, "PLANNER_USAGE", self.sandbox / "planner_usage.json")

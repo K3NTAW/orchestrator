@@ -22,6 +22,15 @@ class BusSandbox(unittest.TestCase):
 
 class Bus(BusSandbox):
 
+    def test_create_task_sets_created_at(self):
+        with patch.object(bus.time, "time", return_value=1234.5):
+            task = bus.create_task("Timestamp", "spec", ["ok"], ["x.py"])
+        self.assertEqual(task["created_at"], 1234.5)
+        self.assertEqual(bus.get(task["id"])["created_at"], 1234.5)
+        task.pop("created_at")
+        bus._save(task)
+        self.assertNotIn("created_at", bus.get(task["id"]))
+
     def written_row(self, **fields):
         bus.log_run(**fields)
         return json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
