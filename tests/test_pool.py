@@ -403,11 +403,21 @@ class PlannerTally(unittest.TestCase):
         self.assertEqual(self.p.pick("scout").id, "B")
 
     def test_tally_gates_day_and_window_independently(self):
-        self.a.window_started = self.now                     # window = [now, now+WINDOW_S)
-        three_h_ago = self.now - 3 * 3600                     # still today, but before window_started
+        now = datetime(2026, 9, 15, 12, 0, tzinfo=P.TZ).timestamp()
+        self.a.window_started = now                          # window = [now, now+WINDOW_S)
+        three_h_ago = now - 3 * 3600                         # still today, but before window_started
         self._write("a.jsonl", [_assistant(_iso(three_h_ago), 10, 5, 0)])
-        self.p.tally_planner()
+        self.p.tally_planner(now=now)
         self.assertEqual(self.a.planner_day_tokens, 15)
+        self.assertEqual(self.a.planner_window_tokens, 0)
+
+    def test_tally_day_boundary_three_hours_before_midnight_counts_yesterday(self):
+        now = datetime(2026, 9, 15, 0, 30, tzinfo=P.TZ).timestamp()
+        self.a.window_started = now
+        three_h_ago = now - 3 * 3600                         # previous local calendar day
+        self._write("a.jsonl", [_assistant(_iso(three_h_ago), 10, 5, 0)])
+        self.p.tally_planner(now=now)
+        self.assertEqual(self.a.planner_day_tokens, 0)
         self.assertEqual(self.a.planner_window_tokens, 0)
 
     def test_tally_skips_line_with_deleted_file_between_glob_and_read(self):
