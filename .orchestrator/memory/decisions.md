@@ -286,3 +286,10 @@ outcome: revert path: bus.update('T-0445', status='failed'); git revert the plan
 type: decision · goal: T-0353 · tasks: T-0353,T-0366,T-0439 · provenance: repo
 - PR 12 https://github.com/K3NTAW/orchestrator/pull/12 open; T-0353 done; the launcher session ran the docs system-map goal T-0007 in the docs repo (PR 2 there); this session deploys it and publishes the artifact
 outcome: revert path: git revert the checkpoint commit (plan.md and decisions.md only); Phase H itself: close PR 12 unmerged
+
+## 2026-09-20 Session 6410 closes: docs system map deployed to production from goal/T-0007, follow-up docs goal T-0012 launched, Phase I owned by the launcher session
+type: decision · goal: T-0353 · tasks: T-0353,T-0366 · provenance: repo
+- docs.kentawaibel.com production now serves the goal/T-0007 build (deployment HLHBHK1ND3J18KV4NPK7bMuu8F5Q, /orchestrator/ returns 200 with six SVG diagrams); the launcher session prefers deploying only after PRs 1 and 2 merge to main; the user granted deploy rights on 2026-09-19 23:46, so the manual deploy stands and main catches up when the PRs merge
+- the T-0007 page predates Phase H (no decision routes, reservations, failure kinds, acceptance gate), has no phase timeline or measured numbers and uses its own palette; follow-up goal T-0012 (headless Planner pid 69926, account B, branch goal/T-0012 from goal/T-0007) adds them and the site tokens; its PR will base on PR 2; deploy from goal/T-0012 or after merge is the next session's call
+- the launcher session published the map as artifact https://claude.ai/artifact/WVgUMFJ1eWxFGTqVTxdUtt and owns Phase I (T-0445, brief .orchestrator/phase-i-program.md); plan.md OWNER header says session 6410 closes
+outcome: Session 6410 stops here: no more tasks, deploys or plan.md writes from it. Revert paths: vercel rollback on project docs-kentawaibel; T-0012 can be stopped with orchestrator goal stop in the docs repo
