@@ -254,3 +254,9 @@ type: decision · goal: T-0353 · tasks: T-0354,T-0355,T-0356,T-0357,T-0358,T-03
 - two sonnet scouts (0.74 USD each side) produced the matrix; core gaps: routing (H3a/H3b), launch attribution and pinned policy version (H2), reservations and notify per transition (H4), failure signatures and kinds (H7), gate on acceptance-named tests (H6), packet header and acceptance never dropped (H8), accounting fields (H1), counters from bus and codex tools posting (H5a), worktree reuse and review re-spawn (H5b), docs (H9)
 - deferred with reasons: Jev changes, read and test result caches, memory expiry, Codex sandbox scope enforcement, learned routing, expansion metrics
 outcome: revert path: git revert c6dd834 for the checkpoint; each merged Phase H task is reverted by its own sha listed in the PR
+
+## 2026-09-20 H2 (T-0361) merged by Planner decision over review T-0384: its only finding is the deferred route wiring that H3b (T-0365) delivers
+type: decision · goal: T-0353 · tasks: T-0361,T-0384,T-0365 · provenance: repo
+- review T-0384 (request_changes, one high) says daemon.tick never computes a route so every launch records route escalate, reason legacy:autonomous; the T-0361 spec states exactly that default until H3b wires decision.route, and T-0365 depends on T-0361, so a fix round would duplicate H3b
+- merge(T-0361, goal/T-0353) via the MCP merge tool: rebase, tests-green, fast-forward to 68ff495; tests of T-0361 and T-0370 green
+outcome: revert path: git revert 68ff495 on goal/T-0353; if H3b does not land, the legacy default stays labelled in scorecard --planner and this decision must be revisited
