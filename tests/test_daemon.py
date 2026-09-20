@@ -2334,3 +2334,23 @@ class DispatchWorker(unittest.TestCase):
         before = dict(self.state)
         daemon._dispatch_worker(self.task_id, "prompt")
         self.assertEqual(self.state, before)
+
+
+class MergeDecisionEvidence(unittest.TestCase):
+    def test_report_merge_records_gate_evidence_for_goal_head(self):
+        from unittest.mock import patch
+        from contextlib import nullcontext
+        state = {"G": {"id": "G", "pipeline": {}},
+                 "T": {"id": "T", "parent": "G", "constraints": {}}}
+        def update(tid, **fields):
+            state[tid].update(fields)
+        result = {"status": "merged", "target": "goal/G", "sha": "head"}
+        with patch.object(bus, "get", side_effect=lambda tid: state[tid]), \
+                patch.object(bus, "update", side_effect=update), patch.object(bus, "locked", nullcontext), \
+                patch.object(daemon.gitutil, "_git_in", return_value=FakeProc("head\n")), \
+                patch.object(daemon, "notify"):
+            daemon.report_merge("T", result)
+            self.assertEqual(state["G"]["pipeline"]["last_merge"]["sha"], "head")
+            daemon.report_merge("T", {"status": "tests_red"})
+        evidence = state["G"]["pipeline"]["last_merge"]
+        self.assertEqual((evidence["status"], evidence["head_sha"]), ("tests_red", "head"))

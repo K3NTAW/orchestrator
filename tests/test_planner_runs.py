@@ -1028,3 +1028,272 @@ class PremiumAudit(PlannerRunsBase):
                                                    "reasons": {"review": 3}}])
         (PR.STATE / "pool.toml").write_text('[planner.routes]\npremium_launches_soft_per_goal = 4\n')
         self.assertEqual(PR.premium_summary()["exceptions"], [])
+
+
+class RoutedDecisions(PlannerRunsBase):
+    def setUp(self):
+        super().setUp()
+        from unittest.mock import patch
+        self.pool = P.Pool()
+        self.pool.cfg["planner"] = {"autonomous": True, "routes": {"enabled": True}}
+        self.pool.cfg["review"] = {"security_paths": [], "semantic_paths": [], "semantic_patterns": {}}
+        self.pool.cfg["daemon"] = {"auto_fix_rounds": 2, "flaky_rerun_max": 0, "close_retry_s": 0, "close_max_attempts": 3}
+        self.launches = []
+        self.real_launch = PR.launch_routed
+        self.swap(PR, "launch_routed", lambda pool, route, prompt, account, budget, log:
+                  self.launches.append((route, prompt)) or {"pid": 8000 + len(self.launches), "pid_start": None, "log": str(log)})
+        self.swap(handover, "write", lambda *a: None)
+        self.swap(PR.notify, "_sink", lambda msg: None)
+        self.swap(PR.failures, "touch_areas", lambda task, cfg=None: {area: False for area in PR.failures.DEFAULT_AREAS})
+        self.swap(PR.gitutil, "_git_in", lambda *a: __import__('subprocess').CompletedProcess(a, 0, "abc\n", ""))
+        self.patch_identity_of(lambda *a: True)
+        self.swap(PR, "Pool", lambda: self.pool)
+
+    def held(self, goal, reason="manual", **fields):
+        return self.execute_child(goal, status="held", hold_reason=reason, **fields)
+
+    def closable(self):
+        goal = self.goal()
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}", sha="abc")
+        return goal
+
+    def test_planner_runs_never_imports_daemon(self):
+        import re
+        source = (REPO / "orchestrator/planner_runs.py").read_text()
+        self.assertIsNone(re.search(r"^\s*(?:from\s+[^\n]*\bdaemon\b\s+import|from\s+\.\s+import\s+[^\n]*\bdaemon\b|import\s+[^\n]*\bdaemon\b)", source, re.M))
+
+    def test_ctx_fields_complete_for_each_kind(self):
+        goal = self.goal()
+        scout = self.scout_child(goal)
+        held = self.held(goal, "gate_red", resume_hint={"failures": "FAILED tests/test_x.py::test_x"})
+        for point in ((goal, "held", PR._held_key(bus.get(held))), (goal, "scouts_done", goal), (goal, "closable", goal)):
+            ctx = PR.build_ctx(point, self.pool)
+            self.assertIn("infra_failure_kind", ctx)
+            self.assertIn("routes", ctx)
+            self.assertIn("premium_launches", ctx)
+            route = PR.decision.route(PR._point(point), ctx)
+            self.assertFalse(route.reason.startswith("unknown:"), route)
+        ctx = PR.build_ctx((goal, "held", PR._held_key(bus.get(held))), self.pool)
+        self.assertEqual(ctx["failing_ids"], ["tests/test_x.py::test_x"])
+        bus.update(scout, status="failed")
+        self.assertEqual(PR.build_ctx((goal, "scouts_done", goal), self.pool)["blocked_scouts"], [scout])
+
+    def test_routine_hold_launches_no_model(self):
+        goal = self.goal()
+        self.held(goal, "gate_red", resume_hint={"failures": "FAILED tests/test_x.py::test_x"})
+        daemon.auto_fix_round(self.pool)
+        PR.tick(self.pool)
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any((t.get("constraints") or {}).get("auto_round") == 1 for t in bus.read()))
+
+    def test_two_held_siblings_one_launch_only_escalate_section(self):
+        goal = self.goal()
+        routine = self.held(goal, "gate_red", resume_hint={"failures": "FAILED tests/test_x.py::test_x"})
+        risky = self.held(goal, "security approval")
+        daemon.auto_fix_round(self.pool)
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 1)
+        route, packet = self.launches[0]
+        self.assertEqual(route.name, "escalate")
+        self.assertIn(f"Task id: {risky}", packet)
+        self.assertNotIn(f"Task id: {routine}", packet)
+        self.assertTrue(any((t.get("constraints") or {}).get("fix_round_for") == routine for t in bus.read()))
+
+    def test_two_nonroutine_sections_share_claim_and_launch(self):
+        goal = self.goal()
+        self.held(goal)
+        self.held(goal)
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 1)
+        records = PR._load_records()
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["launch_id"], records[1]["launch_id"])
+        for r in records:
+            for field in ("route", "reason", "evidence", "cheaper_steps", "launch_id", "state_version", "cursor_at_launch"):
+                self.assertIn(field, r)
+
+    def test_closable_unknown_gate_skips_before_route(self):
+        from unittest.mock import patch
+        goal = self.closable()
+        with patch.object(PR, "_gate_state", return_value="unknown"), patch.object(PR.decision, "route") as route:
+            PR.tick(self.pool)
+            route.assert_not_called()
+        self.assertEqual(self.launches, [])
+        self.assertNotIn("closed_at", bus.get(goal).get("pipeline") or {})
+
+    def test_closable_gate_state_from_merge_record_never_runs_suite(self):
+        from unittest.mock import patch
+        goal = self.closable()
+        with patch.object(PR.subprocess, "run", side_effect=AssertionError("must not run suite")):
+            self.assertEqual(PR.build_ctx((goal, "closable", goal), self.pool)["gate_state"], "green")
+            bus.update(goal, pipeline={"last_merge": {"status": "tests_red", "head_sha": "abc"}})
+            self.assertEqual(PR.build_ctx((goal, "closable", goal), self.pool)["gate_state"], "red")
+            bus.update(goal, pipeline={"last_merge": {"status": "merged", "sha": "other"}})
+            self.assertEqual(PR.build_ctx((goal, "closable", goal), self.pool)["gate_state"], "unknown")
+
+    def test_closable_routine_is_idempotent_across_ticks(self):
+        goal = self.closable()
+        PR.tick(self.pool)
+        before = bus.get(goal)
+        marker = (PR.STATE / "plan.md").read_text()
+        PR.tick(self.pool)
+        self.assertEqual(bus.get(goal), before)
+        self.assertEqual((PR.STATE / "plan.md").read_text(), marker)
+        self.assertEqual(self.launches, [])
+
+    def test_close_default_leaves_pr_to_planner(self):
+        from unittest.mock import patch
+        goal = self.closable()
+        with patch.object(PR, "_open_pr", side_effect=AssertionError("no gh")):
+            PR.tick(self.pool)
+        result = bus.get(goal)["result"]
+        self.assertIsNone(result["pr_url"])
+        self.assertEqual(result["note"], "PR pending: Planner opens goal/<id> to main")
+        self.assertTrue(bus.get(goal)["pipeline"]["closed_at"])
+
+    def test_close_recovers_crash_after_stamp(self):
+        goal = self.closable()
+        PR.stamp(goal, "closed_at")
+        PR.tick(self.pool)
+        self.assertTrue(bus.get(goal)["result"]["goal_closed"])
+        self.assertIn(f"goal: {goal}", (PR.STATE / "plan.md").read_text())
+
+    def test_close_auto_open_pr_failure_retries_then_escalates_without_gave_up(self):
+        from unittest.mock import patch
+        goal = self.closable()
+        self.pool.cfg["planner"]["routes"]["auto_open_pr"] = True
+        with patch.object(PR, "_open_pr", side_effect=RuntimeError("gh unauthorized")) as gh:
+            for _ in range(4):
+                PR.tick(self.pool)
+        self.assertEqual(gh.call_count, 3)
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(self.launches[0][0].reason, "close_failed")
+        self.assertEqual(bus.get(goal)["pipeline"]["close_attempts"], 3)
+        self.assertTrue(all(r["attempts"] == 0 and r["status"] != "gave_up" for r in PR._load_records()))
+
+    def test_investigate_uses_smaller_tier(self):
+        goal = bus.create_task("small goal", "spec", ["ok"], ["src/app.py"], role="triage", complexity=3)["id"]
+        self.scout_child(goal)
+        PR.tick(self.pool)
+        self.assertEqual((self.launches[0][0].name, self.launches[0][0].tier), ("investigate", "sonnet"))
+
+    def test_escalate_uses_premium_tier_with_reason(self):
+        goal = self.goal()
+        self.held(goal)
+        PR.tick(self.pool)
+        route = self.launches[0][0]
+        self.assertEqual((route.name, route.tier, route.reason), ("escalate", "fable", "hold_requires_planner"))
+
+    def test_same_state_version_never_relaunches(self):
+        goal = self.goal()
+        self.held(goal)
+        PR.tick(self.pool)
+        records = PR._load_records()
+        records[0]["status"] = "exited_early"
+        PR._save_records(records)
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 1)
+
+    def test_two_goals_two_launches(self):
+        for _ in range(2):
+            goal = self.goal()
+            self.held(goal)
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 2)
+        self.assertEqual(len(PR._goal_launches()), 2)
+
+    def test_cursor_advances_only_after_launch_start(self):
+        goal = self.goal()
+        self.held(goal)
+        original = PR.launch_routed
+        self.swap(PR, "launch_routed", lambda *a: (_ for _ in ()).throw(RuntimeError("launch failure")))
+        PR.tick(self.pool)
+        self.assertEqual(PR._goal_launches(), {})
+        PR.launch_routed = original
+        PR.tick(self.pool)
+        self.assertGreater(PR._goal_launches()[goal]["cursor"], 0)
+
+    def test_auth_failure_cools_account_without_gave_up(self):
+        goal = self.goal()
+        self.held(goal)
+        self.swap(PR, "launch_routed", lambda *a: (_ for _ in ()).throw(RuntimeError("authentication failed 401")))
+        PR.tick(self.pool)
+        record = PR._load_records()[0]
+        self.assertEqual((record["status"], record["attempts"]), ("infra_failure", 0))
+        self.assertTrue(any(a.cooling() and a.hold_reason == "auth" for a in self.pool.accounts))
+        self.assertEqual(PR._goal_launches(), {})
+
+    def test_infra_exit_restores_cursor_and_state_guard(self):
+        goal = self.goal()
+        self.held(goal)
+        PR.tick(self.pool)
+        record = PR._load_records()[0]
+        Path(record["log"] + ".stderr").write_text("service unavailable 503")
+        self.patch_identity_of(lambda *a: False)
+        PR.reconcile()
+        self.assertEqual(PR._goal_launches(), {})
+        self.assertEqual(PR._load_records()[0]["attempts"], 0)
+        self.assertEqual(PR._load_records()[0]["status"], "infra_failure")
+
+    def test_soft_budget_exceeded_still_launches_with_exception(self):
+        goal = self.goal()
+        self.held(goal)
+        self.pool.cfg["planner"]["routes"]["premium_launches_soft_per_goal"] = 0
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 1)
+        self.assertTrue(PR._load_records()[0]["exception"])
+
+    def test_routes_disabled_restores_per_point_launch(self):
+        goal = self.goal()
+        self.held(goal)
+        self.held(goal)
+        self.pool.cfg["planner"]["routes"]["enabled"] = False
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 2)
+        self.assertEqual(PR._goal_launches(), {})
+
+    def test_investigate_launch_command_uses_selected_model(self):
+        from unittest.mock import patch, Mock
+        route = PR.decision.Route("investigate", "small", [], [], "sonnet")
+        model = self.pool.cfg.get("models", {}).get("sonnet", "sonnet")
+        with patch.object(goals, "Popen", return_value=Mock(pid=8123)) as popen, \
+                patch.object(goals, "trust_workspace"), patch.object(goals, "_proc_start", return_value=None), \
+                patch.object(goals, "resolve_secrets", return_value={}):
+            result = self.real_launch(self.pool, route, "prompt", self.pool.accounts[0], 3, PR.STATE / "tier.log")
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], model)
+        self.assertEqual(result["pid"], 8123)
+
+    def test_security_hold_is_not_given_routine_fix(self):
+        goal = self.goal()
+        held = self.held(goal, "gate_red", resume_hint={"failures": "FAILED tests/test_x.py::test_x"})
+        self.swap(PR.failures, "touch_areas", lambda *a: {"auth": True, "migrations": False, "interfaces": False, "data_deletion": False})
+        daemon.auto_fix_round(self.pool)
+        PR.tick(self.pool)
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(self.launches[0][0].reason, "hold_touches_auth")
+        self.assertFalse(any((t.get("constraints") or {}).get("fix_round_for") == held for t in bus.read()))
+
+    def test_live_fix_round_skips_before_route(self):
+        from unittest.mock import patch
+        goal = self.goal()
+        held = self.held(goal)
+        self.execute_child(goal, constraints={"fix_round_for": held})
+        point = (goal, "held", PR._held_key(bus.get(held)))
+        with patch.object(PR, "decision_points", return_value=iter([point])), patch.object(PR.decision, "route") as route:
+            PR.tick(self.pool)
+            route.assert_not_called()
+
+    def test_close_retry_delay_and_existing_retrospective(self):
+        from unittest.mock import patch
+        goal = self.closable()
+        self.pool.cfg["planner"]["routes"]["auto_open_pr"] = True
+        self.pool.cfg["daemon"]["close_retry_s"] = 900
+        memory = PR.STATE / "memory"
+        memory.mkdir()
+        (memory / "decisions.md").write_text(f"goal: {goal}\nalready reviewed\n")
+        with patch.object(PR, "_open_pr", side_effect=RuntimeError("gh failed")) as gh:
+            PR.tick(self.pool)
+            PR.tick(self.pool)
+        self.assertEqual(gh.call_count, 1)
+        self.assertFalse((PR.STATE / "plan.md").exists())
