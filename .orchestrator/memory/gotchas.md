@@ -282,3 +282,9 @@ type: gotcha · goal: T-0445 · tasks: T-0475,T-0479 · provenance: repo
 - T-0475 and T-0479 both put their commits on the parent task branch; the daemon would have gated and merged the empty fix worktree (the parent's original commit) had the tasks not been marked failed first
 - codex_reply on a marked-failed fix task still works and lands in the same checkout Codex used before
 outcome: specs for T-0482 onward carry the own-worktree sentence; check git rev-parse of both branches after every fix round
+
+## 2026-09-21 test_tally_gates_day_and_window_independently fails between 00:00 and 03:00 local time: three hours ago is yesterday
+type: gotcha · goal: T-0489 · tasks: T-0493 · provenance: repo
+- tests/test_pool.py:405-410 uses the real clock and assumes now minus three hours is still today; observed 2026-09-21 00:04 on goal/T-0445 head and on task/T-0493 (merge went tests_red); passes again after 03:00
+- the KeyError goal_id error in test_spawn.RunClaudeNormalisedUsage seen in the same merge run passed alone (order flake, same family as the planner_runs flake)
+outcome: fix task on goal/T-0489 pins the test clock; until it merges, do not spec fix rounds for this failure between midnight and 03:00
