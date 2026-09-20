@@ -1,7 +1,7 @@
 """orchestrator.goals: launch/track/stop a headless Planner session against a target repo. goals.py may only
 import install.install, spawn.trust_workspace and spawn.resolve_secrets from the package (T-0115); these tests
 exercise it against scratch git repos, never REPO itself."""
-import contextlib, io, json, os, re, subprocess, sys, unittest
+import contextlib, io, json, os, re, subprocess, sys, threading, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_goals.py` doesn't add this dir itself
 from _harness import REPO, TMP, scratch_repo
@@ -213,6 +213,81 @@ class StartRefusals(GoalsTestCase):
         self.assertIn("T-7777", r["reason"])
         self.assertIn("running", r["reason"])
         self.assertEqual(FakePopen.calls, 0)
+
+
+class InvalidTargetToml(GoalsTestCase):
+    def test_preview_cfg_refuses_invalid_toml(self):
+        repo = self.repo("invalid-toml")
+        self.unignore(repo)
+        (repo / ".orchestrator").mkdir()
+        (repo / ".orchestrator" / "pool.toml").write_text("this is [ not valid toml")
+        self.fake_run()
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertIn("toml", r["reason"].lower())
+        self.assertNotIn("Traceback", r["reason"])
+        self.assertEqual(FakePopen.calls, 0)
+        log_count = len(subprocess.run(["git", "log", "--format=%H"], cwd=repo, capture_output=True,
+                                       text=True).stdout.splitlines())
+        self.assertEqual(log_count, 1)
+
+
+class ClaudeCliMissing(GoalsTestCase):
+    def test_start_records_missing_claude_cli(self):
+        repo = self.repo("claude-missing")
+        self.unignore(repo)
+        self.fake_run("T-9300")
+
+        def raise_fnf(*a, **k):
+            raise FileNotFoundError(2, "No such file or directory", "claude")
+
+        goals.Popen = raise_fnf
+
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertEqual(r["reason"], "claude CLI not found")
+        self.assertIsNotNone(r.get("commit"))
+
+        log = subprocess.run(["git", "log", "--format=%s"], cwd=repo, capture_output=True, text=True).stdout
+        self.assertIn("orchestrator: scaffold (goal start)", log)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(r["commit"], head)
+
+        entries = goals.status(str(repo), r["goal_id"])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["record_status"], "failed")
+
+
+class SingleGoalGuard(GoalsTestCase):
+    def test_single_goal_guard_under_lock(self):
+        repo = self.repo("single-guard")
+        self.unignore(repo)
+        from orchestrator.install import install as _install
+        _install(str(repo))
+
+        results = []
+        barrier = threading.Barrier(2)
+
+        def reserve():
+            barrier.wait()
+            results.append(goals._reserve_running_slot(repo, None))
+
+        threads = [threading.Thread(target=reserve) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        successes = [r for r in results if r[1] is None]
+        refusals = [r for r in results if r[1] is not None]
+        self.assertEqual(len(successes), 1, results)
+        self.assertEqual(len(refusals), 1, results)
+        self.assertIn("starting", refusals[0][1])
+
+        # the reservation is only a placeholder -- exactly one "starting" record landed, not two
+        records = json.loads((repo / ".orchestrator" / "runs" / "goals.json").read_text())
+        starting = [r for r in records if r.get("status") == "starting"]
+        self.assertEqual(len(starting), 1)
 
 
 class PrecheckGitRefusals(GoalsTestCase):
@@ -572,6 +647,16 @@ class CliGoalOutput(GoalsTestCase):
 
         out_list_json = self._run_cli(["goal", "list", str(repo), "--json"]).strip()
         self.assertTrue(out_list_json.startswith("{"))
+
+    def test_format_goal_line_prints_note_when_present(self):
+        entry = {"goal_id": "T-1", "record_status": "running", "planner_alive": None,
+                  "children": {}, "pr_url": None,
+                  "note": "process-start verification unavailable on this platform; liveness check only"}
+        line = cli._format_goal_line(entry)
+        self.assertIn("note=process-start verification unavailable on this platform", line)
+
+        no_note = {**entry, "note": None}
+        self.assertNotIn("note=", cli._format_goal_line(no_note))
 
 
 if __name__ == "__main__":

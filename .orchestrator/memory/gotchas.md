@@ -166,3 +166,39 @@ outcome: the human reinstalls the CLI (npm global package or the native setup); 
 type: gotcha · goal: T-0201 · tasks: T-0222,T-0223 · provenance: repo
 - spawn.base_for() ignores constraints.fix_round_for and inputs; the daemon dispatched T-0222 about 20 s after creation with a worktree on goal/T-0201 (6358799) instead of task/T-0220 (d8531a3); planner-mode.sh also stops the Planner from repointing a worktree
 outcome: workaround: the fix-round spec opens with a STEP 0 that puts the worktree on task/<parent task>, and the acceptance requires the parent commit in the log (T-0223). Fix candidate for a polish task: base_for() prefers constraints.fix_round_for's task branch
+
+## 2026-09-19 already_merged() stamps an uncommitted task as merged when its branch still equals the goal head
+type: gotcha · goal: T-0201 · tasks: T-0229 · provenance: repo
+- daemon.already_merged() (about line 225) treats task branch is-ancestor-of goal/<parent> as proof the work landed; an executor that finishes without committing leaves the branch at the goal head, so the check passes and bus.update(merged_into=..., merged_via=ancestor) fires with nothing merged and no gate. Seen on E3 v2 T-0229 at 18:20: three new files and two edits sat uncommitted in wt/T-0229 while the bus said merged
+outcome: Planner committed the worktree as found, cleared merged_into and gated_at so gate() reviews it. Fix candidate (polish): already_merged() must also require the branch head to differ from the merge base, or the worktree to be clean with a commit not on the target; a dirty worktree on a done task should hold with reason executor did not commit
+
+## 2026-09-19 a committed config toggle broke the gate for every open worktree: tests read the real pool.toml
+type: gotcha · goal: T-0201 · tasks: T-0229,T-0236 · provenance: repo
+- tests/test_jev.py::test_disabled_returns_none_without_network reads pool.toml through jev._cfg(); the Planner set [jev].enabled = true at 17:45 and every worktree cut afterwards fails tests-green with 'urlopen must not be called when jev is disabled' (E3 T-0229 held gate_red at 18:25; T-0230, T-0233, T-0234, T-0235 will follow)
+outcome: P10 T-0236 pins the config inside the tests; held tasks then go through merge() (rebase onto goal, tests, fast-forward) instead of a fresh gate. Rule: a test may never depend on a committed pool.toml value; a Planner config commit must run the test suite from ROOT first
+
+## 2026-09-19 daemon-dispatched Codex runs finish but never reach the bus: _dispatch_worker discards executor.start()'s result
+type: gotcha · goal: T-0201 · tasks: T-0235,T-0237,T-0238 · provenance: repo
+- daemon._dispatch_worker() (about line 305) calls executor.start() and drops the return dict; executor._run() logs the run and returns status done with the final message, but nothing calls bus.post_result, so the task stays running with pid null forever (three Codex tasks sat running 30 min after their runs logged done at 16:04). The Claude fallback path posts from spawn.run_worker, which is why this never showed while Codex cooled
+outcome: Planner ran tests-green on each worktree and posted the results by hand. Fix candidate (polish P11): _dispatch_worker posts done/failed/held from the returned dict with summary = message[:3000], executed_by codex:<ex>, and the daemon then gates as usual
+
+## 2026-09-19 Planner session restart kills the in-process daemon and aborts the Codex runs it dispatched
+type: gotcha · goal: T-0240 · tasks: T-0241,T-0242 · provenance: repo
+- orchestrator/daemon.py:776 autostart runs the daemon as a Thread inside the orchestrator.mcp server process, which holds daemon.lock; the dispatch threads (daemon.py:300 spawn_async) and their codex exec children die with that process. The 18:16 session restart aborted T-0241 and T-0242 mid-turn (codex rollout shows turn_aborted), left no codex_thread and no run row, and left uncommitted edits in wt/T-0242; T-0241 had committed seconds earlier
+- the same happens with orchestrator daemon --once, which exits while dispatch threads run; a CLI daemon started while the MCP server is alive exits with another instance already holds the lock
+outcome: Restart the session only when no Codex task is running (status running with assigned_to codex). Recovery: a fresh codex(task_id, prompt) thread on the same worktree continued from the uncommitted diff (T-0242 done at 56e33a1); the codex MCP tool returns the result dict but does not post it to the bus, so the Planner posts it by hand until F3 merges
+
+## 2026-09-19 codex_reply is broken: codex exec resume rejects the -C flag
+type: gotcha · goal: T-0240 · tasks: T-0242 · provenance: repo
+- orchestrator/executor.py:51 builds every command as codex exec ARGS --json -C cwd ACCESS; for the resume subcommand the installed Codex CLI answers error: unexpected argument -C found (usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]); the round counter still increments (T-0242 rounds 1) and the task is not held
+outcome: Fix candidate (polish, c2): for resume pass the worktree as cwd of the subprocess and put --json and -C before the resume subcommand if the CLI accepts them there, else drop -C; add a test that asserts the argv shape for resume. Until then a fix round needs a fresh codex thread with the diff summary in the prompt
+
+## 2026-09-19 merge_reviewed stamps merged_at before the merge; a tests_red merge leaves the task failed with merged_at set and is never retried
+type: gotcha · goal: T-0240 · tasks: T-0241,T-0245 · provenance: repo
+- orchestrator/daemon.py:643 stamps pipeline.merged_at then calls merge.merge; on tests_red merge.merge sets the task failed reason tests_red (T-0241 at 18:22 after a green worktree gate and an approved review, a flaky daemon-thread test failed only in the merge run); report_merge only notifies
+outcome: The Planner writes a fix round with constraints.fix_round_for naming the failed task (spawn.base_for cuts the worktree from task/T-xxxx) and marks the original done plus merged_into by hand when the fix round merges. Fix candidate: clear merged_at on tests_red so a later green gate can retry, or hold the task with hold_reason gate_red instead of failed
+
+## 2026-09-19 tests/test_handover.py test_handover_survives_jev_exception is flaky under the daemon gate (305 != 2)
+type: gotcha · goal: T-0240 · tasks: T-0254 · provenance: repo
+- tests/test_handover.py:288 test_handover_survives_jev_exception failed once in the daemon gate of T-0254 (executor.py-only diff) with AssertionError 305 != 2 on the orchestrator.jev.ask subtest, after a RuntimeError boom traceback from another test's thread; green on two Planner reruns of tests-green.sh on the same worktree. The gate runs the full suite inside the MCP server's daemon thread, so state leaked by a sibling test (daemon dispatch threads, module-level jev caches) is the likely cause
+outcome: Planner cleared hold_reason gate_red and pipeline.gated_at with bus.update and let the daemon re-gate. Polish candidate (c2): isolate the count the test asserts (mock call count or line count) from module state, and make gate reds that pass a rerun visible as flaky in the scorecard

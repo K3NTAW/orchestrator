@@ -3,12 +3,14 @@ daemon.maybe_handover()'s 15-minute throttle.
 
 Each test gets its own sandbox for bus.STATE/TASKS/RUNS and handover.STATE/ROOT (handover.write() looks both up
 at call time, not import time, precisely so a test can swap them) so plan.md and wt/ never touch the real repo."""
-import json, sys, tempfile, time, unittest
+import fcntl, io, json, sys, tempfile, threading, time, unittest
+from contextlib import redirect_stderr
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_handover.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
-from orchestrator import bus, daemon, handover
+from orchestrator import bus, daemon, handover, jev
 from orchestrator import pool as P
 
 
@@ -196,6 +198,180 @@ class Handover(unittest.TestCase):
         self.assertTrue(daemon.HANDOVER_STATE.exists())
         self.assertEqual(json.loads(daemon.HANDOVER_STATE.read_text())["handover_last_at"], now)
         self.assertFalse(P.PERSIST.exists())   # pool_state.json is untouched by the handover throttle
+
+    def test_throttle_under_lock(self):
+        """handover.maybe_write() checks and updates its last-written timestamp inside the same bus.locked()
+        acquisition used for the plan.md write itself (not a separate flock taken after the fact), so a second
+        caller racing the first blocks on that lock rather than also passing the throttle check and writing
+        plan.md a second time within the interval."""
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow_write(reason):
+            entered.set()
+            release.wait(2)
+            calls.append(reason)
+
+        self.swap(handover, "write", slow_write)
+        now = time.time()
+        results = []
+
+        def call():
+            results.append(handover.maybe_write("tick", now=now))
+
+        t1 = threading.Thread(target=call)
+        t1.start()
+        self.assertTrue(entered.wait(2))  # t1 is inside write(), holding the bus lock
+
+        t2 = threading.Thread(target=call)
+        t2.start()
+        time.sleep(0.05)  # give t2 a chance to block on the lock rather than race the entered check
+        release.set()
+        t1.join(2)
+        t2.join(2)
+
+        self.assertEqual(len(calls), 1)              # only one real write happened
+        self.assertEqual(sorted(results), [False, True])  # the blocked caller saw the fresh timestamp and skipped
+
+    def test_truncation_tail(self):
+        items = [f"item{i}" for i in range(11)]
+
+        text = handover._join_truncated(items)
+
+        self.assertEqual(text, ", ".join(items[:handover.MAX_ITEMS]) + ", … and 3 more")
+
+    def test_handover_prunes_with_jev(self):
+        g = self.goal("Ship the feature")
+        kept_done = self.child(g, "Docs pass")
+        bus.post_result(kept_done, {"summary": "ok"}, "done")
+        dropped_done = self.child(g, "PRUNE_ME docs")
+        bus.post_result(dropped_done, {"summary": "ok"}, "done")
+        dropped_failed = self.child(g, "PRUNE_ME failure")
+        bus.update(dropped_failed, status="failed", reason="boom")
+        held = self.child(g, "PRUNE_ME held")
+        bus.update(held, status="held", hold_reason="gate_red", resume_hint={})
+        merged = self.child(g, "PRUNE_ME merged")
+        bus.update(merged, status="done", merged_into="goal/G", sha="abc12345")
+
+        def fake_ask(state, questions, **kw):
+            return {"answers": {qid: {"noul": 0.1 if "PRUNE_ME" in q["criteria"] else 0.9}
+                                for qid, q in questions.items()}}
+        self.swap(jev, "ask", fake_ask)
+
+        plan = handover.write("test")
+        _, section = self.section(plan.read_text())
+        lines = section.splitlines()
+
+        self.assertIn(f"- done (not merged): {kept_done} Docs pass", lines)
+        self.assertFalse(any(l.startswith("- failed:") for l in lines))  # its only failed child was pruned entirely
+        self.assertIn(f"- held: {held}", section)       # held is never pruned, even with a low score
+        self.assertIn(f"- merged: {merged}", section)   # merged is never pruned, even with a low score
+        self.assertIn("pruned 2 by jev", lines[0])       # dropped_done + dropped_failed
+
+    def test_handover_unchanged_without_jev(self):
+        self.swap(jev, "ask", lambda *a, **k: None)
+        g = self.goal("Ship indexing")
+        done = self.child(g, "Docs pass")
+        bus.post_result(done, {"summary": "ok"}, "done")
+        failed = self.child(g, "Migrate schema")
+        bus.update(failed, status="failed", reason="rebase_conflict")
+
+        plan = handover.write("test")
+        _, section = self.section(plan.read_text())
+        lines = section.splitlines()
+
+        self.assertNotIn("pruned", lines[0])
+        self.assertIn(f"- done (not merged): {done}", section)
+        self.assertIn(f"- failed: {failed}", section)
+
+    def test_handover_survives_jev_exception(self):
+        g = self.goal("Ship indexing")
+        done = self.child(g, "Docs pass")
+        bus.post_result(done, {"summary": "ok"}, "done")
+        failed = self.child(g, "Migrate schema")
+        bus.update(failed, status="failed", reason="rebase_conflict")
+        events = handover._last_events(5)
+        plan = handover.STATE / "plan.md"
+        plan.write_text("# Planner notes\n")
+
+        for target in ("orchestrator.jev.ask", "orchestrator.handover.jev_rank.rank"):
+            with self.subTest(target=target):
+                stderr = io.StringIO()
+                with mock.patch(target, side_effect=RuntimeError("jev endpoint exploded\nmore detail")) as rank:
+                    with redirect_stderr(stderr):
+                        written = handover.write("test")
+
+                before, section = self.section(written.read_text())
+                self.assertEqual(before, "# Planner notes\n\n")
+                self.assertIn(f"- done (not merged): {done} Docs pass", section)
+                self.assertIn(f"- failed: {failed} Migrate schema", section)
+                self.assertNotIn("pruned", section.splitlines()[0])
+                for event in events:
+                    self.assertIn(f"{event['task']} {event['kind']} {json.dumps(event['data'])[:80]}", section)
+                self.assertIn(handover.RESUME_SENTENCE, section)
+                self.assertEqual(rank.call_count, 2)  # task groups and the events tail
+                self.assertEqual(len(stderr.getvalue().splitlines()), rank.call_count)
+
+    def test_rank_not_called_under_lock(self):
+        """write() must release the bus lock before placing any jev_rank/jev.ask request: a fake ask() probes
+        for the lock with a non-blocking flock on a second fd. If write() still held the bus lock while calling
+        us, that probe would fail (EWOULDBLOCK) even though it's the same process/thread -- flock denies a
+        second lock attempt via a different fd while the first is held, per flock(2)."""
+        g = self.goal("Ship the feature")
+        done = self.child(g, "Docs pass")
+        bus.post_result(done, {"summary": "ok"}, "done")
+
+        lock_was_free = []
+
+        def fake_ask(state, questions, **kw):
+            with open(bus.LOCK, "a+") as fh:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_was_free.append(True)
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                except OSError:
+                    lock_was_free.append(False)
+            return {"answers": {qid: {"noul": 0.9} for qid in questions}}
+
+        self.swap(jev, "ask", fake_ask)
+
+        handover.write("test")
+
+        self.assertTrue(lock_was_free)         # jev.ask was actually called
+        self.assertTrue(all(lock_was_free))    # ...and never while write() held the bus lock
+
+    def test_handover_jev_request_cap(self):
+        for i in range(8):
+            g = self.goal(f"Ship feature {i}")
+            done = self.child(g, "Docs pass")
+            bus.post_result(done, {"summary": "ok"}, "done")
+
+        calls = []
+
+        def fake_ask(state, questions, **kw):
+            calls.append(questions)
+            return {"answers": {qid: {"noul": 0.9} for qid in questions}}
+
+        self.swap(jev, "ask", fake_ask)
+
+        handover.write("test")
+
+        self.assertEqual(len(calls), handover.MAX_JEV_REQUESTS)  # 8 goals + events would be 9 requests uncapped
+
+    def test_identical_section_does_not_rewrite(self):
+        fixed = datetime(2026, 1, 1, 12, 0, 0, tzinfo=handover.TZ)
+        with mock.patch("orchestrator.handover.datetime") as dt:
+            dt.now.return_value = fixed
+
+            p1 = handover.write("test")
+            text1 = p1.read_text()
+
+            with mock.patch("orchestrator.handover.os.replace") as replace:
+                p2 = handover.write("test")
+                replace.assert_not_called()
+
+        self.assertEqual(p2.read_text(), text1)
 
 
 if __name__ == "__main__":

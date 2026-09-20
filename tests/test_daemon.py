@@ -4,7 +4,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
-import http.server, os, subprocess, sys, tempfile, threading, time, unittest
+import http.server, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
@@ -35,6 +35,7 @@ class Daemon(unittest.TestCase):
         # them here every notify() call in this suite would fire a real webhook POST or osascript popup.
         self.clear_env("ORCH_NOTIFY_URL")
         self.clear_env("ORCH_NOTIFY_DESKTOP")
+        self.swap(daemon, "_code_review_warned", False)   # one test triggers the bad-code_review-value notice
         self.gate_green(True)
 
     def swap(self, mod, name, value):
@@ -52,6 +53,14 @@ class Daemon(unittest.TestCase):
         orig = os.environ.get(name)
         os.environ[name] = value
         self.addCleanup(lambda: os.environ.__setitem__(name, orig) if had else os.environ.pop(name, None))
+
+    def review_pool(self, code_review):
+        """A Pool() with [review].code_review overridden -- the established pattern (see
+        test_reviews_expected_stamped_at_gate_survives_threshold_change) for exercising one review policy
+        without touching the shared TMP sandbox's pool.toml, which every test in this file reads from."""
+        pool = P.Pool()
+        pool.cfg["review"]["code_review"] = code_review
+        return pool
 
     def gate_green(self, green):
         """daemon.subprocess.run covers the tests-green gate, notify()'s osascript, and already_merged()'s git
@@ -217,12 +226,16 @@ class Daemon(unittest.TestCase):
         self.assertEqual(reviews[0]["tier"], "sonnet")
 
     def test_green_gate_merges_cheap_task_and_reviews_the_rest(self):
+        """code_review="always" here: this exercises the pre-2026-09-19 D1 complexity split (DIRECT_MERGE_MAX,
+        reviews_expected), not the new security_paths default, and TMP is a plain tempdir (not a git repo) so
+        changed_paths() would otherwise be at the mercy of whatever git state another test in this shared
+        sandbox left behind."""
         cheap = self.task("cheap", complexity=2)
         bus.update(cheap, status="done", worktree=str(TMP))
         big = self.task("big", complexity=5)
         bus.update(big, status="done", worktree=str(TMP))
-        daemon.tick()
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
+        daemon.tick(self.review_pool("always"))
         self.assertEqual(self.merged, [cheap])                    # complexity <=3: hooks are the whole review
         reviews = bus.read(role="review")
         self.assertEqual([(r["inputs"], r["complexity"]) for r in reviews], [([big], 5)])  # created once, not twice
@@ -258,36 +271,37 @@ class Daemon(unittest.TestCase):
     def test_gate_review_tier_opus_for_sonnet_executor(self):
         t = self.task("big", complexity=5)
         bus.update(t, status="done", worktree=str(TMP), executor="claude:sonnet")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         self.assertEqual(bus.read(role="review")[0]["tier"], "opus")
 
     def test_gate_review_tier_sonnet_for_opus_executor(self):
         t = self.task("big", complexity=5)
         bus.update(t, status="done", worktree=str(TMP), executor="claude:opus")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         self.assertEqual(bus.read(role="review")[0]["tier"], "sonnet")
 
     def test_gate_review_tier_default_for_codex(self):
         t = self.task("big", complexity=5)
         bus.update(t, status="done", worktree=str(TMP), executor="astra")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         self.assertEqual(bus.read(role="review")[0]["tier"], "sonnet")
 
     def test_one_review_only_for_mid_complexity(self):
         """complexity 5 sits between direct_merge_max (3) and two_reviews_from (7): exactly one review task, and
-        a second gate pass (the task is already gated_at) must not spawn a second one."""
+        a second gate pass (the task is already gated_at) must not spawn a second one. code_review="always" so
+        this exercises the complexity split rather than the security_paths default."""
         t = self.task("mid", complexity=5)
         bus.update(t, status="done", worktree=str(TMP))
-        daemon.tick()
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
+        daemon.tick(self.review_pool("always"))
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 1)
         self.assertEqual(reviews[0]["inputs"], [t])
 
     def test_two_reviews_for_high_complexity_merge_waits_for_both(self):
-        """complexity 7 (>= two_reviews_from), Codex-executed: two review tasks split across the two different
-        Claude tiers, and merge_reviewed() must not merge until both have approved -- one approve alone must not
-        be enough."""
+        """complexity 7 (>= two_reviews_from), Codex-executed, code_review="always": two review tasks split
+        across the two different Claude tiers, and merge_reviewed() must not merge until both have approved --
+        one approve alone must not be enough."""
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="astra")
 
@@ -300,26 +314,27 @@ class Daemon(unittest.TestCase):
             return {"status": "merged", "target": "goal/G", "sha": "abc12345"}
         self.swap(merge, "merge", fake_merge)
 
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 2)
         self.assertEqual(sorted(r["tier"] for r in reviews), ["opus", "sonnet"])  # split across the two tiers
 
         bus.update(reviews[0]["id"], status="done", review_verdict="approve")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         self.assertEqual(self.merged, [])                          # only one of two reviews approved so far
 
         bus.update(reviews[1]["id"], status="done", review_verdict="approve")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         self.assertEqual(self.merged, [t])
 
     def test_two_reviews_claude_executor_same_non_executing_tier(self):
         """T-0150 review item 3: for a Claude-executed complexity-7 task, both reviews must land on the
         non-executing tier (never the tier that executed), not split across the two tiers. Both reviews may
-        land on the same account; only the model differs from the executor (T-0159 review item 2)."""
+        land on the same account; only the model differs from the executor (T-0159 review item 2).
+        code_review="always" for the same reason as the sibling tests above."""
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="claude:opus")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 2)
         self.assertEqual([r["tier"] for r in reviews], ["sonnet", "sonnet"])
@@ -340,10 +355,11 @@ class Daemon(unittest.TestCase):
 
     def test_sibling_review_failed_holds_source_without_waiting(self):
         """T-0150 review item 2: one sibling review approved, the other failed -- merge_reviewed() must hold the
-        source task naming the failed sibling instead of waiting on a review that can never finish."""
+        source task naming the failed sibling instead of waiting on a review that can never finish.
+        code_review="always" so this complexity-7 task gets the two reviews the test needs siblings for."""
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="astra")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 2)
         bus.update(reviews[0]["id"], status="done", review_verdict="approve")
@@ -356,10 +372,10 @@ class Daemon(unittest.TestCase):
 
     def test_sibling_review_held_holds_source_without_waiting(self):
         """T-0150 review item 2, held variant: a sibling review itself held (e.g. no account headroom) must not
-        be waited on forever either."""
+        be waited on forever either. code_review="always" for the two reviews the test needs siblings for."""
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="astra")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 2)
         bus.update(reviews[0]["id"], status="done", review_verdict="approve")
@@ -374,10 +390,10 @@ class Daemon(unittest.TestCase):
         """T-0159 review item 1 (a): both reviews of a complexity-7 task fail -- neither ever reaches done, so
         the old review-centric loop (`for r in bus.read(status="done", role="review")`) never even saw this
         task. merge_reviewed must still hold it, naming both failed review ids, instead of leaving it stuck
-        done+gated forever."""
+        done+gated forever. code_review="always" for the two reviews the test needs siblings for."""
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="astra")
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 2)
         bus.update(reviews[0]["id"], status="failed")
@@ -390,10 +406,11 @@ class Daemon(unittest.TestCase):
 
     def test_single_review_failed_holds_mid_complexity(self):
         """T-0159 review item 1 (b): a complexity-4 task's one and only review fails -- same escape-hatch gap as
-        above, but with reviews_expected() == 1 instead of 2."""
+        above, but with reviews_expected() == 1 instead of 2. code_review="always" for determinism against a
+        plain tempdir worktree."""
         t = self.task("mid", complexity=4)
         bus.update(t, status="done", worktree=str(TMP))
-        daemon.tick()
+        daemon.tick(self.review_pool("always"))
         reviews = bus.read(role="review")
         self.assertEqual(len(reviews), 1)
         bus.update(reviews[0]["id"], status="failed")
@@ -402,6 +419,260 @@ class Daemon(unittest.TestCase):
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["hold_reason"], f"reviews failed: {reviews[0]['id']}")
         self.assertEqual(self.merged, [])
+
+    def test_no_review_for_non_security_diff(self):
+        """2026-09-19 decision: code_review defaults to "security_paths" now. A diff that touches nothing
+        security-sensitive merges straight through with zero review tasks, whatever the complexity."""
+        t = self.task("app change", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP))
+        self.swap(daemon, "changed_paths", lambda task: ["src/app.py"])
+        daemon.tick(self.review_pool("security_paths"))
+        self.assertEqual(self.merged, [t])
+        self.assertEqual(bus.read(role="review"), [])
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["reviews_expected"], 0)
+        self.assertEqual(gated["pipeline"]["review_reason"], "none")
+
+    def test_one_review_for_security_path(self):
+        """A diff touching a configured security glob gets exactly one review on security_review_tier, with the
+        security checklist forced regardless of the source task's own (here low) complexity -- spawn.py's
+        run_worker hardcodes the checklist cutoff at complexity >= 7, so the review task is created with its
+        complexity bumped to reach it."""
+        t = self.task("hardening", complexity=3)
+        bus.update(t, status="done", worktree=str(TMP))
+        self.swap(daemon, "changed_paths", lambda task: ["orchestrator/serve.py"])
+        daemon.tick(self.review_pool("security_paths"))
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["tier"], "sonnet")
+        self.assertGreaterEqual(reviews[0]["complexity"], 7)
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "security_paths:orchestrator/*.py")
+        self.assertEqual(gated["pipeline"]["reviews_expected"], 1)
+
+    def test_security_review_never_self_model(self):
+        """security_review_tier defaults to "sonnet"; a sonnet-executed fallback task must not be reviewed by
+        itself -- the security review swaps to opus instead, same self-review rule as review_tier()."""
+        t = self.task("hardening", complexity=5)
+        bus.update(t, status="done", worktree=str(TMP), executor="claude:sonnet")
+        self.swap(daemon, "changed_paths", lambda task: [".claude/hooks/tests-green.sh"])
+        daemon.tick(self.review_pool("security_paths"))
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["tier"], "opus")
+
+    def test_diff_unavailable_fails_closed(self):
+        """changed_paths() returning None (non-git worktree, no base, git error) must fail closed: treated as a
+        security match, exactly one review, never a silent direct merge."""
+        t = self.task("mystery diff", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP))
+        self.swap(daemon, "changed_paths", lambda task: None)
+        daemon.tick(self.review_pool("security_paths"))
+        self.assertEqual(self.merged, [])
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "diff_unavailable")
+        self.assertEqual(gated["pipeline"]["reviews_expected"], 1)
+
+    def real_repo(self):
+        """A throwaway git repo in its own tempdir (not the shared module-level TMP, whose .claude and
+        .orchestrator/prompts are symlinks into this actual repo's checkout -- writing test commits under those
+        paths would edit the real repo). scratch_repo() already gives it a main branch and initial commit."""
+        repo = Path(tempfile.mkdtemp(prefix="orch-secpaths-"))
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        scratch_repo(repo)
+        return repo
+
+    def commit_in(self, repo, branch, relpath, content):
+        """scratch_repo()'s default .gitignore excludes .claude/ (it's a symlink into the real repo checkout in
+        the shared TMP sandbox), which would silently drop a .claude/hooks/ test file here too -- so this adds
+        with -f to force past that for these throwaway repos."""
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", branch)
+        path = repo / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        run("add", "-A", "-f")
+        run("commit", "-qm", f"add {relpath}")
+
+    def test_changed_paths_real_repo_hook_matches(self):
+        """changed_paths() over a real repo picks up a change under .claude/hooks/, and it matches the
+        .claude/hooks/** security glob."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        self.commit_in(repo, "task/hook-change", ".claude/hooks/new-hook.sh", "#!/bin/sh\n")
+
+        t = self.task("hook change", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertIn(".claude/hooks/new-hook.sh", paths)
+        self.assertEqual(daemon._matching_security_path(paths), ".claude/hooks/**")
+
+    def test_changed_paths_real_repo_source_no_match(self):
+        """A change to a plain source file outside every security glob does not match."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        self.commit_in(repo, "task/source-change", "src/app.py", "print('hi')\n")
+
+        t = self.task("source change", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertEqual(paths, ["src/app.py"])
+        self.assertIsNone(daemon._matching_security_path(paths))
+
+    def test_changed_paths_quoted_path_matches(self):
+        """A path with a space and an umlaut is quoted/escaped by plain `git diff --name-only`; -z disables that
+        quoting so changed_paths() gets the raw path back and it still matches its security glob."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        fname = "deploy überprüfen.md"
+        self.commit_in(repo, "task/quoted-path", f"skills/{fname}", "# deploy\n")
+
+        t = self.task("quoted path", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertIn(f"skills/{fname}", paths)
+        self.assertEqual(daemon._matching_security_path(paths), "skills/**")
+
+    def test_changed_paths_rename_matches_old_path(self):
+        """A renamed guarded file (git mv .claude/hooks/a.sh moved.sh) must still match the security glob:
+        --no-renames makes the diff report it as delete-old + add-new instead of collapsing it into one R100
+        rename entry, so the old, still-guarded path shows up in changed_paths() even though the new path is
+        outside every glob."""
+        repo = self.real_repo()
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        run("checkout", "-b", "goal/T-0043")
+        hook = repo / ".claude" / "hooks" / "a.sh"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/sh\n")
+        run("add", "-A", "-f")
+        run("commit", "-qm", "add hook")
+        run("checkout", "-b", "task/rename-hook")
+        run("mv", ".claude/hooks/a.sh", "moved.sh")
+        run("commit", "-qm", "rename hook out of guarded dir")
+
+        t = self.task("rename hook out", complexity=2)
+        bus.update(t, worktree=str(repo))
+        paths = daemon.changed_paths(bus.get(t))
+        self.assertIn(".claude/hooks/a.sh", paths)
+        self.assertIn("moved.sh", paths)
+        self.assertEqual(daemon._matching_security_path(paths), ".claude/hooks/**")
+
+    def test_security_glob_covers_cli(self):
+        """orchestrator/*.py (the single glob that replaced the enumerated per-module list) still matches a
+        module with no dedicated entry of its own, e.g. orchestrator/cli.py."""
+        self.swap(daemon, "SECURITY_PATHS", daemon.DEFAULT_SECURITY_PATHS)
+        self.assertEqual(daemon._matching_security_path(["orchestrator/cli.py"]), "orchestrator/*.py")
+
+    def test_changed_paths_non_git_returns_none(self):
+        """A worktree that isn't a git repo makes changed_paths() fail closed with None, never an empty list."""
+        non_git = Path(tempfile.mkdtemp(prefix="orch-nongit-"))
+        self.addCleanup(shutil.rmtree, non_git, ignore_errors=True)
+        t = self.task("no repo", complexity=2)
+        bus.update(t, worktree=str(non_git))
+        self.assertIsNone(daemon.changed_paths(bus.get(t)))
+
+    def test_empty_security_paths_fails_closed(self):
+        """An empty [review].security_paths list must fail closed to one review, with review_reason
+        "security_paths_empty", and notify once -- never a silent "nothing is security-sensitive"."""
+        notified = []
+        self.swap(daemon, "notify", lambda msg: notified.append(msg))
+        self.swap(daemon, "_security_paths_empty_warned", False)
+        pool = self.review_pool("security_paths")
+        pool.cfg["review"]["security_paths"] = []
+
+        t = self.task("empty security paths", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP))
+        daemon.tick(pool)
+        self.assertEqual(self.merged, [])
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "security_paths_empty")
+        self.assertEqual(gated["pipeline"]["reviews_expected"], 1)
+        self.assertEqual(len(notified), 1)
+
+        t2 = self.task("empty security paths again", complexity=2)
+        bus.update(t2, status="done", worktree=str(TMP))
+        daemon.tick(pool)
+        self.assertEqual(len(notified), 1)   # same empty list again: no repeat notification
+
+    def test_empty_security_paths_uses_security_tier_and_checklist(self):
+        """security_paths_empty takes the same branch in gate() as a security_paths:* match or a
+        diff_unavailable result: one review on _security_review_tier(t) (never review_tier(t)), with its
+        complexity bumped to SECURITY_CHECKLIST_COMPLEXITY so spawn.py's hardcoded checklist cutoff (complexity
+        >= 7) always fires -- and the self-review-avoidance swap to the other tier still applies here too."""
+        self.swap(daemon, "_security_paths_empty_warned", False)
+        pool = self.review_pool("security_paths")
+        pool.cfg["review"]["security_paths"] = []
+
+        t = self.task("empty security paths", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP))
+        daemon.tick(pool)
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["tier"], "sonnet")
+        self.assertGreaterEqual(reviews[0]["complexity"], daemon.SECURITY_CHECKLIST_COMPLEXITY)
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "security_paths_empty")
+
+        t2 = self.task("empty security paths self-review", complexity=2)
+        bus.update(t2, status="done", worktree=str(TMP), executor="claude:sonnet")
+        daemon.tick(pool)
+        reviews2 = [r for r in bus.read(role="review") if r["inputs"][:1] == [t2]]
+        self.assertEqual(len(reviews2), 1)
+        self.assertEqual(reviews2[0]["tier"], "opus")
+        self.assertGreaterEqual(reviews2[0]["complexity"], daemon.SECURITY_CHECKLIST_COMPLEXITY)
+
+    def test_code_review_always_keeps_two_reviews(self):
+        """code_review="always" reproduces the pre-2026-09-19 D1 policy exactly: a complexity-7, Codex-executed
+        task still gets two reviews split across tiers, unaffected by the new security_paths default."""
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick(self.review_pool("always"))
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual(sorted(r["tier"] for r in reviews), ["opus", "sonnet"])
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "always")
+        self.assertEqual(gated["pipeline"]["reviews_expected"], 2)
+
+    def test_orphaned_still_one_review(self):
+        """Orphaned overrides every code_review setting: even under code_review="never" (which would otherwise
+        merge everything with zero reviews) an orphaned result still gets exactly one."""
+        t = self.task("orphaned cheap", complexity=2)
+        bus.update(t, status="done", worktree=str(TMP), result={"orphaned": True, "commit": "deadbee"})
+        daemon.tick(self.review_pool("never"))
+        self.assertEqual(self.merged, [])
+        reviews = bus.read(role="review")
+        self.assertEqual(len(reviews), 1)
+        gated = bus.get(t)
+        self.assertEqual(gated["pipeline"]["review_reason"], "orphaned")
+        self.assertEqual(gated["pipeline"]["reviews_expected"], 1)
+
+    def test_bad_code_review_value_falls_back_to_always(self):
+        """An unrecognised [review].code_review value falls back to "always" (the safest option) and notifies
+        once, not on every tick."""
+        notified = []
+        self.swap(daemon, "notify", lambda msg: notified.append(msg))
+        pool = P.Pool()
+        pool.cfg["review"]["code_review"] = "sometimes"
+        t = self.task("big", complexity=7)
+        bus.update(t, status="done", worktree=str(TMP), executor="astra")
+        daemon.tick(pool)
+        self.assertEqual(daemon.CODE_REVIEW, "always")
+        self.assertEqual(len(bus.read(role="review")), 2)   # "always" split for complexity 7, not 0 or 1
+        self.assertEqual(len(notified), 1)
+        daemon.tick(pool)                                    # same bad value again: no repeat notification
+        self.assertEqual(len(notified), 1)
 
     def test_merged_at_stamped_on_source_task(self):
         """T-0150 review item 5: the merge dedup stamp lives on the source execute task, not the review task, so
@@ -477,8 +748,10 @@ class Daemon(unittest.TestCase):
     def test_reviews_expected_stamped_at_gate_survives_threshold_change(self):
         """T-0164 review item 2: gate() freezes pipeline.reviews_expected at gate time. Raising
         [review].two_reviews_from afterwards (which would otherwise drop reviews_expected(t) for this task from
-        2 to 1) must not let merge_reviewed() merge on one approval instead of the two it was gated for."""
+        2 to 1) must not let merge_reviewed() merge on one approval instead of the two it was gated for.
+        code_review="always" -- two_reviews_from only drives review counts under that policy."""
         pool = P.Pool()
+        pool.cfg["review"]["code_review"] = "always"
         pool.cfg["review"]["two_reviews_from"] = 7
         t = self.task("big", complexity=7)
         bus.update(t, status="done", worktree=str(TMP), executor="astra")
@@ -542,14 +815,59 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.settle_started(1), [a])
 
     def test_gate_side_effect_failure_holds(self):
+        # code_review="always": complexity 2 <= direct_merge_max merges straight through, deterministically
+        # (not at the mercy of the shared tempdir worktree's git state), which is what makes merge.merge blow up.
         t = self.task("cheap", complexity=2)
         bus.update(t, status="done", worktree=str(TMP))
         self.swap(merge, "merge", raiser(RuntimeError("merge blew up")))
-        daemon.tick()                                              # must return normally, not raise
+        daemon.tick(self.review_pool("always"))                    # must return normally, not raise
         held = bus.get(t)
         self.assertEqual(held["status"], "held")
         self.assertTrue(held["hold_reason"].startswith("gate failed"), held["hold_reason"])
         self.assertIn("merge blew up", held["pipeline"]["gated_error"])
+
+    def test_gate_holds_dirty_worktree(self):
+        """A done execute task whose worktree still has uncommitted changes under its scope must not be gated
+        against a stale HEAD -- gate() must hold it for the Planner to commit or re-spec instead of running
+        tests-green against a commit that doesn't reflect the working tree."""
+        scratch_repo(TMP)
+        t = self.task("dirty", complexity=2)   # self.task's default scope is ["x.py"]
+        bus.update(t, status="done", worktree=str(TMP))
+        (TMP / "x.py").write_text("dirty = 1\n")
+        self.addCleanup(lambda: (TMP / "x.py").unlink(missing_ok=True))
+        tests_green_calls = []
+        already_faked = daemon.subprocess.run
+        def counting_run(*a, **k):
+            if a[0][:1] == [str(merge.TESTS_GREEN)]:
+                tests_green_calls.append(a)
+            return already_faked(*a, **k)
+        self.swap(daemon.subprocess, "run", counting_run)
+
+        daemon.tick()
+
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "executor did not commit"))
+        self.assertIn("x.py", held["resume_hint"]["dirty"])
+        self.assertEqual(self.merged, [])
+        self.assertEqual(tests_green_calls, [])          # never gated against the stale HEAD
+
+    def test_already_merged_ignores_branch_equal_to_target(self):
+        """A task/<id> branch cut from goal/<parent> but never committed to has a HEAD identical to the
+        merge-base with the target, so a plain `merge-base --is-ancestor` check would call it "merged" without
+        any work having landed. already_merged() must require the branch to have actually diverged too."""
+        scratch_repo(TMP)
+        self.addCleanup(g, "checkout", "main")
+        self.addCleanup(g, "branch", "-D", "goal/G")
+        t = self.task("not really merged", complexity=2)
+        bus.update(t, parent="G")
+        g("checkout", "-b", "goal/G")
+        self.addCleanup(g, "branch", "-D", f"task/{t}")
+        g("commit", "--allow-empty", "-qm", "earlier goal work")
+        g("checkout", "-b", f"task/{t}")   # no task commit, even though the goal is ahead of main
+        g("checkout", "main")
+
+        self.assertFalse(daemon.already_merged(bus.get(t)))
+        self.assertNotIn("merged_into", bus.get(t))
 
     def test_gate_missing_worktree_holds(self):
         t = self.task("nowt", complexity=2)
@@ -582,7 +900,7 @@ class Daemon(unittest.TestCase):
         g("add", "-A")
         g("commit", "-qm", "task work")
         g("checkout", "goal/G")
-        g("merge", "--ff-only", f"task/{merged_id}")
+        g("merge", "--no-ff", "-m", "merge landed task", f"task/{merged_id}")
         g("checkout", "main")
 
         pending_id = self.task("not landed yet", complexity=2)
@@ -602,7 +920,10 @@ class Daemon(unittest.TestCase):
             return already_faked(*a, **k)
         self.swap(daemon.subprocess, "run", counting_run)
 
-        daemon.tick()
+        # code_review="always": pending_id's direct merge here is meant to exercise DIRECT_MERGE_MAX (complexity
+        # 2), not the security_paths diff check -- TMP's HEAD at this point is "main", not either task's own
+        # branch, so a real changed_paths() diff would be comparing the wrong commits entirely.
+        daemon.tick(self.review_pool("always"))
 
         merged = bus.get(merged_id)
         self.assertEqual(merged["merged_into"], "goal/G")
@@ -952,3 +1273,32 @@ class Background(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirtyScopePaths(unittest.TestCase):
+    def test_tracked_untracked_renamed_and_ignored_paths(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, check=True,
+                                      capture_output=True, text=True)
+            git("init")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "Test")
+            (root / "src").mkdir()
+            (root / "src/tracked.py").write_text("before")
+            (root / "src/renamed.py").write_text("rename")
+            git("add", ".")
+            git("commit", "-qm", "seed")
+            (root / "src/tracked.py").write_text("after")
+            (root / "src/new\nfile.py").write_text("new")
+            git("mv", "src/renamed.py", "outside.py")
+            for folder in (".orchestrator", ".venv"):
+                (root / folder).mkdir()
+                (root / folder / "state").write_text("ignored")
+            self.assertEqual(daemon._dirty_scope_paths(root, ["src"]),
+                             ["src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
+            self.assertEqual(daemon._dirty_scope_paths(root, ["*"]),
+                             ["outside.py", "src/new\nfile.py", "src/renamed.py", "src/tracked.py"])

@@ -26,9 +26,18 @@ def bus_post_result(task_id: str, result: dict, status: str = "done") -> dict:
 
 
 @srv.tool()
-def bus_read(task_id: str | None = None, status: str | None = None, status_not: str | None = None, role: str | None = None) -> list | dict:
-    """Read one task, or filter tasks by status / status_not / role."""
-    return bus.read(task_id, status, status_not, role)
+def bus_read(task_id: str | None = None, status: str | None = None, status_not: str | None = None,
+             role: str | None = None, compact: bool = True, full: bool = False) -> list | dict:
+    """Read one task, or filter tasks by status / status_not / role.
+    task_id always returns that one task in full (spec, acceptance, scope, events, result -- one task is small
+    enough). A filtered read defaults to compact rows -- {id, parent, role, status, complexity, tier, title
+    (first 90 chars), depends_on, hold_reason, reason (first 120 chars), merged_into, assigned_to, has_result,
+    result_summary (first 160 chars of result.summary)} -- so scanning many tasks doesn't pull every spec and
+    event into context. Pass full=True (or compact=False) for the old shape, then bus_read(task_id=...) on the
+    ones you need to inspect closely."""
+    if task_id:
+        return bus.read(task_id)
+    return bus.read(status=status, status_not=status_not, role=role, compact=compact and not full)
 
 
 @srv.tool()

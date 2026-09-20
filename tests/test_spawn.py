@@ -149,6 +149,130 @@ class RunClaudeBudgetExitReason(unittest.TestCase):
         self.assertIn("budget exceeded", r["reason"])
 
 
+class RunClaudeHoldsWhenCliMissing(unittest.TestCase):
+    def setUp(self):
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_run_claude_holds_when_cli_missing(self):
+        """Gotcha 2026-09-19: a missing `claude` binary must hold the task visibly (run logged with outcome
+        "no_cli"), not crash the worker thread with FileNotFoundError and leave the task stuck "running" until
+        something else requeues it as "process died" forever."""
+        orig_which = spawn.shutil.which
+        spawn.shutil.which = lambda name: None if name == "claude" else orig_which(name)
+        self.addCleanup(lambda: setattr(spawn.shutil, "which", orig_which))
+
+        popen_called = []
+        def fail_if_called(*a, **k):
+            popen_called.append(True)
+            raise AssertionError("Popen must not be called when the claude CLI is missing")
+        orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = fail_if_called
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", orig_popen))
+
+        t = bus.create_task("no-cli-test", "s", ["a"], ["x.py"], role="execute", tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", ["execute"])
+        pool = P.Pool()
+
+        runs_dir = TMP / ".orchestrator" / "runs"
+        before = len(list(runs_dir.glob("*.jsonl"))) if runs_dir.exists() else 0
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS["execute"], 2.0, 60)
+
+        self.assertEqual(popen_called, [])
+        self.assertEqual(r["status"], "held")
+        self.assertIn("claude CLI not found", r["reason"])
+
+        run_files = sorted(runs_dir.glob("*.jsonl"))
+        self.assertGreaterEqual(len(run_files), max(before, 1))
+        last_line = run_files[-1].read_text().strip().splitlines()[-1]
+        self.assertEqual(json.loads(last_line)["outcome"], "no_cli")
+
+
+class RunClaudeToolsAndMcpConfig(unittest.TestCase):
+    """T-0212: TOOLS[role] was defined but never reached the `claude` argv (dead config); --strict-mcp-config +
+    an explicit --mcp-config keeps workers off the github/orchestrator MCP schemas they never call."""
+
+    class CapturingPopen(FakePopen):
+        last_cmd = None
+
+        def __init__(self, cmd, cwd=None, env=None, stdout=None, stderr=None, text=None):
+            RunClaudeToolsAndMcpConfig.CapturingPopen.last_cmd = cmd
+            super().__init__(cmd, cwd=cwd, env=env, stdout=stdout, stderr=stderr, text=text)
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = self.CapturingPopen
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def run_claude_task(self, role="execute"):
+        t = bus.create_task("tools-test", "s", ["a"], ["x.py"], role=role, tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", [role])
+        pool = P.Pool()
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS[role], 2.0, 60)
+        self.assertEqual(r["status"], "done")
+        return self.CapturingPopen.last_cmd
+
+    def test_run_claude_passes_allowed_tools(self):
+        cmd = self.run_claude_task(role="execute")
+        self.assertIn("--allowedTools", cmd)
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], spawn.TOOLS["execute"])
+
+    def test_run_claude_uses_worker_mcp_config(self):
+        """No .mcp.<role>.json override exists for "execute": falls back to the tracked, bus-only worker config."""
+        cmd = self.run_claude_task(role="execute")
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertIn("--mcp-config", cmd)
+        self.assertEqual(cmd[cmd.index("--mcp-config") + 1], str(spawn.ROOT / ".mcp.worker.json"))
+
+    def test_run_claude_keeps_role_override_mcp_config_when_present(self):
+        # "triage" (not "review"): [secrets.review] shells out for a real token in pool.toml, which would hit
+        # this test's patched subprocess.Popen; [secrets.triage] is empty so resolve_secrets never calls it.
+        override = spawn.ROOT / ".mcp.triage.json"
+        override.write_text('{"mcpServers": {}}')
+        self.addCleanup(override.unlink)
+        cmd = self.run_claude_task(role="triage")
+        self.assertEqual(cmd[cmd.index("--mcp-config") + 1], str(override))
+
+
+class FakePopenWithTurns(FakePopen):
+    def communicate(self, timeout=None):
+        return json.dumps({"result": "ok", "usage": {}, "num_turns": 7}), ""
+
+
+class RunRecordHasTurns(unittest.TestCase):
+    """bus.log_run's run record must carry claude's num_turns so the scorecard can show turns per run."""
+
+    def setUp(self):
+        self.orig_popen = spawn.subprocess.Popen
+        spawn.subprocess.Popen = FakePopenWithTurns
+        self.addCleanup(lambda: setattr(spawn.subprocess, "Popen", self.orig_popen))
+        orig_trust = spawn.trust_workspace
+        spawn.trust_workspace = lambda config_dir, wt: None
+        self.addCleanup(lambda: setattr(spawn, "trust_workspace", orig_trust))
+
+    def test_run_record_has_turns(self):
+        t = bus.create_task("turns-test", "s", ["a"], ["x.py"], role="execute", tier="sonnet", complexity=3)
+        t["worktree"] = str(TMP)
+        acct = P.Account("A", "~/.claude-a", ["execute"])
+        pool = P.Pool()
+
+        runs_dir = TMP / ".orchestrator" / "runs"
+        before = len(list(runs_dir.glob("*.jsonl"))) if runs_dir.exists() else 0
+        r = spawn.run_claude(pool, acct, t, "prompt", "claude-sonnet-5", spawn.TOOLS["execute"], 2.0, 60)
+        self.assertEqual(r["status"], "done")
+
+        run_files = sorted(runs_dir.glob("*.jsonl"))
+        self.assertGreaterEqual(len(run_files), max(before, 1))
+        last_line = run_files[-1].read_text().strip().splitlines()[-1]
+        self.assertEqual(json.loads(last_line)["turns"], 7)
+
+
 class RunWorkerMissingReason(unittest.TestCase):
     """T-0134: run_worker must not KeyError when run_claude returns a failure dict without a "reason" key, and
     should preserve any partial output as a resume_hint for the next attempt."""
@@ -278,6 +402,28 @@ class SpawnBase(unittest.TestCase):
         challenge2 = bus.create_task("challenge y", "s", ["a"], ["y.py"], role="challenge", parent="ghost",
                                       inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
         self.assertEqual(spawn.base_for(challenge2), "origin/main")
+
+    def test_base_for_prefers_fix_round_parent(self):
+        """A fix-round execute task (constraints.fix_round_for names the task it's fixing) must cut its worktree
+        from that task's own task/<id> branch, not the goal branch -- the original task's commits may not have
+        landed on the goal branch yet (or ever, if the fix round replaces them)."""
+        original = bus.create_task("feat4", "s", ["a"], ["feat4.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(original["id"], base="HEAD")
+        bus.update(original["id"], worktree=str(wt))
+
+        (wt / "feat4.py").write_text("original = True\n")
+        self.g("add", "feat4.py", cwd=wt, check=True)
+        self.g("commit", "-qm", "original task work", cwd=wt, check=True)
+
+        fix = bus.create_task("fix feat4", "s", ["a"], ["feat4.py"], role="execute", parent="G",
+                              constraints={"fix_round_for": original["id"]})
+        self.assertEqual(spawn.base_for(fix), f"task/{original['id']}")
+        fix_wt = spawn.ensure_worktree(fix["id"])
+        self.assertEqual((fix_wt / "feat4.py").read_text(), "original = True\n")
+
+        fix_missing = bus.create_task("fix ghost", "s", ["a"], ["feat4.py"], role="execute", parent="G",
+                                      constraints={"fix_round_for": "T-9999"})
+        self.assertEqual(spawn.base_for(fix_missing), "goal/G")   # named branch doesn't exist: falls back
 
     def test_ensure_worktree_resolves_base_when_none_given(self):
         t = bus.create_task("stacked-exec", "s", ["a"], ["stacked.py"], role="execute", parent="G")

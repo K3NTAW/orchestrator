@@ -30,12 +30,29 @@ autonomous = false  # 2026-09-18: launch a headless Planner to act on scouts_don
 # execution. complexity 1-3: hooks only, no review (CLAUDE.md step 7, unchanged). 4-6: exactly one review, on
 # whichever model did not execute the task. 7-10: two reviews -- both reviews may run on the same account; the
 # model differs from the executor. Spec review (before an executor ever sees the spec) only fires at
-# complexity >= spec_review_min, and always runs on spec_review_tier.
+# complexity >= spec_review_min, and always runs on spec_review_tier. direct_merge_max/two_reviews_from/the
+# complexity split above apply only when code_review = "always" below.
+#
+# User decision 2026-09-19: code reviews cost 44-45% of the last two goals and the human reviews every merged
+# PR anyway, so code review is dropped except when the merged diff touches a security-sensitive path -- spec
+# review (above) is unchanged and still gates complexity >= spec_review_min before an executor ever sees the
+# spec. code_review: "never" (no code review, ever) | "security_paths" (review only a diff matching one of the
+# globs below, or one changed_paths() could not determine -- fails closed) | "always" (today's pre-2026-09-19
+# D1 behaviour, complexity-driven, unchanged). A security-path (or diff-unavailable) review always gets exactly
+# one reviewer, on security_review_tier, swapped to the other Claude tier when the executor was that tier.
 [review]
 spec_review_min = 6
 direct_merge_max = 3
 two_reviews_from = 7
 spec_review_tier = "sonnet"
+code_review = "security_paths"   # never | security_paths | always
+security_review_tier = "sonnet"
+security_paths = [
+    "orchestrator/*.py",
+    ".claude/hooks/**", ".claude/settings.json", ".orchestrator/pool.toml", ".orchestrator/protected-paths.txt",
+    ".orchestrator/prompts/**", "skills/**", ".claude/skills/**",
+    ".mcp*.json", ".mcp.worker.json", "Dockerfile", "docker-compose*.yml", "pyproject.toml", "uv.lock",
+]
 
 [codex]
 home = "~/.codex"
@@ -158,6 +175,18 @@ max_turns = { triage = 5, scout = 12, review = 10, challenge = 15, execute = 40,
 max_budget_usd = { triage = 0.5, scout = 1.0, review = 3.0, challenge = 1.5, execute = 6.0, planner = 10.0, planner_decision = 3.0 } # hard: --max-budget-usd
 timeout_s = { triage = 300, scout = 600, review = 900, challenge = 900, execute = 1800, planner = 7200 }
 
+# Jev (TypeSafe AI): typed questions about a state answered with calibrated probabilities instead of text
+# (orchestrator/jev.py). Off by default -- flip enabled = true only once daily_budget_tokens has been sized
+# against real usage, same caution as bench.py's MIN_INTERVAL_S. See README's Pipeline section for the note on
+# what leaves the machine.
+[jev]
+enabled = true  # 2026-09-19 user decision: key in the Keychain, Phase E (T-0201)
+model = "jev-latest"
+timeout_s = 5
+daily_budget_tokens = 20_000_000
+max_state_chars = 100_000
+gate_mode = "log"  # E3 tool-call gate (T-0229): "log" (never blocks, default) | "block"
+
 # Secrets: env var name -> shell command that prints the value (Keychain-backed), e.g. the laptop's `f tok get`
 # wrapper below. On a headless host with no Keychain, use the form ENV_NAME = "env:OTHER_NAME" instead, which
 # reads OTHER_NAME straight from this process's environment (e.g. set by systemd/CI, not by a shell command).
@@ -170,3 +199,6 @@ GH_READ_TOKEN = "source ~/.config/f/f.sh && f tok get gh-read --reveal"
 [secrets.triage]
 [secrets.planner]
 GH_WRITE_TOKEN = "env:GH_WRITE_TOKEN"
+[secrets.jev]
+TYPESAFE_API_KEY = "source ~/.config/f/f.sh && f tok get typesafe --reveal"
+# Headless equivalent: TYPESAFE_API_KEY = "env:TYPESAFE_API_KEY"

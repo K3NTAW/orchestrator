@@ -45,6 +45,47 @@ class Cli(unittest.TestCase):
             cli.main()
         json.loads(out.getvalue())  # valid JSON
 
+    def test_planner_runs_summary_prints_on_empty_ledger(self):
+        from orchestrator import planner_runs as PR
+        PR._runs_path().unlink(missing_ok=True)
+        sys.argv = ["orchestrator", "planner-runs", "--summary"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        line = out.getvalue().strip()
+        self.assertIn("decisions=0", line)
+        self.assertIn("jev_scored=0", line)
+        self.assertIn("agreement_rate=None", line)
+
+    def test_planner_runs_default_prints_summary(self):
+        """T-0232 review item 4: `orchestrator planner-runs` with no flag prints the same summary line as
+        `--summary` -- the flag is still accepted, but no longer required."""
+        from orchestrator import planner_runs as PR
+        PR._runs_path().unlink(missing_ok=True)
+        sys.argv = ["orchestrator", "planner-runs"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main()
+        line = out.getvalue().strip()
+        self.assertIn("decisions=0", line)
+        self.assertIn("jev_scored=0", line)
+        self.assertIn("agreement_rate=None", line)
+        self.assertIn("mean_confidence=None", line)
+
+    def test_cost_ignores_jev_lines(self):
+        bus.RUNS.mkdir(parents=True, exist_ok=True)
+        marker = f"cli-cost-jev-{time.time()}"
+        with open(bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl", "a") as fh:
+            fh.write(json.dumps({"task": marker, "role": "execute", "input_tokens": 7, "output_tokens": 0,
+                                  "cache_read_input_tokens": 0}) + "\n")
+            # a jev usage line: no "role" key at all -- must not be counted anywhere, not even under "?"
+            fh.write(json.dumps({"ts": time.time(), "caller": "noul", "input_tokens": 999999,
+                                  "model": "jev-latest", "latency_ms": 1.0, "ok": True}) + "\n")
+        agg = cli.cost("task")
+        self.assertEqual(agg[marker]["input_tokens"], 7)
+        self.assertEqual(agg[marker]["runs"], 1)
+        self.assertNotIn(999999, [v.get("input_tokens") for v in agg.values()])
+
     def test_pick_tallies_then_prints_account_and_config_dir(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
         with mock.patch.object(cli.Pool, "tally_planner") as tally:

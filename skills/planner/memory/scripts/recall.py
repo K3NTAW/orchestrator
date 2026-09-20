@@ -1,5 +1,6 @@
 """Layered recall over orchestrator memory: notes (memory/*.md), bus (tasks/*.json), cmem (claude-mem sqlite, read-only),
-graph (graphify LESSONS.md). `index` prints one line per hit; `get` prints full entries for chosen ids. Stdlib only."""
+graph (graphify LESSONS.md). `index` prints one line per hit; `get` prints full entries for chosen ids. Stdlib only,
+save for jev_rank -- imported from the orchestrator package on ROOT, which is itself stdlib-only."""
 import datetime, json, os, re, sqlite3, sys
 from pathlib import Path
 
@@ -10,6 +11,15 @@ CMEM = Path(os.environ.get("CLAUDE_MEM_DB") or Path.home() / ".claude-mem" / "cl
 LESSONS = Path(os.environ.get("GRAPHIFY_OUT") or ROOT / "graphify-out") / "reflections" / "LESSONS.md"
 HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2}) (.+)$")
 MAX_GET_CHARS = 6000  # same cap as a bus result; one `get` never exceeds it
+
+
+# ORCH_ROOT (above) is the *state* root -- any project's .orchestrator dir -- not necessarily this repo, so it's
+# not safe to import the orchestrator source package from it (an editable install elsewhere could shadow it).
+# Import from the repo recall.py itself lives in instead: skills/planner/memory/scripts/recall.py -> repo root.
+_SRC_ROOT = Path(__file__).resolve().parents[4]
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+from orchestrator import jev_rank  # noqa: E402 -- needs _SRC_ROOT on sys.path first
 
 
 def terms_of(q):
@@ -95,22 +105,38 @@ def index_graph(terms):
 
 
 def cmd_index(argv):
-    q, project, limit = "", None, 20
+    q, project, limit, goal_text = "", None, 20, os.environ.get("ORCH_GOAL_TEXT")
     i = 0
     while i < len(argv):
         if argv[i] == "--project": project = argv[i + 1]; i += 2
         elif argv[i] == "--limit": limit = int(argv[i + 1]); i += 2
+        elif argv[i] == "--goal": goal_text = argv[i + 1]; i += 2
         else: q += " " + argv[i]; i += 1
     terms = terms_of(q)
     if not terms:
-        sys.exit("usage: recall.sh index \"<terms>\" [--project NAME] [--limit N]")
+        sys.exit("usage: recall.sh index \"<terms>\" [--project NAME] [--limit N] [--goal \"<text>\"]")
     hits = index_notes(terms) + index_bus(terms) + index_cmem(terms, project, limit) + index_graph(terms)
     hits.sort(key=lambda h: (-h[0], h[2]))
     if not hits:
         print(f"no hits for {terms} in notes/bus/cmem/graph"); return
-    print(f"# {len(hits)} hits for {terms} (showing {min(len(hits), limit)}) — id · date · layer · title")
-    for s, id_, date, layer, title in hits[:limit]:
-        print(f"{id_} · {date or '-'} · {layer} · {title}")
+    if not goal_text:
+        print(f"# {len(hits)} hits for {terms} (showing {min(len(hits), limit)}) — id · date · layer · title")
+        for s, id_, date, layer, title in hits[:limit]:
+            print(f"{id_} · {date or '-'} · {layer} · {title}")
+        return
+
+    shown = hits[:limit]
+    by_id = {id_: (s, id_, date, layer, title) for s, id_, date, layer, title in shown}
+    items = [{"id": id_, "text": title} for s, id_, date, layer, title in shown]
+    ranked = jev_rank.rank(items, goal_text)
+    if len(ranked) == len(items) and all(it["p_relevant"] is None for it in ranked):
+        print("jev: off")
+    print(f"# {len(ranked)} hits for {terms} (showing {len(ranked)}) — id · date · layer · title · p")
+    for it in ranked:
+        s, id_, date, layer, title = by_id[it["id"]]
+        p = it["p_relevant"]
+        print(f"{id_} · {date or '-'} · {layer} · {title} · {p:.2f}" if p is not None
+              else f"{id_} · {date or '-'} · {layer} · {title} · -")
 
 
 def _jl(s):

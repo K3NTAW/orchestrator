@@ -3,11 +3,12 @@
 # (see docker-compose.executor.yml). UID/GID match the host user that owns the mounted credential
 # dirs so bind mounts stay writable inside the container.
 #
-# Integrity: the codex tarball is verified against a pinned sha256 (CODEX_SHA256_AMD64/_ARM64) -- the
-# release's own codex-package_SHA256SUMS only covers the "-package-" bundle, not the plain arch tarball
-# used here, so there's no published checksum file to check against. The uv and Claude Code installer
-# scripts are downloaded to a file and sha256sum'd into the build log for audit before running -- neither
-# vendor publishes a checksum file for the script itself to verify against.
+# Integrity: the codex and gh tarballs are each verified against a pinned sha256 (CODEX_SHA256_*,
+# GH_SHA256_*) -- the codex release's own codex-package_SHA256SUMS only covers the "-package-" bundle,
+# not the plain arch tarball used here, so there's no published checksum file to check against; gh's
+# release does publish one (gh_<version>_checksums.txt) and the pinned values above come from it. The uv
+# and Claude Code installer scripts are downloaded to a file and sha256sum'd into the build log for audit
+# before running -- neither vendor publishes a checksum file for the script itself to verify against.
 # No --platform pin: this digest is the multi-arch manifest list, so Docker picks the matching entry for
 # whatever host builds it (amd64 on kenta-server, arm64 native on the laptop for smoke tests -- never
 # emulate). The codex asset below is selected per-arch separately, since it has no multi-arch manifest.
@@ -26,6 +27,12 @@ ARG CODEX_VERSION=0.155.0
 # and `sha256sum` them.
 ARG CODEX_SHA256_AMD64=e415cc3adb94ade16e8d44b4dd58a9201cc34b2ee51a5d6eddf2a3a00aecb6c0
 ARG CODEX_SHA256_ARM64=8b4a9c356916c515f7c93f918a01b8fa1371bcc9758addbfa723b85fbec5694b
+ARG GH_VERSION=2.101.0
+# sha256 of gh_${GH_VERSION}_linux_amd64.tar.gz / gh_${GH_VERSION}_linux_arm64.tar.gz, from that
+# release's own gh_${GH_VERSION}_checksums.txt on https://github.com/cli/cli/releases. Bump alongside
+# GH_VERSION.
+ARG GH_SHA256_AMD64=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+ARG GH_SHA256_ARM64=b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
 # Optional pins for the uv/Claude Code installer *scripts* themselves (astral-sh/Anthropic don't publish
 # checksums for these, unlike the codex tarball above). When set, the build verifies the downloaded
 # script against it before running; when empty, the build only logs the hash for manual audit.
@@ -38,14 +45,28 @@ ENV HOME=/home/orch \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git gnupg python3 \
-    && install -d -m 0755 /etc/apt/keyrings \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-         > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# gh: static binary from the cli/cli GitHub release, verified against the pinned CODEX-style
+# GH_SHA256_* checksum above -- not the cli.github.com apt repo, which floats on whatever build it
+# currently serves with no per-artifact hash to pin against. Asset picked by build architecture, like
+# the codex block below; the build then asserts `gh --version` prints GH_VERSION so a bad pin or a
+# renamed binary fails the build instead of shipping silently.
+# Bump: change GH_VERSION above to a version from https://github.com/cli/cli/releases (tag is
+# "v<version>"), and GH_SHA256_AMD64/_ARM64 from that release's gh_<version>_checksums.txt.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) gh_arch=linux_amd64; gh_sha256="$GH_SHA256_AMD64" ;; \
+      arm64) gh_arch=linux_arm64; gh_sha256="$GH_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_${gh_arch}.tar.gz"; \
+    echo "${gh_sha256}  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_${gh_arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh*; \
+    gh --version | grep -qF "gh version ${GH_VERSION}"
 
 # Baked default identity for the `git commit` calls goals.py runs inside cloned target repos --
 # overridable per the runbook's executor.env template (GIT_AUTHOR_NAME/EMAIL, GIT_COMMITTER_NAME/EMAIL;
@@ -81,7 +102,7 @@ RUN curl -LsSf -o /tmp/uv-install.sh "https://astral.sh/uv/${UV_VERSION}/install
     && rm -f /tmp/uv-install.sh
 
 # Codex CLI: static musl binary from the openai/codex GitHub release (no linux-gnu asset is published).
-# Asset picked by build architecture, like the gh apt line above; the tarball is verified against the
+# Asset picked by build architecture, like the gh block above; the tarball is verified against the
 # pinned CODEX_SHA256_* checksum for that architecture before it's installed.
 # Bump: change CODEX_VERSION above to a version from https://github.com/openai/codex/releases (tag is
 # "rust-v<version>"; the download URL below adds that prefix), and CODEX_SHA256_AMD64/_ARM64 (see above).
@@ -124,6 +145,10 @@ USER root
 COPY . /opt/orchestrator
 WORKDIR /opt/orchestrator
 
+# --frozen (here and in the entrypoint below) refuses to update or regenerate uv.lock -- /opt/orchestrator
+# is root-owned (see COPY above) so orch could not write a regenerated lock back to disk at runtime
+# anyway; --frozen makes that explicit and fails fast on a lock mismatch instead of uv silently trying
+# and hitting a permission error, or drifting onto unpinned dependency versions.
 # UV_CACHE_DIR keeps this root-run sync out of /home/orch/.cache -- writing there as root would leave
 # root-owned cache entries orch can't add to at runtime.
 RUN UV_CACHE_DIR=/root/.cache/uv uv sync --frozen && chown -R orch:orch /opt/orchestrator/.venv
@@ -132,4 +157,4 @@ USER orch
 
 # No args (the compose service) -> serve. Args given (e.g. the version-check smoke test in this task's
 # acceptance criteria) -> run them instead, so `docker run --rm <image> sh -c '...'` works directly.
-ENTRYPOINT ["/bin/sh", "-c", "if [ \"$#\" -gt 0 ]; then exec \"$@\"; else exec uv run orchestrator serve --host 0.0.0.0 --port 8090; fi", "--"]
+ENTRYPOINT ["/bin/sh", "-c", "if [ \"$#\" -gt 0 ]; then exec \"$@\"; else exec uv run --frozen orchestrator serve --host 0.0.0.0 --port 8090; fi", "--"]

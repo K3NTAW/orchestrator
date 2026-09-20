@@ -185,7 +185,39 @@ docker compose -f docker-compose.executor.yml run --rm orchestrator-executor gh 
 
 Both are interactive (device-auth flow / browser or token paste) — follow the prompts.
 
-## 8. Bring it up
+## 8. Generate the git credential helper config
+
+`gh auth setup-git` writes the credential helper entries `git push`/`git clone` over https need into
+`~/.gitconfig`. `docker-compose.executor.yml` mounts that file **read-only** into the container (so no
+agent running inside it can rewrite git's credential configuration at runtime), which means the file has
+to exist on the host, produced through a one-off invocation, before `gh` can be used for git operations
+through the compose service:
+
+1. Create the (empty) file the mount will point at, so Docker bind-mounts a regular file rather than
+   creating a directory at that path:
+
+   ```bash
+   touch "$ORCH_CREDS/gitconfig"
+   ```
+
+2. Run `gh auth setup-git` through the image built in step 7, bypassing compose's read-only declaration
+   with a plain `docker run` that mounts the same host path read-write for this one invocation only (this
+   needs step 7's `gh auth login` to have already populated `$ORCH_CREDS/gh`):
+
+   ```bash
+   docker run --rm \
+     --user "${ORCH_UID}:${ORCH_GID}" \
+     -e HOME=/home/orch \
+     -v "$ORCH_CREDS/gh:/home/orch/.config/gh" \
+     -v "$ORCH_CREDS/gitconfig:/home/orch/.gitconfig" \
+     orchestrator-executor gh auth setup-git
+   ```
+
+3. From here on, `docker compose ... up` mounts `$ORCH_CREDS/gitconfig` read-only at `/home/orch/.gitconfig`
+   (step 9). Re-run steps 1–2 (skip the `touch` if the file already exists) if you rotate the `gh` token
+   with a host or protocol `gh auth setup-git` needs to add a new entry for.
+
+## 9. Bring it up
 
 ```bash
 docker compose -f docker-compose.executor.yml up -d --build
@@ -194,7 +226,7 @@ docker compose -f docker-compose.executor.yml up -d --build
 No ports are published — the container is reached on the home docker network (`ORCH_NET`) by the kgpt
 module, not from the host's own network namespace.
 
-## 9. Smoke test
+## 10. Smoke test
 
 No ports are published, so the host can't reach the container by its own network namespace. From the host,
 go through `docker compose exec`:

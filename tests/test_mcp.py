@@ -1,0 +1,44 @@
+"""orchestrator.mcp's spawn_* tools: each refuses a task whose role doesn't match what the tool is for, instead of
+running it under the wrong role (gotcha 2026-09-18: spawn_spec_review handed an execute task id ran an execute)."""
+import sys, unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_mcp.py` doesn't add this dir itself
+from _harness import TMP  # noqa: F401 -- sets ORCH_ROOT before any `orchestrator` import
+from orchestrator import bus, mcp
+
+
+class SpawnToolsRefuseWrongRole(unittest.TestCase):
+    def test_spawn_tools_refuse_wrong_role(self):
+        execute = bus.create_task("do the thing", "s", ["a"], ["x.py"], role="execute")
+
+        for tool, allowed in (
+            (mcp.spawn_scout, ("scout", "triage")),
+            (mcp.spawn_review, ("review",)),
+            (mcp.spawn_challenge, ("challenge",)),
+            (mcp.spawn_spec_review, ("spec_review",)),
+        ):
+            result = tool(execute["id"])
+            expect = f"task {execute['id']} has role execute; this tool takes " + " or ".join(allowed)
+            self.assertEqual(result, {"error": expect}, f"{tool.__name__}: {result}")
+            self.assertEqual(bus.get(execute["id"])["status"], "queued")  # nothing was run
+
+
+class WrongRoleHelper(unittest.TestCase):
+    def test_accepts_matching_role(self):
+        scout = bus.create_task("scout it", "s", ["a"], ["x.py"], role="scout")
+        triage = bus.create_task("triage it", "s", ["a"], ["x.py"], role="triage")
+        review = bus.create_task("review it", "s", ["a"], ["x.py"], role="review", inputs=["T-does-not-matter"])
+        challenge = bus.create_task("challenge it", "s", ["a"], ["x.py"], role="challenge",
+                                     inputs=[{"claim": "c", "evidence": "e", "confidence": 0.5}])
+        spec_review = bus.create_task("spec review it", "s", ["a"], ["x.py"], role="spec_review",
+                                       inputs=["T-does-not-matter"])
+
+        self.assertIsNone(mcp._wrong_role(scout["id"], "scout", "triage"))
+        self.assertIsNone(mcp._wrong_role(triage["id"], "scout", "triage"))
+        self.assertIsNone(mcp._wrong_role(review["id"], "review"))
+        self.assertIsNone(mcp._wrong_role(challenge["id"], "challenge"))
+        self.assertIsNone(mcp._wrong_role(spec_review["id"], "spec_review"))
+
+
+if __name__ == "__main__":
+    unittest.main()

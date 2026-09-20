@@ -32,6 +32,12 @@ MAX_GOAL_CHARS = 20000  # goal ends up in argv of the Planner launch; longer goa
 # clone stderr is never safe to echo verbatim, and it must never reach a response body at all (T-0146 risk 3).
 CREDENTIAL_RE = re.compile(r"://[^/@\s]+@")
 
+# A bearer token (as in "Authorization: Bearer <token>") or an Authorization-style "key=value"/"key: value"
+# secret (token=..., api_key=..., password=..., secret=...) embedded in refused-goal text or subprocess stderr --
+# neither is a URL credential, so CREDENTIAL_RE above never touches it (T-0202 review note).
+BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
+KEYVALUE_SECRET_RE = re.compile(r"(?i)\b(authorization|token|api[_-]?key|secret|password|passwd)\s*[:=]\s*\S+")
+
 access_log = logging.getLogger("orchestrator.serve.access")
 
 
@@ -43,18 +49,16 @@ def _repos_toml_path():
     return Path(os.environ.get("ORCH_REPOS_TOML", str(PACKAGE_REPO / ".orchestrator" / "repos.toml")))
 
 
-def _load_repos():
+def _load_repos_or_503():
+    """(repos, None) when usable, else (None, 503 JSONResponse). A missing repos.toml means this service
+    instance isn't configured yet -- a 503, not a 404 that looks like a bad request for a real repo slug. A
+    malformed repos.toml must not 500 every goal route either -- the parse error is logged, the caller gets a
+    clean 503 too (T-0202 review note distinguishes the two cases at the log line, same status to the client)."""
     p = _repos_toml_path()
     if not p.exists():
-        return {}
-    return tomllib.loads(p.read_text())
-
-
-def _load_repos_or_503():
-    """(repos, None) when usable, else (None, 503 JSONResponse). A malformed repos.toml must not 500 every
-    goal route -- the parse error is logged, the caller gets a clean 503."""
+        return None, JSONResponse({"reason": "service not configured"}, status_code=503)
     try:
-        return _load_repos(), None
+        return tomllib.loads(p.read_text()), None
     except Exception as e:
         access_log.error("repos.toml unreadable: %s", e)
         return None, JSONResponse({"reason": "repos.toml unreadable"}, status_code=503)
@@ -107,11 +111,14 @@ def _auth_error(request):
 
 
 def _safe_reason(text, log_context):
-    """A goals.* refusal reason can embed raw git/subprocess stderr; redact any embedded credential before it
-    reaches a response body, cap what the client sees at 300 chars, and log the full redacted text so an
-    operator still has enough detail to diagnose the refusal (T-0155 review)."""
+    """A goals.* refusal reason can embed raw git/subprocess stderr; redact any embedded credential -- a URL
+    credential, a bearer token, or an Authorization-style key=value secret (T-0202 review) -- before it reaches
+    a response body, cap what the client sees at 300 chars, and log the full redacted text so an operator still
+    has enough detail to diagnose the refusal (T-0155 review)."""
     text = text if isinstance(text, str) else str(text)
     redacted = CREDENTIAL_RE.sub("://***@", text)
+    redacted = BEARER_RE.sub("Bearer ***", redacted)
+    redacted = KEYVALUE_SECRET_RE.sub(lambda m: f"{m.group(1)}=***", redacted)
     access_log.error("%s: %s", log_context, redacted)
     return redacted[:300]
 
@@ -181,7 +188,9 @@ def create_goal(request):
             if not git_url:
                 return JSONResponse({"reason": "repo path missing and no git_url"}, status_code=404)
             try:
-                r = subprocess.run(["git", "clone", git_url, path], capture_output=True, text=True,
+                # "--" before git_url: a url starting with '-' (or an ext:: url) must never be parsable as a
+                # git-clone option (T-0202 review note).
+                r = subprocess.run(["git", "clone", "--", git_url, path], capture_output=True, text=True,
                                     timeout=CLONE_TIMEOUT_S)
             except subprocess.TimeoutExpired:
                 return JSONResponse({"reason": "clone timed out"}, status_code=504)
@@ -246,10 +255,13 @@ def get_goal(request):
     if err:
         return err
 
-    entries = goals.status(cfg["path"], request.path_params["goal_id"])
-    if not entries:
-        return JSONResponse({"reason": "unknown goal"}, status_code=404)
-    return JSONResponse({**entries[0], "repo": slug}, status_code=200)
+    def run_under_lock():
+        entries = goals.status(cfg["path"], request.path_params["goal_id"])
+        if not entries:
+            return JSONResponse({"reason": "unknown goal"}, status_code=404)
+        return JSONResponse({**entries[0], "repo": slug}, status_code=200)
+
+    return _with_repo_lock(slug, run_under_lock)
 
 
 def cancel_goal(request):
@@ -263,14 +275,17 @@ def cancel_goal(request):
     if err:
         return err
 
-    try:
-        r = goals.stop(cfg["path"], goal_id)
-    except (ProcessLookupError, PermissionError):
-        return JSONResponse({"goal_id": goal_id, "repo": slug, "status": "stopped",
-                              "note": "planner already gone"}, status_code=200)
-    if r.get("error") == "unknown goal":
-        return JSONResponse({"reason": "unknown goal"}, status_code=404)
-    return JSONResponse({"goal_id": goal_id, "repo": slug, "status": "stopped"}, status_code=200)
+    def run_under_lock():
+        try:
+            r = goals.stop(cfg["path"], goal_id)
+        except (ProcessLookupError, PermissionError):
+            return JSONResponse({"goal_id": goal_id, "repo": slug, "status": "stopped",
+                                  "note": "planner already gone"}, status_code=200)
+        if r.get("error") == "unknown goal":
+            return JSONResponse({"reason": "unknown goal"}, status_code=404)
+        return JSONResponse({"goal_id": goal_id, "repo": slug, "status": "stopped"}, status_code=200)
+
+    return _with_repo_lock(slug, run_under_lock)
 
 
 class AccessLogMiddleware:

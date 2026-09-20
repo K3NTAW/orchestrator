@@ -1,4 +1,4 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ... | planner-runs --summary"""
 import argparse, json, os, sys
 from collections import defaultdict
 from . import bus, scorecard
@@ -8,15 +8,23 @@ from .pool import Pool
 
 def _format_goal_line(e):
     counts = ",".join(f"{status}={len(items)}" for status, items in sorted(e["children"].items())) or "-"
-    return (f"{e['goal_id']}\tstatus={e['record_status']}\tplanner_alive={e['planner_alive']}\t"
+    line = (f"{e['goal_id']}\tstatus={e['record_status']}\tplanner_alive={e['planner_alive']}\t"
             f"children=[{counts}]\tpr_url={e['pr_url'] or '-'}")
+    if e.get("note"):
+        line += f"\tnote={e['note']}"
+    return line
 
 
 def cost(by):
     agg = defaultdict(lambda: defaultdict(int))
     for f in sorted(RUNS.glob("*.jsonl")) if RUNS.exists() else []:
         for line in f.read_text().splitlines():
-            e = json.loads(line); k = e.get(by, "?")
+            if not line.strip():
+                continue
+            e = json.loads(line)
+            if "role" not in e:
+                continue  # e.g. jev usage lines -- not a worker run, counted nowhere
+            k = e.get(by, "?")
             for m in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
                 agg[k][m] += e.get(m, 0)
             agg[k]["runs"] += 1
@@ -38,6 +46,7 @@ def main():
     sc = sub.add_parser("scorecard")
     sc.add_argument("--by", default="executor", choices=["executor", "tier", "task", "goal"])
     sc.add_argument("--json", action="store_true")
+    pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
     g = sub.add_parser("goal"); gsub = g.add_subparsers(dest="goal_cmd", required=True)
     gs = gsub.add_parser("start"); gs.add_argument("repo"); gs.add_argument("text")
     gs.add_argument("--account", default="A"); gs.add_argument("--reinstall", action="store_true")
@@ -160,6 +169,11 @@ def main():
                     total_usd += r["total_usd"]
                 print(f"total\t{round(total_usd, 2)}\t-\t-\t-\t-\t-\t-")
                 print(scorecard.planner_footer())
+    elif a.cmd == "planner-runs":
+        from . import planner_runs
+        s = planner_runs.summary()
+        print(f"decisions={s['decisions']}\tjev_scored={s['jev_scored']}\t"
+              f"agreement_rate={s['agreement_rate']}\tmean_confidence={s['mean_confidence']}")
     elif a.cmd == "bench":
         from . import bench
         if a.bench_cmd == "fetch":

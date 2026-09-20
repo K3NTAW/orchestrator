@@ -14,12 +14,29 @@ row reconcile() aged out because the process never got as far as recording "runn
 it does not block, but counts toward the same attempts/gave_up-at-2 rule.
 """
 import json, os, re, sys, tempfile, time
-from . import ROOT, STATE, bus, goals, handover, spawn
+from . import ROOT, STATE, bus, goals, handover, jev, spawn
 from .pool import Pool
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 _STALE_CLAIM_S = 120
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]+$")
+_JEV_TIMEOUT_S = 3.0
+
+# next_action options offered to Jev for a decision-point shadow triage (D3, T-0217). scouts_done gets its own
+# set (there is no held task/review to react to yet); held and closable share the fix_round/respec/escalate/noop
+# set, matching what an interactive decision Planner actually does with a held execute task (CLAUDE.md's "Never"
+# section: write a fix-round spec, never edit the held task).
+_SCOUTS_DONE_OPTIONS = {
+    "synthesize_now": "enough scouts have reported to synthesize the plan now",
+    "wait_for_more": "wait for more scouts to finish before synthesizing",
+    "drop_low_confidence": "drop the low-confidence scout findings and synthesize with what's left",
+}
+_NEXT_ACTION_OPTIONS = {
+    "fix_round": "write a fix-round task from the review comments",
+    "respec": "the spec itself is wrong; recreate the task",
+    "escalate": "a human must decide: auth, billing, data deletion, or three failed rounds",
+    "noop": "the hold is stale or already superseded; nothing to do",
+}
 
 
 def _runs_path():
@@ -73,16 +90,20 @@ def _blocked(goal_id, kind, payload_key, records=None):
 
 
 def _held_at(t):
-    """review_held_at or spec_review_held_at (stamped by daemon.merge_reviewed/dispatch) at full float precision;
-    falls back to the latest status=held entry in the task's own event log (e.g. gate_red, worktree missing --
-    holds that stamp pipeline.gated_at, not a *_held_at field of their own)."""
+    """The latest status=held entry in the task's own event log, at full float precision, preferred over
+    review_held_at/spec_review_held_at (stamped once by daemon.stamp and never refreshed on a later hold of the
+    same task -- daemon.stamp's `if pipeline.get(stage): return False` guard means a second hold leaves those
+    stamps stale). Falls back to the pipeline stamps only when the event log has no held entry at all (e.g.
+    gate_red, worktree missing -- holds that stamp pipeline.gated_at, not a *_held_at field of their own)."""
+    held_ts = [e["ts"] for e in t.get("events", []) if e.get("status") == "held"]
+    if held_ts:
+        return max(held_ts)
     pipeline = t.get("pipeline") or {}
     if pipeline.get("review_held_at"):
         return pipeline["review_held_at"]
     if pipeline.get("spec_review_held_at"):
         return pipeline["spec_review_held_at"]
-    held_ts = [e["ts"] for e in t.get("events", []) if e.get("status") == "held"]
-    return max(held_ts) if held_ts else None
+    return None
 
 
 def _held_key(t):
@@ -139,8 +160,9 @@ def decision_points():
 def _session_attached():
     """True while an interactive Planner is already running against this repo: either this process is itself
     the MCP server backing that session (ORCH_DAEMON_HOST=mcp, set by mcp.register_planner_session at server
-    start), or .orchestrator/planner_session.json names a still-live pid. A stale file (dead pid, or a reused
-    one per goals.identity_of) is ignored, not treated as attached."""
+    start), or .orchestrator/planner_session.json names a still-live pid. A stale file (dead pid, a reused one
+    per goals.identity_of, a body that isn't a dict, or a dict lacking an int pid) is ignored, not treated as
+    attached -- the guard fails closed to "not attached" without raising."""
     if os.environ.get("ORCH_DAEMON_HOST") == "mcp":
         return True
     path = STATE / "planner_session.json"
@@ -149,6 +171,8 @@ def _session_attached():
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
         return False
     pid = data.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
@@ -192,9 +216,13 @@ def _record_skip(goal_id, kind, payload_key, reason):
         _save_records(records)
 
 
-def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts):
+def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts, jev_result=None):
     """Update the key's existing record in place on a retry (preserving attempts, set by reconcile()) rather
-    than appending a second one -- one record per key is what lets reconcile() track attempts across retries."""
+    than appending a second one -- one record per key is what lets reconcile() track attempts across retries.
+    jev_result (from jev_triage(), shadow mode only) is stored as-is -- {choice, probabilities, confidence,
+    latency_ms} or None -- and never influences anything else recorded here. agreement is reset to None
+    alongside it: a prior attempt's agreement was scored against that attempt's own jev choice, and must never
+    be left dangling against a new (or newly-absent) jev value that reconcile() hasn't scored yet."""
     with bus.locked():
         records = _load_records()
         r = _find_record(records, goal_id, kind, payload_key)
@@ -202,7 +230,7 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts):
             r = {"goal_id": goal_id, "kind": kind, "payload_key": payload_key, "attempts": attempts}
             records.append(r)
         r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
-                 account=acct_id, log=launched["log"], status="running")
+                 account=acct_id, log=launched["log"], status="running", jev=jev_result, agreement=None)
         _save_records(records)
 
 
@@ -225,6 +253,109 @@ def _record_failed_launch(goal_id, kind, payload_key, attempts, error):
     return status, new_attempts
 
 
+def _decision_task(goal_id, kind, payload_key):
+    """The task the decision is actually about: the held execute task itself for "held" (its id is the part of
+    payload_key before the first ":"), the goal (triage) task for "scouts_done"/"closable". None if it has since
+    been purged -- callers must treat that the same as Jev being unavailable, never raise."""
+    task_id = payload_key.split(":", 1)[0] if kind == "held" else goal_id
+    try:
+        return bus.get(task_id)
+    except KeyError:
+        return None
+
+
+def _review_comments_for(task_id, limit=10):
+    """Up to `limit` "path:line severity issue[:200]" lines from the most recent review(s) of task_id, newest
+    first -- the same {"comments": [{"path","line","issue","severity"}]} shape review.md's prompt asks reviewers
+    to return (bus_post_result's result.comments), read here as data, never rendered into any prompt."""
+    reviews = [r for r in bus.read(role="review") if (r.get("inputs") or [])[:1] == [task_id]]
+    reviews.sort(key=lambda r: (r.get("events") or [{}])[-1].get("ts", 0), reverse=True)
+    out = []
+    for r in reviews:
+        for c in ((r.get("result") or {}).get("comments") or []):
+            out.append(f"{c.get('path', '?')}:{c.get('line', '?')} {c.get('severity', '?')} "
+                       f"{str(c.get('issue', ''))[:200]}")
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _depends_on_statuses(task):
+    statuses = {}
+    for dep_id in task.get("depends_on") or []:
+        try:
+            statuses[dep_id] = bus.get(dep_id)["status"]
+        except KeyError:
+            statuses[dep_id] = None
+    return statuses
+
+
+def _jev_state(kind, task, attempts):
+    return {
+        "kind": kind,
+        "task_title": task.get("title"),
+        "spec": (task.get("spec") or "")[:1500],
+        "hold_reason": task.get("hold_reason"),
+        "review_comments": _review_comments_for(task["id"]),
+        "depends_on": _depends_on_statuses(task),
+        "attempts": attempts,
+    }
+
+
+def _coerce_float(v):
+    """Non-numeric (a bad string, None, a list -- whatever a malformed Jev response hands back) becomes None
+    rather than raising, so one bad field never sinks the whole shadow triage row."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_probabilities(probs):
+    if not isinstance(probs, dict):
+        return {}
+    return {k: _coerce_float(v) for k, v in probs.items()}
+
+
+def jev_triage(kind, task, attempts=0):
+    """Ask Jev what it would decide for this decision point, purely to record for later agreement measurement
+    (E2/T-0214's typed-question client) -- shadow mode only, never consulted by run()/launch_planner, and its
+    result changes nothing about whether or how the real headless Planner launches. Returns
+    {choice, probabilities, confidence, latency_ms} or None -- fail-open the same way jev.ask() itself is
+    fail-open (disabled, no key, budget exhausted, timeout, bad response all return None, never raise), with an
+    explicit 3s cap (jev.ask's own pool.toml timeout may be longer/shorter) so a slow Jev endpoint can never be
+    on the critical path to a real launch. confidence/probabilities are coerced to float (non-numeric -> None,
+    see _coerce_float) rather than trusted as already-numeric, since Jev's response is untrusted external data --
+    a None confidence is excluded from summary()'s mean_confidence, never treated as 0.0."""
+    if task is None:
+        return None
+    state = _jev_state(kind, task, attempts)
+    options = _SCOUTS_DONE_OPTIONS if kind == "scouts_done" else _NEXT_ACTION_OPTIONS
+    started = time.monotonic()
+    result = jev.ask(state, {"next_action": {"type": "choice",
+                     "instructions": "Given this decision-point state, what should the Planner do next?",
+                     "criteria": options}}, timeout_s=_JEV_TIMEOUT_S)
+    latency_ms = (time.monotonic() - started) * 1000
+    if result is None:
+        return None
+    try:
+        a = result["answers"]["next_action"]
+        return {"choice": a["choice"], "probabilities": _coerce_probabilities(a["probabilities"]),
+                "confidence": _coerce_float(a["confidence"]), "latency_ms": latency_ms}
+    except (KeyError, TypeError):
+        return None
+
+
+def _safe_jev_triage(goal_id, kind, payload_key, attempts):
+    """jev_triage should never raise (jev.ask() is documented fail-open) -- this is defense in depth, the same
+    posture run() already takes around launch_planner itself, so a bug in state-building can never turn into a
+    launch failure for what is meant to be a pure side channel."""
+    try:
+        return jev_triage(kind, _decision_task(goal_id, kind, payload_key), attempts)
+    except Exception:
+        return None
+
+
 def run(goal_id, kind, payload_key):
     """Launch a headless Planner for one decision, guarded against attaching alongside an interactive session or
     a saturated pool. The already-decided check and the claim that follows it run inside one bus.locked() block
@@ -232,9 +363,11 @@ def run(goal_id, kind, payload_key):
     loses the race to the lock sees the winner's "claimed" record and returns "already decided" immediately --
     before either guard or launch_planner runs on either thread. Guard skips are recorded (status "skipped", no
     pid) but never block a later decision_points() or run() call for the same key. Everything from here to the
-    launch itself is wrapped in try/except BaseException (T-0198 review item 1): any failure -- a guard raising,
+    launch itself is wrapped in try/except Exception (T-0198 review item 1): any failure -- a guard raising,
     render() rejecting an unsafe key, launch_planner itself throwing -- flips the claimed row to "failed_launch"
-    instead of leaving it stuck "claimed" forever, and is never re-raised."""
+    instead of leaving it stuck "claimed" forever, and is never re-raised. KeyboardInterrupt/SystemExit are
+    caught separately: the claim is released the same way, but the signal is re-raised afterward so Ctrl-C
+    still stops `orchestrator daemon --once` instead of being swallowed as a launch failure."""
     with bus.locked():
         if _blocked(goal_id, kind, payload_key):
             return {"launched": False, "reason": "already decided"}
@@ -264,8 +397,17 @@ def run(goal_id, kind, payload_key):
         prompt = spawn.render("planner-decision", kind=kind, goal_id=goal_id, payload=payload_key)
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{kind}-{attempts + 1}.log"
+
+        # Only spent once every guard above has passed and launch is about to happen for real (T-0232 review
+        # item 1): a decision point skipped for session-attached/no-headroom/unsafe-key never spends a Jev
+        # request, so skip records above never carry a jev field.
+        jev_result = _safe_jev_triage(goal_id, kind, payload_key, attempts)
+
         launched = goals.launch_planner(ROOT, prompt, acct.id, budget, log)
-    except BaseException as e:
+    except (KeyboardInterrupt, SystemExit) as e:
+        _record_failed_launch(goal_id, kind, payload_key, attempts, e)
+        raise
+    except Exception as e:
         status, new_attempts = _record_failed_launch(goal_id, kind, payload_key, attempts, e)
         if status == "gave_up":
             from . import daemon  # deferred: daemon imports this module at load time
@@ -273,7 +415,7 @@ def run(goal_id, kind, payload_key):
                           f"attempts (last: launch failed)")
         return {"launched": False, "reason": "failed_launch", "error": str(e)[:300]}
 
-    _record_running(goal_id, kind, payload_key, launched, acct.id, attempts)
+    _record_running(goal_id, kind, payload_key, launched, acct.id, attempts, jev_result)
     return {"launched": True, "pid": launched["pid"], "log": launched["log"]}
 
 
@@ -283,6 +425,14 @@ def _first_event_ts(task_id):
     unrelated, pre-existing task that happens to share a depends_on/fix_round_for reference."""
     row = bus.db().execute("select ts from events where task_id=? order by seq limit 1", (task_id,)).fetchone()
     return row[0] if row else None
+
+
+def _bus_event_after(since, *task_ids):
+    """True if any bus event exists for one of task_ids with ts > since."""
+    placeholders = ",".join("?" for _ in task_ids)
+    row = bus.db().execute(f"select 1 from events where task_id in ({placeholders}) and ts>? limit 1",
+                           (*task_ids, since)).fetchone()
+    return row is not None
 
 
 def _condition_resolved(r, tasks_by_id, children_by_parent):
@@ -309,8 +459,46 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
                 fts = _first_event_ts(other["id"])
                 if fts is not None and fts > started_at:
                     return True
-        return False
+        # No fix-round task, but the decision Planner may still have legitimately concluded no fix round was
+        # needed -- any bus event it posted on the held task or its goal after launch (a result, a status
+        # change) counts as that conclusion, so reconcile() scores exited_ok rather than exited_early/gave_up.
+        return _bus_event_after(started_at, task_id, goal_id)
     return True
+
+
+def _observed_outcome(r, tasks_by_id):
+    """Map a finished "held"/"closable" decision back to one of the four next_action choices Jev was offered
+    (_NEXT_ACTION_OPTIONS), purely so reconcile() can score jev_triage()'s shadow choice against what actually
+    happened -- this has no effect on run()/decision_points()/_condition_resolved. fix_round/respec key off the
+    same depends_on/fix_round_for convention _condition_resolved already uses for "a new task exists to handle
+    this", plus a parallel constraints.respec_for for a Planner that decided the spec itself was wrong and
+    recreated the task without tying the new one to the old. escalate is the held/goal task itself ending up
+    status "failed" (bus_post_result status="failed" is the one MCP-reachable, unambiguous way a decision
+    Planner can say "a human must decide"). noop is "nothing changed, but the Planner did look" (any bus event
+    after started_at, same signal _condition_resolved's held branch already treats as a legitimate conclusion).
+    None means genuinely unresolved -- scouts_done (no such mapping exists for it) or nothing observable yet."""
+    kind, goal_id, payload_key = r["kind"], r["goal_id"], r["payload_key"]
+    if kind not in ("held", "closable"):
+        return None
+    task_id = payload_key.split(":", 1)[0] if kind == "held" else goal_id
+    started_at = r.get("started_at", 0)
+    for other in tasks_by_id.values():
+        if other["id"] == task_id:
+            continue
+        fts = _first_event_ts(other["id"])
+        if fts is None or fts <= started_at:
+            continue
+        constraints = other.get("constraints") or {}
+        if task_id in (other.get("depends_on") or []) or constraints.get("fix_round_for") == task_id:
+            return "fix_round"
+        if constraints.get("respec_for") == task_id:
+            return "respec"
+    t = tasks_by_id.get(task_id)
+    if t is not None and t["status"] == "failed":
+        return "escalate"
+    if _bus_event_after(started_at, task_id, goal_id):
+        return "noop"
+    return None
 
 
 def reconcile():
@@ -320,8 +508,12 @@ def reconcile():
     process was killed, between _claim() and _record_running()) older than _STALE_CLAIM_S: without this, a claim
     whose process never got far enough to record "running" would block re-decision forever, since "claimed" is
     itself a blocking status. Aged-out claims go to failed_launch/gave_up via the same attempts-based rule as a
-    failed launch (T-0198 review item 1). Call at the start of the autonomous block every tick, before
-    decision_points()."""
+    failed launch (T-0198 review item 1). Also the one place agreement gets scored (T-0217 D3): the instant a
+    running record's process is found gone, _observed_outcome() maps what actually happened back to a
+    next_action choice and compares it against the row's own jev.choice (from jev_triage(), shadow mode only) --
+    True/False if both a jev choice and an outcome exist, else None. Scored once, here, never revisited: once a
+    record leaves "running" it is never seen by this branch again. Call at the start of the autonomous block
+    every tick, before decision_points()."""
     all_tasks = bus.read()
     tasks_by_id = {t["id"]: t for t in all_tasks}
     children_by_parent = {}
@@ -353,6 +545,8 @@ def reconcile():
             if goals.identity_of(r.get("pid"), r.get("pid_start")):
                 continue
             changed = True
+            outcome = _observed_outcome(r, tasks_by_id)
+            r["agreement"] = (outcome == r["jev"]["choice"]) if (outcome is not None and r.get("jev")) else None
             if _condition_resolved(r, tasks_by_id, children_by_parent):
                 r["status"] = "exited_ok"
                 continue
@@ -370,3 +564,26 @@ def reconcile():
         for r in gave_up:
             daemon.notify(f"{r['goal_id']}: planner decision {r['kind']} ({r['payload_key']}) "
                           f"gave up after {r['attempts']} attempts")
+
+
+def summary():
+    """{decisions, jev_scored, agreement_rate, mean_confidence} over the whole ledger, printed by
+    `orchestrator planner-runs` (D3, T-0217; T-0232). decisions is every row ever written; jev_scored counts rows
+    that got a Jev shadow choice (row["jev"] is a dict); agreement_rate is computed only over rows that both have
+    a jev dict and a scored agreement (True/False, set once by reconcile()) -- the fraction of those that
+    agreed, or None with zero such rows; mean_confidence averages jev.confidence over the jev_scored rows whose
+    confidence coerced to a real float (jev_triage()'s _coerce_float already turns a non-numeric confidence into
+    None; a None confidence is excluded here, never treated as 0.0), or None with zero. Never raises on a
+    malformed row (jev not a dict, confidence not numeric) -- isinstance checks throughout, not direct indexing --
+    since older or hand-edited ledger rows may predate the coercion in jev_triage(). An empty ledger returns
+    all-zero/None rather than raising, since the CLI must print cleanly with no decisions recorded yet."""
+    records = _load_records()
+    jev_rows = [r for r in records if isinstance(r.get("jev"), dict)]
+    scored = [r for r in jev_rows if r.get("agreement") is not None]
+    confidences = [r["jev"]["confidence"] for r in jev_rows if isinstance(r["jev"].get("confidence"), (int, float))]
+    return {
+        "decisions": len(records),
+        "jev_scored": len(jev_rows),
+        "agreement_rate": (sum(1 for r in scored if r["agreement"]) / len(scored)) if scored else None,
+        "mean_confidence": (sum(confidences) / len(confidences)) if confidences else None,
+    }

@@ -279,6 +279,36 @@ class ReposTomlUnreadable(ServeTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"status": "ok"})
 
+    def test_missing_repos_toml_is_503(self):
+        self.repos_toml.unlink()
+
+        r = self.client.get("/goals", headers=self.auth())
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json(), {"reason": "service not configured"})
+
+        r2 = self.client.post("/goals", json={"repo": "demo", "goal": "g"}, headers=self.auth())
+        self.assertEqual(r2.status_code, 503)
+        self.assertEqual(r2.json(), {"reason": "service not configured"})
+
+    def test_healthz_unaffected_by_missing_repos_toml(self):
+        self.repos_toml.unlink()
+        r = self.client.get("/healthz")
+        self.assertEqual(r.status_code, 200)
+
+
+class SafeReasonRedaction(unittest.TestCase):
+    def test_safe_reason_redacts_bearer(self):
+        reason = "refused: Authorization: Bearer abcDEF123.token-xyz was rejected upstream"
+        redacted = serve._safe_reason(reason, "ctx")
+        self.assertNotIn("abcDEF123", redacted)
+        self.assertIn("***", redacted)
+
+    def test_safe_reason_redacts_keyvalue_secret(self):
+        reason = "git push failed: api_key=SECRETVALUE123 invalid"
+        redacted = serve._safe_reason(reason, "ctx")
+        self.assertNotIn("SECRETVALUE123", redacted)
+        self.assertIn("***", redacted)
+
 
 class CloneUnderLock(ServeTestCase):
     def setUp(self):
@@ -300,6 +330,19 @@ class CloneUnderLock(ServeTestCase):
         argv, kwargs = mock_run.call_args
         self.assertEqual(list(argv[0])[:2], ["git", "clone"])
         self.assertIn("timeout", kwargs)
+
+    @mock.patch("orchestrator.goals.start")
+    @mock.patch("orchestrator.goals.list_goals")
+    @mock.patch("orchestrator.serve.subprocess.run")
+    def test_clone_argv_has_double_dash(self, mock_run, mock_list, mock_start):
+        mock_run.return_value = subprocess.CompletedProcess(["git", "clone"], 0, stdout="", stderr="")
+        mock_list.return_value = []
+        mock_start.return_value = {"launched": True, "goal_id": "T-2001"}
+        r = self.client.post("/goals", json={"repo": "clonable", "goal": "g"}, headers=self.auth())
+        self.assertEqual(r.status_code, 201, r.text)
+        argv = list(mock_run.call_args[0][0])
+        self.assertEqual(argv[:3], ["git", "clone", "--"])
+        self.assertEqual(argv[3], "https://example.com/repo.git")
 
     @mock.patch("orchestrator.goals.start")
     @mock.patch("orchestrator.goals.list_goals")

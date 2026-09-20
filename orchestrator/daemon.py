@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, json, os, subprocess, sys, threading, time, urllib.request
+import fcntl, fnmatch, json, os, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
@@ -12,9 +12,28 @@ SPEC_REVIEW_MIN = 6    # complexity at which a spec must be reviewed before an e
 DIRECT_MERGE_MAX = 3   # complexity at or below which hooks are the whole review (CLAUDE.md step 7)
 TWO_REVIEWS_FROM = 7   # complexity at which merge waits for two review approvals instead of one
 SPEC_REVIEW_TIER = "sonnet"  # tier the spec review worker runs on
-# The four constants above are defaults; _load_review_cfg() overwrites them from pool.toml's [review] table
-# at the top of every tick() so dispatch()/gate()/merge_reviewed() (which read them as plain module globals,
-# not through a Pool argument) always see the current policy without threading pool.cfg through every call.
+# Default globs, mirrored from the committed pool.toml (§review policy, 2026-09-19 decision): kept here only so
+# a pool.toml missing [review] entirely (test_defaults_when_review_table_missing) still has something sane to
+# fall back to; the shipped pool.toml is the actual source of truth operators edit.
+DEFAULT_SECURITY_PATHS = [
+    "orchestrator/*.py",
+    ".claude/hooks/**", ".claude/settings.json", ".orchestrator/pool.toml", ".orchestrator/protected-paths.txt",
+    ".orchestrator/prompts/**", "skills/**", ".claude/skills/**",
+    ".mcp*.json", ".mcp.worker.json", "Dockerfile", "docker-compose*.yml", "pyproject.toml", "uv.lock",
+]
+CODE_REVIEW = "always"              # never | security_paths | always -- "always" is the safest default when
+                                     # [review] is missing entirely, matching pre-2026-09-19 D1 behaviour
+SECURITY_PATHS = DEFAULT_SECURITY_PATHS
+SECURITY_REVIEW_TIER = "sonnet"
+SECURITY_CHECKLIST_COMPLEXITY = 7   # spawn.py's run_worker hardcodes the security-checklist cutoff at
+                                     # complexity >= 7; a security-path review is stamped at least this
+                                     # complexity so it always gets the checklist, whatever the source task's
+                                     # own complexity was
+# The constants above are defaults; _load_review_cfg() overwrites them from pool.toml's [review] table at the
+# top of every tick() so dispatch()/gate()/merge_reviewed() (which read them as plain module globals, not
+# through a Pool argument) always see the current policy without threading pool.cfg through every call.
+_code_review_warned = False  # notify() the first time pool.toml carries an unrecognised code_review value, not every tick
+_security_paths_empty_warned = False  # notify() the first time security_paths is empty under code_review="security_paths"
 LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
@@ -25,11 +44,28 @@ def _load_review_cfg(pool):
     the defaults set on the module above -- so a pool.toml without [review] behaves exactly as if it had one
     with these values (§review policy, 2026-09-18: reviews were costing as much as execution)."""
     global SPEC_REVIEW_MIN, DIRECT_MERGE_MAX, TWO_REVIEWS_FROM, SPEC_REVIEW_TIER
+    global CODE_REVIEW, SECURITY_PATHS, SECURITY_REVIEW_TIER, _code_review_warned
     review = pool.cfg.get("review", {})
     SPEC_REVIEW_MIN = review.get("spec_review_min", 6)
     DIRECT_MERGE_MAX = review.get("direct_merge_max", 3)
     TWO_REVIEWS_FROM = review.get("two_reviews_from", 7)
     SPEC_REVIEW_TIER = review.get("spec_review_tier", "sonnet")
+
+    code_review = review.get("code_review", "always")
+    if code_review not in ("never", "security_paths", "always"):
+        if not _code_review_warned:
+            notify(f"pool.toml [review].code_review={code_review!r} is not one of "
+                   f"never|security_paths|always; falling back to always")
+            _code_review_warned = True
+        code_review = "always"
+    CODE_REVIEW = code_review
+
+    security_paths = review.get("security_paths", DEFAULT_SECURITY_PATHS)
+    if not isinstance(security_paths, list) or not all(isinstance(p, str) for p in security_paths):
+        security_paths = DEFAULT_SECURITY_PATHS
+    SECURITY_PATHS = security_paths
+
+    SECURITY_REVIEW_TIER = review.get("security_review_tier", "sonnet")
 
 
 def notify(msg):
@@ -80,6 +116,44 @@ def _git_in(worktree, *args):
     return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
 
 
+def _resolve_base(worktree, parent):
+    """The trunk a worktree's HEAD should be compared against: the first of goal/<parent>, origin/main or main
+    that resolves via merge-base, in that order -- a parentless task, or the first execute task of a goal that
+    hasn't cut its goal branch yet, falls through to whichever trunk the worktree was actually cut from. None
+    when none of the three exist (or worktree isn't a git repo at all). Shared by reconcile_dead (orphaned-work
+    detection) and changed_paths() (security-path review routing) so both use the same fallback order."""
+    candidates = ([f"goal/{parent}"] if parent else []) + ["origin/main", "main"]
+    for candidate in candidates:
+        r = _git_in(worktree, "merge-base", "HEAD", candidate)
+        if r.returncode == 0:
+            return r.stdout.strip()
+    return None
+
+
+def changed_paths(t):
+    """git diff --no-renames --name-only -z <base>..HEAD in the task's worktree, repo-relative paths, base
+    picked by _resolve_base(). --no-renames lists a rename as a plain delete-of-old-path + add-of-new-path
+    pair instead of collapsing it into one "R100 old\\tnew" entry, so a rename of a security-sensitive path
+    (e.g. a guarded .claude/hooks/x.sh moved somewhere outside the glob) still shows the old path and still
+    matches. The -z / NUL split (rather than newline splitting on plain --name-only output) keeps a quoted or
+    non-ASCII path intact so it still matches the security globs. None on any failure -- a non-git worktree, no
+    base to diff against, or a git error -- so gate()'s security_paths policy can fail closed: a diff it cannot
+    inspect is treated as a security match (review_reason "diff_unavailable"), never as "nothing changed"."""
+    worktree = t.get("worktree")
+    if not worktree or not Path(worktree).is_dir():
+        return None
+    try:
+        base = _resolve_base(worktree, t.get("parent"))
+        if base is None:
+            return None
+        r = _git_in(worktree, "diff", "--no-renames", "--name-only", "-z", f"{base}..HEAD")
+        if r.returncode != 0:
+            return None
+        return [p for p in r.stdout.split("\0") if p]
+    except Exception:
+        return None
+
+
 def _requeue(tid, pipeline):
     """Put a task back in the queue for dispatch() to retry. Clearing pipeline.dispatched_at is what actually
     makes that retry happen: dispatch()'s stamp() no-ops when the stage is already stamped, so a requeue that
@@ -102,22 +176,7 @@ def reconcile_dead(t):
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
         return _requeue(tid, t.get("pipeline"))
 
-    base = None
-    parent = t.get("parent")
-    if parent:
-        r = _git_in(worktree, "merge-base", "HEAD", f"goal/{parent}")
-        if r.returncode == 0:
-            base = r.stdout.strip()
-    # No goal/<parent> branch to merge-base against (parentless task, or the first execute task of a goal that
-    # hasn't cut its goal branch yet): fall back to the trunk the worktree was actually cut from.
-    if base is None:
-        r = _git_in(worktree, "merge-base", "HEAD", "origin/main")
-        if r.returncode == 0:
-            base = r.stdout.strip()
-    if base is None:
-        r = _git_in(worktree, "merge-base", "HEAD", "main")
-        if r.returncode == 0:
-            base = r.stdout.strip()
+    base = _resolve_base(worktree, t.get("parent"))
     if base is None:
         return _requeue(tid, t.get("pipeline"))
 
@@ -163,11 +222,10 @@ def stale(t):
 
 
 def already_merged(t):
-    """True when a done execute task's work already landed in its goal branch even though merged_into is unset.
-    merge.merge() only stamps merged_into on whichever task_id it is called with, so a fix-round merge leaves the
-    original task done with merged_into unset while its commit is already an ancestor of goal/<parent> (the first
-    smoke run created T-0057..T-0062 this way). Detected here by ancestry so the gate and review stages do not
-    redo already-merged work; never raises, since a missing git binary or branch just means "not merged"."""
+    """Recognize landed task commits by ancestry, excluding an unchanged target head and
+    branches with no commits beyond trunk. A merge-base with the target itself cannot
+    prove work landed: it equals the task head for every ancestor, including real merges.
+    Missing refs or git errors leave the task available for normal gating."""
     if t.get("merged_into"):
         return True
     parent = t.get("parent")
@@ -178,6 +236,16 @@ def already_merged(t):
     try:
         if not spawn.branch_exists(branch):
             return False
+        head = spawn.git("rev-parse", branch, check=False)
+        target_head = spawn.git("rev-parse", target, check=False)
+        if head.returncode or target_head.returncode or head.stdout.strip() == target_head.stdout.strip():
+            return False
+        trunk = next((c for c in ("origin/main", "main")
+                      if spawn.git("rev-parse", "--verify", c, check=False).returncode == 0), None)
+        if trunk:
+            mb = spawn.git("merge-base", branch, trunk, check=False)
+            if mb.returncode == 0 and head.returncode == 0 and head.stdout.strip() == mb.stdout.strip():
+                return False
         r = spawn.git("merge-base", "--is-ancestor", branch, target, check=False)
     except Exception:
         return False
@@ -303,33 +371,128 @@ def _other_tier(tier):
 
 
 def reviews_expected(t):
-    """How many review approvals an execute task needs before merge_reviewed() may merge it -- the single source
-    of truth gate() also uses to decide how many review tasks to open. An orphaned result (reconcile_dead
-    re-gating a dead worker's last commit) always needs exactly one, whatever the task's complexity: the orphaned
-    warning is what needs the second pair of eyes, not the model split (T-0150 review: an orphaned complexity-7
-    task was stuck waiting on a second review gate() never opens)."""
+    """How many review approvals an execute task needs before merge_reviewed() may merge it under [review]'s
+    "always" policy (today's pre-2026-09-19 D1 split). An orphaned result (reconcile_dead re-gating a dead
+    worker's last commit) always needs exactly one, whatever the task's complexity: the orphaned warning is
+    what needs the second pair of eyes, not the model split (T-0150 review: an orphaned complexity-7 task was
+    stuck waiting on a second review gate() never opens). _review_plan() is the actual source of truth gate()
+    uses for how many review tasks to open under every code_review setting, not just "always"; this function
+    remains as its "always" branch and as merge_reviewed()'s fallback for tasks gated before reviews_expected
+    was stamped."""
     if (t.get("result") or {}).get("orphaned") or t["complexity"] < TWO_REVIEWS_FROM:
         return 1
     return 2
 
 
+def _matching_security_path(paths):
+    """The first configured security glob any of `paths` matches (fnmatch, so "**" matches any depth same as
+    "*" -- fnmatch is not path-separator aware), or None."""
+    for pattern in SECURITY_PATHS:
+        for path in paths:
+            if fnmatch.fnmatch(path, pattern):
+                return pattern
+    return None
+
+
+def _security_review_tier(t):
+    """security_review_tier, unless the executor is a Claude tier that IS security_review_tier -- then the
+    other Claude tier, so a security-path review is never self-reviewed by the model that executed it."""
+    tier = SECURITY_REVIEW_TIER
+    if (t.get("executor") or "") == f"claude:{tier}":
+        return _other_tier(tier)
+    return tier
+
+
+def _review_plan(t):
+    """How many review tasks gate() should open for a done execute task, and why -- stamped verbatim onto
+    pipeline.review_reason/reviews_expected so merge_reviewed() and a later change to [review] agree on what
+    this task was actually gated for. Orphaned results always need exactly one review whatever CODE_REVIEW
+    says (see reviews_expected()'s docstring). Otherwise: "never" merges everything straight through;
+    "security_paths" reviews only a diff that touches a security-sensitive glob, or one changed_paths()
+    couldn't determine (fails closed, review_reason "diff_unavailable" -- a plumbing error must never merge
+    unreviewed work); an empty or missing security_paths list also fails closed (review_reason
+    "security_paths_empty" -- a blank list must never silently mean "nothing is security-sensitive"); "always"
+    is the pre-2026-09-19 D1 policy (DIRECT_MERGE_MAX lets the cheapest tasks merge on hooks alone,
+    reviews_expected(t) drives the complexity split above that)."""
+    if (t.get("result") or {}).get("orphaned"):
+        return 1, "orphaned"
+    if CODE_REVIEW == "never":
+        return 0, "none"
+    if CODE_REVIEW == "security_paths":
+        if not SECURITY_PATHS:
+            global _security_paths_empty_warned
+            if not _security_paths_empty_warned:
+                notify("pool.toml [review].security_paths is empty; every security_paths review fails closed "
+                       "to one review until it is configured")
+                _security_paths_empty_warned = True
+            return 1, "security_paths_empty"
+        paths = changed_paths(t)
+        if paths is None:
+            return 1, "diff_unavailable"
+        match = _matching_security_path(paths)
+        return (1, f"security_paths:{match}") if match else (0, "none")
+    # "always"
+    if t["complexity"] <= DIRECT_MERGE_MAX:
+        return 0, "always"
+    return reviews_expected(t), "always"
+
+
+def _dirty_scope_paths(worktree, scope):
+    """Tracked or untracked paths under `scope` that git status sees as changed in `worktree`, ignoring the
+    orchestrator's own state dir and a venv -- neither is something an executor is expected to have committed.
+    Empty (never None) on a git error, so gate() can treat "can't tell" the same as "nothing to report" rather
+    than blocking merge on a status call that failed for an unrelated reason."""
+    r = _git_in(worktree, "status", "--porcelain", "-z", "--untracked-files=all")
+    if r.returncode != 0:
+        return []
+    dirty = set()
+    entries = iter(r.stdout.split("\0"))
+    for entry in entries:
+        if not entry:
+            continue
+        paths = [entry[3:]]
+        if "R" in entry[:2] or "C" in entry[:2]:
+            paths.append(next(entries, ""))  # -z reports destination, then source
+        for path in paths:
+            if not path or path.split("/", 1)[0] in (".orchestrator", ".venv"):
+                continue
+            if any(fnmatch.fnmatch(path, pattern) or path.startswith(pattern.rstrip("/") + "/")
+                   or pattern in (".", "./") for pattern in scope):
+                dirty.add(path)
+    return sorted(dirty)
+
+
 def gate(pool):
-    """done execute tasks that have not been gated: run tests-green on the worktree, then merge (cheap tasks) or
-    open the number of review tasks reviews_expected() says (one for complexity between DIRECT_MERGE_MAX and
-    TWO_REVIEWS_FROM, or any orphaned result; two otherwise). The second review must never run on the model that
-    executed: when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on
-    review_tier(t) -- the non-executing tier (both reviews may land on the same account; only the model differs
-    from the executor); when the executor is Codex, the second review runs on whichever tier the first one
-    didn't get. The successful gate stamp also freezes pipeline.reviews_expected = reviews_expected(t) so a later
-    change to the [review] two_reviews_from threshold can't change how many approvals merge_reviewed() waits for
-    on a task already past this stage. Filters run cheap-first, already_merged() (which shells out to git) last,
-    so a task the other checks would skip anyway never pays for a git call."""
+    """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
+    the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
+    split). The second of two reviews (only possible under "always") must never run on the model that executed:
+    when the executor is a Claude tier (executor field startswith "claude:"), both reviews run on review_tier(t)
+    -- the non-executing tier (both reviews may land on the same account; only the model differs from the
+    executor); when the executor is Codex, the second review runs on whichever tier the first one didn't get.
+    All three fail-closed review reasons -- a security-path match ("security_paths:*"), a diff gate() couldn't
+    inspect ("diff_unavailable"), and an empty/missing security_paths list ("security_paths_empty") -- take the
+    same branch: exactly one review, on _security_review_tier(t), with the security checklist always forced,
+    regardless of the source task's own complexity: spawn.py's run_worker hardcodes the checklist decision at
+    complexity >= 7, so the review task is created with complexity bumped to at least
+    SECURITY_CHECKLIST_COMPLEXITY rather than inheriting the source task's own (possibly much lower) complexity.
+    The successful gate stamp also freezes
+    pipeline.reviews_expected/review_reason so a later change to [review] can't change how many approvals
+    merge_reviewed() waits for on a task already past this stage. Filters run cheap-first, already_merged()
+    (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree") or already_merged(t):
+        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree") or t.get("merged_into"):
             continue
         if not Path(t["worktree"]).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
                 notify(f"{t['id']}: worktree missing; held")
+            continue
+        dirty = _dirty_scope_paths(t["worktree"], t.get("scope") or [])
+        if dirty:
+            if stamp(t["id"], "gated_at", status="held", hold_reason="executor did not commit",
+                     resume_hint={"dirty": dirty}):
+                notify(f"{t['id']}: worktree has uncommitted scope changes; held")
+            continue
+        if already_merged(t):
             continue
         tg = subprocess.run([str(merge.TESTS_GREEN), t["worktree"]], capture_output=True, text=True, input="{}")
         if tg.returncode:
@@ -337,19 +500,23 @@ def gate(pool):
                      resume_hint={"failures": tg.stderr[-4000:]}):
                 notify(f"{t['id']}: tests red at the gate; held")
             continue
-        if not stamp(t["id"], "gated_at", pipeline_fields={"reviews_expected": reviews_expected(t)}):
+        n_reviews, review_reason = _review_plan(t)
+        if not stamp(t["id"], "gated_at",
+                     pipeline_fields={"reviews_expected": n_reviews, "review_reason": review_reason}):
             continue
-        orphaned = bool((t.get("result") or {}).get("orphaned"))
+        orphaned = review_reason == "orphaned"
+        security = (review_reason in ("diff_unavailable", "security_paths_empty")
+                    or review_reason.startswith("security_paths:"))
         try:
-            if not orphaned and t["complexity"] <= DIRECT_MERGE_MAX:
+            if n_reviews == 0:
                 report_merge(t["id"], merge.merge(t["id"]))
                 continue
             spec = t["spec"]
             if orphaned:
                 # a result with orphaned=true came from reconcile_dead re-gating a dead worker's last commit,
-                # not from an executor that actually finished: never let complexity alone route it straight
-                # to merge, whatever the task's normal tier would be. One review is enough here regardless of
-                # complexity -- the orphaned warning is what needs a second pair of eyes, not the model split.
+                # not from an executor that actually finished: never let complexity or code_review policy
+                # alone route it straight to merge. One review is enough here regardless of complexity -- the
+                # orphaned warning is what needs a second pair of eyes, not the model split.
                 spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
                         f"have died mid-task\n\n{spec}")
                 r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
@@ -357,8 +524,21 @@ def gate(pool):
                                     tier=review_tier(t))
                 spawn_async(spawn.run_worker, r["id"])
                 continue
-            # Any status counts here, not just "done": a review that's still queued/running already claims the
-            # one (or first of two) slot, so a re-entry must not spawn a duplicate on top of it.
+            if security:
+                # a security-path match, a diff the daemon couldn't inspect, or an empty security_paths list:
+                # exactly one review, on _security_review_tier(t), complexity bumped so spawn.py's hardcoded
+                # checklist cutoff always fires here.
+                existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
+                if not existing:
+                    r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+                                        inputs=[t["id"]], parent=t.get("parent"),
+                                        complexity=max(t["complexity"], SECURITY_CHECKLIST_COMPLEXITY),
+                                        tier=_security_review_tier(t))
+                    spawn_async(spawn.run_worker, r["id"])
+                continue
+            # code_review == "always": the pre-2026-09-19 D1 complexity split. Any status counts here, not just
+            # "done": a review that's still queued/running already claims the one (or first of two) slot, so a
+            # re-entry must not spawn a duplicate on top of it.
             existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
             if not existing:
                 r1 = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
@@ -366,7 +546,7 @@ def gate(pool):
                                      tier=review_tier(t))
                 spawn_async(spawn.run_worker, r1["id"])
                 existing = [r1]
-            if reviews_expected(t) == 2 and len(existing) == 1:
+            if n_reviews == 2 and len(existing) == 1:
                 executor_field = t.get("executor") or ""
                 if executor_field.startswith("claude:"):
                     tier2 = review_tier(t)
