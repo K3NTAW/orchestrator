@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, bus, executor, handover, merge, planner_runs, spawn
+from . import STATE, acceptance, bus, executor, handover, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
 
 SPEC_REVIEW_MIN = 6    # complexity at which a spec must be reviewed before an executor sees it
@@ -72,6 +72,8 @@ def lineage(task):
 
 
 def _test_ids(failures):
+    if isinstance(failures, list):
+        failures = "\n".join(str(line) for line in failures)
     if not isinstance(failures, str):
         return None
     ids = re.findall(r"^FAILED\s+(\S+)", failures, re.MULTILINE)
@@ -115,7 +117,10 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
         chunks.append("`" * (backticks % 3))
         return "".join(chunks)
 
-    failure_text = fence_data(((held.get("resume_hint") or {}).get("failures") or "")[:3000])
+    failures = (held.get("resume_hint") or {}).get("failures") or ""
+    if isinstance(failures, list):
+        failures = "\n".join(str(line) for line in failures)
+    failure_text = fence_data(str(failures)[:3000])
     review_lines = [f"{c.get('path', '')}:{c.get('line', '')} {c.get('issue', '')}" for _, cs in comments for c in cs]
     return prompt.format(root_id=root(held)["id"], root_title=root(held)["title"], held_id=held["id"],
                          n=round_no, failed_acceptance="\n".join(f"- {c}" for c in selected),
@@ -764,6 +769,13 @@ def gate(pool):
                 notify(f"{t['id']}: worktree has uncommitted scope changes; held")
             continue
         if already_merged(t):
+            continue
+        missing = acceptance.missing_tests(t["worktree"], t.get("acceptance") or [])
+        if missing:
+            failures = [f"FAILED {path}::{name} (missing: test not defined)" for path, name in missing]
+            if stamp(t["id"], "gated_at", status="held", hold_reason="gate_red",
+                     resume_hint={"failures": failures, "missing_tests": missing}):
+                print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
             continue
         tg = subprocess.run([str(merge.TESTS_GREEN), t["worktree"]], capture_output=True, text=True, input="{}")
         if tg.returncode:

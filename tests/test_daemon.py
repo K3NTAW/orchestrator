@@ -1245,6 +1245,55 @@ class Daemon(unittest.TestCase):
         self.assertTrue(held["hold_reason"].startswith("gate failed"), held["hold_reason"])
         self.assertIn("merge blew up", held["pipeline"]["gated_error"])
 
+    def test_gate_red_when_acceptance_test_missing(self):
+        t = bus.create_task("missing acceptance test", "spec", [
+            "tests/not_defined.py::test_missing and ::test_also_missing pass"], ["x.py"],
+            role="execute", complexity=2, parent="T-0043")["id"]
+        bus.update(t, status="done", worktree=str(TMP))
+        calls = []
+        previous = daemon.subprocess.run
+        self.swap(daemon.subprocess, "run", lambda *a, **k:
+                  (calls.append(a[0]), previous(*a, **k))[1])
+
+        daemon.tick()
+
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "gate_red"))
+        self.assertEqual(held["resume_hint"]["missing_tests"], [
+            ["tests/not_defined.py", "test_missing"],
+            ["tests/not_defined.py", "test_also_missing"],
+        ])
+        self.assertEqual(held["resume_hint"]["failures"], [
+            "FAILED tests/not_defined.py::test_missing (missing: test not defined)",
+            "FAILED tests/not_defined.py::test_also_missing (missing: test not defined)",
+        ])
+        self.assertFalse(any(call[:1] == [str(merge.TESTS_GREEN)] for call in calls))
+
+    def test_gate_runs_suite_when_named_tests_exist(self):
+        test_file = TMP / "tests" / "test_gate_named.py"
+        test_file.parent.mkdir(exist_ok=True)
+        test_file.write_text("class GateTests:\n    def test_exists(self):\n        pass\n")
+        self.addCleanup(test_file.unlink, True)
+        t = bus.create_task("defined acceptance test", "spec",
+                            ["tests/test_gate_named.py::test_exists passes"], ["x.py"],
+                            role="execute", complexity=2, parent="T-0043")["id"]
+        bus.update(t, status="done", worktree=str(TMP))
+        calls = []
+        previous = daemon.subprocess.run
+        self.swap(daemon.subprocess, "run", lambda *a, **k:
+                  (calls.append(a[0]), previous(*a, **k))[1])
+
+        daemon.tick()
+
+        self.assertTrue(any(call[:1] == [str(merge.TESTS_GREEN)] for call in calls))
+
+    def test_auto_fix_round_fires_on_missing_test_ids(self):
+        failures = ["FAILED tests/test_x.py::test_missing (missing: test not defined)"]
+        tid = self.held_for_fix(failures)
+        daemon.auto_fix_round(P.Pool())
+        fix, = self.fixes_for(tid)
+        self.assertIn(failures[0], fix["spec"])
+
     def test_gate_holds_dirty_worktree(self):
         """A done execute task whose worktree still has uncommitted changes under its scope must not be gated
         against a stale HEAD -- gate() must hold it for the Planner to commit or re-spec instead of running
