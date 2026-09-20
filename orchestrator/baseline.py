@@ -19,6 +19,8 @@ PRIMARY = ('tokens_per_accepted_task', 'usd_per_accepted_task',
 NON_INFERIORITY = ('first_pass_rate', 'fix_round_rate', 'avg_fix_rounds',
                   'gate_success_share', 'review_request_changes_rate')
 HIGHER_BETTER = {'first_pass_rate', 'gate_success_share'}
+REVIEW_PRIMARY = ('tokens_per_review',)
+REVIEW_NON_INFERIORITY = ('findings_per_review', 'share_of_reviews_with_a_high_finding', 'distinct_defects')
 
 
 def _path(label, root):
@@ -167,6 +169,8 @@ def save(label, root=STATE, since=None):
             bucket = row.get('bucket') or 'other'
             counts[bucket] = counts.get(bucket, 0) + 1
         cards['routing'] = scorecard.routing_eval(measured)
+        cards['reviews'] = {by: scorecard.review_quality(measured, by=by)
+                            for by in ('role', 'packet_version')}
         snapshot = {'saved_at': now.isoformat(),
                     'window': {'since': since, 'until': now.isoformat(), 'rows_by_bucket': counts,
                                'row_count': len(rows), 'malformed_lines': malformed},
@@ -211,6 +215,29 @@ def compare(a, b, root=STATE):
                         'percent': delta / abs(x) * 100 if delta is not None and x else None,
                         'flag': flag, 'non_inferiority': key in NON_INFERIORITY}
     flags = [metrics[k]['flag'] for k in NON_INFERIORITY]
+    review_comparison = {}
+    reviews_a = (a.get('efficiency') or {}).get('reviews', {})
+    reviews_b = (b.get('efficiency') or {}).get('reviews', {})
+    for grouping in ('role', 'packet_version'):
+        review_comparison[grouping] = {}
+        for group in sorted(set(reviews_a.get(grouping, {})) | set(reviews_b.get(grouping, {})), key=str):
+            before_group = reviews_a.get(grouping, {}).get(group, {})
+            after_group = reviews_b.get(grouping, {}).get(group, {})
+            compared = {}
+            for key in (*REVIEW_PRIMARY, *REVIEW_NON_INFERIORITY):
+                x, y = before_group.get(key), after_group.get(key)
+                if key == 'findings_per_review':
+                    x = x.get('mean') if isinstance(x, dict) else x
+                    y = y.get('mean') if isinstance(y, dict) else y
+                delta = y - x if x is not None and y is not None else None
+                higher_better = key in REVIEW_NON_INFERIORITY
+                flag = ('undefined' if delta is None else 'equal' if delta == 0 else
+                        'better' if (delta > 0) == higher_better else 'worse')
+                compared[key] = {'before': x, 'after': y, 'absolute': delta, 'flag': flag,
+                                 'non_inferiority': higher_better}
+                if higher_better:
+                    flags.append(flag)
+            review_comparison[grouping][group] = compared
     routing_before = (a.get('efficiency') or {}).get('routing')
     routing_after = (b.get('efficiency') or {}).get('routing')
     routing = {'before_verdict': routing_before.get('evidence_verdict') if routing_before else None,
@@ -226,7 +253,7 @@ def compare(a, b, root=STATE):
             x, y = before_group.get(key), after_group.get(key)
             routing['groups'][name][key] = {'before': x, 'after': y,
                                             'absolute': y - x if x is not None and y is not None else None}
-    return {'metrics': metrics, 'routing': routing,
+    return {'metrics': metrics, 'reviews': review_comparison, 'routing': routing,
             'fingerprint_diff': _changed(a.get('fingerprint', {}), b.get('fingerprint', {})),
             'non_inferior': 'no' if 'worse' in flags else 'undefined' if 'undefined' in flags else 'yes'}
 
@@ -245,5 +272,10 @@ def format_comparison(result):
         lines.append(f"routing {name} deltas: {values}")
     if routing:
         lines.append('routing evidence verdict: ' + str(routing.get('after_verdict')))
+    for grouping, groups in result.get('reviews', {}).items():
+        for group, metrics in groups.items():
+            values = ', '.join(f"{key}={cell(row['absolute'])} ({row['flag']})"
+                               for key, row in metrics.items())
+            lines.append(f"review quality {grouping}/{group}: {values}")
     lines.append('non-inferior: ' + result['non_inferior'])
     return '\n'.join(lines)

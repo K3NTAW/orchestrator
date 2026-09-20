@@ -966,3 +966,37 @@ class Efficiency(unittest.TestCase):
     def test_efficiency_model_distribution(self):
         model = scorecard.efficiency(self.root)["model_distribution"]["m"]
         self.assertEqual(model, {"execute": {"rows": 1, "tokens": 100}, "fix_round": {"rows": 1, "tokens": 20}})
+
+    def _review(self, tid, packet=None, pass_index=1, comments=(), tokens=100):
+        self.write_task(tid, role="review", status="done", inputs=["T-root"],
+                        result={"verdict": "request_changes", "comments": list(comments)},
+                        packet_version=packet, review_pass_index=pass_index)
+        self.write_runs({"task": tid, "role": "review", "total_tokens": tokens, "usd": 1,
+                         "packet_version": packet, "review_pass_index": pass_index})
+
+    def test_review_quality_counts_verdicts_and_findings_by_severity(self):
+        self._review("T-review-high", comments=[{"path": "a.py", "line": 1, "issue": "bug", "severity": "high"}])
+        row = scorecard.review_quality(self.root)["general"]
+        self.assertEqual((row["n_reviews"], row["verdicts"]["request_changes"]), (2, 1))
+        self.assertEqual(row["findings_by_severity"]["high"], 1)
+
+    def test_review_quality_distinct_defects_and_overlap_for_two_reviews(self):
+        self.write_task("T-review", role="review", status="done", inputs=["T-root"], result={"verdict": "request_changes", "comments": [
+            {"path": "same.py", "line": 2, "issue": "shared defect"}]}, review_pass_index=1)
+        self._review("T-review-2", pass_index=2, comments=[
+            {"path": "same.py", "line": 2, "issue": "different wording"},
+            {"path": "new.py", "line": 3, "issue": "new defect"}])
+        row = scorecard.review_quality(self.root)["general"]
+        self.assertEqual((row["distinct_defects"], row["overlap_share"], row["second_review_added"]), (2, .5, 1))
+
+    def test_review_quality_groups_by_packet_version_with_pre_packet_bucket(self):
+        self._review("T-review-packet", packet="p2")
+        self.assertEqual(set(scorecard.review_quality(self.root, by="packet_version")), {"pre-packet", "p2"})
+
+    def test_review_quality_findings_per_million_tokens_and_none_when_no_tokens(self):
+        self._review("T-review-token", comments=[{"issue": "one"}], tokens=500_000)
+        self.write_task("T-review-empty", role="review", inputs=["T-root"], result={"verdict": "approve"})
+        by_packet = scorecard.review_quality(self.root, by="packet_version")
+        self.assertGreater(by_packet["pre-packet"]["findings_per_million_tokens"], 0)
+        self.write_task("T-only", role="review", inputs=["T-root"], result={"verdict": "approve", "packet_version": "empty"})
+        self.assertIsNone(scorecard.review_quality(self.root, by="packet_version")["empty"]["findings_per_million_tokens"])

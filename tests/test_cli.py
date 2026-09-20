@@ -177,6 +177,16 @@ class Cli(unittest.TestCase):
             self.assertEqual(card["groups"]["agree"]["n"], 1)
             self.assertEqual(card["groups"]["disagree"]["n"], 1)
 
+    def test_cli_scorecard_reviews_text_and_json(self):
+        fixture = self._scorecard_fixture()
+        fixture.write_task("T-reviewed", executor="worker")
+        fixture.write_task("T-review-quality", role="review", status="done", inputs=["T-reviewed"],
+                           result={"verdict": "approve", "comments": []})
+        fixture.write_runs({"task": "T-review-quality", "role": "review", "total_tokens": 10})
+        with mock.patch.object(cli.scorecard, "STATE", fixture.root):
+            self.assertIn("findings_per_review", self._scorecard_output("--reviews"))
+            self.assertEqual(json.loads(self._scorecard_output("--reviews", "--json"))["general"]["n_reviews"], 2)
+
     def test_cli_scorecard_rejects_two_modes_and_names_by_modes(self):
         for modes in (("--economics", "--efficiency"),
                       ("--economics", "--routing"),

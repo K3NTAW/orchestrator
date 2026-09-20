@@ -800,6 +800,157 @@ def _stamp(value):
         return None
 
 
+def _review_comments(task):
+    """Return structured findings from either the current result envelope or legacy task fields."""
+    result = task.get("result") or {}
+    comments = result.get("comments", task.get("comments", []))
+    return comments if isinstance(comments, list) else []
+
+
+def _comment_components(reviews):
+    """Collapse comments that identify the same defect by location or normalized issue prefix."""
+    components = []
+    for review_id, comments in reviews:
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            path, line = comment.get("path"), comment.get("line")
+            issue = comment.get("issue", comment.get("body", comment.get("comment", "")))
+            normalized = " ".join(str(issue).lower().split())[:60]
+            keys = set()
+            if path is not None and line is not None:
+                keys.add(("location", str(path), str(line)))
+            if normalized:
+                keys.add(("issue", normalized))
+            if not keys:
+                continue
+            matches = [item for item in components if item[0] & keys]
+            if matches:
+                merged_keys, owners = set(keys), {review_id}
+                for item in matches:
+                    merged_keys.update(item[0]); owners.update(item[1]); components.remove(item)
+                components.append((merged_keys, owners))
+            else:
+                components.append((keys, {review_id}))
+    return components
+
+
+def review_quality(root=STATE, by="role"):
+    """Review findings and cost, grouped without treating fewer reviews as an efficiency win."""
+    if by not in ("role", "packet_version", "tier", "band", "reviewed_executor"):
+        raise ValueError(f"unsupported review grouping: {by}")
+    root = Path(root)
+    tasks = {}
+    for path in sorted((root / "tasks").glob("*.json")):
+        try:
+            task = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        tasks[task.get("id", path.stem)] = task
+    run_rows, _ = _efficiency_rows(root, tasks)
+    runs = {}
+    for row in run_rows:
+        if row.get("task"):
+            runs.setdefault(row["task"], []).append(row)
+
+    reviews = []
+    for tid, task in tasks.items():
+        if task.get("role") != "review":
+            continue
+        own_runs = runs.get(tid, [])
+        facts = attribution.review_facts(task)
+        # Persisted run facts win when present; summing usage keeps retries one review observation.
+        for row in own_runs:
+            facts = {**facts, **{key: value for key, value in row.items() if value is not None}}
+        inputs = task.get("inputs") or []
+        target_id = inputs[0] if inputs else None
+        reviewed = tasks.get(target_id, {})
+        target_meta = _attributed({"task": target_id, "role": reviewed.get("role", "execute")}, tasks)
+        packet = facts.get("packet_version")
+        keys = {
+            "role": facts.get("reviewer_role") or "unknown",
+            "packet_version": packet if packet is not None else "pre-packet",
+            "tier": facts.get("tier") or task.get("tier") or "unknown",
+            "band": target_meta.get("band") or "unknown",
+            "reviewed_executor": target_meta.get("executor") or "unknown",
+        }
+        severities = facts.get("findings_by_severity") or {}
+        count = facts.get("findings_count")
+        if count is None:
+            count = sum(v for v in severities.values() if isinstance(v, (int, float)))
+        usd_values = [row.get("usd") for row in own_runs if row.get("usd") is not None]
+        reviews.append({"id": tid, "target": target_id, "group": keys[by],
+                        "verdict": facts.get("verdict"), "findings": count,
+                        "severities": severities, "tokens": sum(_tokens_of(row) for row in own_runs),
+                        "has_tokens": bool(own_runs), "usd": sum(usd_values) if usd_values else None,
+                        "pass": facts.get("review_pass_index"), "status": task.get("status"),
+                        "comments": _review_comments(task)})
+
+    pair_metrics = {}
+    by_target = {}
+    for review in reviews:
+        by_target.setdefault(review["target"], []).append(review)
+    for target, members in by_target.items():
+        done = [review for review in members if review["status"] == "done"]
+        if target is None or len(done) != 2:
+            continue
+        components = _comment_components([(r["id"], r["comments"]) for r in done])
+        shared = sum(len(owners) == 2 for _, owners in components)
+        second = next((r for r in done if r["pass"] == 2), done[1])
+        pair_metrics[target] = {"groups": {r["group"] for r in done}, "distinct_defects": len(components),
+                                "shared_defects": shared,
+                                "overlap_share": shared / len(components) if components else None,
+                                "second_review_added": sum(owners == {second["id"]} for _, owners in components)}
+
+    result = {}
+    for group in sorted({review["group"] for review in reviews}, key=str):
+        members = [review for review in reviews if review["group"] == group]
+        findings = [review["findings"] for review in members]
+        tokens = [review["tokens"] for review in members if review["has_tokens"]]
+        costs = [review["usd"] for review in members if review["usd"] is not None]
+        pairs = [pair for pair in pair_metrics.values() if group in pair["groups"]]
+        total_tokens = sum(tokens)
+        severity = {}
+        for review in members:
+            for name, value in review["severities"].items():
+                severity[name] = severity.get(name, 0) + value
+        verdicts = {name: 0 for name in ("approve", "request_changes", "other")}
+        for review in members:
+            verdict = review["verdict"]
+            verdicts[verdict if verdict in verdicts else "other"] += 1
+        result[group] = {
+            "n_reviews": len(members), "verdicts": verdicts,
+            "findings_per_review": {"mean": statistics.mean(findings) if findings else None,
+                                    "median": statistics.median(findings) if findings else None},
+            "findings_by_severity": severity,
+            "share_of_reviews_with_a_high_finding": (sum((r["severities"].get("high") or 0) > 0 for r in members) / len(members) if members else None),
+            "tokens_per_review": statistics.median(tokens) if tokens else None,
+            "usd_per_review": statistics.median(costs) if costs else None,
+            "findings_per_million_tokens": sum(findings) * 1_000_000 / total_tokens if total_tokens else None,
+            "distinct_defects": sum(p["distinct_defects"] for p in pairs) if pairs else None,
+            "overlap_share": (sum(p["shared_defects"] for p in pairs) /
+                              sum(p["distinct_defects"] for p in pairs)) if pairs and sum(p["distinct_defects"] for p in pairs) else None,
+            "second_review_added": sum(p["second_review_added"] for p in pairs) if pairs else None,
+        }
+    return result
+
+
+def format_review_quality(card):
+    columns = ("n_reviews", "findings_per_review", "share_of_reviews_with_a_high_finding",
+               "tokens_per_review", "usd_per_review", "findings_per_million_tokens",
+               "distinct_defects", "overlap_share", "second_review_added")
+    lines = ["group\t" + "\t".join(columns)]
+    for group, row in card.items():
+        values = []
+        for key in columns:
+            value = row[key]
+            if key == "findings_per_review" and isinstance(value, dict):
+                value = f"mean={value['mean']},median={value['median']}"
+            values.append("n/a" if value is None else str(value))
+        lines.append(str(group) + "\t" + "\t".join(values))
+    return "\n".join(lines)
+
+
 def _efficiency_summary(rows, tasks):
     """Rates use defined tasks only; median/max use lineage tokens; amplification = Total/Execution.
 

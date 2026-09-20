@@ -134,10 +134,11 @@ def main():
     ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard")
-    sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role"])
+    sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role", "packet_version", "reviewed_executor"])
     sc.add_argument("--efficiency", action="store_true")
     sc.add_argument("--economics", action="store_true")
     sc.add_argument("--routing", action="store_true")
+    sc.add_argument("--reviews", action="store_true")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -163,13 +164,15 @@ def main():
     blcompare.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
-        if sum((a.economics, a.efficiency, a.routing)) > 1:
-            ap.error("choose one of --economics, --efficiency, --routing")
+        if sum((a.economics, a.efficiency, a.routing, a.reviews)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews")
+        if a.reviews and a.by not in (None, "role", "packet_version", "tier", "band", "reviewed_executor"):
+            ap.error("--reviews supports --by role|packet_version|tier|band|reviewed_executor")
         if a.economics and a.by not in (None, "executor", "band", "class"):
             ap.error("--economics supports --by executor|band|class")
         if a.efficiency and a.by in ("tier", "task"):
             ap.error("--efficiency supports --by goal|executor|band|class|role")
-        if not a.efficiency and not a.economics and not a.routing:
+        if not a.efficiency and not a.economics and not a.routing and not a.reviews:
             a.by = a.by or "executor"
             if a.by in ("band", "class", "role"):
                 ap.error("--by band|class|role requires --efficiency or --economics")
@@ -273,7 +276,10 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.routing:
+        if a.reviews:
+            card = scorecard.review_quality(root=scorecard.STATE, by=a.by or "role")
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_review_quality(card))
+        elif a.routing:
             card = scorecard.routing_eval(root=scorecard.STATE)
             print(json.dumps(card, indent=1) if a.json else scorecard.format_routing_eval(card))
         elif a.economics:

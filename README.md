@@ -382,8 +382,18 @@ lower it while worsening quality. Read it alongside first-pass and repair outcom
 The `unknown` group retains unattributed usage; unaccepted usage remains in window
 breakdowns. Unknown models are explicit, and unrecognized buckets contribute to Other.
 Legacy rows receive read-time attribution from task metadata and fix/review links,
-with explicit recorded attribution preserved; history is never rewritten. Missing
-lifecycle evidence stays undefined. Role groups measure usage rather than outcomes.
+with explicit recorded attribution preserved; history is never rewritten.
+Review quality is reported with `orchestrator scorecard --reviews`.
+Use `--by role|packet_version|tier|band|reviewed_executor` to select the cohort.
+JSON output is available with `--json` for analysis and baseline tooling.
+The `pre-packet` packet-version bucket keeps reviews predating packet metadata comparable.
+Verdicts and severity totals show what reviewers found, not merely what they cost.
+Finding rates use review counts; missing denominators remain undefined rather than zero.
+Token and USD medians expose the review-context cost for each cohort.
+Findings per million tokens helps compare differently sized review packets.
+Two completed reviews also report deduplicated defects, overlap, and pass-two additions.
+Compare packet-version cohorts alongside those quality measures; reviews are never removed to save tokens.
+Missing lifecycle evidence stays undefined. Role groups measure usage rather than outcomes.
 
 Before any P1+ change, run `orchestrator baseline save phase-h-code`.
 Snapshots live in `.orchestrator/baselines/<label>.json` and freeze all six groupings,

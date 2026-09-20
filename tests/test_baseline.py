@@ -57,7 +57,7 @@ def test_save_writes_metrics_and_fingerprint():
         path = baseline.save('phase-h-code', root)
         saved = baseline.load('phase-h-code', root)
         assert path == root / 'baselines' / 'phase-h-code.json'
-        assert set(saved['efficiency']) == {'all', 'goal', 'executor', 'band', 'class', 'role', 'routing'}
+        assert set(saved['efficiency']) == {'all', 'goal', 'executor', 'band', 'class', 'role', 'routing', 'reviews'}
         for by in baseline.GROUPS:
             assert saved['efficiency'][by or 'all'] == scorecard.efficiency(root, by=by)
         assert saved['metrics']['tokens_per_accepted_task'] == 120
@@ -146,6 +146,23 @@ def test_baseline_includes_routing_eval_and_compare_reports_it():
         result = baseline.compare('before', 'after', root)
         assert result['routing']['after_verdict'] == 'insufficient'
         assert 'routing disagree deltas:' in baseline.format_comparison(result)
+
+
+def test_baseline_includes_review_quality_and_compare_flags_drops():
+    with state() as root:
+        review = {'id': 'T-review', 'role': 'review', 'status': 'done', 'inputs': ['T-0001'],
+                  'result': {'verdict': 'request_changes', 'comments': [
+                      {'path': 'x.py', 'line': 1, 'issue': 'defect', 'severity': 'high'}]}}
+        (root / 'tasks' / 'T-review.json').write_text(json.dumps(review))
+        baseline.save('review-before', root)
+        baseline.save('review-after', root)
+        after = baseline.load('review-after', root)
+        assert set(after['efficiency']['reviews']) == {'role', 'packet_version'}
+        before = baseline.load('review-before', root)
+        before['efficiency']['reviews']['role']['general']['findings_per_review']['mean'] = 2
+        result = baseline.compare(before, after)
+        assert result['reviews']['role']['general']['findings_per_review']['flag'] == 'worse'
+        assert result['non_inferior'] == 'no'
 
 
 def test_cli_baseline_save_show_list_compare():
