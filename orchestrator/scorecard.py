@@ -381,15 +381,23 @@ def jev_footer(root=STATE):
 def _tokens_of(e):
     """int cast on each field: a run logged with a float token count (e.g. cache_read_input_tokens=20.0)
     would otherwise make // 10 return a float and poison every downstream sum with a trailing ".0"."""
-    if e.get("total_tokens") is not None:
-        return int(e["total_tokens"])
     if "input_uncached_tokens" in e:
-        return sum(int(e.get(key) or 0) for key in
-                   ("input_uncached_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens"))
+        return (int(e.get("input_uncached_tokens") or 0) + int(e.get("output_tokens") or 0) +
+                int(e.get("cache_read_tokens") or 0) // 10 + int(e.get("cache_write_tokens") or 0))
+    if _legacy_total_only(e):
+        return int(e["total_tokens"])
     inp = int(e.get("input_tokens") or 0)
     out = int(e.get("output_tokens") or 0)
     cache_read = int(e.get("cache_read_input_tokens") or 0)
     return inp + out + cache_read // 10
+
+
+def _legacy_total_only(e):
+    """Whether a total_tokens value has no accompanying usage buckets to recompute from."""
+    bucket_keys = ("input_uncached_tokens", "cache_read_tokens", "cache_write_tokens",
+                   "input_tokens", "cache_read_input_tokens", "cache_write_input_tokens",
+                   "cache_creation_input_tokens", "output_tokens", "reasoning_tokens")
+    return e.get("total_tokens") is not None and not any(key in e for key in bucket_keys)
 
 
 def by_task(root=STATE):
@@ -484,6 +492,14 @@ def by_goal(root=STATE):
             dated_runs.setdefault(path.stem, []).append(goal_id)
 
     def tokens(entry):
+        if "input_uncached_tokens" in entry:
+            return {
+                "uncached": int(entry.get("input_uncached_tokens") or 0),
+                "cache_read": int(entry.get("cache_read_tokens") or 0),
+                "cache_write": int(entry.get("cache_write_tokens") or 0),
+                "output": int(entry.get("output_tokens") or 0),
+                "reasoning": int(entry.get("reasoning_tokens") or 0),
+            }
         return {
             "uncached": int(entry.get("input_tokens") or 0),
             "cache_read": int(entry.get("cache_read_input_tokens") or 0),
@@ -542,14 +558,13 @@ def by_goal(root=STATE):
                 if entry.get("task") != t["id"]:
                     continue
                 raw = tokens(entry)
-                if entry.get("total_tokens") is not None or "input_uncached_tokens" in entry:
+                if _legacy_total_only(entry):
                     # Preserve the recorded total, including legacy total-only rows.
                     legacy_tokens += _tokens_of(entry) - effective(raw)
                 for key, value in raw.items():
                     token_buckets[key] += value
                 if t.get("status") == "failed" or t.get("merged_via") == "superseded":
-                    failed_tokens += (_tokens_of(entry) if entry.get("total_tokens") is not None
-                                      or "input_uncached_tokens" in entry else effective(raw))
+                    failed_tokens += _tokens_of(entry) if "input_uncached_tokens" in entry or _legacy_total_only(entry) else effective(raw)
             if gate is not None:
                 g = gate.get(t["id"], {"calls": 0, "waste": 0, "blocked": 0})
                 calls += g["calls"]; waste += g["waste"]; blocked += g["blocked"]

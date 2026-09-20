@@ -49,6 +49,22 @@ class Scorecard(unittest.TestCase):
         self.write_task("T-child", parent="T-goal", merged_into="goal/G")
         self.assertEqual(scorecard.tokens_per_accepted_goal(self.root)["tokens"], 42)
 
+    def test_tokens_of_discounts_cache_read_on_normalised_rows(self):
+        row = {"total_tokens": 1_000, "input_uncached_tokens": 100,
+               "cache_read_tokens": 200, "cache_write_tokens": 30, "output_tokens": 10}
+        self.assertEqual(scorecard._tokens_of(row), 160)
+
+    def test_by_goal_buckets_exact_for_normalised_rows(self):
+        self.write_task("T-goal")
+        self.write_task("T-child", parent="T-goal")
+        self.write_runs({"task": "T-child", "role": "execute", "total_tokens": 1_000,
+                         "input_uncached_tokens": 100, "cache_read_tokens": 200,
+                         "cache_write_tokens": 30, "output_tokens": 10})
+        row = scorecard.by_goal(self.root)["T-goal"]
+        self.assertEqual((row["tokens_uncached"], row["tokens_cache_read"],
+                          row["tokens_cache_write"], row["tokens_output"]), (100, 200, 30, 10))
+        self.assertEqual(row["total_tokens"], 160)
+
     def test_by_goal_median_and_range_small_sample(self):
         rows = []
         for i, amount in enumerate((10, 20, 30, 40, 100)):
