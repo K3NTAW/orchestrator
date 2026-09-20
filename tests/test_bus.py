@@ -1,6 +1,7 @@
 """Bus rules: acceptance is required, immutable fields, oversize results rejected, events, id sequencing."""
 import gc, json, sys, unittest, warnings
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_bus.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401  (TMP/ORCH_ROOT must exist before the orchestrator import below)
 from orchestrator import bus
@@ -142,6 +143,25 @@ class Bus(unittest.TestCase):
         reply = bus_mcp.bus_events(0, 1)
         self.assertTrue(reply["truncated"])
         self.assertEqual(reply["next_since"], reply["events"][-1]["seq"])
+
+    def test_events_filtered_page_never_exceeds_next_since(self):
+        scout = bus.create_task("Scout", "s", ["a"], ["x"], role="scout")
+        execute = bus.create_task("Execute", "s", ["a"], ["x"], role="execute")
+        from orchestrator import bus_mcp
+        original_events = bus.events
+
+        def insert_after_page(*args, **kwargs):
+            page = original_events(*args, **kwargs)
+            bus._event(execute["id"], "concurrent")
+            return page
+
+        with patch.object(bus, "events", side_effect=insert_after_page) as events:
+            reply = bus_mcp.bus_events(0, 2, role="execute")
+
+        self.assertEqual(events.call_count, 1)
+        self.assertTrue(reply["events"])
+        self.assertTrue(all(event["seq"] <= reply["next_since"] for event in reply["events"]))
+        self.assertNotIn("concurrent", [event["kind"] for event in reply["events"]])
 
     def test_depends_on(self):
         a = bus.create_task("A", "spec a", ["ok"], ["src/**"])

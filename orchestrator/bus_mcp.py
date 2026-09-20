@@ -45,7 +45,11 @@ def bus_events(since: int = 0, limit: int = 200, role: str | None = None,
                task_ids: list[str] | None = None) -> dict:
     """Events after `since`, optionally by role or task id, with cursor metadata."""
     raw = bus.events(since, limit)
-    events = bus.events(since, limit, role=role, task_ids=task_ids)
+    ids = set(task_ids) if task_ids is not None else None
+    roles = {task["id"]: task["role"] for task in bus.read()} if role is not None else {}
+    events = [event for event in raw
+              if (role is None or roles.get(event["task"]) == role)
+              and (ids is None or event["task"] in ids)]
     # The cursor advances past the last sequence examined, even when role/task
     # filters omit events, so callers never reread the unfiltered stream.
     next_since = raw[-1]["seq"] if raw else since
