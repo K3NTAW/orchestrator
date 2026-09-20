@@ -101,7 +101,11 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     kind = "resume" if args and args[0] == "resume" else "exec"
     command_args = args[1:] if kind == "resume" else args
     cmd = argv_for(kind, command_args, cwd, access)
+    log_task = task.get("_run_task_id", task["id"])
     log = {"executor": ex.id if ex else "codex", "complexity": task["complexity"]}
+    constraints = task.get("_run_constraints", task.get("constraints") or {})
+    if constraints.get("fix_round_for"):
+        log["resume_mode"] = task.get("_resume_mode", "fresh")
     log["prompt_chars"] = len(args[-1])
     from .spawn import packet_run_meta
     log["packet_meta"] = task.get("packet_meta") or packet_run_meta(args[-1])
@@ -115,7 +119,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
     if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
         reason = f"codex argv error: {r.stderr[-800:]}"
-        bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex",
+        bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex",
                     duration_s=round(time.time() - t0, 1), outcome="failed", reason=reason, **log)
         bus.update(task["id"], resume_hint={"argv_error": reason[:300]})
         return {"status": "failed", "reason": reason}
@@ -135,11 +139,11 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         pool.codex.cooldown_until = time.time() + secs; pool.save()
         bus.update(task["id"], status="held", hold_reason=f"codex usage limit; resets in {secs // 60} min",
                    resume_hint={"thread": ev["thread_id"], "diff_stat": _diff_stat(cwd)})
-        bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
+        bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
                     cooldown_s=secs, **log)
         return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
     u = ev["usage"]
-    bus.log_run(task=task["id"], role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
+    bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
                 outcome="error" if ev["error"] else "done", usage=u, **log, **(_tokens(u) if u else {}))
     if ev["error"] or r.returncode:
         return {"status": "failed", "reason": ev["error"] or r.stderr[-800:], "thread": ev["thread_id"]}
@@ -312,10 +316,14 @@ def _exhausted(pool, t, run=None):
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 
-def reply(task_id, delta, packet_meta=None):
+def reply(task_id, delta, packet_meta=None, fix_round_task_id=None):
     """Fix-loop round: resume the task's thread with a delta (failing tests + assertion lines) on the executor that
     started it — same thread, same model, never a re-pick mid-task. Capped at MAX_ROUNDS."""
     t = bus.get(task_id)
+    if fix_round_task_id is not None:
+        fix = bus.get(fix_round_task_id)
+        t = {**t, "_run_task_id": fix_round_task_id,
+             "_run_constraints": fix.get("constraints") or {}, "_resume_mode": "resume"}
     if packet_meta is not None:
         t["packet_meta"] = packet_meta
     if t.get("merged_into") is not None:

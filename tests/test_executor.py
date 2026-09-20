@@ -30,6 +30,27 @@ class Executor(unittest.TestCase):
         self.assertEqual(row()["packet_meta"], meta)
         self.assertEqual(row()["prompt_chars"], len("repair"))
 
+    def test_reply_run_row_logs_resume_mode_and_fix_round_task(self):
+        parent = self.exec_task(title="parent")
+        fix = bus.create_task("fix", "repair", ["a"], ["x.py"], role="execute",
+                              constraints={"fix_round_for": parent})
+        bus.update(parent, codex_thread="thread-1", executor="astra", rounds=0)
+        self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "thread-1"},
+                                    {"type": "turn.completed", "usage": {}}))
+        with patch.object(executor, "_resume_compatible", return_value=(True, "compatible")):
+            self.assertEqual(executor.reply(parent, "repair", fix_round_task_id=fix["id"])["status"], "done")
+        row = json.loads((bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((row["task"], row["resume_mode"]), (fix["id"], "resume"))
+
+    def test_fresh_fix_round_row_logs_resume_mode_fresh(self):
+        tid = self.exec_task(title="fresh fix")
+        bus.update(tid, constraints={"fix_round_for": "T-parent"})
+        self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "fresh"},
+                                    {"type": "turn.completed", "usage": {}}))
+        self.assertEqual(executor.start(tid, "full packet")["status"], "done")
+        row = json.loads((bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((row["task"], row["resume_mode"]), (tid, "fresh"))
+
     def reply_checkout(self, head, dirty="", ancestor=True):
         """Mock git and Codex independently, exercising the real reply and event parser."""
         P.PERSIST.unlink(missing_ok=True)

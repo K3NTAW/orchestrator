@@ -524,6 +524,36 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
         bus.post_result(task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
 
 
+def _fix_round_delta(parent, fix):
+    """Only the failed state changes between fix rounds; keep the resumed prompt to that delta."""
+    failures = (parent.get("resume_hint") or {}).get("failures")
+    if isinstance(failures, list):
+        failures = "\n".join(str(line) for line in failures)
+    if not failures:
+        reviews = _rejecting_reviews(parent)
+        failures = "\n".join(f"{c.get('path', '')}:{c.get('line', '')} {c.get('issue', '')}"
+                             for _, comments in reviews for c in comments) or "(no failure detail recorded)"
+    acceptance_ids = _test_ids(failures) or []
+    selected = [criterion for criterion in fix.get("acceptance") or []
+                if not acceptance_ids or any(test_id in criterion for test_id in acceptance_ids)]
+    return "Failures:\n" + str(failures)[:3000] + "\n\nAcceptance:\n" + "\n".join(
+        f"- {criterion}" for criterion in (selected or fix.get("acceptance") or []))
+
+
+def _dispatch_reply_worker(task_id, parent_id, delta):
+    try:
+        r = executor.reply(parent_id, delta, fix_round_task_id=task_id)
+        if r["status"] == "done":
+            bus.post_result(task_id, spawn.fit_result({
+                "summary": r["message"][:3000], "executed_by": "codex:" + bus.get(parent_id)["executor"],
+                "thread": r["thread"], "usage": r.get("usage"),
+            }), "done")
+        elif r["status"] == "failed":
+            bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+    except Exception as e:
+        bus.post_result(task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
+
+
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     slots = free_slots(pool)
@@ -539,6 +569,30 @@ def dispatch(pool):
                 break
             if stamp(t["id"], "dispatched_at"):
                 slots -= 1
+                fix_parent_id = (t.get("constraints") or {}).get("fix_round_for")
+                if fix_parent_id:
+                    parent = bus.get(fix_parent_id)
+                    if not parent.get("codex_thread"):
+                        reason = "no_thread"
+                    elif parent.get("rounds", 0) >= executor.MAX_ROUNDS:
+                        reason = "rounds_exhausted"
+                    elif not parent.get("executor") or parent.get("executor") not in pool.executors or \
+                            pool.executors[parent["executor"]].provider != "codex":
+                        reason = "executor_not_codex"
+                    else:
+                        compatible, _ = executor._resume_compatible(parent)
+                        reason = None if compatible else "incompatible_worktree"
+                    pipeline = dict(bus.get(t["id"]).get("pipeline") or {})
+                    if reason is None:
+                        pipeline["resume"] = {"mode": "resume", "thread": parent["codex_thread"],
+                                              "parent": parent["id"]}
+                        bus.update(t["id"], pipeline=pipeline, worktree=parent.get("worktree"),
+                                   branch=parent.get("branch") or f"task/{parent['id']}")
+                        spawn_async(_dispatch_reply_worker, t["id"], parent["id"], _fix_round_delta(parent, t))
+                        complete(t["id"], "dispatched_at")
+                        continue
+                    pipeline["resume"] = {"mode": "fresh", "reason": reason}
+                    bus.update(t["id"], pipeline=pipeline)
                 packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
                 prompt = spawn.render("execute", packet=packet, spec=t["spec"],
                                       acceptance=t["acceptance"], scope=t["scope"])

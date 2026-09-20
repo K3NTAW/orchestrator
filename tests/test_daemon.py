@@ -50,6 +50,42 @@ class Daemon(unittest.TestCase):
         self.assertIn("works", seen["prompt"])
         self.assertNotIn("{{", seen["prompt"])
 
+    def test_fix_round_dispatch_resumes_parent_thread_when_compatible(self):
+        parent_id = self.held_for_fix("FAILED tests/test_x.py::test_x - assertion")
+        bus.update(parent_id, codex_thread="thread-1", executor="astra", rounds=1,
+                   worktree=str(self.sandbox), codex_thread_head="abc")
+        fix = bus.create_task("fix", "FULL SPEC MUST NOT BE SENT", ["works"], ["x.py"], role="execute",
+                              complexity=2, parent="T-0043",
+                              constraints={"fix_round_for": parent_id, "auto_round": 1})
+        fix_id = fix["id"]
+        calls = []
+        self.swap(executor, "_resume_compatible", lambda task: (True, "compatible"))
+        self.swap(executor, "reply", lambda *args, **kwargs: calls.append((args, kwargs)) or {"status": "held"})
+        daemon.dispatch(P.Pool())
+        self.assertEqual(calls[0][0], (parent_id, calls[0][0][1]))
+        self.assertIn("FAILED tests/test_x.py::test_x", calls[0][0][1])
+        self.assertNotIn("FULL SPEC MUST NOT BE SENT", calls[0][0][1])
+        self.assertEqual(calls[0][1]["fix_round_task_id"], fix_id)
+        self.assertEqual(bus.get(fix_id)["pipeline"]["resume"]["mode"], "resume")
+        self.assertEqual(bus.get(fix_id)["worktree"], str(self.sandbox))
+
+    def test_fix_round_dispatch_fresh_when_worktree_incompatible_records_reason(self):
+        parent_id = self.held_for_fix()
+        bus.update(parent_id, codex_thread="thread-1", executor="astra", rounds=1, worktree=str(self.sandbox))
+        fix_id = self.task("fix", constraints={"fix_round_for": parent_id, "auto_round": 1})
+        self.swap(executor, "_resume_compatible", lambda task: (False, "worktree is dirty"))
+        daemon.dispatch(P.Pool())
+        self.assertEqual(bus.get(fix_id)["pipeline"]["resume"],
+                         {"mode": "fresh", "reason": "incompatible_worktree"})
+        self.assertIn(fix_id, self.started)
+
+    def test_fix_round_dispatch_fresh_when_parent_has_no_thread(self):
+        parent_id = self.held_for_fix()
+        fix_id = self.task("fix", constraints={"fix_round_for": parent_id, "auto_round": 1})
+        daemon.dispatch(P.Pool())
+        self.assertEqual(bus.get(fix_id)["pipeline"]["resume"], {"mode": "fresh", "reason": "no_thread"})
+        self.assertIn(fix_id, self.started)
+
     def metric_gate_task(self, **fields):
         tid = self.task("gate metrics", **fields)
         bus.update(tid, status="done", worktree=str(self.sandbox))
