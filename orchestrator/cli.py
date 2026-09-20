@@ -1,4 +1,4 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | daemon [--once] | merge T-0001 | post T-0001 --summary ..."""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | daemon [--once] | merge T-0001 | install /path/to/target | post T-0001 --summary ..."""
 import argparse, json
 from collections import defaultdict
 from . import bus, scorecard
@@ -25,6 +25,7 @@ def main():
     sub.add_parser("resume").add_argument("account")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
+    ins = sub.add_parser("install"); ins.add_argument("target")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard"); sc.add_argument("--by", default="executor", choices=["executor", "tier"])
     sc.add_argument("--json", action="store_true")
@@ -52,6 +53,12 @@ def main():
         from .daemon import main as d; d(once=a.once)
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
+    elif a.cmd == "install":
+        from .install import install
+        for line in install(a.target):
+            print(line)
+        print("Next: commit the scaffold in the target repo, then start the Planner there with "
+              f"ORCH_ROOT={a.target}.")
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":

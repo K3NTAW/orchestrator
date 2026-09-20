@@ -74,3 +74,10 @@ type: decision · goal: T-0043 · tasks: T-0063,T-0064 · provenance: repo
 - .orchestrator/pool.toml [daemon] autostart=true, interval_s=30; orchestrator/mcp.py calls daemon.start_background at boot inside try/except (34e9e5d)
 - orchestrator/daemon.py acquire_lock on .orchestrator/daemon.lock keeps one instance across the autostart and the CLI; ORCH_DAEMON=0 opts out; stale() skips tasks of closed goals; already_merged() marks ancestor-merged fix-round originals (901306a)
 outcome: Chosen over a launcher change in dotfiles (protected path, and a separate process to babysit): the daemon lives exactly as long as the Planner session. Rollback: autostart=false or revert the two commits
+
+## 2026-09-18 orchestrator install: the orchestrator is scaffolded into a target repo as committed files, not run from its own repo against another
+type: decision · goal: T-0065 · tasks: T-0070,T-0071,T-0072 · provenance: repo
+- orchestrator/install.py — copies .orchestrator/{pool.toml,prompts,protected-paths.txt,memory,plan.md,tasks}, .claude/{hooks,settings.json,skills}, skills/ into the target; rewrites .mcp*.json to uv run --project (this repo) with env ORCH_ROOT=(target); appends ignore lines; writes .orchestrator/tests.sh when the target Makefile has test/lint/typecheck
+- alternative that lost: point ORCH_ROOT at this repo and run from the target root (README wording before). Worktrees are cut with git worktree add and carry only committed files, so hooks, prompts and skills must be committed in the target
+- first target: kgpt, installed 2026-09-18 14:05 from goal/T-0065 (d410503); executed by claude:sonnet as Codex fallback, reviewed by sonnet (daemon) and opus (T-0072, other account)
+outcome: revert path: git revert d410503 in the orchestrator; in kgpt, revert the scaffold commit named in kgpt/.orchestrator/memory/decisions.md
