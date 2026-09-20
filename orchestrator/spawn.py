@@ -1,9 +1,23 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
-import ast, hashlib, json, os, re, shutil, subprocess, sys, time
+import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 from . import ROOT, STATE, bus
 from .pool import Pool, is_rate_limited, parse_reset_hint
+
+_MEMORY_RECALL = None
+
+
+def memory_recall(query, **kwargs):
+    """Load the shared memory skill lazily so packet building has no optional service dependency."""
+    global _MEMORY_RECALL
+    if _MEMORY_RECALL is None:
+        path = Path(__file__).resolve().parents[1] / ".claude/skills/memory/scripts/recall.py"
+        spec = importlib.util.spec_from_file_location("orchestrator_memory_recall", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _MEMORY_RECALL = module.recall
+    return _MEMORY_RECALL(query, **kwargs)
 
 TOOLS = {
     "scout":     "Read,Grep,Glob,Bash(git *),Bash(rg *),Bash(ls *),Bash(bash skills/*),mcp__bus__bus_post_result,mcp__bus__bus_read",
@@ -244,15 +258,10 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
     merge_base = git("merge-base", "HEAD", goal_branch, cwd=wt, check=False).stdout.strip()
     if not merge_base:
         merge_base = git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip() or "(unavailable)"
-    terms = {p.lower() for p in scope}
-    terms.update(Path(p).stem.lower() for p in scope)
-    gotchas = []
-    for candidate in (wt / ".orchestrator/memory/gotchas.md", wt / "gotchas.md"):
-        for line, title, body in _memory_entries(candidate):
-            if any(term and term in f"{title}\n{body}".lower() for term in terms):
-                gotchas.append(f"- mem:gotchas.md:{line} {title}")
-        if candidate.exists():
-            break
+    memory = memory_recall(" ".join([task.get("title", ""), *scope]), layers=("notes", "bus"),
+                           budget_hits=5, task=task.get("id"))
+    gotchas = [f"- {hit['id']} {hit['title']}" for hit in memory["hits"]
+               if hit["id"].startswith("mem:gotchas.md:")]
     matched_gotchas = list(gotchas)
     decisions = []
     for candidate in (wt / ".orchestrator/memory/decisions.md", wt / "decisions.md"):
@@ -338,7 +347,8 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
         except OSError:
             policy_version = "(unavailable)"
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
-                  "policy_version": str(policy_version), "gotchas": gotchas_sha}
+                  "policy_version": str(policy_version), "gotchas": gotchas_sha,
+                  "memory_layers": ",".join(memory["layers_consulted"])}
 
 
 def packet_meta(task, worktree) -> dict:
@@ -363,7 +373,7 @@ def packet(task, worktree) -> str:
     """Build a bounded executor briefing with a verifiable provenance header."""
     body, meta = _packet_body(task, worktree)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
-              f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']}")
+              f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
     # Account for the header itself, including a possible extra digit in n.
     over = len(header) + 1 + len(body) - 4800
     if over > 0:
@@ -496,17 +506,16 @@ def scout_packet(task) -> str:
         if directory.is_dir():
             tree.extend(str(child.relative_to(wt)) for child in sorted(directory.iterdir()))
     tree = list(dict.fromkeys(tree))[:60]
-    titles = []
-    for index in (wt / ".orchestrator/memory/index.md", ROOT / ".orchestrator/memory/index.md"):
-        if index.is_file():
-            titles = [title for _, title, _ in _memory_entries(index)][:10]
-            break
+    memory = memory_recall(" ".join([task.get("title", ""), *map(str, task.get("scope", []))]),
+                           layers=("notes", "bus"), budget_hits=5, task=task.get("id"))
+    titles = [hit["title"] for hit in memory["hits"]]
     body = "\n".join([_section("question", task.get("spec")),
                        _section("expected output", task.get("acceptance", [])),
                        _section("scope tree", tree), _section("memory titles", titles),
                        _section("result contract", ["bus_post_result fields: findings, open_questions, suggested_next, blocked",
                                                     "result limit: 1,500 tokens"])])
-    return _role_packet(body, _base_sha(task, wt), f"task@{task.get('id', '(none)')} tree@HEAD memory-index@HEAD")
+    return _role_packet(body, _base_sha(task, wt),
+                        f"task@{task.get('id', '(none)')} tree@HEAD memory@{','.join(memory['layers_consulted'])}")
 
 
 def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:

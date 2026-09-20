@@ -316,8 +316,7 @@ Hooks live: guardrails, scope-guard, tests-green, loop-guard, require-acceptance
 ## Memory (skill `memory`)
 Layered, cheapest first: notes (`.orchestrator/memory/*.md`, dated `## YYYY-MM-DD title` entries) · bus results · claude-mem
 observations (read-only FTS over `~/.claude-mem/claude-mem.db`; the plugin is on `~/.claude`, not the worker accounts) · graphify code
-graph (`graphify-out/`, gitignored, AST only, no LLM). `recall.sh index "<terms>"` then `recall.sh get <id>...`; `record.sh draft <GOAL>` /
-`add` / `set architecture` at retrospective; `graph.sh update|query|affected|explain|summary` after merges and for scouts.
+graph (`graphify-out/`, gitignored, AST only, no LLM). Progressive recall stops once its hit or character budget is met and never consults a richer layer merely because it exists; unavailable layers are recorded but skipped. `recall.sh index --progressive "<terms>"` reports consulted layers and records attributable memory usage; worker packets deliberately use notes and bus only. `record.sh draft <GOAL>` / `add` / `set architecture` at retrospective; `graph.sh update|query|affected|explain|summary` after merges and for scouts.
 
 ## CLI
 ```

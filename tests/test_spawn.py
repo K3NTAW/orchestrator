@@ -568,7 +568,7 @@ class Render(unittest.TestCase):
         meta = spawn.packet_meta(self.packet_fixture(), TMP)
         self.assertEqual(text.splitlines()[0],
                          f"packet v{meta['hash']} base {meta['base']} sources "
-                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']}")
+                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@notes,bus")
 
     def test_packet_hash_changes_when_body_changes(self):
         task = self.packet_fixture()
@@ -641,6 +641,17 @@ class Render(unittest.TestCase):
         (memory / "gotchas.md").write_text("## Widget cache\nFacts: changing widget.py needs a cache reset.\n")
         text = spawn.packet(task, TMP)
         self.assertRegex(text, r"mem:gotchas\.md:1 Widget cache")
+
+    def test_packet_memory_uses_notes_and_bus_only(self):
+        seen = {}
+        def fake_recall(query, **kwargs):
+            seen.update(kwargs)
+            return {"hits": [], "layers_consulted": ["notes", "bus"], "stopped_at": None, "chars": 0}
+        with mock.patch.object(spawn, "memory_recall", side_effect=fake_recall):
+            text = spawn.packet(self.packet_fixture(), TMP)
+        self.assertEqual(seen["layers"], ("notes", "bus"))
+        self.assertEqual(seen["budget_hits"], 5)
+        self.assertIn("memory@notes,bus", text.splitlines()[0])
 
     def test_templates_fill(self):
         task = {**self.packet_fixture(), "id": "T-1", "spec": "q", "acceptance": ["a"]}

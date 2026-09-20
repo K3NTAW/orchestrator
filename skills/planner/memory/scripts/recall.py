@@ -1,7 +1,7 @@
 """Layered recall over orchestrator memory: notes (memory/*.md), bus (tasks/*.json), cmem (claude-mem sqlite, read-only),
 graph (graphify LESSONS.md). `index` prints one line per hit; `get` prints full entries for chosen ids. Stdlib only,
 save for jev_rank -- imported from the orchestrator package on ROOT, which is itself stdlib-only."""
-import datetime, json, os, re, sqlite3, sys
+import datetime, json, os, re, sqlite3, sys, time
 from pathlib import Path
 
 ROOT = Path(os.environ.get("ORCH_ROOT") or Path.cwd())
@@ -36,6 +36,7 @@ _SRC_ROOT = Path(__file__).resolve().parents[4]
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 from orchestrator import jev_rank  # noqa: E402 -- needs _SRC_ROOT on sys.path first
+from orchestrator import bus  # noqa: E402 -- needs _SRC_ROOT on sys.path first
 
 
 def terms_of(q):
@@ -120,17 +121,71 @@ def index_graph(terms):
     return out
 
 
+def _layer_hits(layer, terms, *, task, limit):
+    """Return one layer's index hits, or ``None`` when the source is unavailable."""
+    if layer == "notes":
+        return index_notes(terms)
+    if layer == "bus":
+        return index_bus(terms)
+    if layer == "claude-mem":
+        if not CMEM.exists():
+            return None
+        return index_cmem(terms, task, limit)
+    if layer == "graph":
+        if not LESSONS.exists():
+            return None
+        return index_graph(terms)
+    raise ValueError(f"unknown recall layer: {layer}")
+
+
+def recall(query, *, layers=("notes", "bus", "claude-mem", "graph"), budget_hits=8,
+           min_score=0.5, budget_chars=6000, task=None):
+    """Recall progressively, avoiding richer layers once the cheap answer is sufficient."""
+    started = time.monotonic()
+    terms = terms_of(query)
+    hits, consulted, chars, stopped_at = [], [], 0, None
+    for layer in layers:
+        layer_hits = _layer_hits(layer, terms, task=task, limit=budget_hits)
+        if layer_hits is None:
+            consulted.append(f"{layer} unavailable")
+            continue
+        consulted.append(layer)
+        for score_, id_, date, provenance, title in sorted(layer_hits, key=lambda h: (-h[0], h[2])):
+            if chars + len(title) > budget_chars:
+                stopped_at = layer
+                break
+            hits.append({"score": score_, "id": id_, "date": date, "layer": provenance, "title": title})
+            chars += len(title)
+        sufficient = sum(hit["score"] >= min_score for hit in hits) >= budget_hits
+        if sufficient or chars >= budget_chars or stopped_at:
+            stopped_at = layer
+            break
+    result = {"hits": hits, "layers_consulted": consulted, "stopped_at": stopped_at, "chars": chars}
+    bus.log_run(task=task, role="memory", outcome="recalled", layers_consulted=consulted,
+                stopped_at=stopped_at, hits=hits, chars=chars, est_tokens=chars // 4,
+                duration_s=time.monotonic() - started)
+    return result
+
+
 def cmd_index(argv):
-    q, project, limit, goal_text = "", None, configured_hits(), os.environ.get("ORCH_GOAL_TEXT")
+    q, project, limit, goal_text, progressive = "", None, configured_hits(), os.environ.get("ORCH_GOAL_TEXT"), False
     i = 0
     while i < len(argv):
         if argv[i] == "--project": project = argv[i + 1]; i += 2
         elif argv[i] == "--limit": limit = int(argv[i + 1]); i += 2
         elif argv[i] == "--goal": goal_text = argv[i + 1]; i += 2
+        elif argv[i] == "--progressive": progressive = True; i += 1
         else: q += " " + argv[i]; i += 1
     terms = terms_of(q)
     if not terms:
         sys.exit("usage: recall.sh index \"<terms>\" [--project NAME] [--limit N] [--goal \"<text>\"]")
+    if progressive:
+        result = recall(q, budget_hits=limit, task=project)
+        hits = result["hits"]
+        print(f"# {len(hits)} progressive hits for {terms} — layers_consulted: {', '.join(result['layers_consulted']) or '(none)'}")
+        for hit in hits:
+            print(f"{hit['id']} · {hit['date'] or '-'} · {hit['layer']} · {age(hit['date'])} · {hit['title']}")
+        return
     hits = index_notes(terms) + index_bus(terms) + index_cmem(terms, project, limit) + index_graph(terms)
     hits.sort(key=lambda h: (-h[0], h[2]))
     if not hits:

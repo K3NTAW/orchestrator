@@ -1,6 +1,6 @@
 """skills/planner/memory/scripts: record.sh (draft/add/set) and recall.sh (index/get) over the orchestrator's
 memory files, plus the retrospect-written hook accepting what record.sh writes."""
-import importlib.util, io, os, subprocess, sys, time, unittest
+import importlib.util, io, json, os, subprocess, sys, time, unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_memory_skill.py` doesn't add this dir itself
@@ -84,6 +84,46 @@ class MemorySkill(unittest.TestCase):
         with redirect_stdout(out):
             recall.cmd_index(["jev", "rank", "flag", "--goal", "ship the jev rank flag"])
         self.assertIn("jev: off", out.getvalue())
+
+    def test_recall_stops_after_budget_hits_in_notes_layer(self):
+        recall = self.load_recall()
+        calls = {"bus": 0, "cmem": 0, "graph": 0}
+        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "one"), (1, "mem:x:2", "", "mem", "two")]
+        recall.index_bus = lambda terms: calls.__setitem__("bus", calls["bus"] + 1) or []
+        recall.index_cmem = lambda *args: calls.__setitem__("cmem", calls["cmem"] + 1) or []
+        recall.index_graph = lambda terms: calls.__setitem__("graph", calls["graph"] + 1) or []
+        result = recall.recall("one two", budget_hits=2)
+        self.assertEqual(result["layers_consulted"], ["notes"])
+        self.assertEqual(result["stopped_at"], "notes")
+        self.assertEqual(calls, {"bus": 0, "cmem": 0, "graph": 0})
+
+    def test_recall_skips_unavailable_layer_and_names_it(self):
+        recall = self.load_recall()
+        recall.index_notes = lambda terms: []
+        recall.index_bus = lambda terms: []
+        recall.CMEM = TMP / "missing.db"
+        recall.LESSONS = TMP / "missing-lessons.md"
+        result = recall.recall("nothing")
+        self.assertEqual(result["layers_consulted"], ["notes", "bus", "claude-mem unavailable", "graph unavailable"])
+
+    def test_recall_logs_memory_run_row_with_task_and_layers(self):
+        task = bus.create_task("memory recall row", "s", ["a"], ["x.py"])
+        recall = self.load_recall()
+        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "memory")]
+        result = recall.recall("memory", layers=("notes",), task=task["id"])
+        row = json.loads(sorted(bus.RUNS.glob("*.jsonl"))[-1].read_text().splitlines()[-1])
+        self.assertEqual(row["role"], "memory")
+        self.assertEqual(row["task"], task["id"])
+        self.assertEqual(row["goal_id"], task["id"])
+        self.assertEqual(row["layers_consulted"], result["layers_consulted"])
+
+    def test_recall_progressive_cli_header(self):
+        recall = self.load_recall()
+        recall.index_notes = lambda terms: [(1, "mem:x:1", "", "mem", "memory")]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            recall.cmd_index(["--progressive", "memory"])
+        self.assertIn("layers_consulted: notes", out.getvalue())
 
 
 if __name__ == "__main__":
