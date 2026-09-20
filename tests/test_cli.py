@@ -177,6 +177,27 @@ class Cli(unittest.TestCase):
             self.assertEqual(card["groups"]["agree"]["n"], 1)
             self.assertEqual(card["groups"]["disagree"]["n"], 1)
 
+    def test_cli_scorecard_rejects_two_modes_and_names_by_modes(self):
+        for modes in (("--economics", "--efficiency"),
+                      ("--economics", "--routing"),
+                      ("--efficiency", "--routing")):
+            err = io.StringIO()
+            with self.subTest(modes=modes), mock.patch.object(
+                sys, "argv", ["orchestrator", "scorecard", *modes]
+            ), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                cli.main()
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("choose one of --economics, --efficiency, --routing", err.getvalue())
+
+        for by in ("band", "class", "role"):
+            err = io.StringIO()
+            with self.subTest(by=by), mock.patch.object(
+                sys, "argv", ["orchestrator", "scorecard", "--by", by]
+            ), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                cli.main()
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("--by band|class|role requires --efficiency or --economics", err.getvalue())
+
     def test_scorecard_default_output_unchanged(self):
         with mock.patch.object(cli.scorecard, "build", return_value={}), mock.patch.object(cli.scorecard, "scores", return_value={}):
             self.assertEqual(self._scorecard_output(), "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore\n")

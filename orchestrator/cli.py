@@ -163,6 +163,8 @@ def main():
     blcompare.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
+        if sum((a.economics, a.efficiency, a.routing)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing")
         if a.economics and a.by not in (None, "executor", "band", "class"):
             ap.error("--economics supports --by executor|band|class")
         if a.efficiency and a.by in ("tier", "task"):
@@ -170,7 +172,7 @@ def main():
         if not a.efficiency and not a.economics and not a.routing:
             a.by = a.by or "executor"
             if a.by in ("band", "class", "role"):
-                ap.error("this --by requires --efficiency")
+                ap.error("--by band|class|role requires --efficiency or --economics")
     if a.cmd == "status":
         if a.plain:
             s = Pool().status()

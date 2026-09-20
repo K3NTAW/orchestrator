@@ -137,3 +137,15 @@ class JevRoute(unittest.TestCase):
                     "outside": {"class_success": 1, "expected_cost": 0}}
         for signals in ({"substantial_reasoning": .9}, {"localized_simple": .9, "elevated_risk": .1}, {}):
             self.assertIn(jev_route.hypothetical(self.eligible, signals, evidence, "outside"), {"weak", "strong"})
+
+    def test_cache_max_entries_zero_disables_caching(self):
+        routing = {"mode": "shadow", "cache_ttl_s": 86400, "cache_max_entries": 0}
+        with mock.patch.object(jev_route, "_routing_cfg", return_value=routing), \
+             mock.patch.object(jev_route.jev, "_cfg", return_value=self.cfg), \
+             mock.patch.object(jev_route.jev, "_day_tokens_used", return_value=0), \
+             mock.patch.object(jev_route.jev, "ask", side_effect=[self.answer(), self.answer()]) as ask:
+            jev_route.classify(self.task, FakePool(), self.eligible, self.root)
+            jev_route.classify(self.task, FakePool(), self.eligible, self.root)
+        self.assertEqual(ask.call_count, 2)
+        cache = self.root / "runs" / "jev" / "route_cache.json"
+        self.assertTrue(not cache.exists() or json.loads(cache.read_text()) == {})

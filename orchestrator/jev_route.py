@@ -55,6 +55,9 @@ def _cache_read(root, key, ttl):
 
 
 def _cache_write(root, key, row, ttl, max_entries):
+    max_entries = max(0, max_entries)
+    if max_entries == 0:
+        return
     path, lock = _cache_paths(root)
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "a+") as fh:
@@ -99,9 +102,11 @@ def classify(task, pool, eligible, root=STATE):
     if not cfg["enabled"] or jev._day_tokens_used() >= cfg["daily_budget_tokens"]:
         return None
     key = _key(task)
-    cached = _cache_read(root, key, routing.get("cache_ttl_s", 86400))
-    if cached is not None:
-        return cached
+    max_entries = max(0, routing.get("cache_max_entries", 500))
+    if max_entries:
+        cached = _cache_read(root, key, routing.get("cache_ttl_s", 86400))
+        if cached is not None:
+            return cached
     state = {
         "spec": jev.redact((task.get("spec") or "")[:1500]),
         "acceptance": [jev.redact(str(v)) for v in task.get("acceptance") or []],
@@ -123,8 +128,7 @@ def classify(task, pool, eligible, root=STATE):
                "usage": result.get("usage"), "cache": "miss", "key": key}
     except Exception:
         return None
-    _cache_write(root, key, row, routing.get("cache_ttl_s", 86400),
-                 routing.get("cache_max_entries", 500))
+    _cache_write(root, key, row, routing.get("cache_ttl_s", 86400), max_entries)
     return row
 
 
