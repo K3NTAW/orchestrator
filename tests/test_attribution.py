@@ -1,4 +1,6 @@
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +10,21 @@ from orchestrator import attribution, bus, scorecard
 
 
 class AttributionTests(unittest.TestCase):
+    def test_review_facts_backfills_packet_version_from_multiline_runs_file(self):
+        rows = [
+            {"task": "other-first", "packet_meta": {"version": "wrong-first"}},
+            {"task": "historical-review", "packet_meta": {"version": "review-packet-hash"}},
+            {"task": "other-last", "packet_meta": {"version": "wrong-last"}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            runs = Path(directory)
+            (runs / "2026-09-20.jsonl").write_text(
+                json.dumps(rows[0]) + "\n\n{malformed\n" +
+                "\n".join(json.dumps(row) for row in rows[1:]) + "\n")
+            with patch.object(bus, "RUNS", runs):
+                facts = attribution.review_facts({"id": "historical-review", "role": "review"})
+        self.assertEqual(facts["packet_version"], "review-packet-hash")
+
     def test_review_facts_normalises_severities_and_counts(self):
         task = {"id": "R", "role": "review", "complexity": 7,
                 "constraints": {"reviewer_role": "security", "reviewed_sha": "abc"},

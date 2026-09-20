@@ -26,13 +26,24 @@ def review_facts(review_task):
         if packet_version is None:
             for path in sorted(bus.RUNS.glob("*"), reverse=True):
                 try:
-                    row = json.loads(path.read_text())
-                except (OSError, ValueError, TypeError, IsADirectoryError):
+                    lines = path.read_text().splitlines()
+                except (OSError, UnicodeError):
                     continue
-                if row.get("task") == task.get("id"):
-                    packet_version = (row.get("packet_meta") or {}).get("version")
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(row, dict) or row.get("task") != task.get("id"):
+                        continue
+                    meta = row.get("packet_meta")
+                    packet_version = meta.get("version") if isinstance(meta, dict) else None
                     if packet_version is not None:
                         break
+                if packet_version is not None:
+                    break
 
         inputs = task.get("inputs") or []
         reviewed_id = inputs[0] if inputs and isinstance(inputs[0], str) else None
