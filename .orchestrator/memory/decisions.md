@@ -248,3 +248,9 @@ type: decision · goal: T-0260 · tasks: T-0001 · provenance: repo
 - vercel git connect needs the repo URL when run from a git worktree (the CLI reports no local Git repository because a worktree has a .git file, not a directory); vercel git connect https://github.com/K3NTAW/docs-kentawaibel.git --yes from wt/deploy connected it
 - production branch is main, which still holds only the scaffold; merging PR 1 triggers the first automatic production deploy and replaces the manual deployment FPadPdHG8eNm4Qi1fbCyzV8dMrKu; pushes to other branches create preview deployments
 outcome: Revert path: vercel git disconnect in the linked directory (or the project's Git settings), no repo change involved
+
+## 2026-09-20 Phase H (T-0353) opened: gap matrix and ten specs on goal/T-0353; checkpoint commit c6dd834
+type: decision · goal: T-0353 · tasks: T-0354,T-0355,T-0356,T-0357,T-0358,T-0359,T-0360,T-0361,T-0362,T-0363,T-0364,T-0365,T-0366 · provenance: repo
+- two sonnet scouts (0.74 USD each side) produced the matrix; core gaps: routing (H3a/H3b), launch attribution and pinned policy version (H2), reservations and notify per transition (H4), failure signatures and kinds (H7), gate on acceptance-named tests (H6), packet header and acceptance never dropped (H8), accounting fields (H1), counters from bus and codex tools posting (H5a), worktree reuse and review re-spawn (H5b), docs (H9)
+- deferred with reasons: Jev changes, read and test result caches, memory expiry, Codex sandbox scope enforcement, learned routing, expansion metrics
+outcome: revert path: git revert c6dd834 for the checkpoint; each merged Phase H task is reverted by its own sha listed in the PR
