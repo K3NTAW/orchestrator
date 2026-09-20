@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 from fnmatch import fnmatchcase
 from itertools import chain
-from pathlib import PurePosixPath
-from typing import Any, Iterable, Mapping
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Iterable, Mapping
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 DEFAULT_RULES = {
     "hard": ("dependency", "same_file", "glob_covers", "same_glob"),
-    "soft": ("dir_contains", "same_dir", "test_adjacent", "sibling_globs"),
+    "soft": ("dir_contains", "same_dir", "test_adjacent", "sibling_globs", "graph_link"),
     "soft_conflict_policy": "defer",
+    "graph_hard_links": 0,
 }
 
 
@@ -77,9 +83,89 @@ def _depends_on(start: str, target: str, tasks: Mapping[str, Mapping[str, Any]])
     return False
 
 
+def load_graph(root: Path | str = ROOT) -> dict[str, Any] | None:
+    """Load the optional graphify node-link output without making it required."""
+    path = Path(root) / "graphify-out" / "graph.json"
+    try:
+        data = json.loads(path.read_text())
+        nodes_by_file: dict[str, list[Any]] = {}
+        for node in data["nodes"]:
+            source_file = node.get("source_file")
+            if source_file is not None:
+                nodes_by_file.setdefault(str(source_file).replace("\\", "/"), []).append(node["id"])
+        links = [(link["source"], link["target"]) for link in data["links"]]
+        return {
+            "nodes_by_file": nodes_by_file,
+            "links": links,
+            "built_at_commit": data.get("built_at_commit"),
+            "path": str(path),
+        }
+    except (OSError, TypeError, ValueError, KeyError):
+        return None
+
+
+def _run_git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+
+
+def graph_fresh_for(
+    paths: Iterable[str],
+    graph: Mapping[str, Any],
+    git: Callable[..., Any] | None = None,
+) -> bool | None:
+    """Return whether the relevant paths are unchanged since the graph build."""
+    commit = graph.get("built_at_commit")
+    if not commit:
+        return None
+    worktree = Path(str(graph.get("path", ROOT / "graphify-out" / "graph.json"))).parent.parent
+    runner = git or _run_git
+    try:
+        result = runner(worktree, "diff", "--name-only", str(commit), "HEAD", "--", *sorted(set(paths)))
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return not bool(result.stdout.strip())
+
+
+def _graph_files(task: Mapping[str, Any], graph: Mapping[str, Any]) -> set[str]:
+    known_files = graph.get("nodes_by_file", {})
+    files = {entry for entry in _scope(task) if _is_literal(entry)}
+    for pattern in (entry for entry in _scope(task) if _is_glob(entry)):
+        files.update(path for path in known_files if fnmatchcase(path, pattern))
+    return files
+
+
+def _graph_file_link_counts(
+    files_a: set[str], files_b: set[str], graph: Mapping[str, Any]
+) -> dict[tuple[str, str], int]:
+    node_files = {
+        node_id: source_file
+        for source_file, node_ids in graph.get("nodes_by_file", {}).items()
+        for node_id in node_ids
+    }
+    counts: dict[tuple[str, str], int] = {}
+    for source, target in graph.get("links", []):
+        source_file, target_file = node_files.get(source), node_files.get(target)
+        if source_file in files_a and target_file in files_b:
+            pair = (source_file, target_file)
+        elif source_file in files_b and target_file in files_a:
+            pair = (target_file, source_file)
+        else:
+            continue
+        counts[pair] = counts.get(pair, 0) + 1
+    return counts
+
+
 def graph_signal(t1: Mapping[str, Any], t2: Mapping[str, Any], graph: Any) -> list[str]:
-    """Return graph-derived reasons (reserved for a later implementation)."""
-    return []
+    """Return fresh graph links between the tasks' literal and expanded scopes."""
+    if not graph:
+        return []
+    files_a, files_b = _graph_files(t1, graph), _graph_files(t2, graph)
+    if graph_fresh_for(files_a | files_b, graph) is not True:
+        return ["graph_stale"]
+    return [f"graph_link:{left}->{right}"
+            for left, right in sorted(_graph_file_link_counts(files_a, files_b, graph))]
 
 
 def classify(
@@ -161,6 +247,14 @@ def classify(
     configured = _rules(rules)
     hard = set(configured["hard"])
     soft = set(configured["soft"])
+    graph_threshold = int(configured["graph_hard_links"] or 0)
+    if graph is not None and graph_threshold > 0:
+        files_a, files_b = _graph_files(first, graph), _graph_files(second, graph)
+        if graph_fresh_for(files_a | files_b, graph) is True and any(
+            count >= graph_threshold
+            for count in _graph_file_link_counts(files_a, files_b, graph).values()
+        ):
+            hard.add("graph_link")
     ordered = sorted(reasons)
     if any(_reason_kind(reason) in hard for reason in ordered):
         return {"level": "hard", "reasons": ordered, "score": 1.0}
