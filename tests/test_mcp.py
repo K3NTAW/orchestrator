@@ -1,6 +1,6 @@
 """orchestrator.mcp's spawn_* tools: each refuses a task whose role doesn't match what the tool is for, instead of
 running it under the wrong role (gotcha 2026-09-18: spawn_spec_review handed an execute task id ran an execute)."""
-import sys, unittest
+import json, sys, unittest
 from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_mcp.py` doesn't add this dir itself
@@ -9,6 +9,21 @@ from orchestrator import bus, mcp
 
 
 class SpawnToolsRefuseWrongRole(unittest.TestCase):
+    def test_spawn_scout_reports_error_when_worktree_fails(self):
+        scout = bus.create_task("failed scout spawn", "s", ["a"], ["x.py"], role="scout")
+        self.addCleanup(bus.update, scout["id"], status="done")
+        with mock.patch.object(mcp.spawn, "ensure_worktree", side_effect=RuntimeError("worktree add failed")), \
+                mock.patch.object(mcp.threading, "Thread") as thread:
+            reply = mcp.spawn_scout(scout["id"])
+        self.assertEqual(reply, {"status": "error", "reason": "worktree add failed"})
+        thread.assert_not_called()
+        self.assertEqual(bus.get(scout["id"])["status"], "queued")
+        rows = [json.loads(line) for path in bus.RUNS.glob("*.jsonl") for line in path.read_text().splitlines()]
+        rows = [row for row in rows if row.get("task") == scout["id"]]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "spawn_error")
+        self.assertEqual(rows[0]["reason"], "worktree add failed")
+
     def test_spawn_tools_refuse_wrong_role(self):
         execute = bus.create_task("do the thing", "s", ["a"], ["x.py"], role="execute")
 

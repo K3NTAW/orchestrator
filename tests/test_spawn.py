@@ -1,7 +1,8 @@
 """spawn.run_worker's review-verdict propagation, prompt template rendering / result fitting, base-branch
 selection for stacked/challenge/review tasks (review T-0026, T-0030), and headless-host secret/token wiring
 (env-form secrets, CLAUDE_CODE_OAUTH_TOKEN injection)."""
-import json, os, subprocess, sys, unittest
+import json, os, subprocess, sys, tempfile, unittest
+from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_spawn.py` doesn't add this dir itself
 from _harness import TMP, g, scratch_repo
@@ -23,6 +24,24 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_ensure_worktree_reuses_existing_task_branch(self):
+        with tempfile.TemporaryDirectory(prefix="orch-worktree-") as directory:
+            root = Path(directory)
+            wt = root / "wt" / "T-x"
+            self.assertFalse(wt.exists())
+
+            def git(*args, **kwargs):
+                if args[:2] == ("worktree", "add"):
+                    self.assertEqual(args, ("worktree", "add", str(wt), "task/T-x"))
+                    wt.mkdir()
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with mock.patch.object(spawn, "ROOT", root), mock.patch.object(spawn, "git", side_effect=git) as run:
+                self.assertEqual(spawn.ensure_worktree("T-x", base="HEAD"), wt)
+            self.assertTrue(wt.is_dir())
+            run.assert_any_call("rev-parse", "--verify", "task/T-x", check=False)
+            self.assertEqual(sum(call.args[:2] == ("worktree", "add") for call in run.call_args_list), 1)
+
     def test_run_worker_captures_verdict_on_review_and_reviewed_task(self):
         reviewed = bus.create_task("feat-rv", "s", ["a"], ["rv.py"], role="execute")
         review = bus.create_task("review feat-rv", "s", ["a"], ["rv.py"], role="review", inputs=[reviewed["id"]])

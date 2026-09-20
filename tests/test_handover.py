@@ -15,6 +15,26 @@ from orchestrator import pool as P
 
 
 class Handover(unittest.TestCase):
+    def test_unchanged_state_writes_nothing(self):
+        goal = self.goal()
+        child = self.child(goal, "Implement feature")
+        with mock.patch.object(handover.os, "replace", wraps=handover.os.replace) as replace:
+            plan = handover.write("first tick")
+            first = plan.read_bytes()
+            first_mtime = plan.stat().st_mtime_ns
+            self.assertEqual(replace.call_count, 1)
+            handover.write("later tick")
+            self.assertEqual(replace.call_count, 1)
+            self.assertEqual(plan.read_bytes(), first)
+            self.assertEqual(plan.stat().st_mtime_ns, first_mtime)
+            state_path = handover.STATE / "handover_state.json"
+            first_hash = json.loads(state_path.read_text())["snapshot_hash"]
+            bus.update(child, status="held", hold_reason="awaiting input")
+            handover.write("changed tick")
+            self.assertEqual(replace.call_count, 2)
+            self.assertNotEqual(json.loads(state_path.read_text())["snapshot_hash"], first_hash)
+            self.assertIn("hold_reason=awaiting input", plan.read_text())
+
     def setUp(self):
         sandbox = Path(tempfile.mkdtemp(prefix="orch-handover-"))
         for mod, name, value in (

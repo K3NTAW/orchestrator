@@ -20,6 +20,36 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_dispatch_respawns_requeued_review_once(self):
+        review = self.task("dead review", role="review")
+        bus.claim(review, "claude:A")
+        daemon.reconcile_dead(bus.get(review))
+        self.assertFalse(bus.get(review).get("pipeline"))
+        pool = P.Pool()
+        daemon.dispatch(pool)
+        stamp = bus.get(review)["pipeline"]["respawned_at"]
+        self.assertGreater(stamp, 0)
+        daemon.dispatch(pool)
+        self.assertEqual(self.workers, [review])
+        self.assertEqual(bus.get(review)["pipeline"]["respawned_at"], stamp)
+
+    def test_dispatch_respawns_unclaimed_spec_review_after_delay(self):
+        now = time.time()
+        self.swap(daemon.time, "time", lambda: now - 31)
+        old = self.task("abandoned spec review", role="spec_review")
+        self.swap(daemon.time, "time", lambda: now - 29)
+        young = self.task("new spec review", role="spec_review")
+        self.swap(daemon.time, "time", lambda: now)
+        pool = P.Pool()
+        pool.cfg.setdefault("daemon", {})["respawn_after_s"] = 30
+        daemon.dispatch(pool)
+        daemon.dispatch(pool)
+        self.assertEqual(self.workers, [old])
+        self.assertEqual(bus.get(old)["pipeline"]["respawned_at"], now)
+        self.assertFalse(bus.get(young).get("pipeline"))
+        self.assertFalse(bus.get(old).get("claimed_at"))
+        self.assertFalse(bus.get(young).get("claimed_at"))
+
     def setUp(self):
         self.sandbox = Path(tempfile.mkdtemp(prefix="orch-daemon-"))
         for name, value in (("STATE", self.sandbox), ("TASKS", self.sandbox / "tasks"),
