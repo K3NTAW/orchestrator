@@ -7,7 +7,7 @@ import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threadin
 from pathlib import Path
 from . import STATE, acceptance, bus, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
-from . import failures, gitutil, schedlog, notify as notifications
+from . import failures, gitutil, interference, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
                        _test_ids, _path_in_scope, _rejecting_reviews, _normal_issue, failure_signature,
                        _failure_text, _node_id_to_unittest, _RunnerProbeTimeout, _flaky_rerun_command,
@@ -588,8 +588,64 @@ def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
         bus.post_result(task_id, spawn.fit_result({"reason": head[:3000]}), "failed")
 
 
+_scheduler_mode_warned = False
+
+
+def _load_scheduler_cfg(pool):
+    """Read scheduler policy on every dispatch, including direct callers."""
+    global _scheduler_mode_warned
+    cfg = {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0}
+    cfg.update(pool.cfg.get("scheduler", {}))
+    if cfg["mode"] not in ("off", "shadow", "active"):
+        if not _scheduler_mode_warned:
+            notify(f"pool.toml [scheduler].mode={cfg['mode']!r} is not one of "
+                   "off|shadow|active; falling back to shadow")
+            _scheduler_mode_warned = True
+        cfg["mode"] = "shadow"
+    return cfg
+
+
+def eligible(pool, candidates):
+    """Return all eligible ids in first-come order without changing bus state."""
+    fallback = _fallback_mode(pool)
+    return [t["id"] for t in sorted(candidates, key=lambda t: t["id"])
+            if not stale({**t, "status": "queued"}) and bus.ready(t)
+            and not (t.get("pipeline") or {}).get("dispatched_at")
+            and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve")
+            and (not fallback or fallback_tier(t["complexity"]) is not None)]
+
+
+def _first_come_order(eligible_ids, slots):
+    return eligible_ids[:max(0, slots)]
+
+
+def _wave_order(candidate_ids, tasks):
+    """Hook for future critical-path ranking."""
+    return candidate_ids
+
+
+def _wave_tasks(candidates, running):
+    """Include dependency ancestry across goals, tolerating missing ids and cycles."""
+    tasks = {t["id"]: t for t in candidates + running}
+    pending = list(tasks.values())
+    seen = set(tasks)
+    while pending:
+        for tid in pending.pop().get("depends_on") or []:
+            if tid in seen:
+                continue
+            seen.add(tid)
+            try:
+                task = bus.get(tid)
+            except KeyError:
+                continue
+            tasks[tid] = task
+            pending.append(task)
+    return tasks
+
+
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
+    scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
     row = {"ts": time.time(), "free_slots": slots, "fallback": fallback,
@@ -599,16 +655,44 @@ def dispatch(pool):
     capacity_reason = ("account_capacity" if fallback else
                        "cooldown" if enabled and all(ex.cooling() for ex in enabled) else
                        "executor_capacity")
-    slots_exhausted = False
     retry_held = [t for t in bus.read(status="held", role="execute")
                   if t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")]
-    for t in bus.read(status="queued", role="execute") + retry_held:
+    candidates = sorted(bus.read(status="queued", role="execute") + retry_held, key=lambda t: t["id"])
+    candidate_ids = eligible(pool, candidates)
+    selected = _first_come_order(candidate_ids, slots)
+    deferred = {}
+    if scheduler["mode"] != "off" and candidate_ids:
+        running = [t for t in bus.read(role="execute")
+                   if t["status"] == "running" or
+                   (t["status"] in ("queued", "held") and
+                    (t.get("pipeline") or {}).get("dispatched_at") and
+                    not (t.get("pipeline") or {}).get("gated_at"))]
+        running_ids = [t["id"] for t in running]
+        tasks = _wave_tasks([t for t in candidates if t["id"] in candidate_ids], running)
+        result = interference.select_wave(
+            candidate_ids, running_ids, tasks, capacity=min(slots, scheduler["max_wave"] or slots),
+            order=_wave_order(candidate_ids, tasks),
+            rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
+        schedlog.append("waves", {"ts": row["ts"], "mode": scheduler["mode"], "ready": candidate_ids,
+                                 "running": running_ids, "baseline_order": selected, "wave": result["wave"],
+                                 "deferred": result["deferred"],
+                                 "predicted": interference.pairwise([tasks[i] for i in result["wave"]]),
+                                 "priority": {}, "applied": scheduler["mode"] == "active"})
+        if scheduler["mode"] == "active":
+            selected = result["wave"]
+            deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
+                        else "predicted_interference" for item in result["deferred"]}
+    # Visit selected tasks in wave order; still process every other candidate for reviews and telemetry.
+    ranks = {tid: index for index, tid in enumerate(selected)}
+    visit = (sorted(candidates, key=lambda t: ranks.get(t["id"], len(ranks)))
+             if scheduler["mode"] == "active" else candidates)
+    for t in visit:
         entry = {"task": t["id"], "goal_id": t.get("parent"), "ready": bus.ready(t),
                  "action": "skipped", "reason": "other"}
         if t.get("executor"):
             entry["executor"] = t["executor"]
         row["considered"].append(entry)
-        if stale(t):
+        if stale({**t, "status": "queued"}):
             entry["reason"] = "stale"
             continue
         if not entry["ready"]:
@@ -623,15 +707,12 @@ def dispatch(pool):
                     bus.update(t["id"], pipeline=pipeline)
         verdict = t.get("spec_review_verdict")
         if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
-            if slots_exhausted:
-                entry["reason"] = capacity_reason
-                continue
             if fallback and fallback_tier(t["complexity"]) is None:
                 entry["reason"] = "fallback_no_tier"
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
-            if slots <= 0:
-                slots_exhausted = True
-                entry["reason"] = capacity_reason
+            if t["id"] not in selected or slots <= 0:
+                entry["reason"] = deferred.get(t["id"], "other" if
+                    (t.get("pipeline") or {}).get("dispatched_at") else capacity_reason)
                 continue
             if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
                 entry["action"] = "dispatched"
@@ -681,9 +762,10 @@ def dispatch(pool):
             entry["reason"] = "spec_review_pending"
     held_ids = {t["id"] for t in retry_held}
     for entry in row["considered"]:
-        if entry["task"] in held_ids and entry["action"] != "dispatched":
+        if entry["task"] in held_ids and entry["action"] != "dispatched" and entry["task"] not in deferred:
             entry["reason"] = "budget"
     if row["considered"]:
+        row["considered"].sort(key=lambda entry: entry["task"])
         schedlog.append("dispatch", row)
     # Reviews are normally spawned when they are created, so they are not part of the execute loop above.
     # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread

@@ -89,6 +89,166 @@ class Daemon(unittest.TestCase):
         self.swap(spawn, "packet_run_meta", lambda packet: {})
         return P.Pool()
 
+    def scheduler_pool(self, mode="active", slots=2, **cfg):
+        pool = self.dispatch_telemetry(slots)
+        pool.cfg["scheduler"] = {"mode": mode, **cfg}
+        return pool
+
+    def scheduler_task(self, title, path, **fields):
+        tid = bus.create_task(title, "spec", ["works"], [path], role="execute", complexity=2,
+                              parent=fields.pop("parent", "T-0043"),
+                              depends_on=fields.pop("depends_on", None))["id"]
+        if fields:
+            bus.update(tid, **fields)
+        return tid
+
+    def scheduler_dispatched(self):
+        return [entry["task"] for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
+                if entry["action"] == "dispatched"]
+
+    def test_scheduler_cfg_defaults(self):
+        pool = self.scheduler_pool()
+        pool.cfg.pop("scheduler")
+        self.assertEqual(daemon._load_scheduler_cfg(pool),
+                         {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0})
+
+    def test_scheduler_cfg_rejects_unknown_mode(self):
+        pool = self.scheduler_pool("unknown")
+        self.swap(daemon, "_scheduler_mode_warned", False)
+        task = self.scheduler_task("ready", "a/file.py")
+        with mock.patch.object(daemon, "notify") as notify:
+            daemon.dispatch(pool)
+            self.assertEqual(daemon._load_scheduler_cfg(pool)["mode"], "shadow")
+        notify.assert_called_once()
+        self.assertIn("falling back to shadow", notify.call_args.args[0])
+        self.assertEqual(self.scheduler_dispatched(), [task])
+        self.assertFalse(daemon.schedlog.read("waves")[0]["applied"])
+
+    def test_dispatch_shadow_logs_wave_and_keeps_first_come(self):
+        pool = self.scheduler_pool("shadow")
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("b", "a/file.py")
+        c = self.scheduler_task("c", "c/file.py")
+        before = [bus.get(t) for t in (a, b, c)]
+        self.assertEqual(daemon.eligible(pool, list(reversed(before))), [a, b, c])
+        self.assertEqual([bus.get(t) for t in (a, b, c)], before)
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(self.scheduler_dispatched(), [a, b])
+        self.assertEqual(wave["baseline_order"], [a, b])
+        self.assertEqual(wave["ready"], [a, b, c])
+        self.assertEqual(wave["wave"], [a, c])
+        self.assertEqual(wave["predicted"], [])
+        self.assertEqual(wave["priority"], {})
+        self.assertFalse(wave["applied"])
+
+    def test_dispatch_active_defers_hard_conflict_with_running_task(self):
+        pool = self.scheduler_pool()
+        running = self.scheduler_task("running", "a/file.py", status="running")
+        a = self.scheduler_task("a", "a/file.py")
+        daemon.dispatch(pool)
+        self.assertEqual(self.scheduler_dispatched(), [])
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["running"], [running])
+        self.assertEqual(wave["deferred"], [{"task": a, "reason": "hard:" + running}])
+        self.assertTrue(wave["applied"])
+        self.assertEqual(daemon.schedlog.read("dispatch")[0]["considered"][0]["reason"],
+                         "predicted_interference")
+
+    def test_dispatch_active_backfills_deferred_slot(self):
+        pool = self.scheduler_pool(slots=2)
+        running = self.scheduler_task("running", "a/file.py", pipeline={"dispatched_at": 123})
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("b", "b/file.py")
+        c = self.scheduler_task("c", "c/file.py")
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["running"], [running])
+        self.assertEqual(wave["ready"], [a, b, c])
+        self.assertEqual(wave["baseline_order"], [a, b])
+        self.assertEqual(wave["wave"], [b, c])
+        self.assertEqual(self.scheduler_dispatched(), [b, c])
+
+    def test_dispatch_active_respects_slots_and_dependencies(self):
+        pool = self.scheduler_pool(slots=2)
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("conflict", "a/file.py")
+        c = self.scheduler_task("c", "c/file.py")
+        d = self.scheduler_task("d", "d/file.py")
+        blocked = self.scheduler_task("blocked", "e/file.py", depends_on=[a])
+        launches = []
+        self.swap(daemon, "spawn_async", lambda fn, tid, *args: launches.append(tid))
+        self.swap(daemon, "_wave_order", lambda ids, tasks: list(reversed(ids)))
+        daemon.dispatch(pool)
+        self.assertEqual(launches, [d, c])
+        self.assertEqual(daemon.schedlog.read("waves")[0]["wave"], launches)
+        self.assertNotIn(blocked, daemon.schedlog.read("waves")[0]["ready"])
+        self.assertFalse((bus.get(blocked).get("pipeline") or {}).get("dispatched_at"))
+        # With capacity for both overlapping candidates, only one may be selected.
+        daemon.dispatch(pool)
+        self.assertEqual(launches, [d, c, b])
+        self.assertNotIn(a, self.scheduler_dispatched())
+
+    def test_dispatch_mode_off_writes_no_wave_rows(self):
+        pool = self.scheduler_pool("off", slots=1)
+        a = self.scheduler_task("a", "a/file.py")
+        self.scheduler_task("b", "a/file.py")
+        with mock.patch.object(daemon.interference, "select_wave") as select:
+            daemon.dispatch(pool)
+        select.assert_not_called()
+        self.assertEqual(self.scheduler_dispatched(), [a])
+        self.assertEqual(daemon.schedlog.read("waves"), [])
+
+    def test_dispatch_wave_includes_budget_retry_candidates(self):
+        pool = self.scheduler_pool(slots=2)
+        retry = self.scheduler_task("retry", "a/file.py", status="held", hold_reason="budget", parent=None)
+        later = self.scheduler_task("later", "b/file.py")
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["ready"], [retry, later])
+        self.assertEqual(wave["wave"], [retry, later])
+        self.assertEqual(self.scheduler_dispatched(), [retry, later])
+        self.assertEqual(bus.get(retry)["status"], "queued")
+
+    def test_dispatch_active_capacity_deferral_keeps_capacity_reason(self):
+        pool = self.scheduler_pool(slots=2, max_wave=1)
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("b", "b/file.py", status="held", hold_reason="budget")
+        daemon.dispatch(pool)
+        self.assertEqual(self.scheduler_dispatched(), [a])
+        self.assertEqual(daemon.schedlog.read("waves")[-1]["deferred"],
+                         [{"task": b, "reason": "capacity"}])
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][-1]["reason"],
+                         "executor_capacity")
+        self.swap(daemon, "free_slots", lambda pool: 0)
+        pool.executors = {"cooling": mock.Mock(enabled=True, roles=["execute"])}
+        pool.executors["cooling"].cooling.return_value = True
+        for fallback, reason in ((False, "cooldown"), (True, "account_capacity")):
+            with self.subTest(reason=reason):
+                self.swap(daemon, "_fallback_mode", lambda pool, value=fallback: value)
+                daemon.dispatch(pool)
+                self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][-1]["reason"], reason)
+
+    def test_wave_tasks_cover_cross_goal_dependency_ancestry(self):
+        pool = self.scheduler_pool()
+        running = self.scheduler_task("running", "r/file.py", status="running", parent="G-other")
+        ancestor = self.scheduler_task("ancestor", "a/file.py", status="done", merged_into="goal/other",
+                                       parent="G-other", depends_on=[running])
+        middle = self.scheduler_task("middle", "m/file.py", status="done", merged_into="goal/current",
+                                     depends_on=[ancestor])
+        candidate = self.scheduler_task("candidate", "c/file.py", depends_on=[middle])
+        with mock.patch.object(daemon.interference, "select_wave", wraps=daemon.interference.select_wave) as select:
+            daemon.dispatch(pool)
+        select.assert_called_once()
+        tasks = select.call_args.args[2]
+        self.assertEqual(set(tasks), {running, ancestor, middle, candidate})
+        orphan = {"id": "orphan", "depends_on": ["T-missing", "orphan"]}
+        self.assertEqual(daemon._wave_tasks([orphan], []), {"orphan": orphan})
+        self.assertEqual(daemon.schedlog.read("waves")[0]["ready"], [candidate])
+        self.assertEqual(self.scheduler_dispatched(), [])
+        self.assertEqual(daemon.schedlog.read("waves")[0]["deferred"],
+                         [{"task": candidate, "reason": "hard:" + running}])
+
     def test_dispatch_stamps_first_ready_at_once(self):
         pool = self.dispatch_telemetry()
         dependency = self.task("dependency")

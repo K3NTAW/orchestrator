@@ -151,6 +151,8 @@ through to the pool's stored numbers rather than crashing pick) for callers that
 a running daemon.
 
 ## Pipeline
+
+The `[scheduler]` table defaults to `mode = "shadow"`, which keeps first-come dispatch and logs proposed waves to `waves.jsonl` in the scheduler log directory. `active` dispatches only the selected wave, deferring predicted interference and backfilling from later eligible tasks; `off` disables wave selection and logging. `soft_conflict_policy = "defer"` postpones soft conflicts behind clean candidates, and `max_wave = 0` uses available capacity (a positive value caps the wave). Wave rows include eligible and running ids, baseline order, selected wave, deferrals, predicted conflicts and whether the wave was applied.
 Each execute or fix round starts with a **Worker packet** assembled from repository data. Its ordered sections are
 objective, acceptance, base, write scope, read scope, relevant tests, symbols, gotchas, decisions, verify, and
 evidence. The packet is capped at 4,800 characters, trimming the bottom sections first and pointing to
