@@ -21,9 +21,11 @@ def raiser(exc):
 
 class Daemon(unittest.TestCase):
     def setUp(self):
-        sandbox = Path(tempfile.mkdtemp(prefix="orch-daemon-"))
-        for name, value in (("STATE", sandbox), ("TASKS", sandbox / "tasks"), ("RUNS", sandbox / "runs")):
+        self.sandbox = Path(tempfile.mkdtemp(prefix="orch-daemon-"))
+        for name, value in (("STATE", self.sandbox), ("TASKS", self.sandbox / "tasks"),
+                            ("RUNS", self.sandbox / "runs")):
             self.swap(bus, name, value)
+        self.addCleanup(shutil.rmtree, self.sandbox, True)
         P.PERSIST.unlink(missing_ok=True)                 # a cooldown another test persisted would zero free_slots
         self.addCleanup(P.PERSIST.unlink, True)
         self.started, self.workers, self.merged = [], [], []
@@ -424,7 +426,7 @@ class Daemon(unittest.TestCase):
 
     def test_red_gate_holds_without_review(self):
         t = self.task("red", complexity=5)
-        bus.update(t, status="done", worktree=str(TMP))
+        bus.update(t, status="done", worktree=str(self.sandbox))
         self.gate_green(False)
         daemon.tick()
         held = bus.get(t)
@@ -1270,14 +1272,14 @@ class Daemon(unittest.TestCase):
         self.assertFalse(any(call[:1] == [str(merge.TESTS_GREEN)] for call in calls))
 
     def test_gate_runs_suite_when_named_tests_exist(self):
-        test_file = TMP / "tests" / "test_gate_named.py"
+        test_file = self.sandbox / "tests" / "test_gate_named.py"
         test_file.parent.mkdir(exist_ok=True)
         test_file.write_text("class GateTests:\n    def test_exists(self):\n        pass\n")
         self.addCleanup(test_file.unlink, True)
         t = bus.create_task("defined acceptance test", "spec",
                             ["tests/test_gate_named.py::test_exists passes"], ["x.py"],
                             role="execute", complexity=2, parent="T-0043")["id"]
-        bus.update(t, status="done", worktree=str(TMP))
+        bus.update(t, status="done", worktree=str(self.sandbox))
         calls = []
         previous = daemon.subprocess.run
         self.swap(daemon.subprocess, "run", lambda *a, **k:

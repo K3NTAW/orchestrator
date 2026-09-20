@@ -1,6 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _harness import TMP  # noqa: F401  (sets ORCH_ROOT before the orchestrator import below)
 
 from orchestrator.acceptance import missing_tests, named_tests
 
@@ -19,7 +23,7 @@ class AcceptanceTests(unittest.TestCase):
         ])
 
     def test_missing_tests_detects_absent_definitions(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
             root = Path(directory)
             (root / "tests").mkdir()
             (root / "tests/test_one.py").write_text(

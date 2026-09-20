@@ -756,28 +756,30 @@ def gate(pool):
     merge_reviewed() waits for on a task already past this stage. Filters run cheap-first, already_merged()
     (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or not t.get("worktree") or t.get("merged_into"):
+        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or t.get("merged_into"):
             continue
-        if not Path(t["worktree"]).exists():
+        worktree = t.get("worktree")
+        if worktree and not Path(worktree).exists():
             if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
                 notify(f"{t['id']}: worktree missing; held")
             continue
-        dirty = _dirty_scope_paths(t["worktree"], t.get("scope") or [])
-        if dirty:
-            if stamp(t["id"], "gated_at", status="held", hold_reason="executor did not commit",
-                     resume_hint={"dirty": dirty}):
-                notify(f"{t['id']}: worktree has uncommitted scope changes; held")
-            continue
-        if already_merged(t):
-            continue
-        missing = acceptance.missing_tests(t["worktree"], t.get("acceptance") or [])
-        if missing:
-            failures = [f"FAILED {path}::{name} (missing: test not defined)" for path, name in missing]
-            if stamp(t["id"], "gated_at", status="held", hold_reason="gate_red",
-                     resume_hint={"failures": failures, "missing_tests": missing}):
-                print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
-            continue
-        tg = subprocess.run([str(merge.TESTS_GREEN), t["worktree"]], capture_output=True, text=True, input="{}")
+        if worktree:
+            dirty = _dirty_scope_paths(worktree, t.get("scope") or [])
+            if dirty:
+                if stamp(t["id"], "gated_at", status="held", hold_reason="executor did not commit",
+                         resume_hint={"dirty": dirty}):
+                    notify(f"{t['id']}: worktree has uncommitted scope changes; held")
+                continue
+            if already_merged(t):
+                continue
+            missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
+            if missing:
+                failures = [f"FAILED {path}::{name} (missing: test not defined)" for path, name in missing]
+                if stamp(t["id"], "gated_at", status="held", hold_reason="gate_red",
+                         resume_hint={"failures": failures, "missing_tests": missing}):
+                    print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
+                continue
+        tg = subprocess.run([str(merge.TESTS_GREEN), worktree], capture_output=True, text=True, input="{}")
         if tg.returncode:
             if stamp(t["id"], "gated_at", status="held", hold_reason="gate_red",
                      resume_hint={"failures": tg.stderr[-4000:]}):
