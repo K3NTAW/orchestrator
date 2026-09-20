@@ -10,6 +10,26 @@ from orchestrator import bus, executor, pool as P, spawn
 class Executor(unittest.TestCase):
     LIVE = {"astra", "luna", "terra", "sol"}
 
+    def test_codex_run_row_has_packet_meta_and_prompt_chars(self):
+        tid = self.exec_task(title="packet logging")
+        briefing = spawn.packet(bus.get(tid), TMP)
+        meta = spawn.packet_run_meta(briefing)
+        prompt = spawn.render("execute", packet=briefing, spec="s", acceptance=["a"], scope=["x.py"])
+        self.fake_codex(codex_stream({"type": "thread.started", "thread_id": "packet-thread"},
+                                    {"type": "turn.completed", "usage": {}}))
+        self.assertEqual(executor.start(tid, prompt, packet_meta=meta)["status"], "done")
+        def row():
+            return json.loads((bus.RUNS / f"{time.strftime('%Y-%m-%d')}.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(row()["packet_meta"], meta)
+        self.assertEqual(row()["prompt_chars"], len(prompt))
+        self.assertEqual(meta["chars"], len(briefing))
+        self.assertEqual(meta["est_tokens"], len(briefing) // 4)
+        self.assertEqual(meta["version"], meta["hash"])
+        with patch.object(executor, "_resume_compatible", return_value=(True, "compatible")):
+            self.assertEqual(executor.reply(tid, "repair")["status"], "done")
+        self.assertEqual(row()["packet_meta"], meta)
+        self.assertEqual(row()["prompt_chars"], len("repair"))
+
     def reply_checkout(self, head, dirty="", ancestor=True):
         """Mock git and Codex independently, exercising the real reply and event parser."""
         P.PERSIST.unlink(missing_ok=True)
@@ -182,7 +202,7 @@ class Executor(unittest.TestCase):
         self.assertEqual(bus.get(t5["id"])["tier"], "sonnet")
         time.sleep(0.2); self.assertEqual(sorted(ran), sorted([t5["id"], t7["id"]]))
         pool.codex.cooldown_until = 0; pool.save()
-        self.assertIn(".claude/hooks/tests-green.sh .", spawn.render("execute", spec="s", acceptance=["a"], scope=["x"]))
+        self.assertIn(".claude/hooks/tests-green.sh .", spawn.render("execute", packet="brief", spec="s", acceptance=["a"], scope=["x"]))
 
     def test_start_routes_through_pick_executor(self):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)

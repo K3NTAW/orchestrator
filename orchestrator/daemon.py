@@ -489,16 +489,22 @@ def hold_failed(tid, error_key, stage_label, exc):
     notify(f"{tid}: {stage_label} failed: {exc}")
 
 
-def _dispatch_worker(task_id, prompt, executor_id=None):
+def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
     try:
         try:
             parameters = inspect.signature(executor.start).parameters.values()
             accepts_executor = any(p.kind == inspect.Parameter.VAR_KEYWORD or
                                    (p.name == "executor_id" and p.kind != inspect.Parameter.POSITIONAL_ONLY)
                                    for p in parameters)
+            accepts_meta = any(p.kind == inspect.Parameter.VAR_KEYWORD or
+                               (p.name == "packet_meta" and p.kind != inspect.Parameter.POSITIONAL_ONLY)
+                               for p in parameters)
         except (TypeError, ValueError):
             accepts_executor = True
+            accepts_meta = True
         kwargs = {"executor_id": executor_id} if executor_id is not None and accepts_executor else {}
+        if packet_meta is not None and accepts_meta:
+            kwargs["packet_meta"] = packet_meta
         r = executor.start(task_id, prompt, **kwargs)
         if r["status"] == "done":
             bus.post_result(task_id, spawn.fit_result({
@@ -533,8 +539,10 @@ def dispatch(pool):
                 break
             if stamp(t["id"], "dispatched_at"):
                 slots -= 1
-                prompt = spawn.render("execute", spec=t["spec"], acceptance=t["acceptance"], scope=t["scope"])
-                spawn_async(_dispatch_worker, t["id"], prompt)
+                packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
+                prompt = spawn.render("execute", packet=packet, spec=t["spec"],
+                                      acceptance=t["acceptance"], scope=t["scope"])
+                spawn_async(_dispatch_worker, t["id"], prompt, None, spawn.packet_run_meta(packet))
                 complete(t["id"], "dispatched_at")
             else:
                 continue

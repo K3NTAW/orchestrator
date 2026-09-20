@@ -20,6 +20,36 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_dispatch_prompt_contains_packet_not_placeholder(self):
+        tid = self.task("packet dispatch objective")
+        seen = {}
+        def start(task_id, prompt, **kwargs):
+            seen.update(task_id=task_id, prompt=prompt, **kwargs)
+            return {"status": "held"}
+        self.swap(executor, "start", start)
+        daemon.dispatch(P.Pool())
+        self.assertEqual(seen["task_id"], tid)
+        self.assertTrue(seen["prompt"].startswith("packet v"))
+        self.assertIn("## objective\npacket dispatch objective", seen["prompt"])
+        self.assertNotIn("{{", seen["prompt"])
+        self.assertIn(seen["packet_meta"]["hash"], seen["prompt"].splitlines()[0])
+
+    def test_fix_round_prompt_contains_packet(self):
+        held = self.held_for_fix()
+        daemon.auto_fix_round(P.Pool())
+        fix, = self.fixes_for(held)
+        seen = {}
+        def start(task_id, prompt, **kwargs):
+            seen.update(task_id=task_id, prompt=prompt)
+            return {"status": "held"}
+        self.swap(executor, "start", start)
+        daemon.dispatch(P.Pool())
+        self.assertEqual(seen["task_id"], fix["id"])
+        self.assertTrue(seen["prompt"].startswith("packet v"))
+        self.assertIn("## objective\n" + fix["title"], seen["prompt"])
+        self.assertIn("works", seen["prompt"])
+        self.assertNotIn("{{", seen["prompt"])
+
     def metric_gate_task(self, **fields):
         tid = self.task("gate metrics", **fields)
         bus.update(tid, status="done", worktree=str(self.sandbox))
@@ -427,7 +457,8 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0][0], tid)
         self.assertEqual(len(calls[0][0]), 2)
-        self.assertEqual(calls[0][1], {})
+        self.assertEqual(set(calls[0][1]), {"packet_meta"})
+        self.assertGreater(calls[0][1]["packet_meta"]["chars"], 0)
 
     def test_failed_dispatch_stamp_releases_reservation(self):
         self.swap(P, "PERSIST", self.sandbox / "pool_state.json")

@@ -90,6 +90,9 @@ def render(name, **kw):
     t = (STATE / "prompts" / f"{name}.md").read_text()
     for k, v in kw.items():
         t = t.replace("{{" + k + "}}", v if isinstance(v, str) else json.dumps(v, indent=0))
+    remaining = re.search(r"\{\{\s*([^{}]+?)\s*\}\}", t)
+    if remaining:
+        raise ValueError(f"unfilled_placeholder: {remaining.group(1)}")
     return t
 
 
@@ -284,17 +287,32 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
         ("evidence", evidence or ["- (none)"]),
     ]
+    dependencies = []
+    for dependency_id in task.get("depends_on", []):
+        try:
+            dependency = bus.get(dependency_id)
+        except KeyError:
+            dependencies.append(f"- {dependency_id}: (unavailable)")
+            continue
+        sha = dependency.get("sha") or dependency.get("merged_sha")
+        dependencies.append(
+            f"- {dependency_id}: {dependency.get('title', '')[:90]}"
+            f"; status: {dependency.get('status')}; merged_into: {dependency.get('merged_into')}"
+            + (f"; merged sha: {sha}" if sha else ""))
+    if dependencies:
+        sections.append(("dependencies", dependencies))
     def build():
-        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections)
+        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections
+                         if name != "dependencies" or lines)
     # The task contract is more valuable than discovery hints.  In particular,
     # acceptance criteria are never summarized: an over-cap packet says so in
     # its provenance header instead.
-    trimmable = ("evidence", "decisions", "gotchas", "symbols", "relevant_tests")
+    trimmable = ("dependencies", "evidence", "decisions", "gotchas", "symbols", "relevant_tests")
     by_name = {name: lines for name, lines in sections}
     while len(build()) >= 4800:
         changed = False
         for name in trimmable:
-            lines = by_name[name]
+            lines = by_name.get(name, [])
             if lines:
                 lines.pop()
                 changed = True
@@ -323,7 +341,17 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
 
 def packet_meta(task, worktree) -> dict:
     """Provenance values for the packet and its corresponding run record."""
-    return _packet_body(task, worktree)[1]
+    return packet_run_meta(packet(task, worktree))
+
+
+def packet_run_meta(text) -> dict:
+    """Measure the exact packet sent, using its H8 header as the version identity."""
+    header = re.match(r"packet v([0-9a-f]+) base (\S+) sources pool.toml@(\S+) gotchas@(\S+)", text)
+    meta = {"chars": len(text), "est_tokens": len(text) // 4, "hash": None, "version": None}
+    if header:
+        version, base, policy, gotchas = header.groups()
+        meta.update(hash=version, version=version, base=base, policy_version=policy, gotchas=gotchas)
+    return meta
 
 
 def packet(task, worktree) -> str:
@@ -403,6 +431,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
+    if task["role"] == "execute":
+        log["prompt_chars"] = len(prompt)
     if task.get("packet_meta"):
         log["packet_meta"] = task["packet_meta"]
     if shutil.which("claude") is None:

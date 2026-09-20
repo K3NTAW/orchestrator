@@ -24,6 +24,29 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_packet_dependencies_section_lists_depends_on(self):
+        dep = bus.create_task("D" * 110, "s", ["a"], ["x.py"], role="execute")
+        bus.update(dep["id"], status="done", merged_into="goal/G", sha="abc12345")
+        task = bus.create_task("dependent", "s", ["keep every criterion"], ["x.py"],
+                               role="execute", depends_on=[dep["id"]])
+        text = spawn.packet(task, TMP)
+        self.assertGreater(text.index("## dependencies"), text.index("## evidence"))
+        for value in (dep["id"], "D" * 90, "status: done", "merged_into: goal/G", "merged sha: abc12345"):
+            self.assertIn(value, text)
+        self.assertNotIn("D" * 91, text)
+        self.assertNotIn("## dependencies", spawn.packet({**task, "depends_on": []}, TMP))
+        large = {**task, "acceptance": ["criterion " + "x" * 5000]}
+        bounded = spawn.packet(large, TMP)
+        self.assertNotIn("## dependencies", bounded)
+        self.assertIn(large["acceptance"][0], bounded)
+        self.assertIn(".claude/hooks/tests-green.sh .", bounded)
+
+    def test_render_flags_unfilled_placeholder(self):
+        with self.assertRaisesRegex(ValueError, "unfilled_placeholder: packet"):
+            spawn.render("execute", spec="s", acceptance=["a"], scope=["x.py"])
+        text = spawn.render("execute", packet="brief", spec="s", acceptance=["a"], scope=["x.py"])
+        self.assertNotIn("{{", text)
+
     def test_ensure_worktree_reuses_existing_task_branch(self):
         with tempfile.TemporaryDirectory(prefix="orch-worktree-") as directory:
             root = Path(directory)
@@ -513,7 +536,7 @@ class Render(unittest.TestCase):
         self.assertNotIn("scripts/tests_green.sh", text)
 
     def test_fix_delta_prompt_names_gate_and_commit(self):
-        text = spawn.render("fix-delta", n=1, failing_tests="x", assertion_lines="y")
+        text = spawn.render("fix-delta", packet="brief", n=1, failing_tests="x", assertion_lines="y")
         self.assertIn(".claude/hooks/tests-green.sh", text)
         self.assertIn("git commit", text)
         self.assertNotIn("scripts/tests_green.sh", text)

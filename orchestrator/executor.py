@@ -102,6 +102,9 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     command_args = args[1:] if kind == "resume" else args
     cmd = argv_for(kind, command_args, cwd, access)
     log = {"executor": ex.id if ex else "codex", "complexity": task["complexity"]}
+    log["prompt_chars"] = len(args[-1])
+    from .spawn import packet_run_meta
+    log["packet_meta"] = task.get("packet_meta") or packet_run_meta(args[-1])
     t0 = time.time()
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
@@ -219,7 +222,7 @@ def post_tool_result(task_id, result, replace_result=False):
     return True, "result posted"
 
 
-def start(task_id, prompt, executor_id=None):
+def start(task_id, prompt, executor_id=None, packet_meta=None):
     """Fresh Codex thread for one atomic task, in its worktree, on the executor pick_executor routes the task to.
     Held (not failed) when every executor in the task's complexity band is cooling, busy or over its daily budget.
     scores() is B3's ranking input; absent, every executor scores 1.0."""
@@ -256,6 +259,9 @@ def start(task_id, prompt, executor_id=None):
             return {"status": "budget", "reason": "budget reservation refused"}
         from .spawn import ensure_worktree
         wt = Path(t.get("worktree") or ensure_worktree(task_id))
+        from .spawn import packet_run_meta
+        t = {**t, "packet_meta": packet_meta if packet_meta is not None else packet_run_meta(prompt)}
+        bus.update(task_id, packet_meta=t["packet_meta"])
         bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
         ex.roll_day(); ex.day_tasks += 1
         pool.codex.day_tasks += 1; pool.save()       # legacy mirror, until B3 drops pool.codex
@@ -306,10 +312,12 @@ def _exhausted(pool, t, run=None):
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
 
 
-def reply(task_id, delta):
+def reply(task_id, delta, packet_meta=None):
     """Fix-loop round: resume the task's thread with a delta (failing tests + assertion lines) on the executor that
     started it — same thread, same model, never a re-pick mid-task. Capped at MAX_ROUNDS."""
     t = bus.get(task_id)
+    if packet_meta is not None:
+        t["packet_meta"] = packet_meta
     if t.get("merged_into") is not None:
         return {"status": "refused", "reason": f"task {task_id} is merged into {t['merged_into']}"}
     pool = Pool()
@@ -328,10 +336,14 @@ def reply(task_id, delta):
     if compatible:
         args = ["resume", t["codex_thread"], delta]
     else:
-        from .spawn import packet
-        repair = packet(t, t["worktree"]) + "\n\nRepair delta:\n" + delta
+        from .spawn import packet, packet_run_meta
+        briefing = packet(t, t["worktree"])
+        t["packet_meta"] = packet_run_meta(briefing)
+        repair = briefing + "\n\nRepair delta:\n" + delta
         bus.update(task_id, resume_incompatible=reason)
         args = ["-m", ex.model, repair]
+    if t.get("packet_meta"):
+        bus.update(task_id, packet_meta=t["packet_meta"])
     result = _run(pool, t, args, t["worktree"],
                   t["constraints"].get("timeout_s", 1800), ex=ex)
     if not result.get("reason", "").startswith("codex argv error:"):
