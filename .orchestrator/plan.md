@@ -3,8 +3,8 @@
 ## State in one paragraph
 Phase G (T-0260, token economy, complexity 8) closed at 23:56: all eleven sub-goals merged on goal/T-0260 (head 2ca1517, 37 commits over goal/T-0240), tests-green exit 0 externally on wt/goal-T-0260, PR 11 https://github.com/K3NTAW/orchestrator/pull/11 open for the human after PR 10, retrospective in decisions.md 2026-09-19. No task under T-0260 is open. The main checkout stays on goal/T-0240 (the running MCP server loads Phase F code); switch to goal/T-0260 only after PR 11 is merged or the human says so. The next goal is the user's 23:46 request: create docs.kentawaibel.com with the same visual as kentawaibel.com and one entry for the orchestrator (see "Next goal").
 
-## Next goal: docs.kentawaibel.com (requested 2026-09-19 23:46; STARTED 2026-09-20 00:02)
-Running in its own repo /Users/k3ntaw/code/docs-kentawaibel: `orchestrator goal start` scaffolded it at 085d4d9, GOAL task T-0001 on the docs bus, headless Planner pid 28790 on account B (log .orchestrator/runs/planner-T-0001.log, budget 10 USD). The goal text excludes deploy: once the docs repo builds green (tests-green.sh exit 0, npm run build), this Planner runs `vercel link`/project docs-kentawaibel, `vercel domains add docs.kentawaibel.com`, `vercel deploy --prod` from that repo. The user granted the rights for those steps at 23:46. If the headless Planner dies or gives up, resume it from that repo (`f orch` there, skill resume) or relaunch with goal start --reinstall false.
+## docs.kentawaibel.com (requested 2026-09-19 23:46; LIVE 2026-09-20 00:30)
+Repo /Users/k3ntaw/code/docs-kentawaibel (private GitHub K3NTAW/docs-kentawaibel, PR 1 goal/T-0001 to main open for the human). `orchestrator goal start` scaffolded it at 085d4d9 and a headless Planner on account B ran the goal in 11 min for 6.17 USD: five Codex tasks T-0002..T-0006 merged into goal/T-0001 at ebf4a11, zero fix rounds, no reviews. This Planner verified the gate and build on wt/deploy, created Vercel project docs-kentawaibel, added the domain and deployed to production: https://docs.kentawaibel.com serves the site (index and /orchestrator return 200). Deployed from the goal branch, not main. Follow-ups (new goals, on the docs bus): connect the Vercel project to the GitHub repo for automatic deploys; gitignore .vercel; more entries.
 Facts gathered (read-only, session 5):
 - kentawaibel.com is the Vite + React 19 + TypeScript + Tailwind v4 site at /Users/k3ntaw/code/k3ntaw-portfolio (no git repo, deployed with the Vercel CLI; .vercel/project.json links project k3ntaw-portfolio, prj_HIXTMCLlDCM7lNDJ6MJgzxKv38Jk, team k3ntaws-projects). Design tokens live in src/index.css @theme: OKLCH near-black surfaces (bg 0.145, surface 0.205, border 0.32), cool white ink, one azure accent (oklch 0.72 0.15 255), Geist Variable and Geist Mono via @fontsource-variable, motion + lenis for animation, lucide-react icons; components Nav, Hero, Featured, Repos, Skills, About, Footer, CommandPalette.
 - Domain: kentawaibel.com is registered at Vercel with Cloudflare nameservers (lisa/fonzie.ns.cloudflare.com, proxied); docs.kentawaibel.com already resolves to Cloudflare and Vercel answers DEPLOYMENT_NOT_FOUND, so no DNS change is needed: add docs.kentawaibel.com as a domain on a new Vercel project. Vercel CLI 54 is logged in (the human completed the device login at 23:47). No Cloudflare API tooling on this machine (cloudflared cert only); Keychain and ~/.config/f are guardrail-protected.
@@ -45,3 +45,18 @@ The daemon owns the loop; the Planner becomes a function of decision points (pla
 - Phase C, D, F, G retrospectives: decisions.md 2026-09-18/19 entries (goals T-0073, T-0109, T-0240, T-0260). Gotchas of 2026-09-19 in gotchas.md.
 - bus:T-0066..T-0069 kgpt scouts; T-0074..T-0077 Phase C scouts; T-0261..T-0263 Phase G scouts.
 - Hosts: Hetzner `ssh kgpt@46.62.167.12` dir /home/kgpt/kgpt (compose project), home `ssh k3ntaw@192.168.1.167` (fish shell, pipe scripts via `bash -s`), kgpt home side /opt/kgpt-home.
+
+## Auto-handover 2026-09-20T12:23:50+02:00 — daemon tick
+
+Open goals: none
+
+Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 143 more
+
+Last events:
+- 2026-09-19T23:52:03+02:00 T-0351 update {"pipeline": {"dispatched_at": 1789854374.351734, "gated_at": 1789854567.241838,
+- 2026-09-19T23:53:03+02:00 T-0351 update {"status": "done", "merged_into": "goal/T-0260", "sha": "2ca1517c316f3f279da4b1f
+- 2026-09-19T23:53:25+02:00 T-0348 update {"status": "done", "merged_into": "goal/T-0260", "merged_via": "fix round T-0351
+- 2026-09-19T23:53:25+02:00 T-0277 update {"status": "done", "merged_into": "goal/T-0260", "merged_via": "fix round T-0351
+- 2026-09-19T23:55:53+02:00 T-0260 update {"status": "done", "result": {"summary": "Phase G closed: 11 sub-goals merged on
+
+Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
