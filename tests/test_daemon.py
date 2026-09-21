@@ -1033,6 +1033,45 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.workers, [review])
         self.assertEqual(bus.get(review)["pipeline"]["respawned_at"], stamp)
 
+    def test_dispatch_respawns_review_again_after_window(self):
+        now = time.time()
+        review = self.task("retry abandoned review", role="review")
+        bus.update(review, pipeline={"respawned_at": now - 121, "respawn_count": 1})
+        self.swap(daemon.time, "time", lambda: now)
+
+        daemon.dispatch(P.Pool())
+
+        task = bus.get(review)
+        self.assertEqual(self.workers, [review])
+        self.assertEqual(task["pipeline"]["respawned_at"], now)
+        self.assertEqual(task["pipeline"]["respawn_count"], 2)
+        daemon.dispatch(P.Pool())
+        self.assertEqual(self.workers, [review])
+
+    def test_respawn_holds_after_respawn_max(self):
+        now = time.time()
+        review = self.task("exhausted review", role="review")
+        bus.update(review, pipeline={"respawned_at": now - 121, "respawn_count": 3})
+        self.swap(daemon.time, "time", lambda: now)
+        notify = mock.Mock()
+        self.swap(daemon, "notify", notify)
+
+        daemon.dispatch(P.Pool())
+
+        task = bus.get(review)
+        self.assertEqual(self.workers, [])
+        self.assertEqual(task["status"], "held")
+        self.assertTrue(task["hold_reason"].startswith("respawn_exhausted"))
+        self.assertNotIn("respawned_at", task["pipeline"])
+        notify.assert_called_once_with(f"{review}: respawn_exhausted: 3 respawns without a claim")
+
+        bus.update(review, status="queued", pipeline={"respawned_at": now - 121, "respawn_count": 3})
+        pool = P.Pool()
+        pool.cfg["daemon"]["respawn_max"] = 5
+        daemon.dispatch(pool)
+        self.assertEqual(self.workers, [review])
+        self.assertEqual(bus.get(review)["pipeline"]["respawn_count"], 4)
+
     def test_respawn_skips_task_claimed_between_snapshot_and_lock(self):
         review = self.task("claimed while respawning", role="review")
         bus.claim(review, "claude:A")

@@ -942,6 +942,7 @@ def dispatch(pool):
     max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
     review_slots = max(0, max_workers - running_claude_workers(pool) - inflight_claude_dispatches())
     respawn_after = pool.cfg.get("daemon", {}).get("respawn_after_s", 120)
+    respawn_max = pool.cfg.get("daemon", {}).get("respawn_max", 3)
     now = time.time()
     for task in bus.read(status="queued"):
         if review_slots <= 0:
@@ -952,10 +953,8 @@ def dispatch(pool):
             continue
         pipeline = task.get("pipeline") or {}
         events = task.get("events") or []
-        requeued_at = max((event.get("ts", 0) for event in events
-                           if event.get("reason") == "process died; requeued"),
-                          default=task.get("claimed_at") or 0)
-        if pipeline.get("respawned_at", 0) > requeued_at:
+        respawned_at = pipeline.get("respawned_at", 0)
+        if respawned_at and now - respawned_at < respawn_after:
             continue
         died = any(event.get("reason") == "process died; requeued" for event in events)
         created_at = task.get("created_at") or min((event.get("ts", 0) for event in events), default=0)
@@ -964,21 +963,31 @@ def dispatch(pool):
                 created_at = (bus.TASKS / f"{task['id']}.json").stat().st_mtime
             except OSError:
                 created_at = now
-        if not died and now - created_at < respawn_after:
+        if not died and not respawned_at and now - created_at < respawn_after:
             continue
+        exhausted_count = None
         with bus.locked():
             current = bus.get(task["id"])
             current_pipeline = dict(current.get("pipeline") or {})
-            current_events = current.get("events") or []
-            current_requeued_at = max((event.get("ts", 0) for event in current_events
-                                       if event.get("reason") == "process died; requeued"),
-                                      default=current.get("claimed_at") or 0)
+            current_respawned_at = current_pipeline.get("respawned_at", 0)
             if (current.get("status") != "queued" or
-                    current_pipeline.get("respawned_at", 0) > current_requeued_at):
+                    (current_respawned_at and now - current_respawned_at < respawn_after)):
                 continue
-            current_pipeline["respawned_at"] = now
-            bus.update(task["id"], pipeline=current_pipeline)
-            spawn_async(spawn.run_worker, task["id"])
+            respawn_count = current_pipeline.get("respawn_count", 0)
+            if respawn_count >= respawn_max:
+                current_pipeline.pop("respawned_at", None)
+                bus.update(task["id"], status="held",
+                           hold_reason=f"respawn_exhausted: {respawn_count} respawns without a claim",
+                           pipeline=current_pipeline)
+                exhausted_count = respawn_count
+            else:
+                current_pipeline["respawned_at"] = now
+                current_pipeline["respawn_count"] = respawn_count + 1
+                bus.update(task["id"], pipeline=current_pipeline)
+                spawn_async(spawn.run_worker, task["id"])
+        if exhausted_count is not None:
+            notify(f"{task['id']}: respawn_exhausted: {exhausted_count} respawns without a claim")
+            continue
         review_slots -= 1
 
 
