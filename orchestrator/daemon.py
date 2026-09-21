@@ -606,13 +606,13 @@ def _load_scheduler_cfg(pool):
 
 
 def eligible(pool, candidates):
-    """Return all eligible ids in first-come order without changing bus state.
+    """Filter candidates in their supplied order without changing bus state.
 
     A dispatched task is already owned, even while queued before its worker claims it;
     it belongs to the wave's running set, never its ready candidates.
     """
     fallback = _fallback_mode(pool)
-    return [t["id"] for t in sorted(candidates, key=lambda t: t["id"])
+    return [t["id"] for t in candidates
             if not stale({**t, "status": "queued"}) and bus.ready(t)
             and not (t.get("pipeline") or {}).get("dispatched_at")
             and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve")
@@ -661,7 +661,8 @@ def dispatch(pool):
                        "executor_capacity")
     retry_held = [t for t in bus.read(status="held", role="execute")
                   if t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")]
-    candidates = sorted(bus.read(status="queued", role="execute") + retry_held, key=lambda t: t["id"])
+    # Each bus read is id-ordered; preserve queued work ahead of budget retries.
+    candidates = bus.read(status="queued", role="execute") + retry_held
     candidate_ids = eligible(pool, candidates)
     selected = _first_come_order(candidate_ids, slots)
     deferred = {}

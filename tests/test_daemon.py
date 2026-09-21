@@ -106,6 +106,30 @@ class Daemon(unittest.TestCase):
         return [entry["task"] for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
                 if entry["action"] == "dispatched"]
 
+    def test_candidate_order_keeps_queued_before_budget_retries(self):
+        for mode in ("off", "shadow"):
+            for slots in (1, 2):
+                with self.subTest(mode=mode, slots=slots):
+                    pool = self.scheduler_pool(mode, slots=slots)
+                    retry = self.scheduler_task("older retry", "retry/file.py", parent=None,
+                                                status="held", hold_reason="budget")
+                    queued = self.scheduler_task("new queued task", "queued/file.py", parent=None)
+                    self.assertLess(retry, queued)
+                    candidates = (bus.read(status="queued", role="execute") +
+                                  bus.read(status="held", role="execute"))
+                    self.assertEqual(daemon.eligible(pool, candidates), [queued, retry])
+                    launched = []
+                    with mock.patch.object(daemon, "spawn_async",
+                                           side_effect=lambda fn, tid, *args: launched.append(tid)):
+                        daemon.dispatch(pool)
+                    self.assertEqual(launched, [queued, retry][:slots])
+                    if mode == "shadow":
+                        wave = daemon.schedlog.read("waves")[-1]
+                        self.assertEqual(wave["ready"], [queued, retry])
+                        self.assertEqual(wave["baseline_order"], [queued, retry][:slots])
+                    for tid in (retry, queued):
+                        bus.update(tid, status="done")
+
     def test_eligible_excludes_dispatched_unclaimed_tasks(self):
         pool = self.scheduler_pool(slots=2)
         inflight = self.scheduler_task("unclaimed", "busy/file.py", pipeline={"dispatched_at": 123})
@@ -186,7 +210,7 @@ class Daemon(unittest.TestCase):
         b = self.scheduler_task("b", "a/file.py")
         c = self.scheduler_task("c", "c/file.py")
         before = [bus.get(t) for t in (a, b, c)]
-        self.assertEqual(daemon.eligible(pool, list(reversed(before))), [a, b, c])
+        self.assertEqual(daemon.eligible(pool, list(reversed(before))), [c, b, a])
         self.assertEqual([bus.get(t) for t in (a, b, c)], before)
         daemon.dispatch(pool)
         wave, = daemon.schedlog.read("waves")
@@ -261,8 +285,8 @@ class Daemon(unittest.TestCase):
         later = self.scheduler_task("later", "b/file.py")
         daemon.dispatch(pool)
         wave, = daemon.schedlog.read("waves")
-        self.assertEqual(wave["ready"], [retry, later])
-        self.assertEqual(wave["wave"], [retry, later])
+        self.assertEqual(wave["ready"], [later, retry])
+        self.assertEqual(wave["wave"], [later, retry])
         self.assertEqual(self.scheduler_dispatched(), [retry, later])
         self.assertEqual(bus.get(retry)["status"], "queued")
 
