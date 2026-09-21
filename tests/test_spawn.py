@@ -88,6 +88,36 @@ class ReviewVerdict(unittest.TestCase):
         text = spawn.render("execute", packet="brief", spec="s", acceptance=["a"], scope=["x.py"])
         self.assertNotIn("{{", text)
 
+    def test_render_validates_against_template_not_output(self):
+        token = "{" * 2 + "acceptance" + "}" * 2
+        text = spawn.render("execute", packet="p", spec="quotes " + token,
+                            acceptance=["a"], scope=["x.py"])
+        self.assertEqual(text.count(token), 1)
+        with self.assertRaisesRegex(ValueError, "unfilled_placeholder: packet"):
+            spawn.render("execute", spec="s", acceptance=["a"], scope=["x.py"])
+
+    def test_render_single_pass_never_resubstitutes(self):
+        token = "{" * 2 + "scope" + "}" * 2
+        scope = ["z.py"]
+        text = spawn.render("execute", packet="p", spec=token, acceptance=["a"], scope=scope)
+        self.assertEqual(text.count(token), 1)
+        self.assertEqual(text.count(json.dumps(scope, indent=0)), 1)
+
+    def test_run_worker_holds_on_render_error(self):
+        source = bus.create_task("render source", "s", ["a"], ["x.py"], role="execute")
+        review = bus.create_task("render review", "s", ["a"], ["x.py"], role="review",
+                                 inputs=[source["id"]])
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(spawn, "render", side_effect=ValueError("unfilled_placeholder: packet")), \
+                mock.patch.object(spawn.notify, "notify") as notify:
+            result = spawn.run_worker(review["id"])
+        updated = bus.get(review["id"])
+        self.assertEqual(result, {"status": "held", "reason": "render_error"})
+        self.assertEqual(updated["status"], "held")
+        self.assertTrue(updated["hold_reason"].startswith("render_error"))
+        self.assertIsNone(updated.get("assigned_to"))
+        notify.assert_called_once()
+
     def test_ensure_worktree_reuses_existing_task_branch(self):
         with tempfile.TemporaryDirectory(prefix="orch-worktree-") as directory:
             root = Path(directory)

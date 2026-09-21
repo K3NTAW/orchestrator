@@ -141,6 +141,8 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
 def auto_fix_round(pool):
     cap = pool.cfg.get("daemon", {}).get("auto_fix_rounds", 2)
     for held in bus.read(status="held", role="execute"):
+        if held.get("hold_reason", "").startswith("render_error"):
+            continue
         if stale(held):
             continue
         held_at = planner_runs._held_at(held)
@@ -492,6 +494,16 @@ def hold_failed(tid, error_key, stage_label, exc):
     notify(f"{tid}: {stage_label} failed: {exc}")
 
 
+def hold_render_error(task_id, exc):
+    with bus.locked():
+        task = bus.get(task_id)
+        pipeline = dict(task.get("pipeline") or {})
+        pipeline["render_error"] = str(exc)[:300]
+        pipeline.pop("dispatched_at", None)
+        bus.update(task_id, status="held", hold_reason="render_error: " + str(exc)[:200], pipeline=pipeline)
+    notify(f"{task_id}: render_error: {exc}")
+
+
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
     routing = None
     try:
@@ -557,9 +569,13 @@ def _dispatch_fresh_fix(task_id, reason):
     pipeline["resume"] = {"mode": "fresh", "reason": reason}
     bus.update(task_id, pipeline=pipeline, worktree=None, branch=f"task/{task_id}")
     fix = bus.get(task_id)
-    packet = spawn.packet(fix, spawn.ROOT)
-    prompt = spawn.render("execute", packet=packet, spec=fix["spec"],
-                          acceptance=fix["acceptance"], scope=fix["scope"])
+    try:
+        packet = spawn.packet(fix, spawn.ROOT)
+        prompt = spawn.render("execute", packet=packet, spec=fix["spec"],
+                              acceptance=fix["acceptance"], scope=fix["scope"])
+    except Exception as exc:
+        hold_render_error(task_id, exc)
+        return
     _dispatch_worker(task_id, prompt, None, spawn.packet_run_meta(packet))
 
 
@@ -849,9 +865,13 @@ def dispatch(pool):
                         continue
                     pipeline["resume"] = {"mode": "fresh", "reason": reason}
                     bus.update(t["id"], pipeline=pipeline)
-                packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
-                prompt = spawn.render("execute", packet=packet, spec=t["spec"],
-                                      acceptance=t["acceptance"], scope=t["scope"])
+                try:
+                    packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
+                    prompt = spawn.render("execute", packet=packet, spec=t["spec"],
+                                          acceptance=t["acceptance"], scope=t["scope"])
+                except Exception as exc:
+                    hold_render_error(t["id"], exc)
+                    continue
                 spawn_async(_dispatch_worker, t["id"], prompt, None, spawn.packet_run_meta(packet))
                 complete(t["id"], "dispatched_at")
             else:
