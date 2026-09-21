@@ -117,10 +117,13 @@ def graph_fresh_for(
     commit = graph.get("built_at_commit")
     if not commit:
         return None
+    resolved_paths = sorted(set(paths))
+    if not resolved_paths:
+        return True
     worktree = Path(str(graph.get("path", ROOT / "graphify-out" / "graph.json"))).parent.parent
     runner = git or _run_git
     try:
-        result = runner(worktree, "diff", "--name-only", str(commit), "HEAD", "--", *sorted(set(paths)))
+        result = runner(worktree, "diff", "--name-only", str(commit), "HEAD", "--", *resolved_paths)
     except Exception:
         return None
     if result.returncode != 0:

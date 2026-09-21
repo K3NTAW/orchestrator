@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from orchestrator.interference import classify, graph_signal, load_graph, select_wave
+from orchestrator.interference import classify, graph_fresh_for, graph_signal, load_graph, select_wave
 
 
 def task(task_id, *scope, depends_on=()):
@@ -60,6 +60,14 @@ class InterferenceTests(unittest.TestCase):
         with patch("orchestrator.interference.graph_fresh_for", return_value=False):
             result = classify(task("a", "src/a.py"), task("b", "lib/b.py"), graph=graph)
         self.assertEqual(result, {"level": "none", "reasons": ["graph_stale"], "score": 0.0})
+
+    def test_graph_fresh_for_empty_paths_is_fresh_without_git(self):
+        graph = {"built_at_commit": "abc", "path": str(Path.cwd() / "graphify-out" / "graph.json")}
+
+        def raising_git(*args):
+            raise AssertionError("git should not be called for empty paths")
+
+        self.assertTrue(graph_fresh_for([], graph, git=raising_git))
 
     def test_graph_hard_links_threshold(self):
         graph = self.graph(Path.cwd(), links=((1, 2), (1, 2)))
