@@ -288,3 +288,27 @@ type: gotcha · goal: T-0489 · tasks: T-0493 · provenance: repo
 - tests/test_pool.py:405-410 uses the real clock and assumes now minus three hours is still today; observed 2026-09-21 00:04 on goal/T-0445 head and on task/T-0493 (merge went tests_red); passes again after 03:00
 - the KeyError goal_id error in test_spawn.RunClaudeNormalisedUsage seen in the same merge run passed alone (order flake, same family as the planner_runs flake)
 outcome: fix task on goal/T-0489 pins the test clock; until it merges, do not spec fix rounds for this failure between midnight and 03:00
+
+## 2026-09-21 review completion nulled the review task's reviewed_sha, so the daemon never merged approved work (P6a1, first live goal)
+type: gotcha · goal: T-0503 · tasks: T-0511,T-0514 · provenance: repo
+- spawn.run_worker (spawn.py:636) wrote attribution.review_facts keys over the review task; review_facts read reviewed_sha from the review task's constraints/pipeline (absent) and returned None, clobbering the top-level field _open_reviews had stamped; _merge_reviewed_one filters reviews by reviewed_sha so approved tasks sat done+unmerged with no hold and no notify
+- the fix (T-0514) is not live until the MCP server process restarts: spawn.py runs inside orchestrator.mcp, so every review of this goal still nulled the field and the Planner merged approved, daemon-gated tasks by hand with merge()
+outcome: symptom: review done+approve, task done, merged_into null for more than two ticks; check the review's top-level reviewed_sha. Remedy on old servers: hand merge after checking the daemon gate was green; restart the session so the merged spawn.py loads
+
+## 2026-09-21 acceptance criteria must name tests as tests/<file>.py::<name>; bare names verify nothing and pytest-style functions are never collected
+type: gotcha · goal: T-0503 · tasks: T-0506,T-0513,T-0517 · provenance: repo
+- acceptance.named_tests parses only the path::name form; every S-task spec in this goal used bare names, so the H6 gate checked nothing while the Planner believed it did
+- missing_tests only greps a def; tests-green runs unittest discover (pytest is not a project dependency), so S1 shipped eight module-level def test_ functions that never ran, the gate stayed at the base count 754 and two malformed loops reached review
+outcome: rule: acceptance names tests/test_<module>.py::test_name, tests are unittest.TestCase methods; T-0517 makes missing_tests flag not_collected defs and the write-spec skill says so; until then compare the gate's test count against the base before trusting a result
+
+## 2026-09-21 depends_on is immutable, so every spec-review round on a parent forces recreating all queued dependents; create dependents only after the parent's spec review approves
+type: gotcha · goal: T-0503 · tasks: T-0507,T-0524,T-0531,T-0534,T-0509,T-0526,T-0510,T-0528 · provenance: repo
+- S2 went through three spec-review rounds (T-0523, T-0525, T-0532); each round superseded S2 and, because S3, S4b and the ordering fix listed the superseded id in depends_on, they were superseded and recreated twice (8 extra tasks, no code written)
+- the daemon creates a spec review for a queued complexity 6+ task only once its dependencies are merged, so a dependent created early costs nothing until then but must be recreated whenever its parent is
+outcome: rule: for a chain, create the next task only after the previous one's spec review approves (or the Planner waives after three rounds and dispatches with the codex tool, accepting one stray daemon spec review in the 30 s gap)
+
+## 2026-09-21 a Planner hand merge that rebases moves the task head, and _merge_reviewed_one opened a review of already-merged work; those reviews still carried real findings
+type: gotcha · goal: T-0503 · tasks: T-0515,T-0519,T-0521,T-0527,T-0533,T-0552 · provenance: repo
+- merge() rebases the task branch onto the goal branch; _merge_reviewed_one compared the worktree head against pipeline.reviewed_sha before checking already_merged, so every hand merge that rebased opened one more sonnet security review (five in this goal, about 0.5 USD each)
+- the Planner skipped reading them as waste, but T-0515 found two real S0b defects and T-0527 one gate-message defect; a review of merged code is still evidence
+outcome: T-0552 checks already_merged first. Rule: read every finished review's verdict and comments, whatever triggered it; fast-forward merges (task cut from the current goal head) avoid the rebase and the extra review
