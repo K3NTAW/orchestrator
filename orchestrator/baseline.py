@@ -15,7 +15,9 @@ from . import ROOT, STATE, scorecard
 GROUPS = (None, 'goal', 'executor', 'band', 'class', 'role')
 PRIMARY = ('tokens_per_accepted_task', 'usd_per_accepted_task',
            'tokens_per_accepted_goal', 'usd_per_accepted_goal', 'tokens_to_first_green',
-           'calls_per_accepted_task', 'turns_per_accepted_task', 'pipeline_amplification')
+           'calls_per_accepted_task', 'turns_per_accepted_task', 'pipeline_amplification',
+           'fable_tokens_per_accepted_goal', 'planner_tokens_per_accepted_goal',
+           'fable_calls_per_accepted_goal', 'planner_tokens_per_material_decision', 'fable_share')
 NON_INFERIORITY = ('first_pass_rate', 'fix_round_rate', 'avg_fix_rounds',
                   'gate_success_share', 'review_request_changes_rate')
 HIGHER_BETTER = {'first_pass_rate', 'gate_success_share'}
@@ -92,7 +94,7 @@ def _fingerprint(root, rows):
             'orchestrator_version': package_version}
 
 
-def _metrics(card, tasks):
+def _metrics(card, tasks, root=None):
     accepted = list(card.get('tasks', {}).values())
     def mean(key):
         values = [t.get(key) for t in accepted]
@@ -117,6 +119,16 @@ def _metrics(card, tasks):
     attempts = sum(a for a, _ in gates)
     result['gate_success_share'] = sum(a - r for a, r in gates) / attempts if attempts else None
     result['review_request_changes_rate'] = verdicts.count('request_changes') / len(verdicts) if verdicts else None
+    planner_keys = ('fable_tokens_per_accepted_goal', 'planner_tokens_per_accepted_goal',
+                    'fable_calls_per_accepted_goal', 'planner_tokens_per_material_decision', 'fable_share')
+    planner = {}
+    if root is not None:
+        try:
+            from . import planner_telemetry
+            planner = planner_telemetry.accepted_goal_summary(root)
+        except Exception:
+            planner = {}
+    result.update({key: planner.get(key) for key in planner_keys})
     return result
 
 
@@ -176,7 +188,7 @@ def save(label, root=STATE, since=None):
                     'saved_at': now.isoformat(),
                     'window': {'since': since, 'until': now.isoformat(), 'rows_by_bucket': counts,
                                'row_count': len(rows), 'malformed_lines': malformed},
-                    'efficiency': cards, 'metrics': _metrics(cards['all'], tasks),
+                    'efficiency': cards, 'metrics': _metrics(cards['all'], tasks, measured),
                     'fingerprint': _fingerprint(root, rows)}
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic replacement prevents readers from seeing a partially written snapshot.
