@@ -1,4 +1,6 @@
-# plan.md — Planner checkpoint (updated 2026-09-21 03:30; GOAL T-0503 Adaptive Parallelism S1 CLOSED, PR 15 open for the human; no open goal on this bus)
+# plan.md — Planner checkpoint (updated 2026-09-21 03:45; GOAL T-0503 CLOSED and RELEASED: PR 15 merged into main at 58ee5d1, docs PRs 1 and 2 merged; no open goal on this bus)
+
+## RELEASED 03:45 (user "do this"): PR 15 merged at 58ee5d1 (merge commit, branch kept); docs-kentawaibel PR 1 acc714e then PR 2 a19fd42, no open docs PRs. The main checkout is still local main 11615e5 (planner-mode blocks the Planner from merging origin/main there). HUMAN NEXT: in /Users/k3ntaw/code/orchestrator run `git pull` (merges origin/main 58ee5d1 into local main, no conflicts expected: local commits touch only .orchestrator/), then restart with `f orch` so the MCP servers load the merged code. Then the first goal runs in [scheduler].mode = shadow.
 
 ## CLOSED 2026-09-21 03:27 — GOAL T-0503 Adaptive Parallelism S1 (brief priorities 0-4)
 goal/T-0503 head 8227caf (15 commits over main 8fd67c8, 25 files, +2041), external gate 822 tests green (main 754), PR 15 https://github.com/K3NTAW/orchestrator/pull/15 -> main, GOAL result posted, retrospective in decisions.md 2026-09-21 (four gotchas the same day). Brief: .orchestrator/adaptive-parallelism-program.md. Merged: S0a T-0504 dispatch-skip telemetry + schedlog, S0b T-0505 scorecard --parallelism + baseline block, S1 T-0506 interference.py (fix round after review T-0513), S4a T-0508 graph signal, S2 v4 T-0534 waves behind [scheduler].mode=shadow (three Codex rounds), S3 v4 T-0541 critical_path.py, S4b v6 T-0550 stale checks behind stale_rebase=false, hotfixes T-0514 reviewed_sha, T-0517 acceptance collection + write-spec rule, T-0552 already_merged before head-moved + gate message, T-0553 graph empty pathspec, T-0559 critical path partial. Superseded without code: T-0507/T-0524/T-0531 (S2 rounds), T-0509/T-0526/T-0538 (S3), T-0510/T-0528/T-0543/T-0546/T-0548 (S4b), T-0520/T-0529 (ordering fix). Cost 132.9 USD API-equivalent, 35.9M tokens, 67 rows; 22 reviews, 10 spec reviews.
@@ -31,3 +33,19 @@ Phase C: two processes, kgpt `modules/orchestrator` thin MCP module forwarding t
 - Retrospectives: decisions.md 2026-09-18 to 2026-09-21 (goals T-0073, T-0109, T-0240, T-0260, T-0353, T-0445, T-0489, release T-0499, T-0503). Gotchas 2026-09-18 to 2026-09-21 in gotchas.md.
 - Hosts: Hetzner `ssh kgpt@46.62.167.12` dir /home/kgpt/kgpt, home `ssh k3ntaw@192.168.1.167` (fish shell), kgpt home side /opt/kgpt-home.
 - docs.kentawaibel.com: repo /Users/k3ntaw/code/docs-kentawaibel, Vercel project docs-kentawaibel, PRs 1 and 2 open.
+
+## Auto-handover 2026-09-21T03:35:01+02:00 — daemon tick
+
+[planner].handover_context_tokens is the configured handover threshold.
+Open goals: none
+
+Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 250 more
+
+Last events:
+- 2026-09-21T03:25:39+02:00 T-0560 update {"review_verdict": "approve"}
+- 2026-09-21T03:25:39+02:00 T-0560 update {"review_facts": {"verdict": "approve", "findings_count": 0, "findings_by_severi
+- 2026-09-21T03:25:39+02:00 T-0559 update {"review_verdict": "approve"}
+- 2026-09-21T03:27:54+02:00 T-0559 update {"status": "done", "merged_into": "goal/T-0503", "sha": "8227caf208fce5a31332285
+- 2026-09-21T03:29:34+02:00 T-0503 update {"status": "done", "result": {"summary": "Adaptive Parallelism S1 closed: goal/T
+
+Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
