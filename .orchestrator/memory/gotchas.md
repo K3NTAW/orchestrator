@@ -328,3 +328,18 @@ outcome: treat this signature as flaky: clear pipeline.gated_at and let the daem
 type: gotcha · goal: T-0561 · tasks: T-0634,T-0637 · provenance: repo
 - tests/_harness.py creates one temporary ORCH_ROOT per suite run; Codex wrote tests/test_allocation.py and tests/test_strategy.py with their own temporary roots (duplicate harness import under another path), so the unittest discovery run pointed hooks and memory tests at the wrong root; the same worktree passed the affected tests when run alone, which looked like concurrency flakiness (earlier gotcha today) but was not
 outcome: fix landed in both tasks (import _harness first, single root); execute.md prompt now states the rule; the earlier concurrent-gate gotcha is downgraded: re-gating alone would not have helped
+
+## 2026-09-21 A spec that quotes a double-brace template placeholder makes spawn.render raise unfilled_placeholder and the daemon dispatch dies silently every lease
+type: gotcha · goal: T-0561 · tasks: T-0660 · provenance: repo
+- R20's spec quoted the fix-delta.md line containing the assertion_lines placeholder in double curly braces; spawn.render (spawn.py:101-113) substitutes known keys and then raises on any remaining double-brace token, the exception escaped daemon.dispatch's spawn_async call before complete(dispatched_at) ran, so the task showed dispatched_at re-stamped every 900 s lease with no events, no run row and no hold for an hour
+outcome: rule: never put double curly braces in a spec, acceptance or title (describe placeholders in words); backlog: dispatch should catch render errors and hold the task with hold_reason render_error so the Planner sees it
+
+## 2026-09-21 A queued review whose spawned worker dies before claiming is respawned once and then never again; T-0667 sat queued for an hour
+type: gotcha · goal: T-0561 · tasks: T-0667,T-0664 · provenance: repo
+- review T-0667 (fix round of the config task) was created 13:03, respawned by the daemon at 13:05 (pipeline.respawned_at), no run row and no claim followed; the respawn guard skips any task whose respawned_at is newer than its last requeue, so nothing tried again; account A was over its planner day budget at the time, B was free; spawn_review by the Planner started it at 14:07
+outcome: when a review is queued with respawned_at set and no assigned_to for more than a few minutes, spawn_review it by hand; backlog: the daemon should retry the respawn after respawn_after_s again or hold the task with a visible reason
+
+## 2026-09-21 A review of any diff that touches the prompt templates can never render: the diff context carries template placeholders and spawn.render rejects every remaining double-brace token
+type: gotcha · goal: T-0561 · tasks: T-0664,T-0666,T-0667 · provenance: repo
+- review T-0667 (fix round of the pool.toml plus prompts task) died in spawn.run_worker at render('review') with unfilled_placeholder: spec, because the review packet embeds the scoped diff and the diff of .orchestrator/prompts/execute.md contains the spec placeholder; no run row, no claim, the task looked merely queued; the same check killed R20 v1's dispatch when its spec quoted a placeholder
+outcome: rule: never route prompt-template edits through a Codex task whose diff gets reviewed under the current render; the Planner edits prompts directly (allowed under .orchestrator/) and commits them; backlog R22: spawn.render must validate placeholders against the template before substitution, not against the rendered text, and daemon dispatch/run_worker must hold the task with a visible reason on render errors

@@ -1,4 +1,4 @@
-repo map 5458968 2026-09-21
+repo map 9487303 2026-09-21
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
@@ -74,6 +74,8 @@ repo map 5458968 2026-09-21
 
 ## repomap.py — A compact, static map of the orchestrator package for worker context.
 
+## roadmap.py — Machine-readable implementation status for the orchestrator roadmaps.
+
 ## sched_scorecard.py — Join scheduler predictions to task outcomes for heuristic validation.
 
 ## schedlog.py — Append-only scheduler telemetry, tolerant of interrupted or malformed writes.
@@ -88,6 +90,4 @@ repo map 5458968 2026-09-21
 
 ## speculation.py — Policy and shadow evidence for selective speculative execution.
 
-## stale.py — Pure stale-work evidence collection.
-
-## strategy.py — Observe workflow strategies without changing t
+## stale.py — Pure stale-wor
