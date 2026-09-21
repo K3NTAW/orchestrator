@@ -2071,6 +2071,19 @@ class Daemon(unittest.TestCase):
         daemon.merge_reviewed(pool)
         self.assertEqual(self.merged, [tid])
 
+    def test_merge_reviewed_skips_head_moved_review_for_merged_task(self):
+        tid = self.task("hand merged", complexity=5)
+        bus.update(tid, status="done", worktree=str(TMP), merged_into="goal/T-0043",
+                   pipeline={"reviewed_sha": "reviewed"})
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.swap(daemon, "_git_in", lambda *a, **k: FakeProc("moved\n"))
+
+        daemon.merge_reviewed(P.Pool())
+
+        self.assertEqual(bus.read(role="review"), [])
+        self.assertEqual(messages, [])
+
     def test_changed_paths_real_repo_source_no_match(self):
         """A change to a plain source file outside every security glob does not match."""
         repo = self.real_repo()
@@ -2582,6 +2595,24 @@ class Daemon(unittest.TestCase):
             "FAILED tests/not_defined.py::test_also_missing (missing: test not defined)",
         ])
         self.assertFalse(any(call[:1] == [str(merge.TESTS_GREEN)] for call in calls))
+
+    def test_gate_hold_message_names_not_collected_tests(self):
+        test_file = self.sandbox / "tests" / "test_not_collected.py"
+        test_file.parent.mkdir(exist_ok=True)
+        test_file.write_text("def test_not_collected():\n    pass\n")
+        self.addCleanup(test_file.unlink, True)
+        t = bus.create_task("not collected acceptance test", "spec",
+                            ["tests/test_not_collected.py::test_not_collected passes"], ["x.py"],
+                            role="execute", complexity=2, parent="T-0043")["id"]
+        bus.update(t, status="done", worktree=str(self.sandbox))
+
+        daemon.tick()
+
+        held = bus.get(t)
+        self.assertEqual(held["resume_hint"]["failures"], [
+            "FAILED tests/test_not_collected.py::test_not_collected "
+            "(missing: test not collected by unittest, define it inside a TestCase)",
+        ])
 
     def test_gate_runs_suite_when_named_tests_exist(self):
         test_file = self.sandbox / "tests" / "test_gate_named.py"

@@ -1164,7 +1164,11 @@ def gate(pool):
                 continue
             missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
             if missing:
-                failures = [f"FAILED {path}::{name} (missing: test not defined)" for path, name in missing]
+                failures = [
+                    f"FAILED {path}::{name} (missing: "
+                    f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
+                    for entry in missing for path, name in [entry]
+                ]
                 gate_reds = pipeline.get("gate_reds", 0) + 1
                 if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
                          status="held", hold_reason="gate_red",
@@ -1278,6 +1282,8 @@ def merge_reviewed(pool):
 def _merge_reviewed_one(t):
     if stale(t):
         return
+    if already_merged(t):
+        return
     all_reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
     pipeline = dict(t.get("pipeline") or {})
     reviewed_sha = pipeline.get("reviewed_sha")
@@ -1293,8 +1299,6 @@ def _merge_reviewed_one(t):
     reviews = [r for r in all_reviews if not reviewed_sha or r.get("reviewed_sha") == reviewed_sha]
     if not reviews:
         return  # gate() creates them; nothing to act on yet
-    if already_merged(t):
-        return
     single = len(reviews) == 1
     approved, rejected, pending, stuck, unknown = [], [], [], [], []
     for r in reviews:
