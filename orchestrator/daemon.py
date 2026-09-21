@@ -6,6 +6,7 @@ stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
+from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from .pool import Pool, fallback_tier
 from . import failures, gitutil, interference, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
@@ -594,7 +595,13 @@ _scheduler_mode_warned = False
 def _load_scheduler_cfg(pool):
     """Read scheduler policy on every dispatch, including direct callers."""
     global _scheduler_mode_warned
-    cfg = {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0, "stale_rebase": False}
+    cfg = {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0, "stale_rebase": False,
+           "duration_mode": "empirical", "duration_min_samples": 5, "duration_trim": 0.1,
+           "reserve_imminent": True, "concurrency_mode": "adaptive",
+           "merge_pressure_mode": "observe", "merge_queue_elevated": 3,
+           "merge_queue_saturated": 5, "merge_conflicts_saturated": 2,
+           "jev_mode": "shadow", "jev_max_pairs": 8, "jev_cache_ttl_s": 3600,
+           "jev_cache_max_entries": 200}
     cfg.update(pool.cfg.get("scheduler", {}))
     if cfg["mode"] not in ("off", "shadow", "active"):
         if not _scheduler_mode_warned:
@@ -623,8 +630,8 @@ def _first_come_order(eligible_ids, slots):
     return eligible_ids[:max(0, slots)]
 
 
-def _wave_order(candidate_ids, tasks):
-    return critical_path.rank(candidate_ids, tasks)
+def _wave_order(candidate_ids, tasks, durations=None):
+    return critical_path.rank(candidate_ids, tasks, durations)
 
 
 def _wave_tasks(candidates, running):
@@ -657,6 +664,25 @@ def _wave_tasks(candidates, running):
     return tasks
 
 
+def _filter_wave(result, deferrals, limit):
+    """Apply tick-local exclusions before truncating, preserving deterministic order."""
+    rejected = {item["task"]: item["reason"] for item in result["deferred"]}
+    rejected.update(deferrals)
+    wave = [tid for tid in result["wave"] if tid not in deferrals]
+    for tid in wave[max(0, limit):]:
+        rejected[tid] = "capacity"
+    wave = wave[:max(0, limit)]
+    return {"wave": wave, "deferred": [{"task": tid, "reason": reason}
+                                       for tid, reason in rejected.items() if tid not in wave]}
+
+
+def _dispatch_deferrals(result, capacity_reason):
+    return {item["task"]: (capacity_reason if item["reason"] == "capacity" else
+            "predicted_interference" if item["reason"].startswith(("hard:", "soft:")) else
+            "jev_sched" if item["reason"].startswith("jev:") else item["reason"])
+            for item in result["deferred"]}
+
+
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
     scheduler = _load_scheduler_cfg(pool)
@@ -687,22 +713,85 @@ def dispatch(pool):
                     not (t.get("pipeline") or {}).get("gated_at"))]
         running_ids = [t["id"] for t in running]
         tasks = _wave_tasks([t for t in candidates if t["id"] in candidate_ids], running)
-        wave_limit = min(slots, scheduler["max_wave"] or slots)
-        wave_order = list(_wave_order(candidate_ids, tasks))
-        result = interference.select_wave(
-            candidate_ids, running_ids, tasks, capacity=wave_limit,
-            order=wave_order,
-            rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
         wave_row = {"ts": row["ts"], "mode": scheduler["mode"], "ready": candidate_ids,
-                                 "running": running_ids, "baseline_order": selected, "wave": result["wave"],
-                                 "deferred": result["deferred"],
-                                 "predicted": interference.pairwise([tasks[i] for i in result["wave"]]),
-                                 "priority": {tid: critical_path.explain(tid, tasks) for tid in candidate_ids},
-                                 "applied": scheduler["mode"] == "active"}
+                    "running": running_ids, "baseline_order": selected,
+                    "applied": scheduler["mode"] == "active", "duration_sources": {}}
+        durations = None
+        try:
+            durations = duration.durations_for(list(tasks.values()))
+            wave_row["duration_sources"] = duration.explain_for(list(tasks.values()))
+        except Exception as exc:
+            durations = None
+            wave_row["duration_error"] = str(exc)[:200]
+        wave_order = list(_wave_order(candidate_ids, tasks, durations))
+        priorities = {tid: critical_path.explain(tid, tasks, durations) for tid in candidate_ids}
+        wave_row["priority"] = priorities
+        snap = capacity.snapshot(pool, running_claude_workers(pool), inflight_claude_dispatches())
+        imminent = []
+        for queued in candidates:
+            if queued["status"] != "queued" or queued["id"] in candidate_ids:
+                continue
+            try:
+                task = bus.get(queued["id"])
+                dependencies = [bus.get(tid) for tid in task.get("depends_on") or []]
+            except KeyError:
+                continue
+            if all(dep.get("merged_into") or (dep["status"] == "done" and
+                   (dep.get("pipeline") or {}).get("gated_at")) for dep in dependencies):
+                imminent.append(task["id"])
+                tasks[task["id"]] = task
+        priorities.update({tid: critical_path.explain(tid, tasks, durations) for tid in imminent})
+        admission = capacity.admit(wave_order, tasks, snap, priorities, imminent=imminent, cfg=scheduler)
+        wave_row["capacity"] = {key: admission[key] for key in ("admit", "deferred", "assignments")}
+        pairwise_rows = interference.pairwise([tasks[i] for i in candidate_ids])
+        pressure = merge_pressure.assess(cfg=scheduler)
+        for tid in pressure["waiting"]:
+            if tid not in tasks:
+                try:
+                    tasks[tid] = bus.get(tid)
+                except KeyError:
+                    pass
+        throttle = merge_pressure.throttle(candidate_ids, tasks, pressure["waiting"], pressure,
+                                            pairwise_rows=pairwise_rows, cfg=scheduler)
+        wave_row["merge_pressure"] = {**{k: v for k, v in pressure.items() if k != "waiting"},
+                                     "would_defer": throttle["would_defer"], "applied": throttle["applied"]}
+        limit = concurrency.select_limit(
+            hard_max=slots, ready_ids=candidate_ids, tasks=tasks, pairwise_rows=pairwise_rows,
+            priorities=priorities, snapshot=snap, pressure=pressure, durations=durations, cfg=scheduler)
+        wave_row["concurrency"] = limit
+        wave_limit = min(slots, scheduler["max_wave"] or slots)
+        result = interference.select_wave(
+            candidate_ids, running_ids, tasks, capacity=wave_limit, order=wave_order,
+            rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
+        tick_deferrals = dict(admission["deferred"])
+        if scheduler["merge_pressure_mode"] == "throttle":
+            for tid in throttle["deferred"]:
+                tick_deferrals.setdefault(tid, "merge_pressure")
+        if scheduler["mode"] == "active":
+            wave_limit = min(wave_limit, limit["limit"])
+            result = _filter_wave(result, tick_deferrals, wave_limit)
+        try:
+            parent = tasks[candidate_ids[0]].get("parent")
+            goal_head = _git_in(spawn.ROOT, "rev-parse", f"goal/{parent}" if parent else "main").stdout.strip()
+            annotated = jev_sched.annotate(
+                {"wave": list(result["wave"]), "deferred": [dict(item) for item in result["deferred"]]},
+                pairwise_rows, tasks, goal_head=goal_head, cfg=scheduler)
+            wave_row["jev_sched"] = annotated
+            if scheduler["mode"] == "active" and scheduler["jev_mode"] == "active":
+                # Jev can only remove tasks from the deterministic wave, never add or reorder them.
+                jev_deferred = {tid: "jev_sched" for tid in result["wave"] if tid not in annotated["wave"]}
+                tick_deferrals.update(jev_deferred)
+                result = _filter_wave(result, jev_deferred, wave_limit)
+        except Exception as exc:
+            wave_row["jev_sched"] = {"error": str(exc)[:200]}
+        wave_row.update(wave=result["wave"], deferred=result["deferred"],
+                        predicted=interference.pairwise([tasks[i] for i in result["wave"]]))
+        deterministic = {"baseline_order": list(selected), "wave": list(result["wave"]),
+                         "deferred": list(result["deferred"]), "limit": limit["limit"]}
+        schedlog.append("concurrency", concurrency.log_row(limit, wave_ids=result["wave"]))
         if scheduler["mode"] == "active":
             selected = result["wave"]
-            deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
-                        else "predicted_interference" for item in result["deferred"]}
+            deferred = _dispatch_deferrals(result, capacity_reason)
     # Visit selected tasks in wave order; still process every other candidate for reviews and telemetry.
     ranks = {tid: index for index, tid in enumerate(selected)}
     visit = (sorted(candidates, key=lambda t: ranks.get(t["id"], len(ranks)))
@@ -771,13 +860,16 @@ def dispatch(pool):
                 if scheduler["mode"] == "active":
                     lost_ids.append(t["id"])
                     tasks[t["id"]] = bus.get(t["id"])
+                    remaining = [tid for tid in remaining if tid not in tick_deferrals]
                     result = interference.select_wave(
                         remaining, running_ids + dispatched_ids + lost_ids, tasks,
-                        capacity=min(slots, wave_limit - len(dispatched_ids)), order=wave_order,
+                        capacity=slots, order=wave_order,
                         rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
+                    # Reuse this tick's admission, pressure and Jev exclusions; never resample
+                    # policy on a lost claim, or re-admit a task deferred earlier in the tick.
+                    result = _filter_wave(result, tick_deferrals, wave_limit - len(dispatched_ids))
                     selected = result["wave"]
-                    deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
-                                else "predicted_interference" for item in result["deferred"]}
+                    deferred = _dispatch_deferrals(result, capacity_reason)
                     wave_row["deferred"] = result["deferred"]
                     ranks = {tid: index for index, tid in enumerate(selected)}
                     visit.sort(key=lambda task: ranks.get(task["id"], len(ranks)))
@@ -806,6 +898,16 @@ def dispatch(pool):
             wave_row["wave"] = dispatched_ids
             wave_row["predicted"] = interference.pairwise([tasks[i] for i in dispatched_ids])
         schedlog.append("waves", wave_row)
+        try:
+            decision_log.record(
+                kind="wave", subject=tasks[candidate_ids[0]].get("parent") or candidate_ids[0],
+                candidates=candidate_ids, hard_constraints=["depends_on", "hard_interference", "free_slots"],
+                deterministic=deterministic, historical={"duration_sources": wave_row["duration_sources"]},
+                jev=wave_row["jev_sched"].get("signals"), selected=dispatched_ids,
+                rejected=_dispatch_deferrals({"deferred": wave_row["deferred"]}, capacity_reason),
+                reason="; ".join(limit["reasons"]), mode=scheduler["mode"])
+        except Exception as exc:
+            print(f"scheduler wave decision log: {exc}", file=sys.stderr)
     held_ids = {t["id"] for t in retry_held}
     for entry in row["considered"]:
         if entry["task"] in held_ids and entry["action"] != "dispatched" and entry["task"] not in deferred:

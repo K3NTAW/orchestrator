@@ -1562,7 +1562,7 @@ def parallelism(root=STATE, goal=None):
         for row in sched['dispatch']:
             for considered in row.get('considered', []):
                 if (not isinstance(considered, dict) or row_goal(considered) != gid
-                        or considered.get('action') != 'skip'):
+                        or considered.get('action') not in ('skip', 'skipped')):
                     continue
                 reason = considered.get('reason') or 'other'
                 skips[reason] = skips.get(reason, 0) + 1

@@ -107,6 +107,15 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(set(filtered["goals"]), {"G"})
         self.assertEqual(filtered["skip_reasons"], {"dependency": 1, "capacity": 1})
 
+    def test_parallelism_skip_reasons_count_skipped_rows(self):
+        sched = self.root / "runs" / "sched"
+        sched.mkdir()
+        (sched / "dispatch.jsonl").write_text(json.dumps({"ts": 123, "free_slots": 1,
+            "fallback": False, "running_execute": 0, "running_claude": 0, "considered": [
+                {"task": "T-2", "goal_id": "G", "ready": True, "action": "skipped",
+                 "reason": "reserved_for_critical:T-1"}]}) + "\n")
+        self.assertEqual(scorecard.parallelism(self.root)["skip_reasons"], {"reserved_for_critical:T-1": 1})
+
     def test_parallelism_missing_files_are_zero(self):
         self.write_task("A", parent="G")
         card = scorecard.parallelism(self.root)
