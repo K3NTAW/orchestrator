@@ -106,6 +106,62 @@ class Daemon(unittest.TestCase):
         return [entry["task"] for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
                 if entry["action"] == "dispatched"]
 
+    def test_eligible_excludes_dispatched_unclaimed_tasks(self):
+        pool = self.scheduler_pool(slots=2)
+        inflight = self.scheduler_task("unclaimed", "busy/file.py", pipeline={"dispatched_at": 123})
+        first = self.scheduler_task("first", "first/file.py")
+        second = self.scheduler_task("second", "second/file.py")
+        candidates = bus.read(status="queued", role="execute")
+        self.assertEqual(daemon.eligible(pool, candidates), [first, second])
+        self.assertEqual(bus.read(status="queued", role="execute"), candidates)
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["ready"], [first, second])
+        self.assertEqual(wave["running"], [inflight])
+        self.assertEqual(wave["wave"], [first, second])
+        self.assertEqual(self.scheduler_dispatched(), [first, second])
+        self.assertEqual(bus.get(inflight)["pipeline"]["dispatched_at"], 123)
+
+    def test_lost_dispatch_stamp_does_not_consume_slot(self):
+        original_stamp = daemon.stamp
+        for mode in ("off", "shadow", "active"):
+            for slots, max_wave in ((1, 0), (2, 0), (2, 1)):
+                with self.subTest(mode=mode, slots=slots, max_wave=max_wave):
+                    pool = self.scheduler_pool(mode, slots=slots, max_wave=max_wave)
+                    prefix = f"{mode}-{slots}-{max_wave}"
+                    first = self.scheduler_task("lost first", f"{prefix}/busy/a.py", parent=None)
+                    second = self.scheduler_task("lost second", f"{prefix}/other/b.py", parent=None)
+                    conflict = self.scheduler_task("conflicts with winner", f"{prefix}/busy/a.py", parent=None)
+                    clean = [self.scheduler_task(f"clean {i}", f"{prefix}/clean{i}/file.py", parent=None)
+                             for i in range(3)]
+                    attempts, launched = [], []
+                    def competing_stamp(tid, stage, **kwargs):
+                        if stage == "dispatched_at":
+                            attempts.append(tid)
+                            if tid in (first, second):
+                                # The other dispatcher won after eligible() took its snapshot.
+                                original_stamp(tid, stage, **kwargs)
+                                return False
+                        return original_stamp(tid, stage, **kwargs)
+                    with mock.patch.object(daemon, "stamp", side_effect=competing_stamp), \
+                            mock.patch.object(daemon, "spawn_async", side_effect=lambda fn, tid, *args: launched.append(tid)):
+                        daemon.dispatch(pool)
+                    limit = min(slots, max_wave or slots) if mode == "active" else slots
+                    expected = clean[:limit] if mode == "active" else [conflict, *clean][:limit]
+                    self.assertEqual(launched, expected)
+                    self.assertEqual(attempts[:2], [first, second])
+                    self.assertEqual(self.scheduler_dispatched(), expected)
+                    entries = {entry["task"]: entry for entry in daemon.schedlog.read("dispatch")[-1]["considered"]}
+                    self.assertEqual(entries[first]["action"], "skipped")
+                    self.assertEqual(entries[second]["action"], "skipped")
+                    if mode == "active":
+                        wave = daemon.schedlog.read("waves")[-1]
+                        self.assertEqual(wave["wave"], expected)
+                        self.assertEqual(entries[conflict]["reason"], "predicted_interference")
+                        self.assertEqual(entries[clean[-1]]["reason"], "executor_capacity")
+                    for tid in (first, second, conflict, *clean):
+                        bus.update(tid, status="done")
+
     def test_scheduler_cfg_defaults(self):
         pool = self.scheduler_pool()
         pool.cfg.pop("scheduler")

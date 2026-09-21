@@ -606,7 +606,11 @@ def _load_scheduler_cfg(pool):
 
 
 def eligible(pool, candidates):
-    """Return all eligible ids in first-come order without changing bus state."""
+    """Return all eligible ids in first-come order without changing bus state.
+
+    A dispatched task is already owned, even while queued before its worker claims it;
+    it belongs to the wave's running set, never its ready candidates.
+    """
     fallback = _fallback_mode(pool)
     return [t["id"] for t in sorted(candidates, key=lambda t: t["id"])
             if not stale({**t, "status": "queued"}) and bus.ready(t)
@@ -661,6 +665,9 @@ def dispatch(pool):
     candidate_ids = eligible(pool, candidates)
     selected = _first_come_order(candidate_ids, slots)
     deferred = {}
+    wave_row = None
+    dispatched_ids = []
+    lost_ids = []
     if scheduler["mode"] != "off" and candidate_ids:
         running = [t for t in bus.read(role="execute")
                    if t["status"] == "running" or
@@ -669,15 +676,17 @@ def dispatch(pool):
                     not (t.get("pipeline") or {}).get("gated_at"))]
         running_ids = [t["id"] for t in running]
         tasks = _wave_tasks([t for t in candidates if t["id"] in candidate_ids], running)
+        wave_limit = min(slots, scheduler["max_wave"] or slots)
+        wave_order = list(_wave_order(candidate_ids, tasks))
         result = interference.select_wave(
-            candidate_ids, running_ids, tasks, capacity=min(slots, scheduler["max_wave"] or slots),
-            order=_wave_order(candidate_ids, tasks),
+            candidate_ids, running_ids, tasks, capacity=wave_limit,
+            order=wave_order,
             rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
-        schedlog.append("waves", {"ts": row["ts"], "mode": scheduler["mode"], "ready": candidate_ids,
+        wave_row = {"ts": row["ts"], "mode": scheduler["mode"], "ready": candidate_ids,
                                  "running": running_ids, "baseline_order": selected, "wave": result["wave"],
                                  "deferred": result["deferred"],
                                  "predicted": interference.pairwise([tasks[i] for i in result["wave"]]),
-                                 "priority": {}, "applied": scheduler["mode"] == "active"})
+                                 "priority": {}, "applied": scheduler["mode"] == "active"}
         if scheduler["mode"] == "active":
             selected = result["wave"]
             deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
@@ -686,7 +695,8 @@ def dispatch(pool):
     ranks = {tid: index for index, tid in enumerate(selected)}
     visit = (sorted(candidates, key=lambda t: ranks.get(t["id"], len(ranks)))
              if scheduler["mode"] == "active" else candidates)
-    for t in visit:
+    while visit:
+        t = visit.pop(0)
         entry = {"task": t["id"], "goal_id": t.get("parent"), "ready": bus.ready(t),
                  "action": "skipped", "reason": "other"}
         if t.get("executor"):
@@ -720,6 +730,7 @@ def dispatch(pool):
                 if fallback:
                     entry["executor"] = "claude:" + fallback_tier(t["complexity"])
                 slots -= 1
+                dispatched_ids.append(t["id"])
                 fix_parent_id = (t.get("constraints") or {}).get("fix_round_for")
                 if fix_parent_id:
                     parent = bus.get(fix_parent_id)
@@ -742,6 +753,24 @@ def dispatch(pool):
                 spawn_async(_dispatch_worker, t["id"], prompt, None, spawn.packet_run_meta(packet))
                 complete(t["id"], "dispatched_at")
             else:
+                # A competing dispatcher owns this task. Its failed claim costs us no
+                # slot; refill from the unvisited queue, respecting the winner's scope.
+                remaining = eligible(pool, [bus.get(task["id"]) for task in visit])
+                if scheduler["mode"] == "active":
+                    lost_ids.append(t["id"])
+                    tasks[t["id"]] = bus.get(t["id"])
+                    result = interference.select_wave(
+                        remaining, running_ids + dispatched_ids + lost_ids, tasks,
+                        capacity=min(slots, wave_limit - len(dispatched_ids)), order=wave_order,
+                        rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
+                    selected = result["wave"]
+                    deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
+                                else "predicted_interference" for item in result["deferred"]}
+                    wave_row["deferred"] = result["deferred"]
+                    ranks = {tid: index for index, tid in enumerate(selected)}
+                    visit.sort(key=lambda task: ranks.get(task["id"], len(ranks)))
+                else:
+                    selected = _first_come_order(remaining, slots)
                 continue
         elif verdict == "request_changes":
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
@@ -760,6 +789,11 @@ def dispatch(pool):
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
         else:
             entry["reason"] = "spec_review_pending"
+    if wave_row is not None:
+        if scheduler["mode"] == "active":
+            wave_row["wave"] = dispatched_ids
+            wave_row["predicted"] = interference.pairwise([tasks[i] for i in dispatched_ids])
+        schedlog.append("waves", wave_row)
     held_ids = {t["id"] for t in retry_held}
     for entry in row["considered"]:
         if entry["task"] in held_ids and entry["action"] != "dispatched" and entry["task"] not in deferred:
