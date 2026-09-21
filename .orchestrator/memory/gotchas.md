@@ -343,3 +343,9 @@ outcome: when a review is queued with respawned_at set and no assigned_to for mo
 type: gotcha · goal: T-0561 · tasks: T-0664,T-0666,T-0667 · provenance: repo
 - review T-0667 (fix round of the pool.toml plus prompts task) died in spawn.run_worker at render('review') with unfilled_placeholder: spec, because the review packet embeds the scoped diff and the diff of .orchestrator/prompts/execute.md contains the spec placeholder; no run row, no claim, the task looked merely queued; the same check killed R20 v1's dispatch when its spec quoted a placeholder
 outcome: rule: never route prompt-template edits through a Codex task whose diff gets reviewed under the current render; the Planner edits prompts directly (allowed under .orchestrator/) and commits them; backlog R22: spawn.render must validate placeholders against the template before substitution, not against the rendered text, and daemon dispatch/run_worker must hold the task with a visible reason on render errors
+
+## 2026-09-21 Orphan tasks T-0622 and T-0625 (title scored, spec s, scope x.py) leaked onto the live bus during a 09:35 test run and sat in status running for six hours, counted as two luna executors running
+type: gotcha · goal: T-0561 · tasks: T-0622,T-0625 · provenance: repo
+- both had a tempdir worktree, no parent, no codex thread and no process; status() showed luna running 2 while codex running 0; Planner closed them failed at 15:45
+- cause: tests/test_scorecard.py:858 test_start_forwards_scorecard_scores_to_pick_executor calls bus.create_task and executor.start with no bus root patch, so each local run of that test writes a task into .orchestrator/tasks and leaves it running
+outcome: rule: after any local test run, bus_read(status=running) should be empty of parentless tasks; backlog c2: find the test and make it fail when STATE is the repo root

@@ -343,3 +343,9 @@ type: decision · goal: T-0561 · provenance: repo
 - PR 16 was MERGEABLE/CLEAN, merged with a merge commit, branch kept; main on GitHub now carries every roadmap module with all adaptive modes shadow or off; the local checkout still holds local main 33ec77f (Planner commits: plan, memory, prompt fixes, baseline) and must be pulled by the human because planner-mode blocks merging origin/main in the repo root
 - credentials: the human imported the kgpt secrets env file from the claude environment repo into the f tok store (17 names, verified after a first pass had stored shifted lines because f tok set reads its value from stdin and swallowed the loop's input); the store serves Planner-side tooling only (pool.toml secrets tables); kgpt itself reads secrets from the sops-encrypted prod env on the Hetzner box via infra/setsecrets-batch.sh, so nothing in kgpt changed; the kgpt-ios Access service token is consumed by Cloudflare Access and the iOS app, the gateway needs no change (access.py binds a service-token assertion to the owner)
 outcome: rollback: git revert a819bfe on main; every mode key in pool.toml returns behaviour to pre-goal when set to off; the rotated service token can be rotated again in the dashboard; human next: git pull, f orch, one ordinary goal in shadow, then orchestrator promotion before flipping any mode
+
+## 2026-09-21 Resume 2026-09-21 15:45 after PR 16 release: bus cleared of two test-leaked orphan tasks, no goal open, next steps left to the human
+type: decision · goal: T-0561 · tasks: T-0622,T-0625 · provenance: repo
+- local main 1fda175 carries origin/main a819bfe plus 7 unpushed Planner commits; servers restarted 15:26 on that tree
+- T-0622 and T-0625 closed failed (leaked by tests/test_scorecard.py:858); all adaptive modes stay shadow or off
+outcome: rollback: git revert the plan+memory commit that follows; backlog c2 fix the test root, compact-memory due
