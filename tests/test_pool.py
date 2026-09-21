@@ -1,3 +1,4 @@
+import _harness
 """Account pool selection (PoolSel), the [[executors]] routing table (Executors), and Planner-transcript token
 tallying (PlannerTally): bands, quota groups, cooldowns, budgets, scored ranking."""
 import io, json, os, shutil, sys, tempfile, time, tomllib, unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_pool.py` doesn't add this dir itself
 from _harness import REPO, TMP  # noqa: F401
-from orchestrator import pool as P, spawn
+from orchestrator import planner_router, pool as P, spawn
 
 
 def _iso(ts):
@@ -99,6 +100,14 @@ class PoolSel(unittest.TestCase):
             "mode": "off", "min_fix_round_p": 0.5, "min_samples": 5, "min_retry_cost_usd": 1.0,
         })
         self.assertEqual(cfg["promotion"], {"min_samples": 20})
+
+    def test_planner_routing_table_documented_defaults(self):
+        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        self.assertEqual(cfg["planner"]["routing"], planner_router._DEFAULTS)
+        self.assertEqual(cfg["limits"]["max_budget_usd"]["planner_shadow"], 1.5)
+        with mock.patch.object(planner_router.notify, "notify") as notify:
+            self.assertEqual(planner_router.load_cfg(cfg), planner_router._DEFAULTS)
+            notify.assert_not_called()
 
 
 class Reservations(unittest.TestCase):

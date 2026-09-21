@@ -410,6 +410,44 @@ class Cli(unittest.TestCase):
         self.assertEqual(config_dir, os.path.expanduser(P.Pool().get(acct_id).config_dir))
         self.assertNotIn("~", config_dir)
 
+    def test_pick_planner_model_flag(self):
+        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
+        pl = P.Pool()
+        legacy = io.StringIO()
+        with mock.patch.object(cli, "Pool", return_value=pl), \
+                mock.patch.object(pl, "tally_planner"), \
+                mock.patch.object(sys, "argv", ["orchestrator", "pick", "planner"]), \
+                contextlib.redirect_stdout(legacy):
+            cli.main()
+        self.assertEqual(len(legacy.getvalue().strip().splitlines()), 1)
+
+        shadow = io.StringIO()
+        with mock.patch.object(cli, "Pool", return_value=pl), \
+                mock.patch.object(pl, "tally_planner"), \
+                mock.patch.object(sys, "argv", ["orchestrator", "pick", "planner", "--model"]), \
+                contextlib.redirect_stdout(shadow):
+            cli.main()
+        lines = shadow.getvalue().strip().splitlines()
+        self.assertEqual(lines[1].split("\t")[:2], ["model", pl.cfg["models"]["planner"]])
+        self.assertIn("shadow", lines[1])
+
+        pl.cfg.setdefault("planner", {}).setdefault("routing", {})["mode"] = "active"
+        active = io.StringIO()
+        with mock.patch.object(cli, "Pool", return_value=pl), \
+                mock.patch.object(pl, "tally_planner"), \
+                mock.patch.object(sys, "argv", ["orchestrator", "pick", "planner", "--model"]), \
+                contextlib.redirect_stdout(active):
+            cli.main()
+        model_line = active.getvalue().strip().splitlines()[1]
+        self.assertEqual(model_line.split("\t")[:2], ["model", pl.cfg["models"]["opus"]])
+        self.assertIn("active", model_line)
+
+    def test_claude_md_planner_wording(self):
+        first_line = (REPO / "CLAUDE.md").read_text().splitlines()[0]
+        self.assertNotIn("Planner (Fable 5.1)", first_line)
+        self.assertIn("[planner.routing]", first_line)
+        self.assertIn("`orchestrator pick planner --model`", first_line)
+
     def test_pick_exits_3_when_none(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
         pl = P.Pool()

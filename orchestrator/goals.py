@@ -319,7 +319,7 @@ def _release_running_slot(repo_path, reservation_id):
     _with_goals_lock(repo_path, fn)
 
 
-def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None):
+def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None, model=None):
     """Start one headless Planner subprocess against repo_path. Reads the target's own pool.toml fresh on every
     call -- so an account's oauth_token_env or secrets.planner section added since a previous launch takes effect
     immediately, and this never risks disagreeing with a caller's own (possibly stale) cfg about which pool.toml
@@ -340,7 +340,7 @@ def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extr
         env.update(extra_env)
 
     system_prompt = (repo_path / ".orchestrator" / "prompts" / "planner.md").read_text()
-    argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"], "--output-format", "json",
+    argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"] if model is None else model, "--output-format", "json",
             "--max-budget-usd", str(max_budget_usd), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
             "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]
 

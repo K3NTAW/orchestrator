@@ -710,6 +710,21 @@ def format_premium_summary(summary):
     for row in interactive["day_totals"]:
         lines.append(f"interactive day {row['day']} {row['account']}: in={row['input_tokens']} "
                      f"out={row['output_tokens']} cache read={row['cache_read_tokens']}")
+    interactive_by_goal = summary.get("interactive_by_goal")
+    if interactive_by_goal is not None:
+        lines.append("interactive by goal (approximate):")
+        for row in interactive_by_goal:
+            lines.append(f"goal {row.get('goal_id') or '-'}\t{row['tokens']} tokens\t{','.join(row['days'])}")
+    accepted = summary.get("accepted_goals")
+    if accepted is not None:
+        def shown(key):
+            value = accepted.get(key)
+            return "-" if value is None else value
+        lines.append(f"accepted goals: n={shown('n_goals')} "
+                     f"planner tokens/goal {shown('planner_tokens_per_accepted_goal')} "
+                     f"fable tokens/goal {shown('fable_tokens_per_accepted_goal')} "
+                     f"fable share {shown('fable_share')} "
+                     f"tokens/material decision {shown('planner_tokens_per_material_decision')}")
     for row in summary["exceptions"]:
         lines.append(f"soft-budget exception {row['goal_id']}: {row['launches']}>{row['limit']} "
                      f"(advisory); reasons: {row['reasons']}")
