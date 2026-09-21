@@ -1,7 +1,10 @@
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from tests import _harness  # noqa: F401
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _harness import TMP  # noqa: F401 — share the suite's single ORCH_ROOT
 from orchestrator import allocation
 
 
