@@ -740,6 +740,21 @@ class Render(unittest.TestCase):
         self.assertEqual(spawn.extract_json('here: {"summary":"x"} bye')["summary"], "x")
         self.assertTrue(spawn.extract_json("no json")["summary"])
 
+    def test_extract_json_prefers_fenced_block_after_prose_with_braces(self):
+        text = 'hold_reason=f"merge {status}"\n```json\n{"verdict":"approve","summary":"ok"}\n```'
+        self.assertEqual(spawn.extract_json(text), {"verdict": "approve", "summary": "ok"})
+
+    def test_extract_json_falls_back_to_last_balanced_object(self):
+        text = 'review notes {x} then {"verdict":"approve","summary":"ok"}'
+        self.assertEqual(spawn.extract_json(text), {"verdict": "approve", "summary": "ok"})
+
+    def test_extract_json_plain_object_and_parse_error_unchanged(self):
+        bare = {"verdict": "approve", "summary": "ok"}
+        self.assertEqual(spawn.extract_json(json.dumps(bare)), bare)
+        self.assertEqual(spawn.extract_json("broken {not json}"),
+                         {"summary": "broken {not json}", "parse_error": True})
+        self.assertEqual(spawn.extract_json("no braces"), {"summary": "no braces"})
+
     def test_bounded_diff_summary_first(self):
         diff = "diff --git a/widget.py b/widget.py\nindex 1..2 100644\n--- a/widget.py\n+++ b/widget.py\n@@ -1 +1 @@\n-old\n+new\n"
         bounded = spawn.bounded_diff(diff)
