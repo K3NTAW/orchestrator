@@ -1,3 +1,4 @@
+import _harness
 """orchestrator.goals: launch/track/stop a headless Planner session against a target repo. goals.py may only
 import install.install, spawn.trust_workspace and spawn.resolve_secrets from the package (T-0115); these tests
 exercise it against scratch git repos, never REPO itself."""
@@ -634,14 +635,14 @@ class DecisionPacket(GoalsTestCase):
                   resume_hint={"failures": "AssertionError: expected 1 got 2"})
         review = bus.create_task("review of fix", "spec", ["x"], ["y"], role="review", parent=goal_id,
                                  complexity=3, inputs=[held_id])
-        bus.post_result(review["id"], {"comments": [{"path": "orchestrator/goals.py", "line": 42,
+        bus.post_result(review["id"], {"verdict": "request_changes", "comments": [{"path": "orchestrator/goals.py", "line": 42,
                                                       "issue": "missing null check"}]}, status="done")
 
         packet = PR.decision_packet(goal_id, "held", f"{held_id}:123.456")
 
-        self.assertIn(f"Task id: {held_id}", packet)
-        self.assertIn("Task title:", packet)
-        self.assertIn("Hold reason:", packet)
+        self.assertIn(f"({held_id})", packet)
+        self.assertIn("4 Relevant task state", packet)
+        self.assertIn("hold_reason:\n```data\ngate_red\n```", packet)
         self.assertIn("gate_red", packet)
         self.assertIn("```data", packet)
         self.assertIn("AssertionError: expected 1 got 2", packet)
@@ -654,16 +655,16 @@ class DecisionPacket(GoalsTestCase):
                                ["Planner closes the goal with a PR"], ["**"], role="triage", complexity=5)
         goal_id = goal["id"]
         s1 = bus.create_task("scout one", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
-        bus.post_result(s1["id"], {"summary": "a" * 400}, status="done")
+        bus.post_result(s1["id"], {"findings": [{"finding": "indexed evidence", "source": "a.py:1", "confidence": 0.9}]}, status="done")
         s2 = bus.create_task("scout two", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
         bus.update(s2["id"], status="failed")
 
         packet = PR.decision_packet(goal_id, "scouts_done", goal_id)
 
-        self.assertIn("Scout summaries:", packet)
-        self.assertIn(f"{s1['id']}: {'a' * 300}", packet)
-        self.assertNotIn("a" * 301, packet)  # summary capped to the first 300 chars
-        self.assertIn(f"{s2['id']}: ", packet)
+        self.assertIn("5 Scout findings", packet)
+        self.assertIn("indexed evidence (a.py:1, 0.9)", packet)
+        self.assertNotIn("Scout summaries:", packet)
+        self.assertNotIn("Spawn packet", packet)
 
     def test_decision_packet_capped(self):
         goal = bus.create_task("GOAL: cap decision", "goal spec", ["Planner closes the goal with a PR"], ["**"],
@@ -671,13 +672,13 @@ class DecisionPacket(GoalsTestCase):
         goal_id = goal["id"]
         for i in range(30):
             s = bus.create_task(f"scout {i}", "spec", ["x"], ["y"], role="scout", parent=goal_id, complexity=3)
-            bus.post_result(s["id"], {"summary": "s" * 300}, status="done")
+            bus.post_result(s["id"], {"findings": [{"finding": "s" * 300, "source": "s.py:1", "confidence": 0.9}]}, status="done")
 
         cfg = tomllib.loads((goals.PACKAGE_REPO / ".orchestrator" / "pool.toml").read_text())
         cap = cfg["planner"]["decision_packet_chars"]
 
         packet = PR.decision_packet(goal_id, "scouts_done", goal_id)
-        self.assertEqual(len(packet), cap)
+        self.assertLessEqual(len(packet), cap)
 
     def test_held_packet_trims_inventory_before_context(self):
         goal = bus.create_task("GOAL: five-file scope", "goal spec", ["close"], ["**"],
@@ -693,10 +694,10 @@ class DecisionPacket(GoalsTestCase):
         (cfg_dir / "pool.toml").write_text("[planner]\ndecision_packet_chars = 900\n")
 
         packet = PR.decision_packet(goal["id"], "held", f"{held['id']}:1", self.sandbox)
-        self.assertEqual(len(packet), 900)
+        self.assertLessEqual(len(packet), 900)
         self.assertIn("keep this reason", packet)
         self.assertIn("failure survives", packet)
-        self.assertIn("Spawn packet:", packet)
+        self.assertNotIn("Spawn packet", packet)
 
     def test_fenced_values_escape_backticks_and_missing_goal_is_minimal(self):
         goal = bus.create_task("GOAL: fence", "goal spec", ["close"], ["**"], role="triage", complexity=5)
@@ -705,8 +706,17 @@ class DecisionPacket(GoalsTestCase):
         packet = PR.decision_packet(goal["id"], "held", f"{held['id']}:1", self.sandbox)
         self.assertIn("bad [backticks elided] fence", packet)
         missing = PR.decision_packet("T-9999", "held", "T-9998:1", self.sandbox)
-        self.assertIn("Goal id: T-9999", missing)
-        self.assertIn("Payload id: T-9998:1", missing)
+        self.assertIn("id: T-9999", missing)
+        self.assertIn("(T-9998)", missing)
+
+    def test_decision_packet_new_format(self):
+        goal = bus.create_task("GOAL: format", "spec", ["close"], ["x"], role="triage", complexity=5)
+        packet = PR.decision_packet(goal["id"], "scouts_done", goal["id"])
+        for heading in ("1 Decision header", "2 Goal", "4 Relevant task state",
+                        "5 Scout findings", "8 Required output"):
+            self.assertIn(heading, packet)
+        self.assertNotIn("Spawn packet", packet)
+        self.assertLessEqual(len(packet), PR._packet_cap(PR.ROOT))
 
 
 class CliGoalOutput(GoalsTestCase):

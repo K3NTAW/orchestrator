@@ -1,3 +1,4 @@
+import _harness  # noqa: F401 - share the suite's single isolated ORCH_ROOT
 import json
 import os
 import subprocess
@@ -8,8 +9,31 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 from orchestrator import baseline, scorecard
+
+
+class TestPlannerBaseline(unittest.TestCase):
+    def test_planner_metrics_in_baseline_and_compare(self):
+        values = {"fable_tokens_per_accepted_goal": 10,
+                  "planner_tokens_per_accepted_goal": 20,
+                  "fable_calls_per_accepted_goal": 1,
+                  "planner_tokens_per_material_decision": 5,
+                  "fable_share": .5}
+        with state() as root, mock.patch(
+                "orchestrator.planner_telemetry.accepted_goal_summary",
+                return_value=values):
+            baseline.save("planner", root)
+            saved = baseline.load("planner", root)
+        self.assertEqual({key: saved["metrics"][key] for key in values}, values)
+        old = deepcopy(saved)
+        for key in values:
+            old["metrics"].pop(key)
+        compared = baseline.compare(old, saved)
+        for key in values:
+            self.assertIsNone(compared["metrics"][key]["before"])
+            self.assertFalse(compared["metrics"][key]["non_inferiority"])
 
 
 @contextmanager

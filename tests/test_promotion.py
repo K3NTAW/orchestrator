@@ -1,6 +1,7 @@
 import _harness  # noqa: F401 - share the suite's single isolated ORCH_ROOT
 import tempfile
 import unittest
+from unittest import mock
 
 from orchestrator import decision_log, promotion
 
@@ -15,6 +16,36 @@ def evidence(**overrides):
 
 
 class TestPromotion(unittest.TestCase):
+    def test_planner_routing_feature_registered_and_collected(self):
+        self.assertEqual(promotion.FEATURES["planner_routing"]["default"], "shadow")
+        rows = [dict(tier="opus", decision_type="close", band="small",
+                     task_class="code", architectural=False),
+                dict(tier="fable", decision_type="close", band="small",
+                     task_class="code", architectural=False)]
+        evidence = {"noninferior": True, "deltas": {"first_pass_rate": .1}}
+        shadow = {"n": 2, "agreement_rate": .5}
+        with tempfile.TemporaryDirectory() as root, \
+             mock.patch("orchestrator.planner_telemetry.read_invocations", return_value=rows), \
+             mock.patch("orchestrator.planner_scorecard.class_evidence", return_value=evidence), \
+             mock.patch("orchestrator.planner_shadow.summary", return_value=shadow):
+            result = promotion.collect("planner_routing", root)
+            self.assertEqual((result["n"], result["shadow_n"]), (1, 2))
+            self.assertEqual(result["classes_noninferior"], 1)
+            self.assertEqual(result["classes_inferior"], 0)
+            self.assertEqual(result["classes_insufficient"], 0)
+            self.assertEqual(result["shadow_agreement_rate"], .5)
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(promotion.collect("planner_routing", root)["n"], 0)
+
+    def test_planner_routing_never_promotes_on_tokens_alone(self):
+        tokens = evidence(accepted_tokens_delta=-.99, classes_noninferior=0,
+                          classes_inferior=0, classes_insufficient=3)
+        self.assertEqual(promotion.evaluate("planner_routing", tokens)["recommendation"], "stay")
+        inferior = {**tokens, "classes_inferior": 1}
+        self.assertNotEqual(promotion.evaluate("planner_routing", inferior)["recommendation"], "promote")
+        noninferior = {**tokens, "classes_noninferior": 1, "classes_insufficient": 0}
+        self.assertEqual(promotion.evaluate("planner_routing", noninferior)["recommendation"], "promote")
+
     def test_format_report_with_reasons_does_not_raise(self):
         line = promotion.format_report([{"feature": "scheduler", "recommendation": "stay",
                                          "mode": "shadow", "n": 1,

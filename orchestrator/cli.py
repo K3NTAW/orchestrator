@@ -126,6 +126,7 @@ def main():
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
     sub.add_parser("resume").add_argument("account")
     pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
+    pk.add_argument("--model", action="store_true")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
@@ -145,6 +146,7 @@ def main():
     sc.add_argument("--goal")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
+    sc.add_argument("--planner-routing", action="store_true")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -173,8 +175,10 @@ def main():
     rs.add_argument("--write", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
-        if sum((a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
-            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies")
+        if a.planner_routing and (a.planner or a.parallelism):
+            ap.error("--planner-routing conflicts with --planner and --parallelism")
+        if sum((a.planner_routing, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
             "--efficiency": ("goal", "executor", "band", "class", "role"),
@@ -184,9 +188,12 @@ def main():
             "--reviews": ("role", "packet_version", "tier", "band", "reviewed_executor"),
             "--scheduling": (),
             "--strategies": (),
+            "--planner-routing": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
+        if a.planner_routing:
+            mode = "--planner-routing"
         if a.goal is not None and not a.parallelism:
             ap.error("--goal requires --parallelism")
         if a.parallelism and a.planner:
@@ -252,6 +259,18 @@ def main():
             print("hold: no account with headroom", file=sys.stderr)
             raise SystemExit(3)
         print(f"{picked.id}\t{os.path.expanduser(picked.config_dir)}")
+        if a.model:
+            from . import planner_router
+            rcfg = planner_router.load_cfg(pl.cfg)
+            mode = rcfg["mode"]
+            if mode == "active":
+                tier = rcfg["default_tier"]
+                model = pl.cfg["models"][tier]
+                reason = f"planner_routing active default tier {tier}"
+            else:
+                model = pl.cfg["models"]["planner"]
+                reason = f"planner_routing {mode}: interactive Planner stays on the escalation tier"
+            print(f"model\t{model}\t{reason}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
     elif a.cmd == "handover":
@@ -307,7 +326,11 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.scheduling:
+        if a.planner_routing:
+            from . import planner_scorecard
+            card = planner_scorecard.build(root=scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else planner_scorecard.format(card))
+        elif a.scheduling:
             from . import sched_scorecard
             card = sched_scorecard.build()
             print(json.dumps(card, indent=1) if a.json else sched_scorecard.format(card))

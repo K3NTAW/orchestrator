@@ -1,3 +1,4 @@
+import _harness
 """orchestrator.planner_runs: autonomous decision points (scouts_done/held/closable), the dedup/blocking rules in
 .orchestrator/runs/planner_runs.json, and daemon.tick()'s autonomous-launch gate. goals.launch_planner and
 goals.identity_of are patched per test so nothing here spawns a real `claude` subprocess or reads real process
@@ -11,6 +12,7 @@ from _harness import REPO, TMP  # noqa: F401
 import orchestrator as orch_pkg
 from orchestrator import bus, daemon, goals, handover, jev
 from orchestrator import planner_runs as PR
+from orchestrator import planner_telemetry
 from orchestrator import pool as P
 
 
@@ -33,6 +35,22 @@ class PlannerRunsBase(unittest.TestCase):
         orig = getattr(mod, name)
         setattr(mod, name, value)
         self.addCleanup(setattr, mod, name, orig)
+
+    def test_premium_summary_includes_interactive_by_goal_and_accepted_goals(self):
+        from unittest.mock import patch
+        rows = [{"goal_id": "G", "tokens": 12, "days": ["2026-09-21"]}]
+        accepted = {"n_goals": 1}
+        with patch.object(planner_telemetry, "interactive_by_goal", return_value=rows), \
+                patch.object(planner_telemetry, "accepted_goal_summary", return_value=accepted):
+            summary = PR.premium_summary(root=PR.STATE)
+        self.assertEqual(summary["interactive_by_goal"], rows)
+        self.assertEqual(summary["accepted_goals"], accepted)
+
+        for failing in ("interactive_by_goal", "accepted_goal_summary"):
+            with patch.object(planner_telemetry, failing, side_effect=RuntimeError("broken")):
+                summary = PR.premium_summary(root=PR.STATE)
+            key = "accepted_goals" if failing == "accepted_goal_summary" else failing
+            self.assertIsNone(summary[key])
 
     def clear_env(self, name):
         had = name in os.environ
@@ -1035,7 +1053,7 @@ class RoutedDecisions(PlannerRunsBase):
         super().setUp()
         from unittest.mock import patch
         self.pool = P.Pool()
-        self.pool.cfg["planner"] = {"autonomous": True, "routes": {"enabled": True}}
+        self.pool.cfg["planner"] = {"autonomous": True, "routes": {"enabled": True}, "routing": {"mode": "off"}}
         self.pool.cfg["review"] = {"security_paths": [], "semantic_paths": [], "semantic_patterns": {}}
         self.pool.cfg["daemon"] = {"auto_fix_rounds": 2, "flaky_rerun_max": 0, "close_retry_s": 0, "close_max_attempts": 3}
         self.launches = []
@@ -1095,8 +1113,8 @@ class RoutedDecisions(PlannerRunsBase):
         self.assertEqual(len(self.launches), 1)
         route, packet = self.launches[0]
         self.assertEqual(route.name, "escalate")
-        self.assertIn(f"Task id: {risky}", packet)
-        self.assertNotIn(f"Task id: {routine}", packet)
+        self.assertIn(f"({risky})", packet)
+        self.assertNotIn(f"({routine})", packet)
         self.assertTrue(any((t.get("constraints") or {}).get("fix_round_for") == routine for t in bus.read()))
 
     def test_two_nonroutine_sections_share_claim_and_launch(self):

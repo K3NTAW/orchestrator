@@ -20,6 +20,9 @@ FEATURES = OrderedDict((
                    "default": "shadow", "evidence": "strategy"}),
     ("speculation", {"table": "speculation", "key": "mode", "modes": ("off", "shadow", "active"),
                       "default": "off", "evidence": "speculation"}),
+    ("planner_routing", {"table": "planner.routing", "key": "mode",
+                         "modes": ("off", "shadow", "active"),
+                         "default": "shadow", "evidence": "planner_routing"}),
 ))
 
 CRITERIA = {
@@ -87,6 +90,17 @@ def evaluate(feature, evidence, cfg=None):
                 "recommendation": "demote" if mode == "active" else "stay",
                 "reasons": reasons, "criteria": criteria}
 
+    if feature == "planner_routing":
+        if (evidence.get("classes_inferior", 0) or 0) > 0:
+            reasons.append("inferior_planner_class")
+            return {"feature": feature, "mode": mode, "n": n,
+                    "recommendation": "demote" if mode == "active" else "stay",
+                    "reasons": reasons, "criteria": criteria}
+        if (evidence.get("classes_noninferior", 0) or 0) < 1:
+            reasons.append("insufficient_planner_classes")
+            return {"feature": feature, "mode": mode, "n": n, "recommendation": "stay",
+                    "reasons": reasons, "criteria": criteria}
+
     improvements = [key for key in ("accepted_cost_delta", "accepted_tokens_delta", "latency_delta")
                     if isinstance(evidence.get(key), (int, float)) and evidence[key] < 0]
     if not improvements:
@@ -119,6 +133,44 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "planner_routing":
+        try:
+            import tomllib
+            from . import planner_scorecard, planner_shadow, planner_telemetry
+        except ImportError:
+            return {"n": 0}
+        try:
+            cfg = tomllib.loads((root / "pool.toml").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cfg = {}
+        rows = planner_telemetry.read_invocations(root)
+        tier = _table(cfg, "planner.routing").get("default_tier", "opus")
+        candidates = [row for row in rows if row.get("tier") == tier]
+        shadow = planner_shadow.summary(root)
+        result = {"n": len(candidates), "shadow_n": shadow.get("n", 0),
+                  "classes_noninferior": 0, "classes_inferior": 0,
+                  "classes_insufficient": 0,
+                  "shadow_agreement_rate": shadow.get("agreement_rate")}
+        model = _table(cfg, "models").get(tier)
+        dimensions = {(row.get("decision_type"), row.get("band"), row.get("task_class"),
+                       bool(row.get("architectural"))) for row in candidates}
+        evidence_rows = [planner_scorecard.class_evidence(
+            model, decision_type, band, task_class, architectural, root=root, cfg=cfg)
+            for decision_type, band, task_class, architectural in dimensions]
+        for item in evidence_rows:
+            bucket = ("classes_noninferior" if item.get("noninferior") is True else
+                      "classes_inferior" if item.get("noninferior") is False else
+                      "classes_insufficient")
+            result[bucket] += 1
+        delta_keys = {"first_pass_rate": "first_pass_delta",
+                      "avg_fix_rounds": "fix_rounds_delta",
+                      "gate_success": "gate_success_delta",
+                      "review_request_changes_rate": "review_findings_delta"}
+        for source, target in delta_keys.items():
+            values = [item.get("deltas", {}).get(source) for item in evidence_rows]
+            values = [value for value in values if isinstance(value, (int, float))]
+            result[target] = sum(values) / len(values) if values else None
+        return result
     if feature == "jev_routing":
         rows = []
         runs = root / "runs"

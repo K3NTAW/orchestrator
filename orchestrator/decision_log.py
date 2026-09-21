@@ -22,6 +22,7 @@ KINDS = (
     "speculation",
     "scout",
     "review_plan",
+    "planner_route",
 )
 
 _MAX_TEXT = 2000
