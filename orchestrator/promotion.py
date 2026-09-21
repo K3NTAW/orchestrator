@@ -4,7 +4,7 @@ from collections import OrderedDict
 import json
 from pathlib import Path
 
-from . import STATE
+from . import STATE, decision_log
 
 
 FEATURES = OrderedDict((
@@ -151,7 +151,13 @@ def collect(feature, root=STATE):
             if merged:
                 result["accepted_rate"] = sum(merged) / len(merged)
         return result
-    if feature in ("scheduler", "jev_sched"):
+    if feature == "jev_sched":
+        rows = [row for row in decision_log.read_all(root=root) if row.get("kind") == "jev_sched"]
+        return {"n": len(rows),
+                "jev_disagreement_rate": (sum(bool(row.get("rejected")) for row in rows) / len(rows)
+                                          if rows else 0),
+                "applied": sum(bool(row.get("selected")) for row in rows)}
+    if feature == "scheduler":
         waves = _jsonl(root / "runs" / "sched" / "waves.jsonl")
         stale = _jsonl(root / "runs" / "sched" / "stale.jsonl")
         return {"n": len(waves), "applied": sum(bool(row.get("applied")) for row in waves),

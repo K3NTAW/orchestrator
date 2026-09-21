@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from orchestrator import promotion
+from orchestrator import decision_log, promotion
 
 
 def evidence(**overrides):
@@ -14,6 +14,15 @@ def evidence(**overrides):
 
 
 class TestPromotion(unittest.TestCase):
+    def test_collect_jev_sched_reads_decision_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            common = dict(candidates=["a|b"], hard_constraints=[], deterministic={}, jev={},
+                          reason="shadow", confidence=.8, n=1, mode="shadow")
+            decision_log.record("jev_sched", "G-1", selected=[], rejected=["b"], root=root, **common)
+            decision_log.record("jev_sched", "G-2", selected=[], rejected=[], root=root, **common)
+            self.assertEqual(promotion.collect("jev_sched", root=root),
+                             {"n": 2, "jev_disagreement_rate": .5, "applied": 0})
+
     def test_insufficient_evidence_stays_shadow(self):
         result = promotion.evaluate("scheduler", evidence(
             n=19, accepted_cost_delta=-.15, accepted_tokens_delta=-.3,
