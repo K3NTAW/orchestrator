@@ -10,6 +10,27 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_scorecard_parallelism_flag(self):
+        from orchestrator import scorecard
+        with tempfile.TemporaryDirectory() as directory:
+            for args in (["--parallelism", "--goal", "G"], ["--parallelism", "--json"]):
+                output = io.StringIO()
+                with mock.patch.object(scorecard, "STATE", Path(directory)), \
+                        mock.patch.object(sys, "argv", ["orchestrator", "scorecard", *args]), \
+                        contextlib.redirect_stdout(output):
+                    cli.main()
+                if "--json" in args:
+                    self.assertIn("totals", json.loads(output.getvalue()))
+                else:
+                    self.assertIn("max_concurrent_executors", output.getvalue())
+                    self.assertIn("undefined", output.getvalue())
+            for args in (["--efficiency"], ["--economics"], ["--routing"], ["--reviews"],
+                         ["--planner"], ["--by", "executor"]):
+                with mock.patch.object(sys, "argv", ["orchestrator", "scorecard", "--parallelism", *args]), \
+                        contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    cli.main()
+                self.assertEqual(error.exception.code, 2)
+
     def test_jev_diagnose_summary(self):
         from orchestrator import jev
         execute = bus.create_task("diagnose execute", "s", ["a"], ["x"], role="execute")["id"]

@@ -79,6 +79,454 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def dispatch_telemetry(self, slots=0):
+        self.swap(daemon.schedlog, "SCHED_DIR", self.sandbox / "sched")
+        self.swap(daemon, "free_slots", lambda pool: slots)
+        self.swap(daemon, "_fallback_mode", lambda pool: False)
+        self.swap(daemon, "spawn_async", lambda *args, **kwargs: None)
+        self.swap(spawn, "packet", lambda *args: {})
+        self.swap(spawn, "render", lambda *args, **kwargs: "prompt")
+        self.swap(spawn, "packet_run_meta", lambda packet: {})
+        return P.Pool()
+
+    def scheduler_pool(self, mode="active", slots=2, **cfg):
+        pool = self.dispatch_telemetry(slots)
+        pool.cfg["scheduler"] = {"mode": mode, **cfg}
+        return pool
+
+    def scheduler_task(self, title, path, **fields):
+        tid = bus.create_task(title, "spec", ["works"], [path], role="execute", complexity=2,
+                              parent=fields.pop("parent", "T-0043"),
+                              depends_on=fields.pop("depends_on", None))["id"]
+        if fields:
+            bus.update(tid, **fields)
+        return tid
+
+    def scheduler_dispatched(self):
+        return [entry["task"] for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
+                if entry["action"] == "dispatched"]
+
+    def test_candidate_order_keeps_queued_before_budget_retries(self):
+        for mode in ("off", "shadow"):
+            for slots in (1, 2):
+                with self.subTest(mode=mode, slots=slots):
+                    pool = self.scheduler_pool(mode, slots=slots)
+                    retry = self.scheduler_task("older retry", "retry/file.py", parent=None,
+                                                status="held", hold_reason="budget")
+                    queued = self.scheduler_task("new queued task", "queued/file.py", parent=None)
+                    self.assertLess(retry, queued)
+                    candidates = (bus.read(status="queued", role="execute") +
+                                  bus.read(status="held", role="execute"))
+                    self.assertEqual(daemon.eligible(pool, candidates), [queued, retry])
+                    launched = []
+                    with mock.patch.object(daemon, "spawn_async",
+                                           side_effect=lambda fn, tid, *args: launched.append(tid)):
+                        daemon.dispatch(pool)
+                    self.assertEqual(launched, [queued, retry][:slots])
+                    if mode == "shadow":
+                        wave = daemon.schedlog.read("waves")[-1]
+                        self.assertEqual(wave["ready"], [queued, retry])
+                        self.assertEqual(wave["baseline_order"], [queued, retry][:slots])
+                    for tid in (retry, queued):
+                        bus.update(tid, status="done")
+
+    def test_eligible_excludes_dispatched_unclaimed_tasks(self):
+        pool = self.scheduler_pool(slots=2)
+        inflight = self.scheduler_task("unclaimed", "busy/file.py", pipeline={"dispatched_at": 123})
+        first = self.scheduler_task("first", "first/file.py")
+        second = self.scheduler_task("second", "second/file.py")
+        candidates = bus.read(status="queued", role="execute")
+        self.assertEqual(daemon.eligible(pool, candidates), [first, second])
+        self.assertEqual(bus.read(status="queued", role="execute"), candidates)
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["ready"], [first, second])
+        self.assertEqual(wave["running"], [inflight])
+        self.assertEqual(wave["wave"], [first, second])
+        self.assertEqual(self.scheduler_dispatched(), [first, second])
+        self.assertEqual(bus.get(inflight)["pipeline"]["dispatched_at"], 123)
+
+    def test_lost_dispatch_stamp_does_not_consume_slot(self):
+        original_stamp = daemon.stamp
+        for mode in ("off", "shadow", "active"):
+            for slots, max_wave in ((1, 0), (2, 0), (2, 1)):
+                with self.subTest(mode=mode, slots=slots, max_wave=max_wave):
+                    pool = self.scheduler_pool(mode, slots=slots, max_wave=max_wave)
+                    prefix = f"{mode}-{slots}-{max_wave}"
+                    first = self.scheduler_task("lost first", f"{prefix}/busy/a.py", parent=None)
+                    second = self.scheduler_task("lost second", f"{prefix}/other/b.py", parent=None)
+                    conflict = self.scheduler_task("conflicts with winner", f"{prefix}/busy/a.py", parent=None)
+                    clean = [self.scheduler_task(f"clean {i}", f"{prefix}/clean{i}/file.py", parent=None)
+                             for i in range(3)]
+                    attempts, launched = [], []
+                    def competing_stamp(tid, stage, **kwargs):
+                        if stage == "dispatched_at":
+                            attempts.append(tid)
+                            if tid in (first, second):
+                                # The other dispatcher won after eligible() took its snapshot.
+                                original_stamp(tid, stage, **kwargs)
+                                return False
+                        return original_stamp(tid, stage, **kwargs)
+                    with mock.patch.object(daemon, "stamp", side_effect=competing_stamp), \
+                            mock.patch.object(daemon, "spawn_async", side_effect=lambda fn, tid, *args: launched.append(tid)):
+                        daemon.dispatch(pool)
+                    limit = min(slots, max_wave or slots) if mode == "active" else slots
+                    expected = clean[:limit] if mode == "active" else [conflict, *clean][:limit]
+                    self.assertEqual(launched, expected)
+                    self.assertEqual(attempts[:2], [first, second])
+                    self.assertEqual(self.scheduler_dispatched(), expected)
+                    entries = {entry["task"]: entry for entry in daemon.schedlog.read("dispatch")[-1]["considered"]}
+                    self.assertEqual(entries[first]["action"], "skipped")
+                    self.assertEqual(entries[second]["action"], "skipped")
+                    if mode == "active":
+                        wave = daemon.schedlog.read("waves")[-1]
+                        self.assertEqual(wave["wave"], expected)
+                        self.assertEqual(entries[conflict]["reason"], "predicted_interference")
+                        self.assertEqual(entries[clean[-1]]["reason"], "executor_capacity")
+                    for tid in (first, second, conflict, *clean):
+                        bus.update(tid, status="done")
+
+    def test_scheduler_cfg_defaults(self):
+        pool = self.scheduler_pool()
+        pool.cfg.pop("scheduler")
+        self.assertEqual(daemon._load_scheduler_cfg(pool),
+                         {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0,
+                          "stale_rebase": False})
+
+    def test_scheduler_cfg_rejects_unknown_mode(self):
+        pool = self.scheduler_pool("unknown")
+        self.swap(daemon, "_scheduler_mode_warned", False)
+        task = self.scheduler_task("ready", "a/file.py")
+        with mock.patch.object(daemon, "notify") as notify:
+            daemon.dispatch(pool)
+            self.assertEqual(daemon._load_scheduler_cfg(pool)["mode"], "shadow")
+        notify.assert_called_once()
+        self.assertIn("falling back to shadow", notify.call_args.args[0])
+        self.assertEqual(self.scheduler_dispatched(), [task])
+        self.assertFalse(daemon.schedlog.read("waves")[0]["applied"])
+
+    def stale_subject(self, scope=None):
+        tid = bus.create_task("stale subject", "spec", ["works"], scope or ["scope/**"],
+                              role="execute", complexity=4, parent="T-0043")["id"]
+        bus.update(tid, worktree=str(self.sandbox), branch=f"task/{tid}")
+        return bus.get(tid)
+
+    def test_stale_check_none_when_goal_unmoved(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=[]), \
+                mock.patch.object(daemon, "changed_paths", return_value=["scope/changed.py"]), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "none")
+        self.assertEqual(result["moved_count"], 0)
+
+    def test_stale_check_low_when_scope_overlaps_moved_paths(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon, "changed_paths", return_value=["other.py"]), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "low")
+        self.assertEqual(result["stale_paths"], ["scope/api.py"])
+
+    def test_stale_check_high_when_changed_file_moved(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon, "changed_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "high")
+
+    def test_stale_check_unknown_on_git_failure(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", side_effect=daemon.gitutil.GitError("bad")), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "unknown")
+
+    def test_stale_check_records_row_and_stamp_before_reviews(self):
+        task = self.stale_subject()
+        order = []
+        with mock.patch.object(daemon, "stale_check", side_effect=lambda task: (order.append("stale") or {
+                "base": task["branch"], "goal_head": "goalsha", "moved_count": 0,
+                "stale_paths": [], "risk": "none"})), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("headsha\n")):
+            evidence, recorded = daemon._record_stale_check(task)
+            order.append("reviews")
+        self.assertTrue(recorded)
+        self.assertEqual(order, ["stale", "reviews"])
+        self.assertEqual(bus.get(task["id"])["pipeline"]["stale_check"]["risk"], "none")
+        self.assertEqual(daemon.schedlog.read("stale")[0]["task"], task["id"])
+
+    def test_stale_rebase_conflict_holds_clears_gate_and_never_discards(self):
+        task = self.stale_subject()
+        bus.update(task["id"], pipeline={"gated_at": 1})
+        calls = []
+        def git(worktree, *args):
+            calls.append(args)
+            if args[:1] == ("rebase",) and args[1:] != ("--abort",):
+                return FakeProc("", 1)
+            if args[:2] == ("diff", "--name-only"):
+                return FakeProc("scope/api.py\n")
+            return FakeProc("tasksha\n")
+        with mock.patch.object(daemon, "_git_in", side_effect=git):
+            self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+        held = bus.get(task["id"])
+        self.assertEqual(held["hold_reason"], "stale_rebase_conflict")
+        self.assertNotIn("gated_at", held["pipeline"])
+        self.assertIn(("rebase", "--abort"), calls)
+
+    def test_stale_rebase_success_regates_before_reviews(self):
+        task = self.stale_subject()
+        bus.update(task["id"], pipeline={"gated_at": 1, "stale_check": {"risk": "high"}})
+        with mock.patch.object(daemon, "_git_in", side_effect=[FakeProc(""), FakeProc("newhead\n")]):
+            self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+        pipeline = bus.get(task["id"])["pipeline"]
+        self.assertNotIn("gated_at", pipeline)
+        self.assertEqual(pipeline["stale_check"]["rebased_to"], "newhead")
+
+    def test_dispatch_shadow_logs_wave_and_keeps_first_come(self):
+        pool = self.scheduler_pool("shadow")
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("b", "a/file.py")
+        c = self.scheduler_task("c", "c/file.py")
+        before = [bus.get(t) for t in (a, b, c)]
+        self.assertEqual(daemon.eligible(pool, list(reversed(before))), [c, b, a])
+        self.assertEqual([bus.get(t) for t in (a, b, c)], before)
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(self.scheduler_dispatched(), [a, b])
+        self.assertEqual(wave["baseline_order"], [a, b])
+        self.assertEqual(wave["ready"], [a, b, c])
+        self.assertEqual(wave["wave"], [a, c])
+        self.assertEqual(wave["predicted"], [])
+        self.assertEqual(set(wave["priority"]), {a, b, c})
+        self.assertFalse(wave["applied"])
+
+    def test_wave_row_carries_priority_order(self):
+        pool = self.scheduler_pool("shadow", slots=2)
+        plain = self.scheduler_task("plain", "plain/file.py", parent=None)
+        critical = self.scheduler_task("critical", "critical/file.py", parent=None)
+        self.scheduler_task("held dependent", "held/file.py", parent=None,
+                            depends_on=[critical], status="held", hold_reason="budget")
+        daemon.dispatch(pool)
+        wave = daemon.schedlog.read("waves")[-1]
+        self.assertEqual(wave["ready"], [plain, critical])
+        self.assertEqual(wave["wave"][:2], [critical, plain])
+        self.assertEqual(set(wave["priority"]), {plain, critical})
+        self.assertEqual(wave["priority"][critical]["blocked_descendants"], 1)
+        self.assertEqual(self.scheduler_dispatched(), [plain, critical])
+
+    def test_dispatch_active_defers_hard_conflict_with_running_task(self):
+        pool = self.scheduler_pool()
+        running = self.scheduler_task("running", "a/file.py", status="running")
+        a = self.scheduler_task("a", "a/file.py")
+        daemon.dispatch(pool)
+        self.assertEqual(self.scheduler_dispatched(), [])
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["running"], [running])
+        self.assertEqual(wave["deferred"], [{"task": a, "reason": "hard:" + running}])
+        self.assertTrue(wave["applied"])
+        self.assertEqual(daemon.schedlog.read("dispatch")[0]["considered"][0]["reason"],
+                         "predicted_interference")
+
+    def test_dispatch_active_backfills_deferred_slot(self):
+        pool = self.scheduler_pool(slots=2)
+        running = self.scheduler_task("running", "a/file.py", pipeline={"dispatched_at": 123})
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("b", "b/file.py")
+        c = self.scheduler_task("c", "c/file.py")
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["running"], [running])
+        self.assertEqual(wave["ready"], [a, b, c])
+        self.assertEqual(wave["baseline_order"], [a, b])
+        self.assertEqual(wave["wave"], [b, c])
+        self.assertEqual(self.scheduler_dispatched(), [b, c])
+
+    def test_dispatch_active_respects_slots_and_dependencies(self):
+        pool = self.scheduler_pool(slots=2)
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("conflict", "a/file.py")
+        c = self.scheduler_task("c", "c/file.py")
+        d = self.scheduler_task("d", "d/file.py")
+        blocked = self.scheduler_task("blocked", "e/file.py", depends_on=[a])
+        launches = []
+        self.swap(daemon, "spawn_async", lambda fn, tid, *args: launches.append(tid))
+        self.swap(daemon, "_wave_order", lambda ids, tasks: list(reversed(ids)))
+        daemon.dispatch(pool)
+        self.assertEqual(launches, [d, c])
+        self.assertEqual(daemon.schedlog.read("waves")[0]["wave"], launches)
+        self.assertNotIn(blocked, daemon.schedlog.read("waves")[0]["ready"])
+        self.assertFalse((bus.get(blocked).get("pipeline") or {}).get("dispatched_at"))
+        # With capacity for both overlapping candidates, only one may be selected.
+        daemon.dispatch(pool)
+        self.assertEqual(launches, [d, c, b])
+        self.assertNotIn(a, self.scheduler_dispatched())
+
+    def test_dispatch_mode_off_writes_no_wave_rows(self):
+        pool = self.scheduler_pool("off", slots=1)
+        a = self.scheduler_task("a", "a/file.py")
+        self.scheduler_task("b", "a/file.py")
+        with mock.patch.object(daemon.interference, "select_wave") as select:
+            daemon.dispatch(pool)
+        select.assert_not_called()
+        self.assertEqual(self.scheduler_dispatched(), [a])
+        self.assertEqual(daemon.schedlog.read("waves"), [])
+
+    def test_dispatch_wave_includes_budget_retry_candidates(self):
+        pool = self.scheduler_pool(slots=2)
+        retry = self.scheduler_task("retry", "a/file.py", status="held", hold_reason="budget", parent=None)
+        later = self.scheduler_task("later", "b/file.py")
+        daemon.dispatch(pool)
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["ready"], [later, retry])
+        self.assertEqual(wave["wave"], [retry, later])
+        self.assertEqual(self.scheduler_dispatched(), [retry, later])
+        self.assertEqual(bus.get(retry)["status"], "queued")
+
+    def test_dispatch_active_capacity_deferral_keeps_capacity_reason(self):
+        pool = self.scheduler_pool(slots=2, max_wave=1)
+        a = self.scheduler_task("a", "a/file.py")
+        b = self.scheduler_task("b", "b/file.py", status="held", hold_reason="budget")
+        daemon.dispatch(pool)
+        self.assertEqual(self.scheduler_dispatched(), [a])
+        self.assertEqual(daemon.schedlog.read("waves")[-1]["deferred"],
+                         [{"task": b, "reason": "capacity"}])
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][-1]["reason"],
+                         "executor_capacity")
+        self.swap(daemon, "free_slots", lambda pool: 0)
+        pool.executors = {"cooling": mock.Mock(enabled=True, roles=["execute"])}
+        pool.executors["cooling"].cooling.return_value = True
+        for fallback, reason in ((False, "cooldown"), (True, "account_capacity")):
+            with self.subTest(reason=reason):
+                self.swap(daemon, "_fallback_mode", lambda pool, value=fallback: value)
+                daemon.dispatch(pool)
+                self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][-1]["reason"], reason)
+
+    def test_wave_tasks_cover_cross_goal_dependency_ancestry(self):
+        pool = self.scheduler_pool()
+        running = self.scheduler_task("running", "r/file.py", status="running", parent="G-other")
+        ancestor = self.scheduler_task("ancestor", "a/file.py", status="done", merged_into="goal/other",
+                                       parent="G-other", depends_on=[running])
+        middle = self.scheduler_task("middle", "m/file.py", status="done", merged_into="goal/current",
+                                     depends_on=[ancestor])
+        candidate = self.scheduler_task("candidate", "c/file.py", depends_on=[middle])
+        with mock.patch.object(daemon.interference, "select_wave", wraps=daemon.interference.select_wave) as select:
+            daemon.dispatch(pool)
+        select.assert_called_once()
+        tasks = select.call_args.args[2]
+        self.assertEqual(set(tasks), {running, ancestor, middle, candidate})
+        orphan = {"id": "orphan", "depends_on": ["T-missing", "orphan"]}
+        self.assertEqual(daemon._wave_tasks([orphan], []), {"orphan": orphan})
+        self.assertEqual(daemon.schedlog.read("waves")[0]["ready"], [candidate])
+        self.assertEqual(self.scheduler_dispatched(), [])
+        self.assertEqual(daemon.schedlog.read("waves")[0]["deferred"],
+                         [{"task": candidate, "reason": "hard:" + running}])
+
+    def test_dispatch_stamps_first_ready_at_once(self):
+        pool = self.dispatch_telemetry()
+        dependency = self.task("dependency")
+        task = self.task("waiting", depends_on=[dependency])
+        daemon.dispatch(pool)
+        self.assertNotIn("first_ready_at", bus.get(task).get("pipeline") or {})
+        bus.update(dependency, status="done", merged_into="goal/test")
+        with mock.patch.object(daemon.time, "time", return_value=123.0):
+            daemon.dispatch(pool)
+        self.assertEqual(bus.get(task)["pipeline"]["first_ready_at"], 123.0)
+        with mock.patch.object(daemon.time, "time", return_value=456.0):
+            daemon.dispatch(pool)
+        self.assertEqual(bus.get(task)["pipeline"]["first_ready_at"], 123.0)
+
+    def test_dispatch_logs_skip_reasons_capacity_and_dependency(self):
+        pool = self.dispatch_telemetry(slots=1)
+        first = self.task("first", complexity=2)
+        waiting = self.task("waiting", complexity=2)
+        blocked = self.task("blocked", depends_on=[first], complexity=2)
+        daemon.dispatch(pool)
+        row, = daemon.schedlog.read("dispatch")
+        self.assertEqual(row["free_slots"], 1)
+        self.assertFalse(row["fallback"])
+        self.assertEqual(row["running_execute"], 0)
+        self.assertEqual(row["running_claude"], 0)
+        entries = row["considered"]
+        self.assertEqual([entry["task"] for entry in entries], [first, waiting, blocked])
+        self.assertEqual(entries[0]["action"], "dispatched")
+        self.assertNotIn("reason", entries[0])
+        self.assertEqual([(entry["ready"], entry["action"], entry["reason"]) for entry in entries[1:]],
+                         [(True, "skipped", "executor_capacity"), (False, "skipped", "dependency")])
+        self.assertEqual(entries[0]["goal_id"], bus.get(first)["parent"])
+        self.assertNotIn("dispatched_at", bus.get(waiting)["pipeline"])
+
+    def test_dispatch_log_row_absent_on_idle_tick(self):
+        pool = self.dispatch_telemetry()
+        daemon.dispatch(pool)
+        self.assertFalse((daemon.schedlog.SCHED_DIR / "dispatch.jsonl").exists())
+
+    def test_dispatch_logs_cooldown_fallback_budget_and_noop(self):
+        pool = self.dispatch_telemetry()
+        task = self.task("capacity reasons", complexity=2)
+        pool.executors = {"cooling": mock.Mock(enabled=True, roles=["execute"])}
+        pool.executors["cooling"].cooling.return_value = True
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "cooldown")
+        self.swap(daemon, "_fallback_mode", lambda pool: True)
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "account_capacity")
+        bus.update(task, status="done")
+        high = self.task("no fallback tier", complexity=9)
+        bus.update(high, spec_review_verdict="approve")
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "fallback_no_tier")
+        bus.update(high, status="held", hold_reason="budget")
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "budget")
+        bus.update(high, status="done")
+        bus.update(task, status="held", hold_reason="budget", executor="claude:sonnet")
+        self.swap(daemon, "free_slots", lambda pool: 1)
+        daemon.dispatch(pool)
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual(entry["action"], "dispatched")
+        self.assertEqual(entry["executor"], "claude:sonnet")
+        self.assertNotIn("reason", entry)
+        daemon.dispatch(pool)
+        self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "other")
+
+    def test_dispatch_logs_stale_and_spec_review_changes(self):
+        pool = self.dispatch_telemetry()
+        stale_task = self.task("stale", complexity=2)
+        changes = self.task("changes", complexity=daemon.SPEC_REVIEW_MIN)
+        bus.update(changes, spec_review_verdict="request_changes")
+        self.swap(daemon, "stale", lambda task: task["id"] == stale_task)
+        daemon.dispatch(pool)
+        entries = daemon.schedlog.read("dispatch")[0]["considered"]
+        self.assertEqual([entry["reason"] for entry in entries], ["stale", "spec_review_changes"])
+        self.assertEqual(bus.get(changes)["status"], "held")
+
+    def test_dispatch_creates_spec_reviews_after_slots_exhausted(self):
+        pool = self.dispatch_telemetry(slots=1)
+        first = self.task("first", complexity=2)
+        waiting = self.task("waiting", complexity=2)
+        review = self.task("needs review", complexity=daemon.SPEC_REVIEW_MIN)
+        later = self.task("later", complexity=2)
+        daemon.dispatch(pool)
+        rows = daemon.schedlog.read("dispatch")
+        self.assertEqual([entry["task"] for entry in rows[0]["considered"]
+                          if entry["action"] == "dispatched"], [first])
+        reviews = bus.read(role="spec_review")
+        self.assertEqual([task["inputs"] for task in reviews], [[review]])
+        self.assertEqual(rows[0]["considered"][2]["action"], "spec_review")
+        self.assertEqual(rows[0]["considered"][2]["reason"], "spec_review_pending")
+        for task in (waiting, later):
+            self.assertNotIn("dispatched_at", bus.get(task)["pipeline"])
+        daemon.dispatch(pool)
+        self.assertEqual(len(bus.read(role="spec_review")), 1)
+        entry = next(entry for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
+                     if entry["task"] == review)
+        self.assertEqual((entry["action"], entry["reason"]), ("skipped", "spec_review_pending"))
+
     def test_reply_worker_handles_held_requeues_fix_task_for_retry(self):
         parent = self.held_for_fix()
         bus.update(parent, codex_thread="parent-thread", executor="astra", rounds=1,
@@ -1623,6 +2071,19 @@ class Daemon(unittest.TestCase):
         daemon.merge_reviewed(pool)
         self.assertEqual(self.merged, [tid])
 
+    def test_merge_reviewed_skips_head_moved_review_for_merged_task(self):
+        tid = self.task("hand merged", complexity=5)
+        bus.update(tid, status="done", worktree=str(TMP), merged_into="goal/T-0043",
+                   pipeline={"reviewed_sha": "reviewed"})
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.swap(daemon, "_git_in", lambda *a, **k: FakeProc("moved\n"))
+
+        daemon.merge_reviewed(P.Pool())
+
+        self.assertEqual(bus.read(role="review"), [])
+        self.assertEqual(messages, [])
+
     def test_changed_paths_real_repo_source_no_match(self):
         """A change to a plain source file outside every security glob does not match."""
         repo = self.real_repo()
@@ -2134,6 +2595,24 @@ class Daemon(unittest.TestCase):
             "FAILED tests/not_defined.py::test_also_missing (missing: test not defined)",
         ])
         self.assertFalse(any(call[:1] == [str(merge.TESTS_GREEN)] for call in calls))
+
+    def test_gate_hold_message_names_not_collected_tests(self):
+        test_file = self.sandbox / "tests" / "test_not_collected.py"
+        test_file.parent.mkdir(exist_ok=True)
+        test_file.write_text("def test_not_collected():\n    pass\n")
+        self.addCleanup(test_file.unlink, True)
+        t = bus.create_task("not collected acceptance test", "spec",
+                            ["tests/test_not_collected.py::test_not_collected passes"], ["x.py"],
+                            role="execute", complexity=2, parent="T-0043")["id"]
+        bus.update(t, status="done", worktree=str(self.sandbox))
+
+        daemon.tick()
+
+        held = bus.get(t)
+        self.assertEqual(held["resume_hint"]["failures"], [
+            "FAILED tests/test_not_collected.py::test_not_collected "
+            "(missing: test not collected by unittest, define it inside a TestCase)",
+        ])
 
     def test_gate_runs_suite_when_named_tests_exist(self):
         test_file = self.sandbox / "tests" / "test_gate_named.py"

@@ -185,3 +185,27 @@ def test_cli_baseline_save_show_list_compare():
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(unittest.FunctionTestCase(value) for name, value in globals().items()
                               if name.startswith("test_") and callable(value))
+
+
+def test_baseline_carries_parallelism_block():
+    with state() as root:
+        baseline.save('parallel', root)
+        saved = baseline.load('parallel', root)
+        card = scorecard.parallelism(root)
+        assert saved['parallelism'] == {k: card[k] for k in ('totals', 'skip_reasons', 'waves')}
+        after = deepcopy(saved)
+        after['parallelism']['totals']['merge_conflicts'] += 2
+        result = baseline.compare(saved, after)
+        assert result['parallelism']['totals.merge_conflicts']['absolute'] == 2
+        assert 'parallelism totals.merge_conflicts' in baseline.format_comparison(result)
+        del saved['parallelism']
+        result = baseline.compare(saved, after)
+        assert result['parallelism']['totals.merge_conflicts']['absolute'] is None
+        assert 'undefined' in baseline.format_comparison(result)
+
+
+def test_parallelism_deltas_missing_skip_reason_is_zero():
+    result = baseline._parallelism_deltas(
+        {'skip_reasons': {'capacity': 2}},
+        {'skip_reasons': {'capacity': 1, 'dependency': 3}})
+    assert result['skip_reasons.dependency'] == {'before': 0, 'after': 3, 'absolute': 3}

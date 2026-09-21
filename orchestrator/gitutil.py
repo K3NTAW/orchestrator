@@ -2,6 +2,9 @@
 import subprocess
 from pathlib import Path
 
+class GitError(RuntimeError):
+    pass
+
 def _git_in(worktree, *args):
     return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
 
@@ -43,6 +46,27 @@ def changed_paths(t, *, git=None, resolve_base=None):
     except Exception:
         return None
 
+def moved_paths(base_ref, target_ref, cwd, git=None):
+    """Paths changed on target_ref since its merge-base with base_ref.
+
+    An empty list means the target did not move; GitError means git evidence could
+    not be obtained.  This intentionally differs from changed_paths()'s soft None
+    convention so callers can distinguish "nothing moved" from "risk unknown".
+    """
+    git = git or _git_in
+    try:
+        base = git(cwd, "merge-base", base_ref, target_ref)
+        if base.returncode:
+            raise GitError(base.stderr.strip() or "git merge-base failed")
+        diff = git(cwd, "diff", "--name-only", "-z", base.stdout.strip(), target_ref)
+        if diff.returncode:
+            raise GitError(diff.stderr.strip() or "git diff failed")
+    except GitError:
+        raise
+    except Exception as exc:
+        raise GitError(str(exc)) from exc
+    return sorted(path for path in diff.stdout.split("\0") if path)
+
 def _added_diff_lines(t, *, git=None, resolve_base=None):
     git = git or _git_in
     resolve_base = resolve_base or _resolve_base
@@ -56,4 +80,3 @@ def _added_diff_lines(t, *, git=None, resolve_base=None):
     if r.returncode:
         return None
     return [line[1:] for line in r.stdout.splitlines() if line.startswith("+") and not line.startswith("+++")]
-

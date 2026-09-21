@@ -6,6 +6,7 @@ description: Write one atomic execute-task spec for the Codex executor (one acce
 A human reviews merges. The TaskCreated hook rejects any task without Acceptance and Scope.
 - Title: verb + object. Spec: what and why in ≤12 lines, citing path:line from scout findings.
 - Acceptance: 2–5 externally checkable statements (test names, CLI output, observable behavior).
+- Name tests as `tests/test_<module>.py::test_name` (the gate parses only this form; bare names are not verified), and use `unittest.TestCase` methods unless pytest is a project dependency.
 - Scope: glob list; concurrent execute tasks must have disjoint scopes.
 - read_scope: paths the worker may inspect; list them so the execution packet can include them.
 - interface_contract: functions, signatures, and file formats that other tasks rely on; state it explicitly for parallel or dependent work.

@@ -5,9 +5,9 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, acceptance, bus, decision, executor, handover, jev_route, merge, planner_runs, spawn
+from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
-from . import failures, gitutil, notify as notifications
+from . import failures, gitutil, interference, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
                        _test_ids, _path_in_scope, _rejecting_reviews, _normal_issue, failure_signature,
                        _failure_text, _node_id_to_unittest, _RunnerProbeTimeout, _flaky_rerun_command,
@@ -588,23 +588,161 @@ def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
         bus.post_result(task_id, spawn.fit_result({"reason": head[:3000]}), "failed")
 
 
+_scheduler_mode_warned = False
+
+
+def _load_scheduler_cfg(pool):
+    """Read scheduler policy on every dispatch, including direct callers."""
+    global _scheduler_mode_warned
+    cfg = {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0, "stale_rebase": False}
+    cfg.update(pool.cfg.get("scheduler", {}))
+    if cfg["mode"] not in ("off", "shadow", "active"):
+        if not _scheduler_mode_warned:
+            notify(f"pool.toml [scheduler].mode={cfg['mode']!r} is not one of "
+                   "off|shadow|active; falling back to shadow")
+            _scheduler_mode_warned = True
+        cfg["mode"] = "shadow"
+    return cfg
+
+
+def eligible(pool, candidates):
+    """Filter candidates in their supplied order without changing bus state.
+
+    A dispatched task is already owned, even while queued before its worker claims it;
+    it belongs to the wave's running set, never its ready candidates.
+    """
+    fallback = _fallback_mode(pool)
+    return [t["id"] for t in candidates
+            if not stale({**t, "status": "queued"}) and bus.ready(t)
+            and not (t.get("pipeline") or {}).get("dispatched_at")
+            and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve")
+            and (not fallback or fallback_tier(t["complexity"]) is not None)]
+
+
+def _first_come_order(eligible_ids, slots):
+    return eligible_ids[:max(0, slots)]
+
+
+def _wave_order(candidate_ids, tasks):
+    return critical_path.rank(candidate_ids, tasks)
+
+
+def _wave_tasks(candidates, running):
+    """Include dependency ancestry across goals, tolerating missing ids and cycles."""
+    tasks = {t["id"]: t for t in candidates + running}
+    pending = list(tasks.values())
+    seen = set(tasks)
+    while pending:
+        for tid in pending.pop().get("depends_on") or []:
+            if tid in seen:
+                continue
+            seen.add(tid)
+            try:
+                task = bus.get(tid)
+            except KeyError:
+                continue
+            tasks[tid] = task
+            pending.append(task)
+    # Ranking needs unresolved execute descendants even when they are held or running;
+    # merged and failed work cannot delay the goal and is deliberately excluded.
+    pending = list(candidates)
+    while pending:
+        for task in bus.dependents(pending.pop()["id"]):
+            tid = task["id"]
+            if (tid in tasks or task.get("role") != "execute" or task.get("merged_into")
+                    or task.get("status") == "failed"):
+                continue
+            tasks[tid] = task
+            pending.append(task)
+    return tasks
+
+
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
+    scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
+    row = {"ts": time.time(), "free_slots": slots, "fallback": fallback,
+           "running_execute": len(bus.read(status="running", role="execute")),
+           "running_claude": running_claude_workers(pool), "considered": []}
+    enabled = [ex for ex in pool.executors.values() if ex.enabled and "execute" in ex.roles]
+    capacity_reason = ("account_capacity" if fallback else
+                       "cooldown" if enabled and all(ex.cooling() for ex in enabled) else
+                       "executor_capacity")
     retry_held = [t for t in bus.read(status="held", role="execute")
                   if t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")]
-    for t in bus.read(status="queued", role="execute") + retry_held:
-        if stale(t) or not bus.ready(t):
+    # Each bus read is id-ordered; preserve queued work ahead of budget retries.
+    candidates = bus.read(status="queued", role="execute") + retry_held
+    candidate_ids = eligible(pool, candidates)
+    selected = _first_come_order(candidate_ids, slots)
+    deferred = {}
+    wave_row = None
+    dispatched_ids = []
+    lost_ids = []
+    if scheduler["mode"] != "off" and candidate_ids:
+        running = [t for t in bus.read(role="execute")
+                   if t["status"] == "running" or
+                   (t["status"] in ("queued", "held") and
+                    (t.get("pipeline") or {}).get("dispatched_at") and
+                    not (t.get("pipeline") or {}).get("gated_at"))]
+        running_ids = [t["id"] for t in running]
+        tasks = _wave_tasks([t for t in candidates if t["id"] in candidate_ids], running)
+        wave_limit = min(slots, scheduler["max_wave"] or slots)
+        wave_order = list(_wave_order(candidate_ids, tasks))
+        result = interference.select_wave(
+            candidate_ids, running_ids, tasks, capacity=wave_limit,
+            order=wave_order,
+            rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
+        wave_row = {"ts": row["ts"], "mode": scheduler["mode"], "ready": candidate_ids,
+                                 "running": running_ids, "baseline_order": selected, "wave": result["wave"],
+                                 "deferred": result["deferred"],
+                                 "predicted": interference.pairwise([tasks[i] for i in result["wave"]]),
+                                 "priority": {tid: critical_path.explain(tid, tasks) for tid in candidate_ids},
+                                 "applied": scheduler["mode"] == "active"}
+        if scheduler["mode"] == "active":
+            selected = result["wave"]
+            deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
+                        else "predicted_interference" for item in result["deferred"]}
+    # Visit selected tasks in wave order; still process every other candidate for reviews and telemetry.
+    ranks = {tid: index for index, tid in enumerate(selected)}
+    visit = (sorted(candidates, key=lambda t: ranks.get(t["id"], len(ranks)))
+             if scheduler["mode"] == "active" else candidates)
+    while visit:
+        t = visit.pop(0)
+        entry = {"task": t["id"], "goal_id": t.get("parent"), "ready": bus.ready(t),
+                 "action": "skipped", "reason": "other"}
+        if t.get("executor"):
+            entry["executor"] = t["executor"]
+        row["considered"].append(entry)
+        if stale({**t, "status": "queued"}):
+            entry["reason"] = "stale"
             continue
+        if not entry["ready"]:
+            entry["reason"] = "dependency"
+            continue
+        if t.get("status") == "queued":
+            with bus.locked():
+                current = bus.get(t["id"])
+                pipeline = dict(current.get("pipeline") or {})
+                if "first_ready_at" not in pipeline:
+                    pipeline["first_ready_at"] = time.time()
+                    bus.update(t["id"], pipeline=pipeline)
         verdict = t.get("spec_review_verdict")
         if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
             if fallback and fallback_tier(t["complexity"]) is None:
+                entry["reason"] = "fallback_no_tier"
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
-            if slots <= 0:
-                break
+            if t["id"] not in selected or slots <= 0:
+                entry["reason"] = deferred.get(t["id"], "other" if
+                    (t.get("pipeline") or {}).get("dispatched_at") else capacity_reason)
+                continue
             if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
+                entry["action"] = "dispatched"
+                entry.pop("reason")
+                if fallback:
+                    entry["executor"] = "claude:" + fallback_tier(t["complexity"])
                 slots -= 1
+                dispatched_ids.append(t["id"])
                 fix_parent_id = (t.get("constraints") or {}).get("fix_round_for")
                 if fix_parent_id:
                     parent = bus.get(fix_parent_id)
@@ -627,9 +765,28 @@ def dispatch(pool):
                 spawn_async(_dispatch_worker, t["id"], prompt, None, spawn.packet_run_meta(packet))
                 complete(t["id"], "dispatched_at")
             else:
+                # A competing dispatcher owns this task. Its failed claim costs us no
+                # slot; refill from the unvisited queue, respecting the winner's scope.
+                remaining = eligible(pool, [bus.get(task["id"]) for task in visit])
+                if scheduler["mode"] == "active":
+                    lost_ids.append(t["id"])
+                    tasks[t["id"]] = bus.get(t["id"])
+                    result = interference.select_wave(
+                        remaining, running_ids + dispatched_ids + lost_ids, tasks,
+                        capacity=min(slots, wave_limit - len(dispatched_ids)), order=wave_order,
+                        rules={"soft_conflict_policy": scheduler["soft_conflict_policy"]})
+                    selected = result["wave"]
+                    deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
+                                else "predicted_interference" for item in result["deferred"]}
+                    wave_row["deferred"] = result["deferred"]
+                    ranks = {tid: index for index, tid in enumerate(selected)}
+                    visit.sort(key=lambda task: ranks.get(task["id"], len(ranks)))
+                else:
+                    selected = _first_come_order(remaining, slots)
                 continue
         elif verdict == "request_changes":
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
+                entry["reason"] = "spec_review_changes"
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
         elif not any(r["inputs"][:1] == [t["id"]] for r in bus.read(role="spec_review")):
             if stamp(t["id"], "spec_review_at"):
@@ -637,10 +794,25 @@ def dispatch(pool):
                     sr = bus.create_task(f"spec review: {t['title']}", t["spec"], t["acceptance"], t["scope"],
                                          role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
                                          complexity=t["complexity"], tier=SPEC_REVIEW_TIER)
+                    entry.update(action="spec_review", reason="spec_review_pending")
                     spawn_async(spawn.run_worker, sr["id"])
                     complete(t["id"], "spec_review_at")
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
+        else:
+            entry["reason"] = "spec_review_pending"
+    if wave_row is not None:
+        if scheduler["mode"] == "active":
+            wave_row["wave"] = dispatched_ids
+            wave_row["predicted"] = interference.pairwise([tasks[i] for i in dispatched_ids])
+        schedlog.append("waves", wave_row)
+    held_ids = {t["id"] for t in retry_held}
+    for entry in row["considered"]:
+        if entry["task"] in held_ids and entry["action"] != "dispatched" and entry["task"] not in deferred:
+            entry["reason"] = "budget"
+    if row["considered"]:
+        row["considered"].sort(key=lambda entry: entry["task"])
+        schedlog.append("dispatch", row)
     # Reviews are normally spawned when they are created, so they are not part of the execute loop above.
     # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread
     # that vanished before bus.claim.  The per-requeue stamp prevents every daemon tick spawning another copy.
@@ -875,6 +1047,80 @@ def _open_reviews(t, n_reviews, review_reason):
     return existing
 
 
+def stale_check(task):
+    """Return deterministic stale-work evidence without changing pipeline state."""
+    worktree = task.get("worktree")
+    task_ref = task.get("branch") or f"task/{task['id']}"
+    goal_ref = f"goal/{task['parent']}" if task.get("parent") else "main"
+    head = _git_in(worktree, "rev-parse", goal_ref)
+    goal_head = head.stdout.strip() if head.returncode == 0 else goal_ref
+    result = {"base": task_ref, "goal_head": goal_head, "moved_count": 0,
+              "stale_paths": [], "risk": "unknown"}
+    try:
+        moved = gitutil.moved_paths(task_ref, goal_ref, cwd=worktree)
+    except gitutil.GitError:
+        return result
+    changed = changed_paths(task) or []
+    surface = list(task.get("scope") or []) + changed
+    stale_paths = sorted(path for path in moved
+                         if any(path == pattern or fnmatch.fnmatch(path, pattern) for pattern in surface))
+    risk = "none" if not stale_paths else ("high" if any(path in changed for path in stale_paths) else "low")
+    return {"base": task_ref, "goal_head": goal_head, "moved_count": len(moved),
+            "stale_paths": stale_paths, "risk": risk}
+
+
+def _record_stale_check(task):
+    """Record one stale check per task head and return the stamped evidence."""
+    worktree = task["worktree"]
+    head_result = _git_in(worktree, "rev-parse", "HEAD")
+    head = head_result.stdout.strip() if head_result.returncode == 0 else "unknown"
+    current = bus.get(task["id"])
+    prior = (current.get("pipeline") or {}).get("stale_check") or {}
+    if prior.get("head") == head:
+        return prior, False
+    try:
+        evidence = stale_check(current)
+    except Exception:
+        task_ref = current.get("branch") or f"task/{current['id']}"
+        goal_ref = f"goal/{current['parent']}" if current.get("parent") else "main"
+        goal = _git_in(worktree, "rev-parse", goal_ref)
+        evidence = {"base": task_ref, "goal_head": goal.stdout.strip() if goal.returncode == 0 else goal_ref,
+                    "moved_count": 0, "stale_paths": [], "risk": "unknown"}
+    stamped = {**evidence, "checked_at": time.time(), "head": head}
+    pipeline = dict(current.get("pipeline") or {})
+    pipeline["stale_check"] = stamped
+    bus.update(task["id"], pipeline=pipeline)
+    schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
+                              "action": "recorded"})
+    return stamped, True
+
+
+def _stale_rebase(task, evidence):
+    """Rebase high-risk work, returning True when gate processing must stop."""
+    goal_ref = f"goal/{task['parent']}" if task.get("parent") else "main"
+    rebased = _git_in(task["worktree"], "rebase", goal_ref)
+    if rebased.returncode:
+        conflicts = _git_in(task["worktree"], "diff", "--name-only", "--diff-filter=U")
+        conflict_paths = sorted(path for path in conflicts.stdout.splitlines() if path)
+        _git_in(task["worktree"], "rebase", "--abort")
+        clear_stage(task["id"], "gated_at", status="held", hold_reason="stale_rebase_conflict",
+                    resume_hint={"conflicts": conflict_paths, "goal_head": evidence["goal_head"]})
+        schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
+                                  "action": "rebase_conflict"})
+        return True
+    new_head = _git_in(task["worktree"], "rev-parse", "HEAD").stdout.strip()
+    current = bus.get(task["id"])
+    pipeline = dict(current.get("pipeline") or {})
+    checked = dict(pipeline.get("stale_check") or {})
+    checked["rebased_to"] = new_head
+    pipeline["stale_check"] = checked
+    bus.update(task["id"], pipeline=pipeline)
+    clear_stage(task["id"], "gated_at")
+    schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
+                              "action": "rebased"})
+    return True
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
@@ -918,7 +1164,11 @@ def gate(pool):
                 continue
             missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
             if missing:
-                failures = [f"FAILED {path}::{name} (missing: test not defined)" for path, name in missing]
+                failures = [
+                    f"FAILED {path}::{name} (missing: "
+                    f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
+                    for entry in missing for path, name in [entry]
+                ]
                 gate_reds = pipeline.get("gate_reds", 0) + 1
                 if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
                          status="held", hold_reason="gate_red",
@@ -947,6 +1197,10 @@ def gate(pool):
                 root_pipeline["lineage_fix_rounds"] = root_pipeline.get("lineage_fix_rounds", 0) + 1
                 bus.update(lineage_root["id"], pipeline=root_pipeline)
         try:
+            evidence, _ = _record_stale_check(t)
+            if _load_scheduler_cfg(pool)["stale_rebase"] and evidence["risk"] == "high":
+                if _stale_rebase(t, evidence):
+                    continue
             if n_reviews == 0:
                 report_merge(t["id"], merge.merge(t["id"]))
             else:
@@ -1028,6 +1282,8 @@ def merge_reviewed(pool):
 def _merge_reviewed_one(t):
     if stale(t):
         return
+    if already_merged(t):
+        return
     all_reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
     pipeline = dict(t.get("pipeline") or {})
     reviewed_sha = pipeline.get("reviewed_sha")
@@ -1043,8 +1299,6 @@ def _merge_reviewed_one(t):
     reviews = [r for r in all_reviews if not reviewed_sha or r.get("reviewed_sha") == reviewed_sha]
     if not reviews:
         return  # gate() creates them; nothing to act on yet
-    if already_merged(t):
-        return
     single = len(reviews) == 1
     approved, rejected, pending, stuck, unknown = [], [], [], [], []
     for r in reviews:

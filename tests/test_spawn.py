@@ -24,6 +24,22 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_review_completion_keeps_reviewed_sha(self):
+        reviewed = bus.create_task("review sha target", "s", ["a"], ["sha.py"], role="execute")
+        review = bus.create_task("review sha", "s", ["a"], ["sha.py"], role="review",
+                                 inputs=[reviewed["id"]])
+        bus.update(review["id"], reviewed_sha="stamped-sha")
+        (TMP / "wt" / review["id"]).mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(spawn, "run_claude", return_value={"status": "done", "output": {
+                    "result": json.dumps({"verdict": "approve", "comments": []}), "usage": {}}}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP / "wt" / review["id"]):
+            spawn.run_worker(review["id"])
+
+        updated = bus.get(review["id"])
+        self.assertEqual(updated["reviewed_sha"], "stamped-sha")
+        self.assertEqual(updated["review_facts"]["reviewed_sha"], "stamped-sha")
+
     def test_review_run_row_and_task_carry_review_facts(self):
         reviewed = bus.create_task("review facts target", "s", ["a"], ["facts.py"], role="execute")
         bus.update(reviewed["id"], pipeline={"reviews_expected": 1})

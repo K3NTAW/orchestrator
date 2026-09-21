@@ -139,6 +139,8 @@ def main():
     sc.add_argument("--economics", action="store_true")
     sc.add_argument("--routing", action="store_true")
     sc.add_argument("--reviews", action="store_true")
+    sc.add_argument("--parallelism", action="store_true")
+    sc.add_argument("--goal")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -164,17 +166,22 @@ def main():
     blcompare.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
-        if sum((a.economics, a.efficiency, a.routing, a.reviews)) > 1:
-            ap.error("choose one of --economics, --efficiency, --routing, --reviews")
+        if sum((a.economics, a.efficiency, a.routing, a.reviews, a.parallelism)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
             "--efficiency": ("goal", "executor", "band", "class", "role"),
             "--economics": ("executor", "band", "class"),
             "--routing": (),
+            "--parallelism": (),
             "--reviews": ("role", "packet_version", "tier", "band", "reviewed_executor"),
         }
-        mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews")
+        mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism")
                      if getattr(a, name)), "default")
+        if a.goal is not None and not a.parallelism:
+            ap.error("--goal requires --parallelism")
+        if a.parallelism and a.planner:
+            ap.error("--parallelism conflicts with --planner")
         allowed = groupings[mode]
         if a.by is not None and a.by not in allowed:
             choices = "|".join(allowed) if allowed else "none (omit --by)"
@@ -281,7 +288,10 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.reviews:
+        if a.parallelism:
+            card = scorecard.parallelism(root=scorecard.STATE, goal=a.goal)
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_parallelism(card))
+        elif a.reviews:
             card = scorecard.review_quality(root=scorecard.STATE, by=a.by or "role")
             print(json.dumps(card, indent=1) if a.json else scorecard.format_review_quality(card))
         elif a.routing:
