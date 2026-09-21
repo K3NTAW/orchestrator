@@ -367,3 +367,14 @@ type: gotcha · goal: T-0674 · tasks: T-0751,T-0753,T-0754 · provenance: repo
 - B2 v3 approved at d05749e; B3 landed planner_runs.py changes; rebase onto goal/T-0674 changed the diff hash; merge returned rebase_changed_diff and the daemon held the task with hold_reason merge rebase_changed_diff
 - recovery: create a review task (inputs [task]) and spawn_review it on the already-rebased worktree head, then merge(task) after approve; merge compares before/after diff hashes on the (now no-op) rebase and proceeds
 outcome: backlog c3: daemon respawns a review automatically on rebase_changed_diff instead of holding
+
+## 2026-09-21 daemon --once cannot dispatch: the executor thread dies with the process and the dispatched_at stamp then blocks every retry
+type: gotcha · goal: T-0755 · tasks: T-0015 · provenance: repo
+- kgpt T-0015 2026-09-21 18:51: a loop of orchestrator daemon --once stamped pipeline.dispatched_at, spawned the Codex thread, and exited; the task stayed queued with no worker and later passes no-oped on the stamp. Gate and merge stages are synchronous and work under --once.
+outcome: remedy: daemon.clear_stage(tid, 'dispatched_at', status='queued', pid=None) then a long-lived orchestrator daemon (background Bash, 10 min cap, re-arm) or the MCP-hosted daemon
+
+## 2026-09-21 orchestrator goal start: headless Planners on account B died with 'You are out of usage credits'; the goal record stays running=exited with no PR and the daemon that hosted their worktrees dies with them
+type: gotcha · goal: T-0755 · provenance: repo
+- 2026-09-21 18:43 both kgpt T-0014 and kgpt-ios T-0006 Planners exited within 5 minutes (kgpt after 17 turns, no child task; kgpt-ios after filing two tasks, one merged). planner log is one JSON line with is_error true. Codex executors are unaffected.
+- kgpt worktree gate gaps found while taking over: .env.test is untracked so database tests skip (419 skips) in wt/, clients/web/node_modules is absent so npm run typecheck fails; fixed in kgpt .orchestrator/tests.sh e200247 (sources the main checkout .env.test, symlinks node_modules)
+outcome: when a headless Planner dies, the interactive Planner can finish from the orchestrator repo: ORCH_ROOT=<repo> uv run --project orchestrator python -c 'from orchestrator import bus, daemon' for bus edits, daemon --once for gate/merge, a long-lived daemon for dispatch; bus.update refuses spec changes, so a round-2 delta is a new task with worktree preset to the old one
