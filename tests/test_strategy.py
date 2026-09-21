@@ -1,10 +1,12 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests import _harness  # noqa: F401 - establishes isolated ORCH_ROOT before orchestrator imports
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _harness  # noqa: F401 - share the suite's single isolated ORCH_ROOT
 from orchestrator import strategy
 
 
