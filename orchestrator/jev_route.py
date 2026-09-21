@@ -219,9 +219,6 @@ def shadow_context(task, pool):
     mode = _routing_cfg(pool).get("mode", "off")
     if mode not in ("shadow", "active"):
         return None
-    if mode == "active" and pool.notification_transition("jev_routing_active", True):
-        from .daemon import notify
-        notify("jev routing active requested; active ranking lands in P5")
     eligible = pool.eligible_executors("execute", task["complexity"], task)
     classification = classify(task, pool, eligible)
     evidence = evidence_for(eligible, task)

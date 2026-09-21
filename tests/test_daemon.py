@@ -52,20 +52,21 @@ class JevRouteDispatch(unittest.TestCase):
         self.assertEqual(row["baseline"], "terra")
         self.assertIn("hypothetical", row); self.assertIn("evidence", row)
 
-    def test_active_mode_behaves_as_shadow_and_notifies_once(self):
+    def test_active_mode_reports_adjustment_without_notifying(self):
         class Pool:
             cfg = {"jev": {"routing": {"mode": "active"}}}
-            def notification_transition(self, key, active):
-                previous = getattr(self, "seen", False); self.seen = True; return not previous
-            def eligible_executors(self, *args): return []
-        pool = Pool(); notices = []
-        with mock.patch.object(daemon, "notify", side_effect=notices.append), \
+            def eligible_executors(self, *args): return [mock.Mock(id="terra")]
+        pool = Pool()
+        with mock.patch.object(daemon, "notify") as notify, \
              mock.patch.object(jev_route, "classify", return_value=None), \
              mock.patch.object(jev_route, "evidence_for", return_value={}):
             first = jev_route.shadow_context(self.task, pool)
             second = jev_route.shadow_context(self.task, pool)
         self.assertEqual((first["mode"], second["mode"]), ("active", "active"))
-        self.assertEqual(notices, ["jev routing active requested; active ranking lands in P5"])
+        for context in (first, second):
+            self.assertIs(context["active"], True)
+            self.assertEqual(context["adjustment"], {"terra": 1.0})
+        notify.assert_not_called()
 
     def test_classification_failure_still_dispatches_baseline(self):
         self.run_worker(None, "sol")
