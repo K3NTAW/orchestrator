@@ -151,23 +151,25 @@ def read_all(root=None, since_ts=None):
 
 
 def explain(subject, kinds=None, root=None):
-    """Return decisions for a subject, newest first, with later outcomes attached."""
+    """Return decisions newest first, assigning outcomes to the latest predecessor."""
     rows, malformed = _read(root)
     wanted = set(kinds) if kinds is not None else None
     decisions = []
-    for index, row in enumerate(rows):
-        if row.get("subject") != subject or row.get("kind") == "outcome":
+    latest = {}
+    # Stable ordering preserves append order when timestamps tie.
+    for row in sorted(rows, key=lambda row: row.get("ts", 0)):
+        if row.get("subject") != subject:
+            continue
+        if row.get("kind") == "outcome":
+            decision = latest.get(row.get("decision_kind"))
+            if decision is not None:
+                decision["outcomes"].append(dict(row))
             continue
         if wanted is not None and row.get("kind") not in wanted:
             continue
         decision = dict(row)
-        decision["outcomes"] = [
-            dict(candidate)
-            for candidate in rows[index + 1 :]
-            if candidate.get("kind") == "outcome"
-            and candidate.get("subject") == subject
-            and candidate.get("decision_kind") == row.get("kind")
-        ]
+        decision["outcomes"] = []
+        latest[row.get("kind")] = decision
         decisions.append(decision)
     decisions.sort(key=lambda row: row.get("ts", 0), reverse=True)
     return ExplainRows(decisions, malformed)

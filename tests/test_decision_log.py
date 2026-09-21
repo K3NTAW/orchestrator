@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from orchestrator import decision_log
 
@@ -44,7 +45,8 @@ class DecisionLogTests(unittest.TestCase):
 
     def test_explain_pairs_decisions_with_later_outcomes(self):
         decision_log.outcome("T-0570", "routing", root=self.tmp, merged=False)
-        decision = self._record()
+        decision_a = self._record()
+        decision_b = self._record(selected="careful", reason="Higher review complexity")
         result = decision_log.outcome(
             "T-0570", "routing", root=self.tmp,
             merged=True, conflict=False, fix_rounds=0, actual_duration_s=12, first_pass=True,
@@ -53,8 +55,23 @@ class DecisionLogTests(unittest.TestCase):
         decision_log.outcome("T-0570", "wave", root=self.tmp, merged=True)
 
         rows = decision_log.explain("T-0570", root=self.tmp)
-        self.assertEqual(rows, [{**decision, "outcomes": [result]}])
+        self.assertEqual(rows, [
+            {**decision_b, "outcomes": [result]},
+            {**decision_a, "outcomes": []},
+        ])
         self.assertEqual(decision_log.explain("T-0570", kinds=["wave"], root=self.tmp), [])
+
+        # Timestamp order, rather than file order, determines the predecessor.
+        decision_a = {**decision_a, "ts": 10}
+        decision_b = {**decision_b, "ts": 30}
+        result = {**result, "ts": 20}
+        with patch.object(decision_log, "_read", return_value=(
+            [decision_b, result, decision_a], 0,
+        )):
+            self.assertEqual(decision_log.explain("T-0570", root=self.tmp), [
+                {**decision_b, "outcomes": []},
+                {**decision_a, "outcomes": [result]},
+            ])
 
     def test_invalid_kind_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "invalid decision kind"):
