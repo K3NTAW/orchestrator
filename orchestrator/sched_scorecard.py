@@ -235,10 +235,10 @@ def task_outcomes(root=STATE):
 
 def _literal_files(task):
     changed = task.get("changed_files")
-    entries = changed if isinstance(changed, list) and changed else task.get("scope", [])
+    entries = changed if isinstance(changed, list) else task.get("scope", [])
     return {str(item).replace("\\", "/") for item in entries
-            if isinstance(item, str) and not item.endswith(("/", "**"))
-            and "*" not in item and "?" not in item}
+            if isinstance(item, str) and item and not item.endswith(("/", "**"))
+            and not any(char in item for char in "*?[")}
 
 
 def build(root=STATE):
@@ -246,7 +246,7 @@ def build(root=STATE):
     pairs = pair_outcomes(root)
     tasks = _tasks(root)
     task_rows = task_outcomes(root)
-    telemetry = {name: _sched_rows(root, name) for name in ("waves", "stale", "dispatch", "decisions")}
+    telemetry = {name: _sched_rows(root, name) for name in ("waves", "stale", "dispatch")}
     malformed = sum(value[1] for value in telemetry.values())
 
     hard = [row for row in pairs if row["level"] == "hard" and row["both_ran_concurrently"]]
@@ -254,9 +254,12 @@ def build(root=STATE):
     none = [row for row in pairs if row["level"] == "none" and row["both_ran_concurrently"]]
     concurrent = [row for row in pairs if row["both_ran_concurrently"]]
     serialized = [row for row in pairs if row["serialized"]]
-    unnecessary = [row for row in serialized
-                   if _literal_files(tasks.get(row["a"], {})).isdisjoint(
-                       _literal_files(tasks.get(row["b"], {})))]
+    determined = []
+    for row in serialized:
+        files_a = _literal_files(tasks.get(row["a"], {}))
+        files_b = _literal_files(tasks.get(row["b"], {}))
+        if files_a and files_b:
+            determined.append(files_a.isdisjoint(files_b))
     errors = [row["error"]["ratio"] for row in task_rows if row["error"] is not None]
     waits = [row["queue_wait_s"] for row in task_rows if row["queue_wait_s"] is not None]
 
@@ -282,8 +285,9 @@ def build(root=STATE):
         "soft_conflict_usefulness": (rate(soft, "actual_conflict") - rate(none, "actual_conflict")
                                      if soft and none else None),
         "soft_conflict_usefulness_n": len(soft) + len(none) if soft and none else 0,
-        "unnecessary_serialization": len(unnecessary) / len(serialized) if serialized else None,
-        "unnecessary_serialization_n": len(serialized),
+        "unnecessary_serialization": sum(determined) / len(determined) if determined else None,
+        "unnecessary_serialization_n": len(determined),
+        "serialization_undetermined": len(serialized) - len(determined),
         "conflict_rate": rate(concurrent, "actual_conflict"),
         "conflict_rate_n": len(concurrent),
         "stale_work_rate": rate(pairs, "stale_event"),
@@ -319,7 +323,8 @@ def format(card):
         value = card.get(name)
         rendered = "—" if value is None else json.dumps(value, sort_keys=True)
         lines.append(f"{name:<29}  {rendered}  {card.get(name + '_n', 0)}")
-    lines.extend((f"n_waves                       {card.get('n_waves', 0)}  {card.get('n_waves', 0)}",
+    lines.extend((f"serialization_undetermined     {card.get('serialization_undetermined', 0)}  {card.get('serialization_undetermined', 0)}",
+                  f"n_waves                       {card.get('n_waves', 0)}  {card.get('n_waves', 0)}",
                   f"n_pairs                       {card.get('n_pairs', 0)}  {card.get('n_pairs', 0)}",
                   f"malformed                     {card.get('malformed', 0)}  {card.get('malformed', 0)}"))
     return "\n".join(lines)

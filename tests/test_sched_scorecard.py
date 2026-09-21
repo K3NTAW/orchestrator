@@ -64,6 +64,44 @@ class SchedScorecard(unittest.TestCase):
         self.assertEqual(card["unnecessary_serialization"], 1.0)
         self.assertEqual(card["unnecessary_serialization_n"], 1)
 
+    def test_unnecessary_serialization_ignores_pairs_without_literal_files(self):
+        self.task("A", changed_files=["one.py"])
+        self.task("glob", scope=["src/*.py"])
+        self.task("empty", changed_files=[])
+        unknown = ["glob", "empty", "missing"]
+
+        def wave(partners):
+            self.rows("waves", {
+                "predicted": [{"a": "A", "b": partner, "level": "soft"}
+                              for partner in partners],
+                "deferred": [{"a": "A", "b": partner, "reason": "soft:same_dir"}
+                             for partner in partners],
+            })
+
+        wave(unknown)
+        card = sched_scorecard.build(self.root)
+        self.assertIsNone(card["unnecessary_serialization"])
+        self.assertEqual(card["unnecessary_serialization_n"], 0)
+        self.assertEqual(card["serialization_undetermined"], 3)
+
+        self.task("disjoint", changed_files=["two.py"])
+        self.task("overlap", changed_files=["one.py"])
+        wave(unknown + ["disjoint", "overlap"])
+        card = sched_scorecard.build(self.root)
+        self.assertEqual(card["unnecessary_serialization"], 0.5)
+        self.assertEqual(card["unnecessary_serialization_n"], 2)
+        self.assertEqual(card["serialization_undetermined"], 3)
+        self.assertIn("serialization_undetermined", sched_scorecard.format(card))
+
+    def test_decisions_stream_is_not_read(self):
+        from unittest.mock import patch
+
+        with patch.object(sched_scorecard.schedlog, "read_with_malformed",
+                          return_value=([], 0)) as read:
+            sched_scorecard.build(self.root)
+        self.assertEqual({call.args[0] for call in read.call_args_list},
+                         {"waves", "stale", "dispatch"})
+
 
 if __name__ == "__main__":
     unittest.main()
