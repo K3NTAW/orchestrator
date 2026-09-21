@@ -1,3 +1,4 @@
+import _harness
 """Pure routing policy coverage, runnable with the repository's unittest gate."""
 
 from copy import deepcopy
@@ -25,6 +26,13 @@ class DecisionTests(unittest.TestCase):
             "security_trigger": False, "semantic_trigger": False,
             "all_children_merged": True, "gate_state": "green", "reruns": 1,
         }
+
+    def test_retrospective_and_unchanged_state_routes(self):
+        retrospective = route(point("retrospective"), self.ctx)
+        self.assertEqual((retrospective.name, retrospective.reason),
+                         ("routine", "retrospective_deterministic"))
+        unchanged = route(point("held"), dict(self.ctx, state_unchanged=True))
+        self.assertEqual((unchanged.name, unchanged.reason), ("none", "unchanged_state"))
 
     def test_infra_failure_routes_to_hold_without_model(self):
         for kind in ("held", "scouts_done", "closable"):

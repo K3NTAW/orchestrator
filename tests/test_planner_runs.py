@@ -1035,7 +1035,7 @@ class RoutedDecisions(PlannerRunsBase):
         super().setUp()
         from unittest.mock import patch
         self.pool = P.Pool()
-        self.pool.cfg["planner"] = {"autonomous": True, "routes": {"enabled": True}}
+        self.pool.cfg["planner"] = {"autonomous": True, "routes": {"enabled": True}, "routing": {"mode": "off"}}
         self.pool.cfg["review"] = {"security_paths": [], "semantic_paths": [], "semantic_patterns": {}}
         self.pool.cfg["daemon"] = {"auto_fix_rounds": 2, "flaky_rerun_max": 0, "close_retry_s": 0, "close_max_attempts": 3}
         self.launches = []

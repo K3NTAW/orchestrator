@@ -19,11 +19,13 @@ last_state_version and cursor. Equal child-state versions cannot launch again;
 infra failures restore the previous guard and cursor. Legacy list ledgers remain
 readable and per-point APIs retain their original blocking semantics.
 """
+import dataclasses, random
 import fnmatch, hashlib, json, os, re, subprocess, sys, tempfile, time, tomllib, uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from . import ROOT, STATE, bus, goals, handover, jev, spawn, decision, failures, gitutil, notify
+from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner
 from .pool import Pool
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
@@ -300,7 +302,9 @@ def _claim(goal_id, kind, payload_key, attempts, route=None):
              cheaper_steps=list(route.cheaper_steps) if route is not None else [],
              decision_requested={"held": "write or approve a fix round", "scouts_done": "write specs",
                                  "closable": "close the goal"}.get(kind, "make the requested decision"))
-    for field in ("usage_logged", "tokens", "usd", "session_id"):
+    for field in ("usage_logged", "tokens", "usd", "session_id", "telemetry_before",
+                  "materiality_logged", "materiality", "shadow_logged", "shadow_log",
+                  "shadow_pid", "shadow_pid_start", "shadow_agreement"):
         r.pop(field, None)
     _save_records(records)
 
@@ -611,6 +615,12 @@ def _record_decision_usage(r):
                     "route_reason": r.get("reason"), "decision_kind": r["kind"],
                     "attempt": r.get("attempts", 0) + 1, "started_at": r.get("started_at"),
                     "session_id": output.get("session_id")})
+    if r.get("launch_id"):
+        planner_telemetry.record_usage(
+            r["launch_id"], **_usage_buckets(normalized), usd=usd,
+            latency_s=time.time() - r.get("launch_started_at", r.get("started_at", time.time())),
+            outcome="error" if output.get("is_error") else "done",
+            session_id=output.get("session_id"), root=STATE)
     r["tokens"] = tokens
     r["usd"] = usd
     r["usage_logged"] = True
@@ -685,6 +695,26 @@ def _observed_outcome(r, tasks_by_id):
     return None
 
 
+def _score_shadow(r, records, now):
+    if not r.get("shadow_log") or r.get("shadow_logged") or not r.get("materiality_logged"):
+        return False
+    if goals.identity_of(r.get("shadow_pid"), r.get("shadow_pid_start")):
+        return False
+    sibling = next((other for other in records if other.get("launch_id") == r.get("launch_id")
+                    and other.get("shadow_logged")), None)
+    if sibling:
+        r["shadow_agreement"] = sibling["shadow_agreement"]
+    else:
+        row = planner_shadow.record(
+            launch_id=r["launch_id"], goal_id=r["goal_id"], decision_type=r["decision_type"],
+            state_version=r["state_version"], model=r["shadow_model"], tier=r["shadow_tier"],
+            started_at=r["shadow_started_at"], parsed=planner_shadow.parse(r["shadow_log"]),
+            latency_s=now - r["shadow_started_at"], root=STATE)
+        r["shadow_agreement"] = planner_shadow.score(row, r.get("materiality"))
+    r["shadow_logged"] = True
+    return True
+
+
 def reconcile():
     """For each running record whose process is gone: exited_ok if the decision's own condition already resolved
     (someone else, or a prior attempt, finished it), else exited_early with attempts += 1 -- gave_up (and one
@@ -712,6 +742,8 @@ def reconcile():
         records = _load_records()
         changed = False
         for r in records:
+            if r.get("materiality_logged") and _score_shadow(r, records, now):
+                changed = True
             if r.get("status") == "claimed" and r.get("pid") is None:
                 if now - r.get("started_at", 0) <= _STALE_CLAIM_S:
                     continue
@@ -729,6 +761,14 @@ def reconcile():
             if goals.identity_of(r.get("pid"), r.get("pid_start")):
                 continue
             changed = True
+            if r.get("telemetry_before") is not None and not r.get("materiality_logged"):
+                sibling = next((other for other in records if other.get("launch_id") == r.get("launch_id")
+                                and other.get("materiality_logged")), None)
+                r["materiality"] = sibling["materiality"] if sibling else planner_telemetry.record_materiality(
+                    r["launch_id"], r["telemetry_before"],
+                    planner_telemetry.snapshot(r["goal_id"], root=STATE), root=STATE)
+                r["materiality_logged"] = True
+            _score_shadow(r, records, now)
             if _reconcile_infra(r, records):
                 continue
             if not any(other is not r and other.get("launch_id") == r.get("launch_id")
@@ -1063,7 +1103,7 @@ def build_ctx(point, pool=None):
 def grouped_packet(sections):
     """Preserve one bounded evidence section for every covered point."""
     result = []
-    for point, ctx, route in sections:
+    for point, ctx, route, classification in sections:
         goal_id, kind, key = point["goal_id"], point["kind"], point["payload_key"]
         result.append(f"Section: {kind}")
         result.extend(_fenced("Route and reason", f"{route.name}: {route.reason}"))
@@ -1091,22 +1131,7 @@ def launch_routed(pool, route, prompt, account, budget, log):
     """Use the selected model without changing global config or the legacy launcher."""
     tier = route.tier or "fable"
     model = pool.cfg.get("models", {}).get("planner" if tier == "fable" else tier, tier)
-    if model == pool.cfg.get("models", {}).get("planner"):
-        return goals.launch_planner(ROOT, prompt, account.id, budget, log)
-    goals.trust_workspace(account.config_dir, ROOT)
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(account.config_dir), "ORCH_ROOT": str(ROOT)}
-    if account.oauth_token_env and os.environ.get(account.oauth_token_env):
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[account.oauth_token_env]
-    env.update(goals.resolve_secrets(goals._filter_target_secrets(pool.cfg.get("secrets", {}).get("planner", {}))))
-    system_prompt = (ROOT / ".orchestrator" / "prompts" / "planner.md").read_text()
-    argv = ["claude", "-p", prompt, "--model", model, "--output-format", "json",
-            "--max-budget-usd", str(budget), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
-            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]
-    log.parent.mkdir(parents=True, exist_ok=True)
-    stderr = log.with_suffix(log.suffix + ".stderr")
-    with log.open("w") as out, stderr.open("w") as err:
-        proc = goals.Popen(argv, cwd=str(ROOT), env=env, stdout=out, stderr=err, start_new_session=True)
-    return {"pid": proc.pid, "pid_start": goals._proc_start(proc.pid), "log": str(log), "stderr_log": str(stderr)}
+    return goals.launch_planner(ROOT, prompt, account.id, budget, log, model=model)
 
 
 def _cool_infra(pool, account_id, kind, goal_id):
@@ -1155,32 +1180,51 @@ def _reconcile_infra(record, records):
     return True
 
 
+def _telemetry_skip(point, event, reason):
+    planner_telemetry.record_skip(goal_id=point["goal_id"], event=event, reason=reason,
+                                  kind=point["kind"], payload_key=point["payload_key"], root=STATE)
+
+
+def _class_evidence(model, classification, pool):
+    evidence = {}
+    try:
+        from . import planner_scorecard
+        evidence = planner_scorecard.class_evidence(
+            model, classification["decision_type"], classification["band"],
+            classification["task_class"], classification["architectural"], root=STATE, cfg=pool.cfg)
+    except Exception:
+        pass
+    return {"n": int(evidence.get("n") or 0), "noninferior": evidence.get("noninferior"),
+            "reescalation_rate": float(evidence.get("reescalation_rate") or 0.0)}
+
+
 def run_group(sections, pool):
     goal_id = sections[0][0]["goal_id"]
-    route = max((section[2] for section in sections), key=lambda r: {"investigate": 1, "escalate": 2}[r.name])
+    def skip(reason, selected=None):
+        for point, _, _, _ in sections if selected is None else selected:
+            _telemetry_skip(point, "run_group", reason)
+
     with bus.locked():
         version = state_version(goal_id)
         guards = _goal_launches()
         previous = guards.get(goal_id)
         if previous and previous.get("last_state_version") == version:
+            skip("same_state_version")
             return {"launched": False, "reason": "same state_version"}
         records = _load_records()
         if any(r["goal_id"] == goal_id and r.get("status") in ("claimed", "running") for r in records):
+            skip("goal_launch_active")
             return {"launched": False, "reason": "goal launch active"}
+        skip("already_decided", [s for s in sections if _blocked(goal_id, s[0]["kind"], s[0]["payload_key"], records)])
         sections = [s for s in sections if not _blocked(goal_id, s[0]["kind"], s[0]["payload_key"], records)]
         if not sections:
             return {"launched": False, "reason": "already decided"}
         launch_id, cursor = uuid.uuid4().hex, _cursor()
-        for point, ctx, section_route in sections:
-            key, kind = point["payload_key"], point["kind"]
-            _claim(goal_id, kind, key, _existing_attempts(goal_id, kind, key), section_route)
-        records = _load_records()
-        for point, ctx, section_route in sections:
-            record = _find_record(records, goal_id, point["kind"], point["payload_key"])
-            record.update(launch_id=launch_id, state_version=version, cursor_at_launch=cursor,
-                          previous_goal_launch=previous, launch_route=route.name, tier=route.tier,
-                          exception=route.name == "escalate" and ctx["premium_launches"] >= ctx["routes"].get("premium_launches_soft_per_goal", 2))
-        _save_records(records)
+        sections = sorted(sections, key=lambda s: (
+            -{"investigate": 1, "escalate": 2}[s[2].name],
+            -planner_router.effective_complexity(s[3], s[1]), str(s[0]["payload_key"])))
+        leader, ctx, route, classification = sections[0]
+        ctx = dict(ctx, state_version=version)
     account = None
     try:
         reason = "planner session attached" if _session_attached() else None
@@ -1188,16 +1232,110 @@ def run_group(sections, pool):
             account = pool.pick("planner")
             reason = "no account with headroom" if account is None else None
         if reason:
-            for point, _, _ in sections:
+            for point, _, _, _ in sections:
                 _record_skip(goal_id, point["kind"], point["payload_key"], reason)
+                _telemetry_skip(point, "run_group", "planner_session_attached" if _session_attached() else "no_account_headroom")
             return {"launched": False, "reason": reason}
-        if not all(_SAFE_KEY.fullmatch(str(p[k])) for p, _, _ in sections for k in ("goal_id", "kind", "payload_key")):
+        rcfg = planner_router.load_cfg(pool.cfg)
+        models = pool.cfg.get("models", {})
+        availability = {}
+        for tier in (rcfg["default_tier"], rcfg["escalation_tier"]):
+            configured = bool(models.get("planner" if tier == "fable" else tier))
+            availability[tier] = {"available": configured and account is not None,
+                                  "reason": "ok" if configured else "model_not_configured"}
+        headroom = (1 - (account.day_tokens + account.planner_day_tokens) / account.daily_budget
+                    if account.daily_budget else None)
+        availability["fable_reserve_ok"] = planner_router.fable_reserve_ok(headroom, rcfg)
+        evidence = _class_evidence(models.get("planner" if rcfg["default_tier"] == "fable"
+                                              else rcfg["default_tier"]), classification, pool)
+        history = [row for row in planner_telemetry.read_invocations(root=STATE)
+                   if row.get("goal_id") == goal_id]
+        latest = max(history, key=lambda row: row.get("started_at") or 0, default={})
+        used, cap = ctx.get("auto_fix_rounds_used"), ctx.get("auto_fix_rounds")
+        if latest.get("tier") == rcfg["default_tier"] and (
+                classification["decision_type"] == "architectural_replan"
+                or (ctx.get("spec_review_request_changes") or 0) >= rcfg["hard_spec_review_request_changes_min"]
+                or (type(used) is int and type(cap) is int and used >= cap)):
+            ctx["reescalation"] = True
+        hard = planner_router.hard_escalation(classification, ctx, route, rcfg)
+        signal = None
+        if jev_planner.should_ask(rcfg["mode"], rcfg["jev_mode"], hard, availability, route.name)[0]:
+            signal = jev_planner.ask(
+                classification, ctx, bus.get(goal_id), cfg=rcfg, router_mode=rcfg["mode"],
+                hard_reasons=hard, availability=availability, route=route.name,
+                state_version=version, task=_decision_task(goal_id, leader["kind"], leader["payload_key"])
+                if leader["kind"] == "held" else None, ask_fn=jev.ask, root=STATE)
+        sample = random.random()
+        routed = planner_router.decide(classification, ctx, route, cfg=rcfg,
+                                       availability=availability, evidence=evidence,
+                                       jev_signal=signal, sample=sample)
+        planner_router.record(routed, subject=goal_id, route=route, jev_signal=signal, root=STATE)
+        with bus.locked():
+            records = _load_records()
+            # Recheck after policy evaluation so concurrent ticks cannot both claim.
+            guard = _goal_launches().get(goal_id) or {}
+            if guard.get("last_state_version") == version:
+                skip("same_state_version")
+                return {"launched": False, "reason": "same state_version"}
+            if any(r["goal_id"] == goal_id and r.get("status") in ("claimed", "running") for r in records):
+                skip("goal_launch_active")
+                return {"launched": False, "reason": "goal launch active"}
+            if routed.hold:
+                for point, _, _, _ in sections:
+                    r = _find_record(records, goal_id, point["kind"], point["payload_key"])
+                    if r is None:
+                        r = dict(point, attempts=0)
+                        records.append(r)
+                    r.update(status="held_for_fable", hold_reason=routed.hold_reason)
+                _save_records(records)
+                notify.notify_once(goal_id, f"held_for_fable:{launch_id}",
+                                   f"{goal_id}: {routed.hold_reason}")
+                return {"launched": False, "reason": routed.hold_reason}
+            for point, section_ctx, section_route, _ in sections:
+                _claim(goal_id, point["kind"], point["payload_key"],
+                       _existing_attempts(goal_id, point["kind"], point["payload_key"]), section_route)
+            records = _load_records()
+            for point, section_ctx, _, _ in sections:
+                r = _find_record(records, goal_id, point["kind"], point["payload_key"])
+                r.update(launch_id=launch_id, state_version=version, cursor_at_launch=cursor,
+                         previous_goal_launch=previous, launch_route=route.name, tier=routed.tier,
+                         exception=route.name == "escalate" and section_ctx["premium_launches"] >=
+                         section_ctx["routes"].get("premium_launches_soft_per_goal", 2))
+            _save_records(records)
+        if not all(_SAFE_KEY.fullmatch(str(p[k])) for p, _, _, _ in sections for k in ("goal_id", "kind", "payload_key")):
             raise ValueError("unsafe decision key")
         handover.write("goal decision")
         prompt = spawn.render("planner-decision", packet=grouped_packet(sections))
         log = STATE / "runs" / f"planner-decision-{goal_id}-{launch_id}.log"
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
-        launched = launch_routed(pool, route, prompt, account, budget, log)
+        before = planner_telemetry.snapshot(goal_id, root=STATE)
+        now = time.time()
+        launched = launch_routed(pool, dataclasses.replace(route, tier=routed.tier), prompt, account, budget, log)
+        model = models.get("planner" if routed.tier == "fable" else routed.tier, routed.tier)
+        planner_telemetry.record_launch(
+            launch_id=launch_id, goal_id=goal_id, event="tick",
+            decision_type=classification["decision_type"], kind=leader["kind"],
+            payload_keys=[p["payload_key"].split(":")[0] if p["kind"] == "held"
+                          else p["payload_key"] for p, _, _, _ in sections],
+            model=model, tier=routed.tier, account=account.id, complexity=ctx.get("complexity"),
+            band=classification["band"], task_class=classification["task_class"],
+            architectural=classification["architectural"], route=route.name, route_reason=route.reason,
+            mode=rcfg["mode"], state_version=version, packet_chars=len(prompt), started_at=now,
+            reescalation=bool(ctx.get("reescalation")), root=STATE)
+        shadow_fields = {}
+        if planner_shadow.eligible(routed, rcfg, sample=sample)[0]:
+            try:
+                shadow_account = next(a for a in pool.cfg["claude_accounts"] if a["id"] == account.id)
+                shadow = planner_shadow.launch(
+                    prompt, model=models[routed.shadow_tier], account=shadow_account,
+                    budget_usd=pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_shadow", 1.5),
+                    log=STATE / "runs" / f"planner-shadow-{goal_id}-{launch_id}.log", root=ROOT)
+                if shadow is not None:
+                    shadow_fields = dict(shadow_pid=shadow["pid"], shadow_pid_start=goals._proc_start(shadow["pid"]),
+                                         shadow_log=shadow["log"], shadow_started_at=time.time(),
+                                         shadow_tier=routed.shadow_tier, shadow_model=models[routed.shadow_tier])
+            except Exception as exc:
+                print(f"[planner_runs] shadow launch failed: {exc}", file=sys.stderr)
         infra = _infra_kind(launched.get("stderr") or launched.get("error"))
         if infra:
             raise RuntimeError(infra)
@@ -1207,11 +1345,11 @@ def run_group(sections, pool):
             _cool_infra(pool, account.id if account else None, infra, goal_id)
             with bus.locked():
                 records = _load_records()
-                for point, _, _ in sections:
+                for point, _, _, _ in sections:
                     _find_record(records, goal_id, point["kind"], point["payload_key"]).update(status="infra_failure", infra_failure_kind=infra)
                 _save_records(records)
         else:
-            for point, _, _ in sections:
+            for point, _, _, _ in sections:
                 attempts = _existing_attempts(goal_id, point["kind"], point["payload_key"])
                 status, attempts = _record_failed_launch(goal_id, point["kind"], point["payload_key"], attempts, exc)
                 if status == "gave_up":
@@ -1221,11 +1359,13 @@ def run_group(sections, pool):
         return {"launched": False, "reason": infra or "failed_launch"}
     with bus.locked():
         records = _load_records()
-        for point, _, _ in sections:
+        for point, _, _, _ in sections:
             r = _find_record(records, goal_id, point["kind"], point["payload_key"])
             r.update(status="running", pid=launched["pid"], pid_start=launched["pid_start"],
                      log=launched["log"], stderr_log=launched.get("stderr_log"), account=account.id,
-                     prompt_hash=hashlib.sha256(prompt.encode()).hexdigest()[:12])
+                     prompt_hash=hashlib.sha256(prompt.encode()).hexdigest()[:12],
+                     telemetry_before=before, launch_started_at=now,
+                     decision_type=classification["decision_type"], **shadow_fields)
             r.setdefault("launches", []).append({k: v for k, v in r.items() if k != "launches"})
         guards = _goal_launches()
         guards[goal_id] = {"last_state_version": version, "cursor": cursor, "launch_id": launch_id}
@@ -1344,9 +1484,17 @@ def tick(pool=None):
         point = _point(raw)
         if point["kind"] == "held" and any(t.get("status") != "failed" and
                 (t.get("constraints") or {}).get("fix_round_for") == point["task_id"] for t in bus.read()):
+            _telemetry_skip(point, "tick", "fix_round_in_flight")
             continue
         ctx = build_ctx(point, pool)
+        goal = bus.get(point["goal_id"])
+        task = _decision_task(point["goal_id"], point["kind"], point["payload_key"])
+        ctx["complexity"] = (task if point["kind"] == "held" else goal).get("complexity")
+        ctx["state_version"] = state_version(point["goal_id"])
+        ctx["state_unchanged"] = (_goal_launches().get(point["goal_id"]) or {}).get("last_state_version") == ctx["state_version"]
+        classification = planner_taxonomy.classify(point, ctx, goal=goal, task=task)
         if point["kind"] == "closable" and ctx["gate_state"] == "unknown":
+            _telemetry_skip(point, "tick", "unknown_gate")
             print(f"[planner_runs] {point['goal_id']}: unknown goal gate; skipping tick", file=sys.stderr)
             continue
         route = decision.route(point, ctx)
@@ -1358,10 +1506,11 @@ def tick(pool=None):
             else:
                 routine_close(point, ctx, pool)
         if route.name in ("none", "routine"):
+            _telemetry_skip(point, "tick", "routine" if route.name == "routine" else f"none:{route.reason}")
             continue
         if not enabled:
             run(point["goal_id"], point["kind"], point["payload_key"], route, routed=True)
         else:
-            groups.setdefault(point["goal_id"], []).append((point, ctx, route))
+            groups.setdefault(point["goal_id"], []).append((point, ctx, route, classification))
     for sections in groups.values():
         run_group(sections, pool)

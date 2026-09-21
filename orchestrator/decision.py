@@ -91,7 +91,12 @@ def route(point: dict, ctx: dict) -> Route:
     if "infra_failure_kind" not in ctx or ctx["infra_failure_kind"] is not None:
         return result("escalate", "unknown:infra_failure_kind")
 
+    if ctx.get("state_unchanged") is True:
+        return result("none", "unchanged_state")
+
     kind = point.get("kind")
+    if kind == "retrospective":
+        return result("routine", "retrospective_deterministic")
     if kind == "held":
         required = {
             "failing_ids": (list,), "in_scope_review_comments": (bool,),
