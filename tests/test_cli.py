@@ -11,6 +11,23 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_cli_roadmap_status_writes_json(self):
+        with tempfile.TemporaryDirectory(dir=TMP) as directory:
+            root = Path(directory)
+            config = root / ".orchestrator/pool.toml"
+            config.parent.mkdir(parents=True)
+            config.write_text("")
+            output = io.StringIO()
+            with mock.patch.object(cli, "ROOT", root), \
+                    mock.patch.object(sys, "argv", ["orchestrator", "roadmap-status", "--write"]), \
+                    contextlib.redirect_stdout(output):
+                cli.main()
+            path = root / ".orchestrator/roadmap-status.json"
+            report = json.loads(path.read_text())
+            self.assertIn("summary", report)
+            self.assertEqual(sum(report["summary"].values()), len(report["requirements"]))
+            self.assertIn(str(path), output.getvalue())
+
     def test_scorecard_parallelism_flag(self):
         from orchestrator import scorecard
         with tempfile.TemporaryDirectory() as directory:

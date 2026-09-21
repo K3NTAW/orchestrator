@@ -168,6 +168,9 @@ def main():
     blsub.add_parser("list")
     blcompare = blsub.add_parser("compare"); blcompare.add_argument("a"); blcompare.add_argument("b")
     blcompare.add_argument("--json", action="store_true")
+    rs = sub.add_parser("roadmap-status")
+    rs.add_argument("--json", action="store_true")
+    rs.add_argument("--write", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
         if sum((a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
@@ -194,7 +197,17 @@ def main():
             ap.error(f"--by {a.by} is not supported by {mode}; {mode} supports --by {choices}")
         if mode == "default":
             a.by = a.by or "executor"
-    if a.cmd == "status":
+    if a.cmd == "roadmap-status":
+        from . import roadmap
+        output = ROOT / ".orchestrator" / "roadmap-status.json"
+        report = roadmap.write(output) if a.write else roadmap.build(ROOT)
+        if a.json:
+            print(json.dumps(report, indent=2))
+        elif a.write:
+            print(output)
+        else:
+            print(json.dumps({"summary": report["summary"], "complete": report["complete"]}, indent=2))
+    elif a.cmd == "status":
         if a.plain:
             s = Pool().status()
             for acc in s["accounts"]:
