@@ -219,8 +219,22 @@ class Daemon(unittest.TestCase):
         self.assertEqual(wave["ready"], [a, b, c])
         self.assertEqual(wave["wave"], [a, c])
         self.assertEqual(wave["predicted"], [])
-        self.assertEqual(wave["priority"], {})
+        self.assertEqual(set(wave["priority"]), {a, b, c})
         self.assertFalse(wave["applied"])
+
+    def test_wave_row_carries_priority_order(self):
+        pool = self.scheduler_pool("shadow", slots=2)
+        plain = self.scheduler_task("plain", "plain/file.py", parent=None)
+        critical = self.scheduler_task("critical", "critical/file.py", parent=None)
+        self.scheduler_task("held dependent", "held/file.py", parent=None,
+                            depends_on=[critical], status="held", hold_reason="budget")
+        daemon.dispatch(pool)
+        wave = daemon.schedlog.read("waves")[-1]
+        self.assertEqual(wave["ready"], [plain, critical])
+        self.assertEqual(wave["wave"][:2], [critical, plain])
+        self.assertEqual(set(wave["priority"]), {plain, critical})
+        self.assertEqual(wave["priority"][critical]["blocked_descendants"], 1)
+        self.assertEqual(self.scheduler_dispatched(), [plain, critical])
 
     def test_dispatch_active_defers_hard_conflict_with_running_task(self):
         pool = self.scheduler_pool()
@@ -286,7 +300,7 @@ class Daemon(unittest.TestCase):
         daemon.dispatch(pool)
         wave, = daemon.schedlog.read("waves")
         self.assertEqual(wave["ready"], [later, retry])
-        self.assertEqual(wave["wave"], [later, retry])
+        self.assertEqual(wave["wave"], [retry, later])
         self.assertEqual(self.scheduler_dispatched(), [retry, later])
         self.assertEqual(bus.get(retry)["status"], "queued")
 

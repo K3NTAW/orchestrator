@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, acceptance, bus, decision, executor, handover, jev_route, merge, planner_runs, spawn
+from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from .pool import Pool, fallback_tier
 from . import failures, gitutil, interference, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
@@ -624,8 +624,7 @@ def _first_come_order(eligible_ids, slots):
 
 
 def _wave_order(candidate_ids, tasks):
-    """Hook for future critical-path ranking."""
-    return candidate_ids
+    return critical_path.rank(candidate_ids, tasks)
 
 
 def _wave_tasks(candidates, running):
@@ -641,6 +640,17 @@ def _wave_tasks(candidates, running):
             try:
                 task = bus.get(tid)
             except KeyError:
+                continue
+            tasks[tid] = task
+            pending.append(task)
+    # Ranking needs unresolved execute descendants even when they are held or running;
+    # merged and failed work cannot delay the goal and is deliberately excluded.
+    pending = list(candidates)
+    while pending:
+        for task in bus.dependents(pending.pop()["id"]):
+            tid = task["id"]
+            if (tid in tasks or task.get("role") != "execute" or task.get("merged_into")
+                    or task.get("status") == "failed"):
                 continue
             tasks[tid] = task
             pending.append(task)
@@ -687,7 +697,8 @@ def dispatch(pool):
                                  "running": running_ids, "baseline_order": selected, "wave": result["wave"],
                                  "deferred": result["deferred"],
                                  "predicted": interference.pairwise([tasks[i] for i in result["wave"]]),
-                                 "priority": {}, "applied": scheduler["mode"] == "active"}
+                                 "priority": {tid: critical_path.explain(tid, tasks) for tid in candidate_ids},
+                                 "applied": scheduler["mode"] == "active"}
         if scheduler["mode"] == "active":
             selected = result["wave"]
             deferred = {item["task"]: capacity_reason if item["reason"] == "capacity"
