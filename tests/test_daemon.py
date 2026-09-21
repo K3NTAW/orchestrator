@@ -190,7 +190,8 @@ class Daemon(unittest.TestCase):
         pool = self.scheduler_pool()
         pool.cfg.pop("scheduler")
         self.assertEqual(daemon._load_scheduler_cfg(pool),
-                         {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0})
+                         {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0,
+                          "stale_rebase": False})
 
     def test_scheduler_cfg_rejects_unknown_mode(self):
         pool = self.scheduler_pool("unknown")
@@ -203,6 +204,88 @@ class Daemon(unittest.TestCase):
         self.assertIn("falling back to shadow", notify.call_args.args[0])
         self.assertEqual(self.scheduler_dispatched(), [task])
         self.assertFalse(daemon.schedlog.read("waves")[0]["applied"])
+
+    def stale_subject(self, scope=None):
+        tid = bus.create_task("stale subject", "spec", ["works"], scope or ["scope/**"],
+                              role="execute", complexity=4, parent="T-0043")["id"]
+        bus.update(tid, worktree=str(self.sandbox), branch=f"task/{tid}")
+        return bus.get(tid)
+
+    def test_stale_check_none_when_goal_unmoved(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=[]), \
+                mock.patch.object(daemon, "changed_paths", return_value=["scope/changed.py"]), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "none")
+        self.assertEqual(result["moved_count"], 0)
+
+    def test_stale_check_low_when_scope_overlaps_moved_paths(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon, "changed_paths", return_value=["other.py"]), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "low")
+        self.assertEqual(result["stale_paths"], ["scope/api.py"])
+
+    def test_stale_check_high_when_changed_file_moved(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon, "changed_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "high")
+
+    def test_stale_check_unknown_on_git_failure(self):
+        task = self.stale_subject()
+        with mock.patch.object(daemon.gitutil, "moved_paths", side_effect=daemon.gitutil.GitError("bad")), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
+            result = daemon.stale_check(task)
+        self.assertEqual(result["risk"], "unknown")
+
+    def test_stale_check_records_row_and_stamp_before_reviews(self):
+        task = self.stale_subject()
+        order = []
+        with mock.patch.object(daemon, "stale_check", side_effect=lambda task: (order.append("stale") or {
+                "base": task["branch"], "goal_head": "goalsha", "moved_count": 0,
+                "stale_paths": [], "risk": "none"})), \
+                mock.patch.object(daemon, "_git_in", return_value=FakeProc("headsha\n")):
+            evidence, recorded = daemon._record_stale_check(task)
+            order.append("reviews")
+        self.assertTrue(recorded)
+        self.assertEqual(order, ["stale", "reviews"])
+        self.assertEqual(bus.get(task["id"])["pipeline"]["stale_check"]["risk"], "none")
+        self.assertEqual(daemon.schedlog.read("stale")[0]["task"], task["id"])
+
+    def test_stale_rebase_conflict_holds_clears_gate_and_never_discards(self):
+        task = self.stale_subject()
+        bus.update(task["id"], pipeline={"gated_at": 1})
+        calls = []
+        def git(worktree, *args):
+            calls.append(args)
+            if args[:1] == ("rebase",) and args[1:] != ("--abort",):
+                return FakeProc("", 1)
+            if args[:2] == ("diff", "--name-only"):
+                return FakeProc("scope/api.py\n")
+            return FakeProc("tasksha\n")
+        with mock.patch.object(daemon, "_git_in", side_effect=git):
+            self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+        held = bus.get(task["id"])
+        self.assertEqual(held["hold_reason"], "stale_rebase_conflict")
+        self.assertNotIn("gated_at", held["pipeline"])
+        self.assertIn(("rebase", "--abort"), calls)
+
+    def test_stale_rebase_success_regates_before_reviews(self):
+        task = self.stale_subject()
+        bus.update(task["id"], pipeline={"gated_at": 1, "stale_check": {"risk": "high"}})
+        with mock.patch.object(daemon, "_git_in", side_effect=[FakeProc(""), FakeProc("newhead\n")]):
+            self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+        pipeline = bus.get(task["id"])["pipeline"]
+        self.assertNotIn("gated_at", pipeline)
+        self.assertEqual(pipeline["stale_check"]["rebased_to"], "newhead")
 
     def test_dispatch_shadow_logs_wave_and_keeps_first_come(self):
         pool = self.scheduler_pool("shadow")

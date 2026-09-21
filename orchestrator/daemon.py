@@ -594,7 +594,7 @@ _scheduler_mode_warned = False
 def _load_scheduler_cfg(pool):
     """Read scheduler policy on every dispatch, including direct callers."""
     global _scheduler_mode_warned
-    cfg = {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0}
+    cfg = {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0, "stale_rebase": False}
     cfg.update(pool.cfg.get("scheduler", {}))
     if cfg["mode"] not in ("off", "shadow", "active"):
         if not _scheduler_mode_warned:
@@ -1047,6 +1047,80 @@ def _open_reviews(t, n_reviews, review_reason):
     return existing
 
 
+def stale_check(task):
+    """Return deterministic stale-work evidence without changing pipeline state."""
+    worktree = task.get("worktree")
+    task_ref = task.get("branch") or f"task/{task['id']}"
+    goal_ref = f"goal/{task['parent']}" if task.get("parent") else "main"
+    head = _git_in(worktree, "rev-parse", goal_ref)
+    goal_head = head.stdout.strip() if head.returncode == 0 else goal_ref
+    result = {"base": task_ref, "goal_head": goal_head, "moved_count": 0,
+              "stale_paths": [], "risk": "unknown"}
+    try:
+        moved = gitutil.moved_paths(task_ref, goal_ref, cwd=worktree)
+    except gitutil.GitError:
+        return result
+    changed = changed_paths(task) or []
+    surface = list(task.get("scope") or []) + changed
+    stale_paths = sorted(path for path in moved
+                         if any(path == pattern or fnmatch.fnmatch(path, pattern) for pattern in surface))
+    risk = "none" if not stale_paths else ("high" if any(path in changed for path in stale_paths) else "low")
+    return {"base": task_ref, "goal_head": goal_head, "moved_count": len(moved),
+            "stale_paths": stale_paths, "risk": risk}
+
+
+def _record_stale_check(task):
+    """Record one stale check per task head and return the stamped evidence."""
+    worktree = task["worktree"]
+    head_result = _git_in(worktree, "rev-parse", "HEAD")
+    head = head_result.stdout.strip() if head_result.returncode == 0 else "unknown"
+    current = bus.get(task["id"])
+    prior = (current.get("pipeline") or {}).get("stale_check") or {}
+    if prior.get("head") == head:
+        return prior, False
+    try:
+        evidence = stale_check(current)
+    except Exception:
+        task_ref = current.get("branch") or f"task/{current['id']}"
+        goal_ref = f"goal/{current['parent']}" if current.get("parent") else "main"
+        goal = _git_in(worktree, "rev-parse", goal_ref)
+        evidence = {"base": task_ref, "goal_head": goal.stdout.strip() if goal.returncode == 0 else goal_ref,
+                    "moved_count": 0, "stale_paths": [], "risk": "unknown"}
+    stamped = {**evidence, "checked_at": time.time(), "head": head}
+    pipeline = dict(current.get("pipeline") or {})
+    pipeline["stale_check"] = stamped
+    bus.update(task["id"], pipeline=pipeline)
+    schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
+                              "action": "recorded"})
+    return stamped, True
+
+
+def _stale_rebase(task, evidence):
+    """Rebase high-risk work, returning True when gate processing must stop."""
+    goal_ref = f"goal/{task['parent']}" if task.get("parent") else "main"
+    rebased = _git_in(task["worktree"], "rebase", goal_ref)
+    if rebased.returncode:
+        conflicts = _git_in(task["worktree"], "diff", "--name-only", "--diff-filter=U")
+        conflict_paths = sorted(path for path in conflicts.stdout.splitlines() if path)
+        _git_in(task["worktree"], "rebase", "--abort")
+        clear_stage(task["id"], "gated_at", status="held", hold_reason="stale_rebase_conflict",
+                    resume_hint={"conflicts": conflict_paths, "goal_head": evidence["goal_head"]})
+        schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
+                                  "action": "rebase_conflict"})
+        return True
+    new_head = _git_in(task["worktree"], "rev-parse", "HEAD").stdout.strip()
+    current = bus.get(task["id"])
+    pipeline = dict(current.get("pipeline") or {})
+    checked = dict(pipeline.get("stale_check") or {})
+    checked["rebased_to"] = new_head
+    pipeline["stale_check"] = checked
+    bus.update(task["id"], pipeline=pipeline)
+    clear_stage(task["id"], "gated_at")
+    schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
+                              "action": "rebased"})
+    return True
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
@@ -1119,6 +1193,10 @@ def gate(pool):
                 root_pipeline["lineage_fix_rounds"] = root_pipeline.get("lineage_fix_rounds", 0) + 1
                 bus.update(lineage_root["id"], pipeline=root_pipeline)
         try:
+            evidence, _ = _record_stale_check(t)
+            if _load_scheduler_cfg(pool)["stale_rebase"] and evidence["risk"] == "high":
+                if _stale_rebase(t, evidence):
+                    continue
             if n_reviews == 0:
                 report_merge(t["id"], merge.merge(t["id"]))
             else:
