@@ -1,4 +1,5 @@
 """orchestrator.cli: `status`, `scorecard` and `pick` subcommands, plain-text and JSON output."""
+import _harness
 import contextlib, io, json, os, sys, tempfile, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,6 +149,52 @@ class Cli(unittest.TestCase):
         ):
             output = self._scorecard_output("--by", "goal")
         self.assertIn("tokens per accepted goal: 0 over 1 goals (usd 2.0)", output)
+
+    def test_cli_scorecard_scheduling_and_strategies_text_and_json(self):
+        from orchestrator import sched_scorecard, strategy
+        scheduling = {"scheduler": {"n": 2}}
+        strategies = {("serial", "bug", "small"): {"n": 1}}
+        with mock.patch.object(sched_scorecard, "build", return_value=scheduling), \
+                mock.patch.object(sched_scorecard, "format", return_value="scheduling card"), \
+                mock.patch.object(strategy, "scorecard", return_value=strategies), \
+                mock.patch.object(strategy, "format", return_value="strategy card"):
+            self.assertEqual(self._scorecard_output("--scheduling"), "scheduling card\n")
+            self.assertEqual(json.loads(self._scorecard_output("--scheduling", "--json")), scheduling)
+            self.assertEqual(self._scorecard_output("--strategies"), "strategy card\n")
+            self.assertEqual(json.loads(self._scorecard_output("--strategies", "--json")),
+                             {"serial/bug/small": {"n": 1}})
+        err = io.StringIO()
+        with mock.patch.object(sys, "argv", ["orchestrator", "scorecard", "--scheduling", "--strategies"]), \
+                contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            cli.main()
+        self.assertIn("--scheduling, --strategies", err.getvalue())
+
+    def test_cli_explain_prints_decision_rows(self):
+        from orchestrator import decision_log
+        rows = [{"ts": 1, "kind": "routing", "subject": "T-1", "selected": "a", "reason": "fit",
+                 "rejected": [], "outcomes": []}]
+        with mock.patch.object(decision_log, "explain", return_value=rows), \
+                mock.patch.object(decision_log, "format_explain", return_value="explanation"):
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["orchestrator", "explain", "T-1"]), contextlib.redirect_stdout(out):
+                cli.main()
+            self.assertEqual(out.getvalue(), "explanation\n")
+            with mock.patch.object(sys, "argv", ["orchestrator", "explain", "T-1", "--json"]), contextlib.redirect_stdout(out := io.StringIO()):
+                cli.main()
+            self.assertEqual(json.loads(out.getvalue()), rows)
+
+    def test_cli_promotion_report(self):
+        from orchestrator import promotion
+        rows = [{"feature": "scheduler", "recommendation": "stay", "mode": "shadow", "n": 0}]
+        with mock.patch.object(promotion, "report", return_value=rows), \
+                mock.patch.object(promotion, "format_report", return_value="scheduler: stay"):
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["orchestrator", "promotion"]), contextlib.redirect_stdout(out):
+                cli.main()
+            self.assertEqual(out.getvalue(), "scheduler: stay\n")
+            with mock.patch.object(sys, "argv", ["orchestrator", "promotion", "--json"]), contextlib.redirect_stdout(out := io.StringIO()):
+                cli.main()
+            self.assertEqual(json.loads(out.getvalue()), rows)
 
     def test_cli_scorecard_efficiency_text_and_json(self):
         fixture = self._scorecard_fixture()

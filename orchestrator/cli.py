@@ -140,9 +140,13 @@ def main():
     sc.add_argument("--routing", action="store_true")
     sc.add_argument("--reviews", action="store_true")
     sc.add_argument("--parallelism", action="store_true")
+    sc.add_argument("--scheduling", action="store_true")
+    sc.add_argument("--strategies", action="store_true")
     sc.add_argument("--goal")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
+    ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
+    pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
     j = sub.add_parser("jev"); jsub = j.add_subparsers(dest="jev_cmd", required=True)
     jd = jsub.add_parser("diagnose"); jd.add_argument("--since"); jd.add_argument("--export"); jd.add_argument("--n", type=int, default=10)
@@ -166,8 +170,8 @@ def main():
     blcompare.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
-        if sum((a.economics, a.efficiency, a.routing, a.reviews, a.parallelism)) > 1:
-            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism")
+        if sum((a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
             "--efficiency": ("goal", "executor", "band", "class", "role"),
@@ -175,8 +179,10 @@ def main():
             "--routing": (),
             "--parallelism": (),
             "--reviews": ("role", "packet_version", "tier", "band", "reviewed_executor"),
+            "--scheduling": (),
+            "--strategies": (),
         }
-        mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism")
+        mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
         if a.goal is not None and not a.parallelism:
             ap.error("--goal requires --parallelism")
@@ -288,7 +294,17 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.parallelism:
+        if a.scheduling:
+            from . import sched_scorecard
+            card = sched_scorecard.build()
+            print(json.dumps(card, indent=1) if a.json else sched_scorecard.format(card))
+        elif a.strategies:
+            from . import strategy
+            card = strategy.scorecard()
+            serializable = {"/".join(key) if isinstance(key, tuple) else key: value
+                            for key, value in card.items()}
+            print(json.dumps(serializable, indent=1) if a.json else strategy.format(card))
+        elif a.parallelism:
             card = scorecard.parallelism(root=scorecard.STATE, goal=a.goal)
             print(json.dumps(card, indent=1) if a.json else scorecard.format_parallelism(card))
         elif a.reviews:
@@ -367,6 +383,14 @@ def main():
                          else str(round(accepted_tokens['tokens'])))
                 print(f"tokens per accepted goal: {ratio} over {accepted_tokens['count']} goals "
                       f"(usd {round(accepted_usd['usd'], 2)})")
+    elif a.cmd == "explain":
+        from . import decision_log
+        rows = decision_log.explain(a.task)
+        print(json.dumps(rows, indent=1) if a.json else decision_log.format_explain(rows))
+    elif a.cmd == "promotion":
+        from . import promotion
+        rows = promotion.report()
+        print(json.dumps(rows, indent=1) if a.json else promotion.format_report(rows))
     elif a.cmd == "planner-runs":
         from . import planner_runs
         s = planner_runs.summary()
