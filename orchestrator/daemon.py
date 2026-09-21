@@ -7,6 +7,7 @@ import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threadin
 from pathlib import Path
 from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
+from . import stale as stale_evidence
 from .pool import Pool, fallback_tier
 from . import failures, gitutil, interference, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
@@ -1151,24 +1152,11 @@ def _open_reviews(t, n_reviews, review_reason):
 
 def stale_check(task):
     """Return deterministic stale-work evidence without changing pipeline state."""
-    worktree = task.get("worktree")
-    task_ref = task.get("branch") or f"task/{task['id']}"
-    goal_ref = f"goal/{task['parent']}" if task.get("parent") else "main"
-    head = _git_in(worktree, "rev-parse", goal_ref)
-    goal_head = head.stdout.strip() if head.returncode == 0 else goal_ref
-    result = {"base": task_ref, "goal_head": goal_head, "moved_count": 0,
-              "stale_paths": [], "risk": "unknown"}
-    try:
-        moved = gitutil.moved_paths(task_ref, goal_ref, cwd=worktree)
-    except gitutil.GitError:
-        return result
-    changed = changed_paths(task) or []
-    surface = list(task.get("scope") or []) + changed
-    stale_paths = sorted(path for path in moved
-                         if any(path == pattern or fnmatch.fnmatch(path, pattern) for pattern in surface))
-    risk = "none" if not stale_paths else ("high" if any(path in changed for path in stale_paths) else "low")
-    return {"base": task_ref, "goal_head": goal_head, "moved_count": len(moved),
-            "stale_paths": stale_paths, "risk": risk}
+    # Older tasks carry a branch rather than the pure evidence module's base/task_ref.
+    if not task.get("base") and not task.get("task_ref"):
+        task = {**task, "base": task.get("branch") or f"task/{task['id']}"}
+    return stale_evidence.evidence(task, graph_links=stale_evidence.load_links(),
+                                   graph=interference.load_graph(), tasks=bus.read(role="execute"))
 
 
 def _record_stale_check(task):
@@ -1187,13 +1175,13 @@ def _record_stale_check(task):
         goal_ref = f"goal/{current['parent']}" if current.get("parent") else "main"
         goal = _git_in(worktree, "rev-parse", goal_ref)
         evidence = {"base": task_ref, "goal_head": goal.stdout.strip() if goal.returncode == 0 else goal_ref,
-                    "moved_count": 0, "stale_paths": [], "risk": "unknown"}
+                    "moved_count": 0, "stale_paths": [], "risk": "unknown",
+                    "signals": {}, "risk_reasons": ["evidence_failed"], "graph": "absent"}
     stamped = {**evidence, "checked_at": time.time(), "head": head}
     pipeline = dict(current.get("pipeline") or {})
     pipeline["stale_check"] = stamped
     bus.update(task["id"], pipeline=pipeline)
-    schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
-                              "action": "recorded"})
+    schedlog.append("stale", stale_evidence.row(task, evidence, "recorded"))
     return stamped, True
 
 
@@ -1207,8 +1195,7 @@ def _stale_rebase(task, evidence):
         _git_in(task["worktree"], "rebase", "--abort")
         clear_stage(task["id"], "gated_at", status="held", hold_reason="stale_rebase_conflict",
                     resume_hint={"conflicts": conflict_paths, "goal_head": evidence["goal_head"]})
-        schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
-                                  "action": "rebase_conflict"})
+        schedlog.append("stale", stale_evidence.row(task, evidence, "rebase_conflict", conflict=conflict_paths))
         return True
     new_head = _git_in(task["worktree"], "rev-parse", "HEAD").stdout.strip()
     current = bus.get(task["id"])
@@ -1218,8 +1205,7 @@ def _stale_rebase(task, evidence):
     pipeline["stale_check"] = checked
     bus.update(task["id"], pipeline=pipeline)
     clear_stage(task["id"], "gated_at")
-    schedlog.append("stale", {"task": task["id"], "goal_id": task.get("parent"), **evidence,
-                              "action": "rebased"})
+    schedlog.append("stale", stale_evidence.row(task, evidence, "rebased"))
     return True
 
 

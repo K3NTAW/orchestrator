@@ -335,10 +335,38 @@ class Daemon(unittest.TestCase):
         bus.update(tid, worktree=str(self.sandbox), branch=f"task/{tid}")
         return bus.get(tid)
 
+    def test_stale_check_returns_extended_evidence_and_only_high_rebases(self):
+        task = self.stale_subject(["orchestrator/example.py"])
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["tests/test_example.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["orchestrator/example.py"]), \
+                mock.patch.object(daemon.stale_evidence, "load_links", return_value=None), \
+                mock.patch.object(daemon.interference, "load_graph", return_value=None):
+            evidence = daemon.stale_check(task)
+        self.assertEqual(evidence["risk"], "medium")
+        self.assertEqual(evidence["risk_reasons"], ["tests_changed"])
+        self.assertEqual(evidence["signals"]["tests_changed"], ["tests/test_example.py"])
+        self.assertEqual(evidence["graph"], "absent")
+        bus.update(task["id"], status="done")
+        with mock.patch.object(daemon, "stale", return_value=False), \
+                mock.patch.object(daemon, "already_merged", return_value=False), \
+                mock.patch.object(daemon, "_dirty_scope_paths", return_value=[]), \
+                mock.patch.object(daemon, "_review_plan", return_value=(1, "always")), \
+                mock.patch.object(daemon, "_record_stale_check", return_value=(evidence, True)), \
+                mock.patch.object(daemon, "_load_scheduler_cfg", return_value={"stale_rebase": True}), \
+                mock.patch.object(daemon, "_stale_rebase", return_value=True) as rebase, \
+                mock.patch.object(daemon, "_open_reviews") as reviews:
+            daemon.gate(P.Pool())
+            rebase.assert_not_called()
+            reviews.assert_called_once()
+            daemon.clear_stage(task["id"], "gated_at")
+            evidence["risk"] = "high"
+            daemon.gate(P.Pool())
+            rebase.assert_called_once()
+
     def test_stale_check_none_when_goal_unmoved(self):
         task = self.stale_subject()
         with mock.patch.object(daemon.gitutil, "moved_paths", return_value=[]), \
-                mock.patch.object(daemon, "changed_paths", return_value=["scope/changed.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["scope/changed.py"]), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
             result = daemon.stale_check(task)
         self.assertEqual(result["risk"], "none")
@@ -347,7 +375,7 @@ class Daemon(unittest.TestCase):
     def test_stale_check_low_when_scope_overlaps_moved_paths(self):
         task = self.stale_subject()
         with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
-                mock.patch.object(daemon, "changed_paths", return_value=["other.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["other.py"]), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
             result = daemon.stale_check(task)
         self.assertEqual(result["risk"], "low")
@@ -356,7 +384,7 @@ class Daemon(unittest.TestCase):
     def test_stale_check_high_when_changed_file_moved(self):
         task = self.stale_subject()
         with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
-                mock.patch.object(daemon, "changed_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["scope/api.py"]), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
             result = daemon.stale_check(task)
         self.assertEqual(result["risk"], "high")
@@ -373,7 +401,7 @@ class Daemon(unittest.TestCase):
         order = []
         with mock.patch.object(daemon, "stale_check", side_effect=lambda task: (order.append("stale") or {
                 "base": task["branch"], "goal_head": "goalsha", "moved_count": 0,
-                "stale_paths": [], "risk": "none"})), \
+                "stale_paths": [], "risk": "none", "risk_reasons": []})), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("headsha\n")):
             evidence, recorded = daemon._record_stale_check(task)
             order.append("reviews")
@@ -395,7 +423,7 @@ class Daemon(unittest.TestCase):
             return FakeProc("tasksha\n")
         with mock.patch.object(daemon, "_git_in", side_effect=git):
             self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
-                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high", "risk_reasons": ["changed_files_moved"]}))
         held = bus.get(task["id"])
         self.assertEqual(held["hold_reason"], "stale_rebase_conflict")
         self.assertNotIn("gated_at", held["pipeline"])
@@ -406,7 +434,7 @@ class Daemon(unittest.TestCase):
         bus.update(task["id"], pipeline={"gated_at": 1, "stale_check": {"risk": "high"}})
         with mock.patch.object(daemon, "_git_in", side_effect=[FakeProc(""), FakeProc("newhead\n")]):
             self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
-                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high", "risk_reasons": ["changed_files_moved"]}))
         pipeline = bus.get(task["id"])["pipeline"]
         self.assertNotIn("gated_at", pipeline)
         self.assertEqual(pipeline["stale_check"]["rebased_to"], "newhead")

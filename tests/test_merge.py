@@ -60,7 +60,7 @@ class MergeQueue(unittest.TestCase):
                 return result
             with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
                     patch.multiple(merge, ROOT=repo, git=git):
-                task = bus.create_task("reviewed rebase", "s", ["a"], ["feature.py"], role="execute")
+                task = bus.create_task("reviewed rebase", "s", ["a"], ["feature.py"], role="execute", parent="G")
                 git("branch", "goal/reviewed")
                 wt = repo / "task-worktree"
                 git("worktree", "add", "-b", "task/reviewed", str(wt), "HEAD")
@@ -68,7 +68,7 @@ class MergeQueue(unittest.TestCase):
                 git("add", "feature.py", cwd=wt)
                 git("commit", "-qm", "reviewed feature", cwd=wt)
                 reviewed_sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
-                bus.update(task["id"], worktree=str(wt), pipeline={"reviewed_sha": reviewed_sha})
+                bus.update(task["id"], worktree=str(wt), pipeline={"reviewed_sha": reviewed_sha, "first_green_at": 10})
                 git("checkout", "goal/reviewed")
                 upstream_path = "feature.py" if changed else "unrelated.txt"
                 (repo / upstream_path).write_text("VALUE = 1\n" if changed else "upstream\n")
@@ -90,11 +90,24 @@ class MergeQueue(unittest.TestCase):
                     self.assertEqual(result["status"], "merged", result)
                     self.assertNotEqual(result["sha"], reviewed_sha)
                     self.assertEqual(git("rev-parse", "goal/reviewed").stdout.strip(), result["sha"])
+                    merged = bus.get(task["id"])
+                    self.assertIsInstance(merged["merged_at"], float)
+                    self.assertEqual(merged["pipeline"]["merged_at"], merged["merged_at"])
+                    self.assertEqual(merged["changed_files"], ["feature.py"])
+                    for location in ("pipeline", "top-level"):
+                        if location == "top-level":
+                            merged["pipeline"].pop("merged_at")
+                            bus.update(task["id"], pipeline=merged["pipeline"])
+                        card = merge.scorecard.parallelism(root=state, goal="G")
+                        self.assertEqual(card["totals"]["median_merge_wait_s"], merged["merged_at"] - 10)
                     self.assertEqual((wt / "feature.py").read_text(), "VALUE = 1\n")
                     self.assertEqual((wt / "unrelated.txt").read_text(), "upstream\n")
 
     def test_rebase_changing_diff_returns_status(self):
         self.reviewed_rebase(changed=True)
+
+    def test_merge_stamps_merged_at_and_changed_files(self):
+        self.reviewed_rebase(changed=False)
 
     def test_clean_rebase_keeps_approval(self):
         self.reviewed_rebase(changed=False)

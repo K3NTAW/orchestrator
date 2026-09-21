@@ -19,10 +19,40 @@ class SpawnToolsRefuseWrongRole(unittest.TestCase):
         thread.assert_not_called()
         self.assertEqual(bus.get(scout["id"])["status"], "queued")
         rows = [json.loads(line) for path in bus.RUNS.glob("*.jsonl") for line in path.read_text().splitlines()]
-        rows = [row for row in rows if row.get("task") == scout["id"]]
+        rows = [row for row in rows if row.get("task") == scout["id"] and row.get("role") != "scout_decision"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["outcome"], "spawn_error")
         self.assertEqual(rows[0]["reason"], "worktree add failed")
+
+    def test_spawn_scout_skips_when_reusable_evidence_is_sufficient(self):
+        hits = [{"id": "note-one", "title": "Implementation map", "fresh": True},
+                {"id": "note-two", "title": "Test surface", "fresh": True},
+                {"id": "old", "title": "Obsolete", "fresh": False}]
+        task = bus.create_task("reuse scout", "map implementation", ["a"], ["x.py"], role="scout",
+                               constraints={"objective": "implementation-map"})
+        self.addCleanup(bus.update, task["id"], status="done")
+        check = {"sufficient": True, "hits": hits, "reason": "fresh evidence"}
+        with mock.patch.object(mcp.spawn, "git", return_value=mock.Mock(stdout="head\n")), \
+                mock.patch.object(mcp.scout_evidence, "reuse_check", return_value=check) as reuse, \
+                mock.patch.object(mcp, "_bg", return_value={"status": "spawned"}) as bg:
+            reply = mcp.spawn_scout(task["id"])
+            self.assertEqual(reply, {"task": task["id"], "status": "skipped: reusable evidence", "hits": hits})
+            reuse.assert_called_once_with("map implementation", objective="implementation-map", head_sha="head")
+            bg.assert_not_called()
+            posted = bus.get(task["id"])
+            self.assertEqual(posted["status"], "done")
+            self.assertEqual(posted["result"]["reused_evidence"], hits)
+            findings = posted["result"]["findings"]
+            self.assertEqual(len(findings), 2)
+            self.assertEqual(len(mcp.scout_evidence.normalize_findings(posted["result"])), 2)
+            for finding in findings:
+                self.assertTrue({"finding", "source", "confidence", "relevance"} <= finding.keys())
+            bus.update(task["id"], status="queued", constraints={"force": True})
+            self.assertEqual(mcp.spawn_scout(task["id"])["status"], "spawned")
+            bg.assert_called_once_with(task["id"])
+            reuse.side_effect = RuntimeError("recall failed")
+            mcp.spawn_scout(task["id"])
+            self.assertEqual(bg.call_count, 2)
 
     def test_spawn_tools_refuse_wrong_role(self):
         execute = bus.create_task("do the thing", "s", ["a"], ["x.py"], role="execute")
