@@ -141,6 +141,8 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
 def auto_fix_round(pool):
     cap = pool.cfg.get("daemon", {}).get("auto_fix_rounds", 2)
     for held in bus.read(status="held", role="execute"):
+        if held.get("hold_reason", "").startswith("render_error"):
+            continue
         if stale(held):
             continue
         held_at = planner_runs._held_at(held)
@@ -492,6 +494,16 @@ def hold_failed(tid, error_key, stage_label, exc):
     notify(f"{tid}: {stage_label} failed: {exc}")
 
 
+def hold_render_error(task_id, exc):
+    with bus.locked():
+        task = bus.get(task_id)
+        pipeline = dict(task.get("pipeline") or {})
+        pipeline["render_error"] = str(exc)[:300]
+        pipeline.pop("dispatched_at", None)
+        bus.update(task_id, status="held", hold_reason="render_error: " + str(exc)[:200], pipeline=pipeline)
+    notify(f"{task_id}: render_error: {exc}")
+
+
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
     routing = None
     try:
@@ -557,9 +569,13 @@ def _dispatch_fresh_fix(task_id, reason):
     pipeline["resume"] = {"mode": "fresh", "reason": reason}
     bus.update(task_id, pipeline=pipeline, worktree=None, branch=f"task/{task_id}")
     fix = bus.get(task_id)
-    packet = spawn.packet(fix, spawn.ROOT)
-    prompt = spawn.render("execute", packet=packet, spec=fix["spec"],
-                          acceptance=fix["acceptance"], scope=fix["scope"])
+    try:
+        packet = spawn.packet(fix, spawn.ROOT)
+        prompt = spawn.render("execute", packet=packet, spec=fix["spec"],
+                              acceptance=fix["acceptance"], scope=fix["scope"])
+    except Exception as exc:
+        hold_render_error(task_id, exc)
+        return
     _dispatch_worker(task_id, prompt, None, spawn.packet_run_meta(packet))
 
 
@@ -849,9 +865,13 @@ def dispatch(pool):
                         continue
                     pipeline["resume"] = {"mode": "fresh", "reason": reason}
                     bus.update(t["id"], pipeline=pipeline)
-                packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
-                prompt = spawn.render("execute", packet=packet, spec=t["spec"],
-                                      acceptance=t["acceptance"], scope=t["scope"])
+                try:
+                    packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
+                    prompt = spawn.render("execute", packet=packet, spec=t["spec"],
+                                          acceptance=t["acceptance"], scope=t["scope"])
+                except Exception as exc:
+                    hold_render_error(t["id"], exc)
+                    continue
                 spawn_async(_dispatch_worker, t["id"], prompt, None, spawn.packet_run_meta(packet))
                 complete(t["id"], "dispatched_at")
             else:
@@ -922,6 +942,7 @@ def dispatch(pool):
     max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
     review_slots = max(0, max_workers - running_claude_workers(pool) - inflight_claude_dispatches())
     respawn_after = pool.cfg.get("daemon", {}).get("respawn_after_s", 120)
+    respawn_max = pool.cfg.get("daemon", {}).get("respawn_max", 3)
     now = time.time()
     for task in bus.read(status="queued"):
         if review_slots <= 0:
@@ -932,10 +953,8 @@ def dispatch(pool):
             continue
         pipeline = task.get("pipeline") or {}
         events = task.get("events") or []
-        requeued_at = max((event.get("ts", 0) for event in events
-                           if event.get("reason") == "process died; requeued"),
-                          default=task.get("claimed_at") or 0)
-        if pipeline.get("respawned_at", 0) > requeued_at:
+        respawned_at = pipeline.get("respawned_at", 0)
+        if respawned_at and now - respawned_at < respawn_after:
             continue
         died = any(event.get("reason") == "process died; requeued" for event in events)
         created_at = task.get("created_at") or min((event.get("ts", 0) for event in events), default=0)
@@ -944,21 +963,31 @@ def dispatch(pool):
                 created_at = (bus.TASKS / f"{task['id']}.json").stat().st_mtime
             except OSError:
                 created_at = now
-        if not died and now - created_at < respawn_after:
+        if not died and not respawned_at and now - created_at < respawn_after:
             continue
+        exhausted_count = None
         with bus.locked():
             current = bus.get(task["id"])
             current_pipeline = dict(current.get("pipeline") or {})
-            current_events = current.get("events") or []
-            current_requeued_at = max((event.get("ts", 0) for event in current_events
-                                       if event.get("reason") == "process died; requeued"),
-                                      default=current.get("claimed_at") or 0)
+            current_respawned_at = current_pipeline.get("respawned_at", 0)
             if (current.get("status") != "queued" or
-                    current_pipeline.get("respawned_at", 0) > current_requeued_at):
+                    (current_respawned_at and now - current_respawned_at < respawn_after)):
                 continue
-            current_pipeline["respawned_at"] = now
-            bus.update(task["id"], pipeline=current_pipeline)
-            spawn_async(spawn.run_worker, task["id"])
+            respawn_count = current_pipeline.get("respawn_count", 0)
+            if respawn_count >= respawn_max:
+                current_pipeline.pop("respawned_at", None)
+                bus.update(task["id"], status="held",
+                           hold_reason=f"respawn_exhausted: {respawn_count} respawns without a claim",
+                           pipeline=current_pipeline)
+                exhausted_count = respawn_count
+            else:
+                current_pipeline["respawned_at"] = now
+                current_pipeline["respawn_count"] = respawn_count + 1
+                bus.update(task["id"], pipeline=current_pipeline)
+                spawn_async(spawn.run_worker, task["id"])
+        if exhausted_count is not None:
+            notify(f"{task['id']}: respawn_exhausted: {exhausted_count} respawns without a claim")
+            continue
         review_slots -= 1
 
 

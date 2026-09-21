@@ -2,7 +2,7 @@
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus
+from . import ROOT, STATE, attribution, bus, notify
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -105,12 +105,26 @@ def render(name, **kw):
         kw.setdefault("base_branch", "origin/main")
         kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
-    for k, v in kw.items():
-        t = t.replace("{{" + k + "}}", v if isinstance(v, str) else json.dumps(v, indent=0))
-    remaining = re.search(r"\{\{\s*([^{}]+?)\s*\}\}", t)
-    if remaining:
-        raise ValueError(f"unfilled_placeholder: {remaining.group(1)}")
-    return t
+    placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+    missing = next((match.group(1) for match in placeholder.finditer(t) if match.group(1) not in kw), None)
+    if missing is not None:
+        raise ValueError(f"unfilled_placeholder: {missing}")
+    return placeholder.sub(
+        lambda match: kw[match.group(1)] if isinstance(kw[match.group(1)], str)
+        else json.dumps(kw[match.group(1)], indent=0),
+        t,
+    )
+
+
+def hold_render_error(task_id, exc):
+    with bus.locked():
+        task = bus.get(task_id)
+        pipeline = dict(task.get("pipeline") or {})
+        pipeline["render_error"] = str(exc)[:300]
+        pipeline.pop("dispatched_at", None)
+        bus.update(task_id, status="held", hold_reason="render_error: " + str(exc)[:200],
+                   assigned_to=None, pipeline=pipeline)
+    notify.notify(f"{task_id}: render_error: {exc}")
 
 
 def bounded_text(text, cap_chars, expand_hint):
@@ -752,31 +766,35 @@ def run_worker(task_id, account_id=None):
         return {"status": "held"}
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
-    if role == "review":
-        src = reviewed if reviewed is not None else t
-        role_packet = review_packet(t, src)
-        t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
-        prompt = render("review", packet=role_packet)
-    elif role == "challenge":
-        prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
-                                        for k in ("claim", "evidence", "confidence")})
-    elif role == "spec_review":
-        src = bus.get(t["inputs"][0])
-        role_packet = spec_review_packet(src)
-        t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
-        prompt = render("spec-review", packet=role_packet)
-    elif role == "execute":
-        t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
-        bus.update(task_id, executor=t["executor"])
-        packet_worktree = t.get("worktree") or ROOT
-        t["packet_meta"] = {**packet_meta(t, packet_worktree), "role": role}
-        prompt = render("execute", packet=packet(t, packet_worktree), spec=t["spec"],
-                        acceptance=t["acceptance"], scope=t["scope"]) + \
-            "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
-    else:
-        role_packet = scout_packet(t)
-        t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
-        prompt = render("scout", packet=role_packet)
+    try:
+        if role == "review":
+            src = reviewed if reviewed is not None else t
+            role_packet = review_packet(t, src)
+            t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
+            prompt = render("review", packet=role_packet)
+        elif role == "challenge":
+            prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
+                                            for k in ("claim", "evidence", "confidence")})
+        elif role == "spec_review":
+            src = bus.get(t["inputs"][0])
+            role_packet = spec_review_packet(src)
+            t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
+            prompt = render("spec-review", packet=role_packet)
+        elif role == "execute":
+            t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
+            bus.update(task_id, executor=t["executor"])
+            packet_worktree = t.get("worktree") or ROOT
+            t["packet_meta"] = {**packet_meta(t, packet_worktree), "role": role}
+            prompt = render("execute", packet=packet(t, packet_worktree), spec=t["spec"],
+                            acceptance=t["acceptance"], scope=t["scope"]) + \
+                "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
+        else:
+            role_packet = scout_packet(t)
+            t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
+            prompt = render("scout", packet=role_packet)
+    except Exception as exc:
+        hold_render_error(task_id, exc)
+        return {"status": "held", "reason": "render_error"}
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
         pipeline["hold_note"] = "budget"

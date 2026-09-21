@@ -101,6 +101,14 @@ class PoolSel(unittest.TestCase):
         })
         self.assertEqual(cfg["promotion"], {"min_samples": 20})
 
+    def test_daemon_respawn_max_documented(self):
+        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        self.assertEqual(cfg["daemon"]["respawn_max"], 3)
+        daemon_lines = (REPO / ".orchestrator" / "pool.toml").read_text().splitlines()
+        respawn_after = next(i for i, line in enumerate(daemon_lines) if line.startswith("respawn_after_s"))
+        respawn_max = next(i for i, line in enumerate(daemon_lines) if line.startswith("respawn_max"))
+        self.assertEqual(respawn_max, respawn_after + 1)
+
     def test_planner_routing_table_documented_defaults(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
         self.assertEqual(cfg["planner"]["routing"], planner_router._DEFAULTS)

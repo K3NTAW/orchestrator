@@ -788,6 +788,47 @@ class Daemon(unittest.TestCase):
         self.assertNotIn("{{", seen["prompt"])
         self.assertIn(seen["packet_meta"]["hash"], seen["prompt"].splitlines()[0])
 
+    def test_dispatch_holds_execute_task_on_render_error(self):
+        broken = self.task("broken render")
+        normal = self.task("normal render")
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        original = spawn.render
+        calls = 0
+        def render(name, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("unfilled_placeholder: spec")
+            return original(name, **kwargs)
+        self.swap(spawn, "render", render)
+        daemon.dispatch(P.Pool())
+        updated = bus.get(broken)
+        self.assertEqual(updated["status"], "held")
+        self.assertTrue(updated["hold_reason"].startswith("render_error: unfilled_placeholder"))
+        self.assertEqual(updated["pipeline"]["render_error"], "unfilled_placeholder: spec")
+        self.assertNotIn("dispatched_at", updated["pipeline"])
+        self.assertEqual(messages, [mock.ANY])
+        self.assertIn(broken, messages[0])
+        self.assertIn(normal, self.started)
+
+    def test_fresh_fix_dispatch_holds_on_render_error(self):
+        tid = self.task("fresh fix")
+        with mock.patch.object(spawn, "render", side_effect=ValueError("unfilled_placeholder: spec")), \
+                mock.patch.object(daemon, "_dispatch_worker") as worker, \
+                mock.patch.object(daemon, "notify"):
+            daemon._dispatch_fresh_fix(tid, "compat_changed:x")
+        updated = bus.get(tid)
+        self.assertEqual(updated["status"], "held")
+        self.assertTrue(updated["hold_reason"].startswith("render_error"))
+        worker.assert_not_called()
+
+    def test_auto_fix_round_skips_render_error_hold(self):
+        tid = self.task("render-held")
+        bus.update(tid, status="held", hold_reason="render_error: unfilled_placeholder: spec")
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(self.fixes_for(tid), [])
+
     def test_fix_round_prompt_contains_packet(self):
         held = self.held_for_fix()
         daemon.auto_fix_round(P.Pool())
@@ -991,6 +1032,45 @@ class Daemon(unittest.TestCase):
         daemon.dispatch(pool)
         self.assertEqual(self.workers, [review])
         self.assertEqual(bus.get(review)["pipeline"]["respawned_at"], stamp)
+
+    def test_dispatch_respawns_review_again_after_window(self):
+        now = time.time()
+        review = self.task("retry abandoned review", role="review")
+        bus.update(review, pipeline={"respawned_at": now - 121, "respawn_count": 1})
+        self.swap(daemon.time, "time", lambda: now)
+
+        daemon.dispatch(P.Pool())
+
+        task = bus.get(review)
+        self.assertEqual(self.workers, [review])
+        self.assertEqual(task["pipeline"]["respawned_at"], now)
+        self.assertEqual(task["pipeline"]["respawn_count"], 2)
+        daemon.dispatch(P.Pool())
+        self.assertEqual(self.workers, [review])
+
+    def test_respawn_holds_after_respawn_max(self):
+        now = time.time()
+        review = self.task("exhausted review", role="review")
+        bus.update(review, pipeline={"respawned_at": now - 121, "respawn_count": 3})
+        self.swap(daemon.time, "time", lambda: now)
+        notify = mock.Mock()
+        self.swap(daemon, "notify", notify)
+
+        daemon.dispatch(P.Pool())
+
+        task = bus.get(review)
+        self.assertEqual(self.workers, [])
+        self.assertEqual(task["status"], "held")
+        self.assertTrue(task["hold_reason"].startswith("respawn_exhausted"))
+        self.assertNotIn("respawned_at", task["pipeline"])
+        notify.assert_called_once_with(f"{review}: respawn_exhausted: 3 respawns without a claim")
+
+        bus.update(review, status="queued", pipeline={"respawned_at": now - 121, "respawn_count": 3})
+        pool = P.Pool()
+        pool.cfg["daemon"]["respawn_max"] = 5
+        daemon.dispatch(pool)
+        self.assertEqual(self.workers, [review])
+        self.assertEqual(bus.get(review)["pipeline"]["respawn_count"], 4)
 
     def test_respawn_skips_task_claimed_between_snapshot_and_lock(self):
         review = self.task("claimed while respawning", role="review")
