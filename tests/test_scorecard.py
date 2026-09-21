@@ -15,6 +15,29 @@ class Scorecard(unittest.TestCase):
         self.root = TMP / "scorecard-src" / str(time.time())
         (self.root / "tasks").mkdir(parents=True); (self.root / "runs").mkdir(parents=True)
 
+    def test_format_premium_summary_renders_attribution_blocks(self):
+        summary = {
+            "headless": {"count": 0, "mean_input_tokens": None, "max_input_tokens": None,
+                         "output_tokens": 0, "cache_read_share": 0, "usd": 0, "gave_up": 0,
+                         "by_kind": {}, "by_route": {}, "top_reasons": {}},
+            "interactive": {"sessions_count": 0, "sessions": [], "day_totals": []},
+            "interactive_by_goal": [{"goal_id": "G", "tokens": 42, "days": ["2026-09-20", "2026-09-21"]}],
+            "accepted_goals": {"n_goals": 2, "planner_tokens_per_accepted_goal": 20,
+                               "fable_tokens_per_accepted_goal": 5, "fable_share": .25,
+                               "planner_tokens_per_material_decision": None},
+            "exceptions": [],
+        }
+        rendered = scorecard.format_premium_summary(summary)
+        self.assertIn("interactive by goal (approximate):", rendered)
+        self.assertIn("goal G\t42 tokens\t2026-09-20,2026-09-21", rendered)
+        self.assertIn("accepted goals: n=2 planner tokens/goal 20 fable tokens/goal 5 "
+                      "fable share 0.25 tokens/material decision -", rendered)
+        summary["interactive_by_goal"] = None
+        summary["accepted_goals"] = None
+        rendered = scorecard.format_premium_summary(summary)
+        self.assertNotIn("interactive by goal (approximate):", rendered)
+        self.assertNotIn("accepted goals:", rendered)
+
     def write_task(self, tid, **fields):
         base = {"id": tid, "role": "execute", "tier": "sonnet", "complexity": 3, "status": "queued",
                 "acceptance": ["a"], "scope": ["x"], "spec": "s", "title": tid}

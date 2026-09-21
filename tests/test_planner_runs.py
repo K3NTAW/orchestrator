@@ -11,6 +11,7 @@ from _harness import REPO, TMP  # noqa: F401
 import orchestrator as orch_pkg
 from orchestrator import bus, daemon, goals, handover, jev
 from orchestrator import planner_runs as PR
+from orchestrator import planner_telemetry
 from orchestrator import pool as P
 
 
@@ -33,6 +34,22 @@ class PlannerRunsBase(unittest.TestCase):
         orig = getattr(mod, name)
         setattr(mod, name, value)
         self.addCleanup(setattr, mod, name, orig)
+
+    def test_premium_summary_includes_interactive_by_goal_and_accepted_goals(self):
+        from unittest.mock import patch
+        rows = [{"goal_id": "G", "tokens": 12, "days": ["2026-09-21"]}]
+        accepted = {"n_goals": 1}
+        with patch.object(planner_telemetry, "interactive_by_goal", return_value=rows), \
+                patch.object(planner_telemetry, "accepted_goal_summary", return_value=accepted):
+            summary = PR.premium_summary(root=PR.STATE)
+        self.assertEqual(summary["interactive_by_goal"], rows)
+        self.assertEqual(summary["accepted_goals"], accepted)
+
+        for failing in ("interactive_by_goal", "accepted_goal_summary"):
+            with patch.object(planner_telemetry, failing, side_effect=RuntimeError("broken")):
+                summary = PR.premium_summary(root=PR.STATE)
+            key = "accepted_goals" if failing == "accepted_goal_summary" else failing
+            self.assertIsNone(summary[key])
 
     def clear_env(self, name):
         had = name in os.environ

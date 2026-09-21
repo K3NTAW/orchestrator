@@ -126,6 +126,7 @@ def main():
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
     sub.add_parser("resume").add_argument("account")
     pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
+    pk.add_argument("--model", action="store_true")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
@@ -258,6 +259,18 @@ def main():
             print("hold: no account with headroom", file=sys.stderr)
             raise SystemExit(3)
         print(f"{picked.id}\t{os.path.expanduser(picked.config_dir)}")
+        if a.model:
+            from . import planner_router
+            rcfg = planner_router.load_cfg(pl.cfg)
+            mode = rcfg["mode"]
+            if mode == "active":
+                tier = rcfg["default_tier"]
+                model = pl.cfg["models"][tier]
+                reason = f"planner_routing active default tier {tier}"
+            else:
+                model = pl.cfg["models"]["planner"]
+                reason = f"planner_routing {mode}: interactive Planner stays on the escalation tier"
+            print(f"model\t{model}\t{reason}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
     elif a.cmd == "handover":

@@ -955,6 +955,15 @@ def premium_summary(days=7, root=None):
     exceptions = [{"goal_id": goal, "launches": len(why), "limit": limit,
                    "reasons": dict(Counter(why))} for goal, why in per_goal.items() if len(why) > limit]
     input_total = totals["input_tokens"] + totals["cache_read_tokens"] + totals["cache_write_tokens"]
+    from . import planner_telemetry
+    try:
+        interactive_by_goal = planner_telemetry.interactive_by_goal(root=root, cfg=cfg, days=days)
+    except Exception:
+        interactive_by_goal = None
+    try:
+        accepted_goals = planner_telemetry.accepted_goal_summary(root=root)
+    except Exception:
+        accepted_goals = None
     return {"days": days, "headless": {"count": len(recent), "by_kind": dict(kinds),
             "by_route": dict(routes), "top_reasons": dict(reasons.most_common(5)),
             "mean_input_tokens": sum(inputs) / len(inputs) if inputs else None,
@@ -964,6 +973,8 @@ def premium_summary(days=7, root=None):
             "gave_up": sum(r.get("status") == "gave_up" and
                            cutoff <= r.get("started_at", 0) <= now for r in records)},
             "interactive": _interactive_summary(root, cfg, cutoff, now, launches),
+            "interactive_by_goal": interactive_by_goal,
+            "accepted_goals": accepted_goals,
             "exceptions": exceptions}
 
 
