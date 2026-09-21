@@ -22,8 +22,8 @@ def inputs(**changes):
     task.update(changes.pop("task", {}))
     values = {"priority": {"critical_path_s": 20},
               "ready_priorities": {"T": {"critical_path_s": 20}, "U": {"critical_path_s": 10}},
-              "evidence": {"a": {"fix_round_p": .7, "n": 8, "fix_round_cost_usd": 3,
-                                   "cost_to_accepted_usd": 4}},
+              "evidence": {"a": {"fix_round_p": .7, "n": 8,
+                                   "cost_to_accepted_usd": 3.0}},
               "snapshot": snap("a", "b"), "budget_left_usd": 10, "cfg": {}}
     values.update(changes)
     return task, values
@@ -37,6 +37,12 @@ class Speculation(unittest.TestCase):
         self.assertEqual(result["reason"], "mode_off")
         self.assertTrue(result["eligibility"]["eligible"])
 
+    def test_root_config_does_not_enable_speculation(self):
+        for cfg in ({"mode": "active"}, {"mode": "active", "speculation": None}):
+            with self.subTest(cfg=cfg):
+                task, kwargs = inputs(cfg=cfg)
+                self.assertEqual(speculation.plan(task, **kwargs)["reason"], "mode_off")
+
     def test_ordinary_task_is_ineligible_with_reasons(self):
         task, kwargs = inputs(priority={"critical_path_s": 5})
         kwargs["evidence"]["a"]["fix_round_p"] = .2
@@ -49,9 +55,19 @@ class Speculation(unittest.TestCase):
         result = speculation.plan(task, **kwargs)
         self.assertTrue(result["speculate"])
         self.assertEqual(len(set(result["eligibility"]["executors"])), 2)
+        kwargs["evidence"] = {"a": {"n_tasks": 8, "fix_round_probability": .7,
+                                     "cost_to_accepted": 3.0}}
+        self.assertTrue(speculation.plan(task, **kwargs)["speculate"])
+
+    def test_explicit_retry_cost_and_sample_count_take_precedence(self):
+        task, kwargs = inputs()
+        kwargs["evidence"]["a"].update(fix_round_cost_usd=0, n=0, n_tasks=8)
+        reasons = speculation.eligible(task, **kwargs)["reasons"]
+        self.assertIn("low_retry_cost", reasons)
+        self.assertIn("insufficient_samples", reasons)
 
     def test_insufficient_budget_or_no_spare_capacity_blocks(self):
-        task, kwargs = inputs(budget_left_usd=7)
+        task, kwargs = inputs(budget_left_usd=5)
         self.assertIn("insufficient_budget", speculation.eligible(task, **kwargs)["reasons"])
         kwargs.update(budget_left_usd=10, snapshot=snap("a"))
         self.assertIn("no_spare_capacity", speculation.eligible(task, **kwargs)["reasons"])
@@ -75,7 +91,15 @@ class Speculation(unittest.TestCase):
             (root / "runs" / "r.jsonl").write_text("\n".join((
                 json.dumps({"task": "T", "role": "execute", "usd": 1}),
                 json.dumps({"task": "F", "role": "execute", "usd": 3}))))
-            rows = speculation.shadow_estimate(root, {"a": {"first_pass_p": .8}})
+            evidence = {"a": {"first_pass_green_rate": .8, "n_tasks": 8,
+                               "fix_round_probability": .7, "cost_to_accepted": 3.0}}
+            rows = speculation.shadow_estimate(root, evidence)
+            self.assertAlmostEqual(rows[0]["fix_round_usd"], 2.1)
+            self.assertAlmostEqual(rows[0]["expected_saved_usd"], .68)
+            evidence["a"]["fix_round_cost_usd"] = 0
+            explicit = speculation.shadow_estimate(root, evidence)
+            self.assertEqual(explicit[0]["fix_round_usd"], 0)
+            self.assertFalse(explicit[0]["would_have_paid"])
         self.assertTrue(rows[0]["would_have_paid"])
         self.assertEqual(speculation.summary(rows)["paid_rate"], 1)
 

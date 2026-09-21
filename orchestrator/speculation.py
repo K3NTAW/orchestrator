@@ -27,7 +27,7 @@ def _config(cfg):
             cfg = bus.pool_config()
         except Exception:
             cfg = {}
-    section = cfg.get("speculation", cfg) if isinstance(cfg, dict) else {}
+    section = (cfg.get("speculation") or {}) if isinstance(cfg, dict) else {}
     values = {**DEFAULTS, **section}
     review = cfg.get("review", {}) if isinstance(cfg, dict) else {}
     values["security_paths"] = section.get("security_paths", review.get("security_paths", []))
@@ -47,6 +47,14 @@ def _priority(value):
     return _number(value.get("critical_path_s")) if isinstance(value, dict) else _number(value)
 
 
+def _retry_cost(measured):
+    if "fix_round_cost_usd" in measured:
+        return _number(measured.get("fix_round_cost_usd"))
+    cost = measured.get("cost_to_accepted_usd", measured.get("cost_to_accepted"))
+    fix_p = measured.get("fix_round_p", measured.get("fix_round_probability"))
+    return _number(cost) * _number(fix_p)
+
+
 def _unsafe(task, patterns):
     constraints = task.get("constraints") or {}
     if constraints.get("task_class") == "security" or task.get("task_class") == "security":
@@ -61,7 +69,13 @@ def _unsafe(task, patterns):
 
 
 def eligible(task, *, priority, ready_priorities, evidence, snapshot, budget_left_usd, cfg=None):
-    """Return all failed eligibility conditions and, on success, two executors."""
+    """Return all failed eligibility conditions and, on success, two executors.
+
+    Expected retry cost uses explicit fix_round_cost_usd when present. Otherwise
+    it is cost_to_accepted_usd * fix_round_p: the expected rework share of accepted
+    cost. Scorecard's cost_to_accepted and fix_round_probability are aliases.
+    The shadow estimator uses this same proxy.
+    """
     settings = _config(cfg)
     reasons = []
     ready = [_priority(value) for value in (ready_priorities or {}).values()]
@@ -73,9 +87,9 @@ def eligible(task, *, priority, ready_priorities, evidence, snapshot, budget_lef
     fix_p = measured.get("fix_round_p", measured.get("fix_round_probability"))
     if _number(fix_p) < _number(settings["min_fix_round_p"]):
         reasons.append("low_fix_round_p")
-    if _number(measured.get("n")) < _number(settings["min_samples"]):
+    if _number(measured.get("n", measured.get("n_tasks", 0))) < _number(settings["min_samples"]):
         reasons.append("insufficient_samples")
-    if _number(measured.get("fix_round_cost_usd")) < _number(settings["min_retry_cost_usd"]):
+    if _retry_cost(measured) < _number(settings["min_retry_cost_usd"]):
         reasons.append("low_retry_cost")
 
     # A snapshot is already the capacity authority.  Keep this policy usable with
@@ -176,7 +190,7 @@ def _run_costs(root):
 
 
 def shadow_estimate(root=STATE, evidence=None):
-    """Estimate historical economics for each completed lineage containing a fix round."""
+    """Estimate lineage economics using eligible()'s expected retry-cost proxy."""
     root = Path(root)
     tasks, costs = _tasks(root), _run_costs(root)
     if evidence is None:
@@ -198,7 +212,7 @@ def shadow_estimate(root=STATE, evidence=None):
         economics = (evidence or {}).get(executor, {})
         p_other = economics.get("first_pass_p", economics.get("first_pass_green_rate", 0))
         initial_usd = costs.get(task_id, 0.0)
-        fix_usd = sum(costs.get(row["id"], 0.0) for row in fixes)
+        fix_usd = _retry_cost(economics)
         expected = fix_usd * _number(p_other) - initial_usd
         start = _stamp((initial.get("pipeline") or {}).get("first_green_at")
                        or (initial.get("pipeline") or {}).get("gated_at")
