@@ -1,3 +1,4 @@
+import _harness
 """orchestrator.planner_runs: autonomous decision points (scouts_done/held/closable), the dedup/blocking rules in
 .orchestrator/runs/planner_runs.json, and daemon.tick()'s autonomous-launch gate. goals.launch_planner and
 goals.identity_of are patched per test so nothing here spawns a real `claude` subprocess or reads real process
@@ -1112,8 +1113,8 @@ class RoutedDecisions(PlannerRunsBase):
         self.assertEqual(len(self.launches), 1)
         route, packet = self.launches[0]
         self.assertEqual(route.name, "escalate")
-        self.assertIn(f"Task id: {risky}", packet)
-        self.assertNotIn(f"Task id: {routine}", packet)
+        self.assertIn(f"({risky})", packet)
+        self.assertNotIn(f"({routine})", packet)
         self.assertTrue(any((t.get("constraints") or {}).get("fix_round_for") == routine for t in bus.read()))
 
     def test_two_nonroutine_sections_share_claim_and_launch(self):

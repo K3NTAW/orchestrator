@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from . import ROOT, STATE, bus, goals, handover, jev, spawn, decision, failures, gitutil, notify
 from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner
+from . import planner_packet, scout_evidence
 from .pool import Pool
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
@@ -42,75 +43,29 @@ def _fenced(label, value, limit=None):
     return [f"{label}:", "```data", value, "```"]
 
 
-def decision_packet(goal_id, kind, payload, repo_path=ROOT):
-    """Build a bounded decision packet, preserving its decision context before inventory."""
-    repo_path = Path(repo_path)
+def _packet_cap(repo_path=None):
+    path = Path(repo_path) / ".orchestrator" if repo_path is not None else STATE
     try:
-        cfg = tomllib.loads((repo_path / ".orchestrator" / "pool.toml").read_text())
-    except (OSError, tomllib.TOMLDecodeError):
-        cfg = {}
-    try:
-        cap = max(1, int(cfg.get("planner", {}).get("decision_packet_chars", 6000)))
-    except (TypeError, ValueError):
-        cap = 6000
+        cfg = tomllib.loads((path / "pool.toml").read_text())
+        return max(1, int(cfg.get("planner", {}).get("decision_packet_chars", 6000)))
+    except (OSError, ValueError, TypeError):
+        return 6000
 
-    expected = {"scouts_done": "write specs", "held": "write or approve a fix round",
-                "closable": "close the goal"}.get(kind, "make the requested decision")
+
+def decision_packet(goal_id, kind, payload, repo_path=ROOT):
+    """Legacy single-point entry point using the same compact packet format."""
+    point = _point((goal_id, kind, payload))
     try:
         goal = bus.get(goal_id)
+        ctx = build_ctx(point)
     except KeyError:
-        goal = None
-    lines = [f"Decision: {kind} — expected to {expected}.", f"Goal id: {goal_id}", f"Payload id: {payload}"]
-    lines += _fenced("Goal title", goal.get("title", "") if goal else "")
-    if goal is None:
-        return "\n".join(lines)[:cap]
-
-    inventory = []
-    if kind == "held":
-        task_id = str(payload).split(":", 1)[0]
-        lines.append(f"Task id: {task_id}")
-        try:
-            task = bus.get(task_id)
-        except KeyError:
-            task = None
-        lines += _fenced("Task title", task.get("title", "") if task else "")
-        if task is not None:
-            lines += _fenced("Hold reason", task.get("hold_reason", ""))
-            failures = (task.get("resume_hint") or {}).get("failures")
-            if failures is None:
-                failures = (task.get("result") or {}).get("failures")
-            if failures:
-                lines += _fenced("Failures", failures, 1500)
-            comments = []
-            reviews = [r for r in bus.read(role="review") if (r.get("inputs") or [])[:1] == [task_id]]
-            for review in reviews:
-                for comment in (review.get("result") or {}).get("comments", []):
-                    comments.append(f"{comment.get('path', '?')}:{comment.get('line', '?')} "
-                                    f"{str(comment.get('issue', ''))[:200]}")
-            if comments:
-                lines += _fenced("Review comments", "\n".join(comments))
-            inventory = spawn.packet(task, repo_path).splitlines()
-    elif kind == "scouts_done":
-        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "scout"]
-        summaries = []
-        for scout in children:
-            summaries.append(f"{scout['id']}: " + str((scout.get("result") or {}).get("summary", ""))[:300])
-        if summaries:
-            lines += _fenced("Scout summaries", "\n".join(summaries))
-    elif kind == "closable":
-        children = [t for t in bus.read() if t.get("parent") == goal_id and t.get("role") == "execute"
-                    and t.get("merged_into")]
-        if children:
-            lines += _fenced("Merged tasks", "\n".join(f"{t['id']} {t.get('sha', '?')}" for t in children))
-
-    prefix = "\n".join(lines)
-    if inventory:
-        inventory_text = re.sub(r"`{3,}", "[backticks elided]", "\n".join(inventory))
-        empty_suffix = "\n" + "\n".join(_fenced("Spawn packet", ""))
-        room = cap - len(prefix) - len(empty_suffix)
-        suffix = empty_suffix if room < 0 else "\n" + "\n".join(_fenced("Spawn packet", inventory_text[:room]))
-        return prefix[:cap] if room < 0 else prefix + suffix
-    return prefix[:cap]
+        goal, ctx = {"id": goal_id}, {}
+    task = _decision_task(goal_id, kind, payload)
+    classification = planner_taxonomy.classify(point, ctx, goal=goal, task=task)
+    return planner_packet.build(
+        _packet_sections([(point, ctx, None, classification)]), goal=goal,
+        scout_findings=_scout_findings(goal_id), memory_hits=_memory_hits(goal),
+        cap_chars=_packet_cap(repo_path))["text"]
 
 # next_action options offered to Jev for a decision-point shadow triage (D3, T-0217). scouts_done gets its own
 # set (there is no held task/review to react to yet); held and closable share the fix_round/respec/escalate/noop
@@ -1111,31 +1066,114 @@ def build_ctx(point, pool=None):
     return ctx
 
 
-def grouped_packet(sections):
-    """Preserve one bounded evidence section for every covered point."""
+def _packet_sections(sections):
     result = []
     for point, ctx, route, classification in sections:
-        goal_id, kind, key = point["goal_id"], point["kind"], point["payload_key"]
-        result.append(f"Section: {kind}")
-        result.extend(_fenced("Route and reason", f"{route.name}: {route.reason}"))
-        if kind == "held":
-            task = _decision_task(goal_id, kind, key)
-            result.append(f"Task id: {task['id']}")
-            branch = task.get("branch") or f"task/{task['id']}"
+        task = _decision_task(point["goal_id"], point["kind"], point["payload_key"])
+        comments, dependencies, failure_text = [], [], None
+        if task is not None:
+            comments = [{key: comment.get(key) for key in ("path", "line", "issue")}
+                        for _, reviews in failures.rejecting_reviews(task) for comment in reviews][:10]
+            failure_text = (task.get("resume_hint") or {}).get("failures")
+            if failure_text is None:
+                failure_text = (task.get("result") or {}).get("failures")
+            for dep in task.get("depends_on") or []:
+                try:
+                    status = bus.get(dep)["status"]
+                except KeyError:
+                    status = "missing"
+                dependencies.append({"id": dep, "status": status})
+        result.append({"point": point, "ctx": ctx, "route": route, "classification": classification,
+                       "task": task, "reviews": comments, "failures": failure_text,
+                       "depends_on_statuses": dependencies})
+    return result
+
+
+def _previous_launch(goal_id):
+    return max((r for r in _load_records() if r.get("goal_id") == goal_id and r.get("launch_id")),
+               key=lambda r: r.get("started_at") or 0, default=None)
+
+
+def _packet_tasks():
+    """Ignore stale index entries left behind when a task file is purged."""
+    try:
+        return bus.read()
+    except KeyError:
+        tasks = []
+        for (task_id,) in bus.db().execute("select id from tasks").fetchall():
             try:
-                head = gitutil._git_in(task.get("worktree") or ROOT, "rev-parse", branch)
-                sha = head.stdout.strip() if head.returncode == 0 else "unknown"
-            except OSError:
-                sha = "unknown"
-            result.extend(_fenced("Branch and head sha", f"{branch} {sha}"))
-            result.extend(_fenced("Hold reason", task.get("hold_reason"), 1000))
-            result.extend(_fenced("Failure kind and signature", f"{(task.get('pipeline') or {}).get('failure_kind', 'unknown')} {ctx['failure_signature']}"))
-            result.extend(_fenced("Failing ids", "\n".join(ctx["failing_ids"]), 1500))
-            comments = [c for _, cs in failures.rejecting_reviews(task) for c in cs]
-            result.extend(_fenced("Review comments", json.dumps(comments), 2000))
-        else:
-            result.append(decision_packet(goal_id, kind, key))
-    return "\n".join(result)
+                tasks.append(bus.get(task_id))
+            except KeyError:
+                continue
+        return tasks
+
+
+def _changes_since(goal_id, cursor):
+    changes, seen = [], {}
+    with bus.locked():
+        ids = [goal_id] + [t["id"] for t in _packet_tasks() if t.get("parent") == goal_id]
+        placeholders = ",".join("?" for _ in ids)
+        rows = bus.db().execute(
+            f"select task_id, seq, ts, data from events where seq > ? "
+            f"and task_id in ({placeholders}) order by seq", [cursor, *ids])
+        for task_id, _, ts, data in rows:
+            data = json.loads(data)
+            if not isinstance(data, dict):
+                continue
+            for field in ("status", "hold_reason", "merged_into"):
+                if field in data:
+                    key = (task_id, field)
+                    changes.append({"task": task_id, "field": field, "from": seen.get(key),
+                                    "to": data[field], "ts": ts})
+                    seen[key] = data[field]
+    return changes[-20:]
+
+
+def _scout_findings(goal_id):
+    findings = [finding for task in _packet_tasks()
+                if task.get("parent") == goal_id and task.get("role") == "scout" and task.get("status") == "done"
+                for finding in scout_evidence.normalize_findings(task.get("result"))]
+    return sorted(findings, key=lambda f: f["confidence"], reverse=True)[:10]
+
+
+def _memory_hits(goal):
+    try:
+        return [{"title": hit.get("title", "")} for hit in
+                scout_evidence.memory_recall(goal.get("title", ""), root=STATE)["hits"][:10]]
+    except Exception:
+        return []
+
+
+def _build_grouped(sections):
+    goal_id = sections[0][0]["goal_id"]
+    goal, prev = bus.get(goal_id), _previous_launch(goal_id)
+    meta = planner_packet.build(
+        _packet_sections(sections), goal=goal,
+        previous={"state_version": prev.get("state_version")} if prev else None,
+        changes=_changes_since(goal_id, prev.get("cursor_at_launch", 0)) if prev else None,
+        scout_findings=_scout_findings(goal_id), memory_hits=_memory_hits(goal), cap_chars=_packet_cap())
+    return meta["text"], meta
+
+
+def grouped_packet(sections):
+    """Public text-only interface; launch callers retain the build metadata."""
+    return _build_grouped(sections)[0]
+
+
+def _previous_shadow(goal_id):
+    path = STATE / "runs/sched/planner_shadow.jsonl"
+    rows = []
+    try:
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("goal_id") == goal_id:
+                rows.append(row)
+    except OSError:
+        return None
+    return max(rows, key=lambda row: row.get("started_at") or 0, default=None)
 
 
 def launch_routed(pool, route, prompt, account, budget, log):
@@ -1302,6 +1340,24 @@ def run_group(sections, pool):
                 notify.notify_once(goal_id, f"held_for_fable:{launch_id}",
                                    f"{goal_id}: {routed.hold_reason}")
                 return {"launched": False, "reason": routed.hold_reason}
+            if not all(_SAFE_KEY.fullmatch(str(p[k])) for p, _, _, _ in sections
+                       for k in ("goal_id", "kind", "payload_key")):
+                raise ValueError("unsafe decision key")
+            shadow_row = _previous_shadow(goal_id) if ctx.get("reescalation") else None
+            packet_kind = "escalation" if shadow_row is not None else "decision"
+            if shadow_row is not None:
+                goal = bus.get(goal_id)
+                packet_meta = planner_packet.escalation_packet(
+                    goal=goal, original_sections=_packet_sections(sections),
+                    opus_decision={key: shadow_row.get(key) for key in
+                                   ("proposed_action", "summary", "tasks_proposed", "confidence",
+                                    "needs_fable", "unresolved")},
+                    unresolved=shadow_row.get("unresolved"), conflicting_evidence=None,
+                    scout_findings=_scout_findings(goal_id), memory_hits=_memory_hits(goal),
+                    reason=";".join(hard), cap_chars=_packet_cap())
+                packet_text = packet_meta["text"]
+            else:
+                packet_text, packet_meta = _build_grouped(sections)
             for point, section_ctx, section_route, _ in sections:
                 _claim(goal_id, point["kind"], point["payload_key"],
                        _existing_attempts(goal_id, point["kind"], point["payload_key"]), section_route)
@@ -1316,7 +1372,7 @@ def run_group(sections, pool):
         if not all(_SAFE_KEY.fullmatch(str(p[k])) for p, _, _, _ in sections for k in ("goal_id", "kind", "payload_key")):
             raise ValueError("unsafe decision key")
         handover.write("goal decision")
-        prompt = spawn.render("planner-decision", packet=grouped_packet(sections))
+        prompt = spawn.render("planner-decision", packet=packet_text)
         log = STATE / "runs" / f"planner-decision-{goal_id}-{launch_id}.log"
         budget = pool.cfg.get("limits", {}).get("max_budget_usd", {}).get("planner_decision", 3)
         before = planner_telemetry.snapshot(goal_id, root=STATE)
@@ -1331,7 +1387,7 @@ def run_group(sections, pool):
             model=model, tier=routed.tier, account=account.id, complexity=ctx.get("complexity"),
             band=classification["band"], task_class=classification["task_class"],
             architectural=classification["architectural"], route=route.name, route_reason=route.reason,
-            mode=rcfg["mode"], state_version=version, packet_chars=len(prompt), started_at=now,
+            mode=rcfg["mode"], state_version=version, packet_chars=packet_meta["chars"], started_at=now,
             reescalation=bool(ctx.get("reescalation")), root=STATE)
         shadow_fields = {}
         if planner_shadow.eligible(routed, rcfg, sample=sample)[0]:
@@ -1376,6 +1432,9 @@ def run_group(sections, pool):
                      log=launched["log"], stderr_log=launched.get("stderr_log"), account=account.id,
                      prompt_hash=hashlib.sha256(prompt.encode()).hexdigest()[:12],
                      telemetry_before=before, launch_started_at=now,
+                     packet_kind=packet_kind, packet_chars=packet_meta["chars"],
+                     packet_hash=packet_meta["hash"], packet_delta=packet_meta["delta"],
+                     packet_truncated=packet_meta["truncated"],
                      decision_type=classification["decision_type"], **shadow_fields)
             r.setdefault("launches", []).append({k: v for k, v in r.items() if k != "launches"})
         guards = _goal_launches()
