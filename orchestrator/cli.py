@@ -145,6 +145,7 @@ def main():
     sc.add_argument("--goal")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
+    sc.add_argument("--planner-routing", action="store_true")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -173,8 +174,10 @@ def main():
     rs.add_argument("--write", action="store_true")
     a = ap.parse_args()
     if a.cmd == "scorecard":
-        if sum((a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
-            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies")
+        if a.planner_routing and (a.planner or a.parallelism):
+            ap.error("--planner-routing conflicts with --planner and --parallelism")
+        if sum((a.planner_routing, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
             "--efficiency": ("goal", "executor", "band", "class", "role"),
@@ -184,9 +187,12 @@ def main():
             "--reviews": ("role", "packet_version", "tier", "band", "reviewed_executor"),
             "--scheduling": (),
             "--strategies": (),
+            "--planner-routing": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
+        if a.planner_routing:
+            mode = "--planner-routing"
         if a.goal is not None and not a.parallelism:
             ap.error("--goal requires --parallelism")
         if a.parallelism and a.planner:
@@ -307,7 +313,11 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.scheduling:
+        if a.planner_routing:
+            from . import planner_scorecard
+            card = planner_scorecard.build(root=scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else planner_scorecard.format(card))
+        elif a.scheduling:
             from . import sched_scorecard
             card = sched_scorecard.build()
             print(json.dumps(card, indent=1) if a.json else sched_scorecard.format(card))
