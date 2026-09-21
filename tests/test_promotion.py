@@ -1,3 +1,6 @@
+import tempfile
+import unittest
+
 from orchestrator import promotion
 
 
@@ -10,37 +13,44 @@ def evidence(**overrides):
     return value
 
 
-def test_insufficient_evidence_stays_shadow():
-    result = promotion.evaluate("scheduler", evidence(n=19, accepted_cost_delta=-1,
-                                                       first_pass_delta=-1))
-    assert result["recommendation"] == "stay"
-    assert "insufficient_evidence" in result["reasons"]
+class TestPromotion(unittest.TestCase):
+    def test_insufficient_evidence_stays_shadow(self):
+        result = promotion.evaluate("scheduler", evidence(
+            n=19, accepted_cost_delta=-.15, accepted_tokens_delta=-.3,
+            latency_delta=-.1, first_pass_delta=.1, fix_rounds_delta=-.1,
+            gate_success_delta=.1, review_findings_delta=.1))
+        self.assertEqual(result["mode"], "shadow")
+        self.assertEqual(result["recommendation"], "stay")
+        self.assertIn("insufficient_evidence", result["reasons"])
 
 
-def test_token_reduction_alone_does_not_promote():
-    result = promotion.evaluate("scheduler", evidence(accepted_tokens_delta=-.3,
-                                                       first_pass_delta=-.1))
-    assert result["recommendation"] == "stay"
-    assert "quality_regression:first_pass" in result["reasons"]
+    def test_token_reduction_alone_does_not_promote(self):
+        result = promotion.evaluate("scheduler", evidence(accepted_tokens_delta=-.3,
+                                                           first_pass_delta=-.1))
+        self.assertEqual(result["recommendation"], "stay")
+        self.assertIn("quality_regression:first_pass", result["reasons"])
 
 
-def test_non_inferior_quality_with_cost_improvement_promotes():
-    result = promotion.evaluate("scheduler", evidence(accepted_cost_delta=-.15))
-    assert result["recommendation"] == "promote"
+    def test_non_inferior_quality_with_cost_improvement_promotes(self):
+        result = promotion.evaluate("scheduler", evidence(accepted_cost_delta=-.15))
+        self.assertEqual(result["recommendation"], "promote")
 
 
-def test_active_feature_with_regression_demotes():
-    cfg = {"scheduler": {"mode": "active"}}
-    result = promotion.evaluate("scheduler", evidence(gate_success_delta=-.1), cfg)
-    assert result["recommendation"] == "demote"
+    def test_active_feature_with_regression_demotes(self):
+        cfg = {"scheduler": {"mode": "active"}}
+        result = promotion.evaluate("scheduler", evidence(gate_success_delta=-.1), cfg)
+        self.assertEqual(result["recommendation"], "demote")
 
 
-def test_registry_defaults_and_invalid_config(tmp_path):
-    cfg = {"scheduler": {"mode": "broken"}}
-    for feature, spec in promotion.FEATURES.items():
-        mode, flags = promotion.current_mode(feature, cfg)
-        assert mode == spec["default"]
-        if feature == "scheduler":
-            assert "invalid_config" in flags
-        assert promotion.collect(feature, root=tmp_path)["n"] == 0
-    assert promotion.current_mode("speculation", {})[0] == "off"
+    def test_registry_defaults_and_invalid_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            for feature, spec in promotion.FEATURES.items():
+                with self.subTest(feature=feature):
+                    mode, flags = promotion.current_mode(feature, {})
+                    self.assertEqual(mode, spec["default"])
+                    self.assertEqual(flags, [])
+                    self.assertEqual(promotion.collect(feature, root=root)["n"], 0)
+        mode, flags = promotion.current_mode("scheduler", {"scheduler": {"mode": "broken"}})
+        self.assertEqual(mode, "shadow")
+        self.assertIn("invalid_config", flags)
+        self.assertEqual(promotion.current_mode("speculation", {})[0], "off")
