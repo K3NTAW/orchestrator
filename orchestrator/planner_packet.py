@@ -47,7 +47,7 @@ def _mapping(value):
 
 
 def _clean(value, limit=None):
-    value = str(value or "")
+    value = "" if value is None else str(value)
     if limit is not None:
         value = value[:limit]
     return re.sub(r"`{3,}", "[backticks elided]", value)
@@ -61,7 +61,7 @@ def _fenced(label, value, limit=None):
 def _decision_type(section):
     classification = _mapping(_mapping(section).get("classification"))
     value = classification.get("decision_type")
-    if value not in DECISION_TYPES:
+    if "decision_type" not in classification:
         value = _KIND_FALLBACK.get(_mapping(_mapping(section).get("point")).get("kind"), "other")
     return value if value in DECISION_TYPES else "other"
 

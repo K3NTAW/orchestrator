@@ -44,6 +44,26 @@ class PlannerPacketTests(unittest.TestCase):
         self.assertEqual(result["hash"], PP.meta(result["text"])["hash"])
         fallback = PP.build([_section(kind="held", decision_type=None)], goal={"id": "G-1"})
         self.assertIn(": held_task —", fallback["text"])
+        zero_values = PP.build(
+            [_section(reviews=[{"path": "path", "line": 0, "issue": "fix it"}])],
+            goal={"id": "G-1", "complexity": 0},
+            scout_findings=[{"finding": "fact", "source": "source", "confidence": 0.0}],
+        )
+        self.assertIn("(source, 0.0)", zero_values["text"])
+        self.assertIn("path:0", zero_values["text"])
+        self.assertIn("complexity: 0", zero_values["text"])
+        self.assertEqual(PP._clean(False), "False")
+        self.assertEqual(PP._clean(None), "")
+        for classification, expected_type in [
+            ({"decision_type": "bogus"}, "other"),
+            ({"decision_type": None}, "other"),
+            ({}, "held_task"),
+        ]:
+            with self.subTest(classification=classification):
+                classified = PP.build(
+                    [_section(kind="held", classification=classification)], goal={"id": "G-1"},
+                )
+                self.assertIn(f": {expected_type} —", classified["text"])
 
     def test_delta_with_and_without_changes(self):
         changes = [{"task": f"T-{i}", "field": "status", "from": "a", "to": "b", "ts": i}
