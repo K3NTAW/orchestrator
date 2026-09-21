@@ -255,6 +255,20 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(scorecard.class_success("good", "mechanical", self.root), 1.0)
         self.assertAlmostEqual(scorecard.class_success("good", "security", self.root), 1 / 3)
 
+    def test_class_sample_size_matches_class_success_filter(self):
+        for tid, fields in (
+                ("T-merged", {"executor": "good", "merged_into": "goal/G"}),
+                ("T-failed", {"executor": "good", "status": "failed"}),
+                ("T-unresolved", {"executor": "good"}),
+                ("T-other", {"executor": "other", "merged_into": "goal/G"}),
+                ("T-review", {"executor": "good", "role": "review", "merged_into": "goal/G"})):
+            self.write_task(tid, constraints={"task_class": "mechanical"}, **fields)
+        self.write_runs(*[{"task": tid, "role": "execute"}
+                          for tid in ("T-merged", "T-failed", "T-unresolved", "T-other", "T-review")])
+        self.assertEqual(scorecard.class_sample_size("good", "mechanical", self.root), 2)
+        self.assertEqual(scorecard.class_success("good", "mechanical", self.root, min_samples=1), .5)
+        self.assertIsNone(scorecard.class_success("good", "mechanical", self.root))
+
     def test_expected_cost_needs_samples(self):
         for n in range(2):
             self.write_task(f"T-ec{n}", executor="cheap", status="done", merged_into="goal/G")

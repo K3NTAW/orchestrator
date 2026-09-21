@@ -61,15 +61,8 @@ def task_class(task):
     return attribution.task_class(task)
 
 
-def class_success(executor_id, task_class_name, root=STATE, min_samples=None):
-    """Return an executor's merge rate for a class, using only tasks with execute run rows."""
-    if min_samples is None:
-        try:
-            from .pool import config
-            min_samples = config().get("models", {}).get("min_samples", 3)
-        except Exception:
-            min_samples = 3
-
+def _class_resolved(executor_id, task_class_name, root):
+    """Resolved execute tasks in a class that have a corresponding execute run."""
     tasks_dir = root / "tasks"
     tasks = {}
     for p in sorted(tasks_dir.glob("T-*.json")) if tasks_dir.exists() else []:
@@ -81,10 +74,27 @@ def class_success(executor_id, task_class_name, root=STATE, min_samples=None):
 
     run_task_ids = {entry.get("task") for _, entry in _read_jsonl_entries(root)
                     if entry.get("role") == "execute" and entry.get("task")}
-    resolved = [task for tid, task in tasks.items()
-                if tid in run_task_ids and task.get("role") == "execute"
-                and task.get("executor") == executor_id and task_class(task) == task_class_name
-                and (task.get("merged_into") or task.get("status") == "failed")]
+    return [task for tid, task in tasks.items()
+            if tid in run_task_ids and task.get("role") == "execute"
+            and task.get("executor") == executor_id and task_class(task) == task_class_name
+            and (task.get("merged_into") or task.get("status") == "failed")]
+
+
+def class_sample_size(executor_id, task_class_name, root=STATE):
+    """Number of resolved tasks used by :func:`class_success`."""
+    return len(_class_resolved(executor_id, task_class_name, root))
+
+
+def class_success(executor_id, task_class_name, root=STATE, min_samples=None):
+    """Return an executor's merge rate for a class, using only tasks with execute run rows."""
+    if min_samples is None:
+        try:
+            from .pool import config
+            min_samples = config().get("models", {}).get("min_samples", 3)
+        except Exception:
+            min_samples = 3
+
+    resolved = _class_resolved(executor_id, task_class_name, root)
     if len(resolved) < min_samples:
         return None
     merged = sum(bool(task.get("merged_into")) for task in resolved)
