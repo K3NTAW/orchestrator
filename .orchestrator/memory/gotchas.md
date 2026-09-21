@@ -312,3 +312,19 @@ type: gotcha · goal: T-0503 · tasks: T-0515,T-0519,T-0521,T-0527,T-0533,T-0552
 - merge() rebases the task branch onto the goal branch; _merge_reviewed_one compared the worktree head against pipeline.reviewed_sha before checking already_merged, so every hand merge that rebased opened one more sonnet security review (five in this goal, about 0.5 USD each)
 - the Planner skipped reading them as waste, but T-0515 found two real S0b defects and T-0527 one gate-message defect; a review of merged code is still evidence
 outcome: T-0552 checks already_merged first. Rule: read every finished review's verdict and comments, whatever triggered it; fast-forward merges (task cut from the current goal head) avoid the rebase and the extra review
+
+## 2026-09-21 Scout results lose their structured matrix: summary is truncated to 1500-2000 chars and findings posted outside the result dict vanish; a complexity-6 audit scout burned its 1 USD budget in one turn
+type: gotcha · goal: T-0561 · tasks: T-0562,T-0563,T-0573 · provenance: repo
+- T-0562 put an 18-line audit matrix into result.summary and only the first 2000 chars (P0) survived; T-0573 reported '18 findings' but the stored result has only confidence, provenance, summary (findings never reached the bus result dict); T-0563 (AP audit over daemon, interference, scorecard) exited rc=1 after 199 s at 1.05 USD with turns=1, outcome error, before posting
+- the Planner grep (test names, function maps, config tables) answered the same audit questions in under 15 minutes of tool calls; scouts pay to reread files the Planner can grep
+outcome: rule: audit scouts get one narrow question each (one brief section, cited line ranges, at most 10 findings), results as findings entries of at most 200 chars; prefer Planner grep for test-coverage and does-code-exist questions; follow-up: scout_evidence (R6) normalizes findings and MAX_RESULT_CHARS handling should keep findings before summary
+
+## 2026-09-21 Concurrent test runs collide on shared hook state: test_hooks loop-guard and test_memory_skill fail when two gates run at once
+type: gotcha · goal: T-0561 · tasks: T-0634 · provenance: repo
+- T-0634 gate_red listed test_loop_guard (0 != 2), test_retrospect_and_uncommitted, test_recall_goal_flag_ranks and test_record_then_recall; the same worktree and the goal branch head passed those tests minutes later; the loop-guard hook keeps a per-session log under the orchestrator root with fixed session ids s1/s2 in the tests, and test_memory_skill uses fixed task ids such as T-0076 under the shared TMP, so a Codex gate run overlapping the daemon gate or the Planner's external gate flips the results
+outcome: treat this signature as flaky: clear pipeline.gated_at and let the daemon re-gate; backlog: hooks tests should namespace session ids and TMP per process so gates can run concurrently
+
+## 2026-09-21 A test module that skips or duplicates the tests/_harness import moves ORCH_ROOT for the whole suite: test_hooks and test_memory_skill fail with 0 != 2 and missing bus ids
+type: gotcha · goal: T-0561 · tasks: T-0634,T-0637 · provenance: repo
+- tests/_harness.py creates one temporary ORCH_ROOT per suite run; Codex wrote tests/test_allocation.py and tests/test_strategy.py with their own temporary roots (duplicate harness import under another path), so the unittest discovery run pointed hooks and memory tests at the wrong root; the same worktree passed the affected tests when run alone, which looked like concurrency flakiness (earlier gotcha today) but was not
+outcome: fix landed in both tasks (import _harness first, single root); execute.md prompt now states the rule; the earlier concurrent-gate gotcha is downgraded: re-gating alone would not have helped

@@ -4,5 +4,6 @@ Implement this single task in the current worktree. Run `.claude/hooks/tests-gre
 Spec: {{spec}}
 Acceptance: {{acceptance}}
 Scope (only these paths): {{scope}}
+Tests: this repo runs unittest, not pytest. Every acceptance test id tests/test_<module>.py::test_name must be a method `def test_name(self)` inside a `unittest.TestCase` subclass in that file, named exactly as listed. Module-level `def test_*` functions and pytest fixtures (tmp_path, monkeypatch) are not collected and fail the gate; use tempfile.TemporaryDirectory and unittest.mock instead. Every tests/test_*.py begins with `import _harness` exactly like the existing tests (tests/_harness.py points ORCH_ROOT at one shared temporary root for the whole suite); never import it under another module path or create a second orchestrator state root, or unrelated hook and memory tests in the same run fail.
 No new dependencies without stating why. Finish with: summary, files changed, failures-only test output.
 Tool-call budget: read only files inside Scope first, then edit; do not re-read a file you already read; run the test script at most twice.
