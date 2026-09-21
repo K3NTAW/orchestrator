@@ -1,3 +1,4 @@
+import _harness  # noqa: F401 - share the suite's single isolated ORCH_ROOT
 import tempfile
 import unittest
 
@@ -14,6 +15,12 @@ def evidence(**overrides):
 
 
 class TestPromotion(unittest.TestCase):
+    def test_format_report_with_reasons_does_not_raise(self):
+        line = promotion.format_report([{"feature": "scheduler", "recommendation": "stay",
+                                         "mode": "shadow", "n": 1,
+                                         "reasons": ["insufficient_evidence"]}])
+        self.assertIn("insufficient_evidence", line)
+
     def test_collect_jev_sched_reads_decision_rows(self):
         with tempfile.TemporaryDirectory() as root:
             common = dict(candidates=["a|b"], hard_constraints=[], deterministic={}, jev={},

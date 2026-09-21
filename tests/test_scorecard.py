@@ -1041,6 +1041,15 @@ class Efficiency(unittest.TestCase):
         self.assertEqual(card["first_pass_defined_count"], 2)
         self.assertEqual(card["fix_round_defined_count"], 2)
 
+    def test_first_pass_defined_when_green_without_recorded_reds(self):
+        self.write_task("T-root", merged_into="main", executor="worker",
+                        pipeline={"first_green_at": 130}, lineage_fix_rounds=0)
+        task = scorecard.efficiency(self.root)["tasks"]["T-root"]
+        self.assertIs(task["first_pass"], True)
+        economics = scorecard.executor_economics(self.root)["worker"]
+        self.assertEqual(economics["first_pass_green_rate"], 1)
+        self.assertEqual(economics["first_pass_defined_count"], 1)
+
     def test_efficiency_tokens_and_time_to_first_green_use_stamps(self):
         task = scorecard.efficiency(self.root)["tasks"]["T-root"]
         self.assertEqual((task["tokens_to_first_green"], task["time_to_first_green_s"], task["time_to_accepted_s"]), (120, 30, 60))

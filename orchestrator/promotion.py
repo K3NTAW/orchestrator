@@ -171,5 +171,6 @@ def report(cfg=None, root=STATE):
 
 def format_report(rows):
     return "\n".join("{feature}: {recommendation} ({mode}, n={n}){reasons}".format(
-        **row, reasons=(" — " + ", ".join(row.get("reasons", [])) if row.get("reasons") else ""))
+        **{key: value for key, value in row.items() if key != "reasons"},
+        reasons=(" — " + ", ".join(row.get("reasons", [])) if row.get("reasons") else ""))
         for row in rows)

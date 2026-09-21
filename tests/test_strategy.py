@@ -70,6 +70,15 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(card[("direct_execute", "unfamiliar", "4-6")]["first_pass_rate"], 1)
         self.assertEqual(card[("direct_execute", "unfamiliar", "4-6")]["median_usd"], 2)
 
+    def test_first_pass_rate_ignores_unknown_values(self):
+        rows = [{"strategy": "direct_execute", "task_class": "unfamiliar", "band": "4-6",
+                 "accepted": True, "first_pass": value, "usd": 1, "time_s": 1, "fix_rounds": 0}
+                for value in (None, True, False)]
+        with patch.object(strategy, "observations", return_value=rows):
+            row = strategy.scorecard(self.root)[("direct_execute", "unfamiliar", "4-6")]
+        self.assertEqual(row["first_pass_rate"], .5)
+        self.assertEqual(row["first_pass_defined_count"], 2)
+
     def test_cold_start_and_insufficient_evidence_return_no_strategy(self):
         with patch.object(strategy, "observations", return_value=[]):
             cold = strategy.recommend("unfamiliar", "4-6", root=self.root)

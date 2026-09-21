@@ -869,6 +869,13 @@ class Daemon(unittest.TestCase):
         self.assertEqual(pipeline["first_green_at"], 1000.0)
         self.assertEqual(pipeline["gate_attempts"], 2)
 
+    def test_green_gate_stamps_gate_reds_zero(self):
+        tid = self.metric_gate_task()
+        daemon.gate(P.Pool())
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertEqual(pipeline["gate_reds"], 0)
+        self.assertIn("first_green_at", pipeline)
+
     def test_gate_red_increments_reds_and_keeps_hold(self):
         tid = self.metric_gate_task()
         self.gate_green(False)

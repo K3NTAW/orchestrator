@@ -1274,6 +1274,7 @@ def gate(pool):
         n_reviews, review_reason = _review_plan(t)
         now = time.time()
         green_fields = {"first_green_at": pipeline.get("first_green_at", now),
+                        "gate_reds": pipeline.get("gate_reds", 0),
                         "reviews_expected": n_reviews, "review_reason": review_reason}
         with bus.locked():
             if not stamp(t["id"], "gated_at", pipeline_fields=green_fields):

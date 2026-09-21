@@ -227,12 +227,14 @@ def scorecard(root=STATE, by=("task_class", "band")):
     card = {}
     for key, rows in grouped.items():
         accepted = [row for row in rows if row["accepted"]]
+        first_pass = [row["first_pass"] for row in accepted if row["first_pass"] is not None]
         usd = [row["usd"] for row in rows if row["usd"] is not None]
         times = [row["time_s"] for row in rows if row["time_s"] is not None]
         card[key] = {
             "n": len(rows),
             "accepted_rate": sum(row["accepted"] for row in rows) / len(rows),
-            "first_pass_rate": sum(bool(row["first_pass"]) for row in accepted) / len(accepted) if accepted else 0,
+            "first_pass_rate": sum(first_pass) / len(first_pass) if first_pass else None,
+            "first_pass_defined_count": len(first_pass),
             "median_usd": statistics.median(usd) if usd else None,
             "median_time_s": statistics.median(times) if times else None,
             "avg_fix_rounds": sum(row["fix_rounds"] or 0 for row in rows) / len(rows),
@@ -243,7 +245,9 @@ def scorecard(root=STATE, by=("task_class", "band")):
 def format(card):
     lines = ["strategy | task_class | band | n | accepted | first_pass | median_usd | median_time_s | avg_fix_rounds"]
     for key, row in sorted(card.items()):
-        values = list(key) + [row["n"], f'{row["accepted_rate"]:.3f}', f'{row["first_pass_rate"]:.3f}',
+        first_pass = row["first_pass_rate"]
+        values = list(key) + [row["n"], f'{row["accepted_rate"]:.3f}',
+                              f'{first_pass:.3f}' if first_pass is not None else None,
                               row["median_usd"], row["median_time_s"], f'{row["avg_fix_rounds"]:.2f}']
         lines.append(" | ".join("-" if value is None else str(value) for value in values))
     return "\n".join(lines)

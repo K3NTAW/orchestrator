@@ -1034,7 +1034,7 @@ def efficiency(root=STATE, by=None):
             "time_to_first_green_s": green - created if green is not None and created is not None else None,
             "time_to_accepted_s": end - created if end is not None and created is not None else None,
             "fix_rounds": fixes, "fix_round_tokens": sum(_tokens_of(r) for r in own if r["bucket"] == "fix_round"),
-            "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None}
+            "first_pass": fixes == 0 and (reds or 0) == 0 if green is not None else None}
     goal_card = {}
     for gid in accepted_goals(root):
         members = {tid for tid, task in accepted.items() if task["goal_id"] == gid}
@@ -1154,7 +1154,7 @@ def routing_eval(root=STATE, min_samples=None):
                     verdicts.append(verdict)
         accepted = bool(task.get("merged_into"))
         joined.append({**route, "lineage_root": tid, "accepted": accepted,
-                       "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None,
+                       "first_pass": fixes == 0 and (reds or 0) == 0 if green is not None else None,
                        "fix_rounds": fixes, "gate_reds": reds,
                        "tokens": sum(_tokens_of(row) for row in own),
                        "cost": sum(row.get("usd") or 0 for row in own),
@@ -1313,7 +1313,7 @@ def executor_economics(root=STATE, by="executor"):
                       "initial_tokens": sum(_tokens_of(row) for row in initial),
                       "tokens": sum(_tokens_of(row) for row in own),
                       "usd": sum(row.get("usd") or 0 for row in own), "fix_rounds": fixes,
-                      "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None,
+                      "first_pass": fixes == 0 and (reds or 0) == 0 if green is not None else None,
                       "reasons": reasons, "verdicts": verdicts})
     grouped = {}
     for root_row in roots:
