@@ -361,3 +361,10 @@ outcome: rollback: revert the PR merge commit on main; every mode key in [planne
 type: decision · goal: T-0674 · provenance: repo
 - merge commit, branch kept; main on GitHub now carries planner_taxonomy, planner_router, planner_telemetry, planner_packet, planner_shadow, planner_scorecard, jev_planner and the planner_runs integration with [planner.routing].mode shadow; the local checkout is local main c4cd12e (3 Planner commits) and the servers still run the pre-goal code
 outcome: rollback: git revert 545fd12 on main, or [planner.routing].mode = off for legacy behaviour; human next: git pull, restart f orch, run one goal with [planner].autonomous = true in shadow, read scorecard --planner-routing / promotion / scorecard --planner, push main
+
+## 2026-09-21 2026-09-21 18:45 pool.toml: [planner].autonomous = true and account B gains planner affinity, for headless Planner evidence under [planner.routing] shadow
+type: decision · goal: T-0755 · provenance: repo
+- user asked at 18:25 to flip autonomous and run one goal; GOAL T-0755 (R22 render errors visible, review respawn retry) filed as that goal
+- headless launches skip while an interactive session is attached (planner_runs._session_attached) and while no planner-affinity account has headroom; account A was at 67.1M of 30M, so B got planner affinity at 18:40
+- planner_skips.jsonl already records six closable skips per tick for long-closed goals (decision_points ignores the goal task status), backlog
+outcome: rollback: git revert the commit, or set autonomous = false and remove planner from account B role_affinity in .orchestrator/pool.toml
