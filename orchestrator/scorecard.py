@@ -1369,3 +1369,251 @@ def format_efficiency(card):
     for name, group in [("total", card), *card["groups"].items()]:
         lines.append(name + " breakdown: " + ", ".join(f"{key}={cell(value)}" for key, value in group["breakdown"].items()))
     return "\n".join(lines)
+
+
+def _parallelism_sweep(intervals):
+    """Half-open intervals; average occupancy over the union of busy time."""
+    if not intervals:
+        return None, None
+    changes = {}
+    for start, end in intervals:
+        changes[start] = changes.get(start, 0) + 1
+        changes[end] = changes.get(end, 0) - 1
+    active = peak = 0
+    area = busy = 0.0
+    previous = min(changes)
+    for stamp, change in sorted(changes.items()):
+        width = stamp - previous
+        area += active * width
+        if active:
+            busy += width
+        active += change
+        peak = max(peak, active)
+        previous = stamp
+    return peak, area / busy if busy else None
+
+
+def parallelism(root=STATE, goal=None):
+    """Read-only scheduling telemetry. Missing timing evidence remains undefined.
+
+    Wait medians use observed samples; totals require all applicable samples.
+    Total wall time spans the earliest goal start to the latest goal completion;
+    total critical path is the longest of the independent goal DAGs.
+    """
+    root = Path(root)
+    malformed = 0
+
+    def read_rows(path):
+        nonlocal malformed
+        if not path.exists():
+            return []
+        rows = []
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                malformed += 1
+                continue
+            if not isinstance(row, dict):
+                malformed += 1
+                continue
+            rows.append(row)
+        return rows
+
+    tasks = {}
+    for path in sorted((root / 'tasks').glob('*.json')):
+        try:
+            task = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if isinstance(task, dict):
+            tasks[task.get('id', path.stem)] = task
+        else:
+            malformed += 1
+    runs = [row for path in sorted((root / 'runs').glob('*.jsonl')) for row in read_rows(path)]
+    sched = {name: read_rows(root / 'runs' / 'sched' / (name + '.jsonl'))
+             for name in ('dispatch', 'waves', 'stale')}
+
+    def stamp(task, key):
+        return _stamp((task.get('pipeline') or {}).get(key, task.get(key)))
+
+    def done(task):
+        values = [_stamp(e.get('ts')) for e in task.get('events', [])
+                  if isinstance(e, dict) and e.get('status') == 'done']
+        return max((v for v in values if v is not None), default=None)
+
+    def difference(end, start):
+        return end - start if end is not None and start is not None and end >= start else None
+
+    def row_goal(row):
+        return row.get('goal_id') or tasks.get(row.get('task'), {}).get('parent') or 'unknown'
+
+    goal_ids = {t['parent'] for t in tasks.values() if t.get('parent')}
+    goal_ids.update(row_goal(r) for r in runs)
+    goal_ids.update(row_goal(r) for r in sched['stale'])
+    goal_ids.update(row_goal(c) for r in sched['dispatch'] for c in r.get('considered', [])
+                    if isinstance(c, dict))
+    if goal is not None:
+        goal_ids = {goal}
+    grouped = {gid: {tid: t for tid, t in tasks.items() if t.get('parent') == gid}
+               for gid in sorted(goal_ids)}
+    wait_names = ('queue_wait_s', 'dependency_wait_s', 'execution_s', 'review_s', 'merge_wait_s')
+    intervals, samples, boundaries, paths, path_tasks = {}, {}, {}, {}, {}
+    cards = {}
+    for gid, members in grouped.items():
+        execute = {tid: t for tid, t in members.items() if t.get('role') == 'execute'}
+        waits = {name: [] for name in wait_names}
+        executor_intervals, claude_intervals = [], []
+        durations = {}
+        for tid, task in members.items():
+            created, claimed, gated = (stamp(task, k) for k in ('created_at', 'claimed_at', 'gated_at'))
+            if task.get('role') == 'review':
+                waits['review_s'].append(difference(done(task), created))
+            if tid not in execute:
+                continue
+            ready = stamp(task, 'first_ready_at')
+            waits['queue_wait_s'].append(difference(stamp(task, 'dispatched_at'),
+                                                    ready if ready is not None else created))
+            waits['dependency_wait_s'].append(difference(ready, created))
+            duration = difference(gated, claimed)
+            if duration is None:
+                recorded = [r['duration_s'] for r in runs if r.get('task') == tid
+                            and r.get('role') == 'execute'
+                            and isinstance(r.get('duration_s'), (int, float)) and r['duration_s'] >= 0]
+                duration = sum(recorded) if recorded else None
+            durations[tid] = duration
+            waits['execution_s'].append(duration)
+            waits['merge_wait_s'].append(difference(stamp(task, 'merged_at'), stamp(task, 'first_green_at')))
+            end = gated if gated is not None else done(task)
+            if difference(end, claimed) is not None:
+                executor_intervals.append((claimed, end))
+        for row in runs:
+            if row_goal(row) != gid or row.get('account') == 'codex' or not row.get('role'):
+                continue
+            end, duration = _stamp(row.get('ts')), row.get('duration_s')
+            if end is not None and isinstance(duration, (int, float)) and duration >= 0:
+                claude_intervals.append((end - duration, end))
+
+        memo, visiting = {}, set()
+
+        def longest(tid):
+            if tid in memo:
+                return memo[tid]
+            if tid in visiting:
+                return None
+            duration = durations[tid]
+            if duration is None and not execute[tid].get('merged_into'):
+                return (0, 0)
+            visiting.add(tid)
+            parents = [longest(dep) for dep in execute[tid].get('depends_on', []) if dep in execute]
+            visiting.remove(tid)
+            if any(v is None for v in parents):
+                memo[tid] = None
+            else:
+                parent = max((v for v in parents if v is not None), default=(0, 0))
+                memo[tid] = (parent[0] + (duration or 0), parent[1] + (duration is not None))
+            return memo[tid]
+
+        lengths = [longest(tid) for tid in execute if durations[tid] is not None]
+        best = max(lengths, default=None) if lengths and all(v is not None for v in lengths) else None
+        paths[gid] = best[0] if best is not None else None
+        path_tasks[gid] = best[1] if best is not None else None
+        path_partial = any(duration is None for duration in durations.values())
+        goal_task = tasks.get(gid, {})
+        start, end = stamp(goal_task, 'created_at'), done(goal_task)
+        if end is None:
+            end = max((stamp(t, 'merged_at') for t in members.values()
+                       if stamp(t, 'merged_at') is not None), default=None)
+        boundaries[gid] = (start, end)
+        logged_stale = [r for r in sched['stale'] if row_goal(r) == gid and r.get('risk') == 'high']
+        logged_tasks = {r.get('task') for r in logged_stale}
+        fixes = [t for t in execute.values() if (t.get('constraints') or {}).get('fix_round_for')]
+        concurrent_fixes = 0
+        for fix in fixes:
+            parent_id = fix['constraints']['fix_round_for']
+            parent = members.get(parent_id, {})
+            claimed, gated = stamp(parent, 'claimed_at'), stamp(parent, 'gated_at')
+            if claimed is not None and gated is not None and any(
+                    claimed < merged < gated for tid, t in execute.items() if tid != parent_id
+                    for merged in [stamp(t, 'merged_at')] if merged is not None):
+                concurrent_fixes += 1
+        # Recorded lineage counts cover legacy repairs that lack a linked task.
+        fix_count = len(fixes)
+        for tid, task in execute.items():
+            if (task.get('constraints') or {}).get('fix_round_for'):
+                continue
+            recorded = task.get('lineage_fix_rounds', (task.get('pipeline') or {}).get('lineage_fix_rounds', 0)) or 0
+            linked = sum(_task_lineage(f, tasks)[0] == tid for f in fixes)
+            fix_count += max(0, recorded - linked)
+        skips = {}
+        for row in sched['dispatch']:
+            for considered in row.get('considered', []):
+                if (not isinstance(considered, dict) or row_goal(considered) != gid
+                        or considered.get('action') != 'skip'):
+                    continue
+                reason = considered.get('reason') or 'other'
+                skips[reason] = skips.get(reason, 0) + 1
+        cards[gid] = {
+            'wall_clock_s': difference(end, start), 'critical_path_s': paths[gid],
+            'critical_path_tasks': path_tasks[gid], 'critical_path_partial': path_partial,
+            'merge_conflicts': sum(t.get('reason') == 'rebase_conflict' or
+                                   (t.get('last_merge') or {}).get('status') == 'conflict' for t in execute.values()),
+            'rebase_failures': sum('rebase' in str(t.get('failure_kind') or
+                                   (t.get('pipeline') or {}).get('failure_kind') or '').lower() for t in execute.values()),
+            'stale_work_events': len(logged_stale) + sum(tid not in logged_tasks and
+                ((t.get('pipeline') or {}).get('stale_check') or {}).get('risk') == 'high'
+                for tid, t in members.items()),
+            'fix_rounds': fix_count, 'fix_rounds_after_concurrent_merge': concurrent_fixes,
+            'skip_reasons': skips}
+        intervals[gid] = (executor_intervals, claude_intervals)
+        samples[gid] = waits
+
+    totals = {key: sum(card[key] for card in cards.values()) for key in
+              ('merge_conflicts', 'rebase_failures', 'stale_work_events', 'fix_rounds', 'fix_rounds_after_concurrent_merge')}
+    totals['skip_reasons'] = {}
+    for card in cards.values():
+        for reason, count in card['skip_reasons'].items():
+            totals['skip_reasons'][reason] = totals['skip_reasons'].get(reason, 0) + count
+    defined_paths = [(duration, path_tasks[gid]) for gid, duration in paths.items() if duration is not None]
+    best_path = max(defined_paths, default=None)
+    totals['critical_path_s'] = best_path[0] if best_path is not None else None
+    totals['critical_path_tasks'] = best_path[1] if best_path is not None else None
+    totals['critical_path_partial'] = any(card['critical_path_partial'] for card in cards.values())
+    complete = boundaries and all(difference(end, start) is not None for start, end in boundaries.values())
+    totals['wall_clock_s'] = (max(end for start, end in boundaries.values()) -
+                              min(start for start, end in boundaries.values())) if complete else None
+    for gid, card in [*cards.items(), (None, totals)]:
+        selected = [gid] if gid is not None else list(cards)
+        for index, name in enumerate(('executors', 'claude_workers')):
+            maximum, average = _parallelism_sweep([pair for g in selected for pair in intervals[g][index]])
+            card['max_concurrent_' + name] = maximum
+            card['avg_concurrent_' + name] = average
+        for name in wait_names:
+            values = [v for g in selected for v in samples[g][name]]
+            defined = [v for v in values if v is not None]
+            card['median_' + name] = statistics.median(defined) if defined else None
+            card['total_' + name] = sum(values) if values and len(defined) == len(values) else None
+    waves = [r for r in sched['waves'] if goal is None or row_goal(r) == goal
+             or any(t in grouped.get(goal, {}) for t in r.get('wave', []))]
+    return {'goals': cards, 'totals': totals, 'skip_reasons': totals['skip_reasons'],
+            'waves': {'rows': len(waves), 'applied': sum(bool(r.get('applied')) for r in waves)},
+            'malformed': malformed}
+
+
+def format_parallelism(card):
+    columns = list(card['totals'])
+    def cell(value):
+        if value is None:
+            return 'undefined'
+        if isinstance(value, dict):
+            return json.dumps(value, sort_keys=True)
+        return str(round(value, 4) if isinstance(value, float) else value)
+    lines = ['goal\t' + '\t'.join(columns)]
+    for name, metrics in [*card['goals'].items(), ('total', card['totals'])]:
+        lines.append(str(name) + '\t' + '\t'.join(cell(metrics[k]) for k in columns))
+    lines.append('waves: ' + cell(card['waves']))
+    lines.append('malformed: ' + str(card['malformed']))
+    return '\n'.join(lines)

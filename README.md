@@ -53,6 +53,8 @@ summary whose `tokens` ratio is `null` when no goals are accepted; text displays
 `.orchestrator/plan.md` (open goals, child tasks by status, worktrees, the last 5 bus events); `daemon.tick()`
 calls it too, at most once every 15 minutes, so the checkpoint is never older than that even with no Planner running.
 
+`orchestrator scorecard --parallelism [--goal ID] [--json]` reports per-goal and total executor and Claude worker concurrency (averaged over busy time), queue, dependency, execution, review and merge waits, wall time, DAG critical paths (including task count and whether missing task durations make the path partial), conflicts, rebase failures, stale events, repair rounds and dispatch-skip reasons. Missing timing evidence displays `undefined`; absent scheduler logs contribute zero events. Baseline saves include a `parallelism` block, and comparisons report its numeric deltas while accepting older snapshots without it.
+
 ## Phase H: efficiency
 
 ### Accounting
@@ -149,6 +151,10 @@ through to the pool's stored numbers rather than crashing pick) for callers that
 a running daemon.
 
 ## Pipeline
+
+The `[scheduler]` table defaults to `mode = "shadow"`, which keeps first-come dispatch and logs proposed waves to `waves.jsonl` in the scheduler log directory. `active` dispatches only the selected wave, deferring predicted interference and backfilling from later eligible tasks; `off` disables wave selection and logging. `soft_conflict_policy = "defer"` postpones soft conflicts behind clean candidates, and `max_wave = 0` uses available capacity (a positive value caps the wave). Wave rows include eligible and running ids, baseline order, selected wave, deferrals, predicted conflicts and whether the wave was applied.
+Every green-gated task records a stale-work check against its goal branch before review or merge. Set `[scheduler].stale_rebase = true` to rebase high-risk work first; conflicts hold the task with `stale_rebase_conflict` and escalate to the Planner.
+Ready tasks are ranked by their unresolved downstream critical path, using deterministic cold-start estimates of 600, 1200 and 2400 seconds for complexity bands 1-3, 4-6 and 7-10 respectively.
 Each execute or fix round starts with a **Worker packet** assembled from repository data. Its ordered sections are
 objective, acceptance, base, write scope, read scope, relevant tests, symbols, gotchas, decisions, verify, and
 evidence. The packet is capped at 4,800 characters, trimming the bottom sections first and pointing to

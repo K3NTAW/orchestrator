@@ -24,6 +24,99 @@ class Scorecard(unittest.TestCase):
             base["role"] = "triage"
         (self.root / "tasks" / f"{tid}.json").write_text(json.dumps({**base, **fields}))
 
+    def test_parallelism_concurrency_sweep_and_waits(self):
+        self.write_task("G", role="triage", created_at=0, events=[{"status": "done", "ts": 40}])
+        self.write_task("A", parent="G", created_at=0, claimed_at=10,
+                        pipeline={"first_ready_at": 2, "dispatched_at": 5, "gated_at": 20,
+                                  "first_green_at": 21}, merged_at=25)
+        self.write_task("B", parent="G", created_at=0, claimed_at=15,
+                        pipeline={"first_ready_at": 4, "dispatched_at": 10, "gated_at": 30,
+                                  "first_green_at": 31}, merged_at=35)
+        self.write_task("R", parent="G", role="review", created_at=20,
+                        events=[{"status": "done", "ts": 24}])
+        self.write_runs({"task": "A", "role": "execute", "account": "A", "ts": 20, "duration_s": 10},
+                        {"task": "B", "role": "execute", "account": "B", "ts": 30, "duration_s": 15},
+                        {"task": "B", "role": "execute", "account": "codex", "ts": 30, "duration_s": 30})
+        card = scorecard.parallelism(self.root)
+        row = card["goals"]["G"]
+        for kind in ("executors", "claude_workers"):
+            self.assertEqual(row["max_concurrent_" + kind], 2)
+            self.assertEqual(row["avg_concurrent_" + kind], 1.25)
+        for key, value in {"wall_clock_s": 40, "median_queue_wait_s": 4.5,
+                           "median_dependency_wait_s": 3, "median_execution_s": 12.5,
+                           "total_execution_s": 25, "median_review_s": 4,
+                           "median_merge_wait_s": 4}.items():
+            self.assertEqual(row[key], value)
+        self.assertEqual(card["totals"]["max_concurrent_executors"], 2)
+        self.assertEqual(scorecard._parallelism_sweep([(0, 10), (10, 20), (30, 40)]), (1, 1))
+
+    def test_parallelism_critical_path_over_dag(self):
+        for tid, duration, deps in (("A", 10, []), ("B", 20, ["A"]),
+                                    ("C", 5, ["A"]), ("D", 7, ["B", "C"])):
+            self.write_task(tid, parent="G", claimed_at=0, gated_at=duration, depends_on=deps)
+        self.assertEqual(scorecard.parallelism(self.root)["goals"]["G"]["critical_path_s"], 37)
+        self.write_task("C", parent="G", depends_on=["A"])
+        partial = scorecard.parallelism(self.root)["totals"]
+        self.assertEqual(partial["critical_path_s"], 37)
+        self.assertTrue(partial["critical_path_partial"])
+        self.write_runs({"task": "C", "role": "execute", "account": "codex", "duration_s": 5})
+        self.assertEqual(scorecard.parallelism(self.root)["totals"]["critical_path_s"], 37)
+        self.write_task("A", parent="G", claimed_at=0, gated_at=10, depends_on=["D"])
+        self.assertIsNone(scorecard.parallelism(self.root)["totals"]["critical_path_s"])
+
+    def test_parallelism_critical_path_ignores_unstamped_tasks_off_the_path(self):
+        self.write_task("A", parent="G", claimed_at=0, gated_at=10)
+        self.write_task("B", parent="G", claimed_at=10, gated_at=30, depends_on=["A"])
+        self.write_task("C", parent="G", claimed_at=5)
+        row = scorecard.parallelism(self.root)["goals"]["G"]
+        self.assertEqual((row["critical_path_s"], row["critical_path_tasks"]), (30, 2))
+        self.assertTrue(row["critical_path_partial"])
+
+    def test_parallelism_critical_path_partial_flag(self):
+        self.write_task("A", parent="G", claimed_at=0, gated_at=10)
+        self.write_task("legacy", parent="G", status="done", merged_into="goal/G", depends_on=["A"])
+        self.write_task("B", parent="G", claimed_at=10, gated_at=25, depends_on=["legacy"])
+        row = scorecard.parallelism(self.root)["goals"]["G"]
+        self.assertEqual((row["critical_path_s"], row["critical_path_tasks"]), (25, 2))
+        self.assertTrue(row["critical_path_partial"])
+        self.assertIn("critical_path_tasks", scorecard.format_parallelism(scorecard.parallelism(self.root)))
+
+    def test_parallelism_skip_reasons_from_sched_log(self):
+        sched = self.root / "runs" / "sched"
+        sched.mkdir()
+        (sched / "dispatch.jsonl").write_text(json.dumps({"considered": [
+            {"task": "A", "goal_id": "G", "action": "skip", "reason": "dependency"},
+            {"task": "B", "goal_id": "G", "action": "skip", "reason": "capacity"},
+            {"task": "C", "goal_id": "H", "action": "skip", "reason": "capacity"},
+            {"task": "D", "goal_id": "G", "action": "dispatch", "reason": "ready"}]}) + "\ninvalid\n[]\n")
+        (sched / "waves.jsonl").write_text('{"applied": true}\n{"applied": false}\n')
+        (sched / "stale.jsonl").write_text('{"task":"A","goal_id":"G","risk":"high"}\n')
+        self.write_task("A", parent="G", claimed_at=0, gated_at=10,
+                        reason="rebase_conflict", last_merge={"status": "conflict"},
+                        failure_kind="rebase_failed", pipeline={"stale_check": {"risk": "high"}})
+        self.write_task("B", parent="G", merged_at=5)
+        self.write_task("F", parent="G", constraints={"fix_round_for": "A"})
+        card = scorecard.parallelism(self.root)
+        self.assertEqual(card["skip_reasons"], {"dependency": 1, "capacity": 2})
+        self.assertEqual(card["waves"], {"rows": 2, "applied": 1})
+        self.assertEqual(card["malformed"], 2)
+        for key in ("merge_conflicts", "rebase_failures", "stale_work_events", "fix_rounds",
+                    "fix_rounds_after_concurrent_merge"):
+            self.assertEqual(card["totals"][key], 1)
+        filtered = scorecard.parallelism(self.root, goal="G")
+        self.assertEqual(set(filtered["goals"]), {"G"})
+        self.assertEqual(filtered["skip_reasons"], {"dependency": 1, "capacity": 1})
+
+    def test_parallelism_missing_files_are_zero(self):
+        self.write_task("A", parent="G")
+        card = scorecard.parallelism(self.root)
+        self.assertEqual(card["waves"], {"rows": 0, "applied": 0})
+        self.assertEqual(card["skip_reasons"], {})
+        self.assertEqual(card["totals"]["stale_work_events"], 0)
+        self.assertIsNone(card["totals"]["median_queue_wait_s"])
+        self.assertIsNone(card["totals"]["critical_path_s"])
+        self.assertIn("undefined", scorecard.format_parallelism(card))
+
     def test_scorecard_planner_text_and_json(self):
         from datetime import datetime, timezone
         from unittest.mock import patch
