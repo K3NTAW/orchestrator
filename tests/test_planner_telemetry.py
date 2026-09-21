@@ -50,8 +50,9 @@ class PlannerTelemetryTests(unittest.TestCase):
 
     def test_materiality_detects_new_task_dependency_change_and_fix_strategy(self):
         self.task("T-0001", role="triage", parent=None, status="running")
-        self.task("T-0002", parent="T-0001", status="held", hold_reason="gate")
+        self.task("T-0002", parent="T-0001", status="held", hold_reason="gate", result="x")
         before = telemetry.snapshot("T-0001", self.root)
+        self.assertIs(before["tasks"]["T-0002"]["result_escalate"], False)
         self.task("T-0002", parent="T-0001", status="held", hold_reason="gate",
                   depends_on=["T-0099"])
         self.task("T-0003", parent="T-0001",
@@ -83,6 +84,9 @@ class PlannerTelemetryTests(unittest.TestCase):
         absent = telemetry.snapshot("T-0001", self.root)
         self.assertIsNone(absent["plan_hash"])
         self.assertFalse(telemetry.materiality(own_changed, absent)["plan_changed"])
+        plan.write_text("## GOAL T-0069 — X (depends on T-0055)\nother goal\n")
+        self.assertIsNone(telemetry.goal_plan_section("T-0055", self.root))
+        self.assertIsNone(telemetry.snapshot("T-0055", self.root)["plan_hash"])
 
     def test_per_goal_and_accepted_goal_summary(self):
         self.launch("L1", tier="fable")

@@ -114,7 +114,7 @@ def goal_plan_section(goal_id, root=None):
         lines = (root / "plan.md").read_text(encoding="utf-8").splitlines(keepends=True)
     except OSError:
         return None
-    token = re.compile(r"(?<![\w-])" + re.escape(goal_id) + r"(?![\w-])")
+    token = re.compile(r"GOAL\s+" + re.escape(goal_id) + r"(?![\w-])")
     start = None
     for index, line in enumerate(lines):
         if line.startswith("## ") and token.search(line):
@@ -139,14 +139,15 @@ def snapshot(goal_id, root=None):
         if task_id != goal_id and task.get("parent") != goal_id:
             continue
         constraints = task.get("constraints") or {}
-        result = task.get("result") or {}
+        result = task.get("result")
+        result_escalate = bool(result.get("escalate")) if isinstance(result, dict) else False
         tasks[task_id] = {
             "status": task.get("status"),
             "depends_on": task.get("depends_on"),
             "hold_reason": task.get("hold_reason"),
             "fix_round_for": constraints.get("fix_round_for") if isinstance(constraints, dict) else None,
             # Reserved forward-compatible hook; no producer sets result.escalate today.
-            "result_escalate": bool(result.get("escalate")) if isinstance(result, dict) else False,
+            "result_escalate": result_escalate,
             "parent": task.get("parent"),
             "created_at": task.get("created_at"),
         }
