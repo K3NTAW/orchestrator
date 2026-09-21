@@ -349,3 +349,10 @@ type: decision · goal: T-0561 · tasks: T-0622,T-0625 · provenance: repo
 - local main 1fda175 carries origin/main a819bfe plus 7 unpushed Planner commits; servers restarted 15:26 on that tree
 - T-0622 and T-0625 closed failed (leaked by tests/test_scorecard.py:858); all adaptive modes stay shadow or off
 outcome: rollback: git revert the plan+memory commit that follows; backlog c2 fix the test root, compact-memory due
+
+## 2026-09-21 GOAL T-0674 Adaptive Planner Routing closed: 7 pure modules + 4 integration tasks merged into goal/T-0674 (head 0f7856d, 14 commits, 33 files, +3518), external gate 1017 tests green, baseline planner-fable-only saved, PR to main opened for the human
+type: decision · goal: T-0674 · tasks: T-0675,T-0700,T-0706,T-0708,T-0719,T-0729,T-0730,T-0733,T-0741,T-0750,T-0751 · provenance: repo
+- audit: headless Planner decisions never ran here ([planner].autonomous false, no runs/planner_runs.json); all Fable spend today is the interactive session (about 45M pool-formula tokens on account A, over its 30M daily budget so pick planner returns hold); the router governs headless launches, savings need autonomous shadow runs
+- cost 156 USD API-equivalent, 26.5M worker tokens, 81 bus tasks created (26 spec-review rounds, 9 waived after three rounds and dispatched directly), 16:00-17:50
+- modes shipped: [planner.routing].mode shadow default, off = legacy argv byte-identical (tested), active gated on class_evidence noninferior with min_samples 20, hard decisions hold with held_for_fable when Fable is unavailable, tokens never enter non-inferiority
+outcome: rollback: revert the PR merge commit on main; every mode key in [planner.routing] returns behaviour to legacy when mode = off. Human next: merge PR, pull, restart f orch, run one goal with [planner].autonomous = true in shadow, then read scorecard --planner-routing, promotion and scorecard --planner

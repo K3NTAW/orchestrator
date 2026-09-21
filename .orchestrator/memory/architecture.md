@@ -1,4 +1,4 @@
-repo map 9487303 2026-09-21
+repo map 0f7856d 2026-09-21
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
@@ -50,6 +50,8 @@ repo map 9487303 2026-09-21
 
 ## jev_gate.py — PreToolUse gate for worker sessions (.claude/hooks/jev-gate.sh): ask Jev whether…
 
+## jev_planner.py — Jev shadow signal for Planner tier routing decisions.
+
 ## jev_points.py — Experimental, fail-open Jev decision points.
 
 ## jev_rank.py — jev-compactor-style relevance ranking: score each candidate item against a goal…
@@ -66,7 +68,19 @@ repo map 9487303 2026-09-21
 
 ## notify.py — Notifications with persistent transition deduplication.
 
+## planner_packet.py — Pure, compact packets for Planner decisions and Opus-to-Fable escalation.
+
+## planner_router.py — Pure Planner tier policy; callers resolve aliases and gather all state.
+
 ## planner_runs.py — Autonomous Planner decisions: launch a short-lived headless Planner to act on on…
+
+## planner_scorecard.py — Read-side Planner routing evidence; no routing decisions or ledger writes.
+
+## planner_shadow.py — Isolated shadow Planner launches and bounded, prompt-free evaluation rows.
+
+## planner_taxonomy.py — Purpose-first taxonomy for Planner decisions.
+
+## planner_telemetry.py — Per-invocation Planner telemetry and goal-level usage attribution.
 
 ## pool.py — Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with…
 
@@ -76,18 +90,4 @@ repo map 9487303 2026-09-21
 
 ## roadmap.py — Machine-readable implementation status for the orchestrator roadmaps.
 
-## sched_scorecard.py — Join scheduler predictions to task outcomes for heuristic validation.
-
-## schedlog.py — Append-only scheduler telemetry, tolerant of interrupted or malformed writes.
-
-## scorecard.py — Per-executor outcome rollup: runs/*.jsonl + tasks/T-*.json, keyed by executor id…
-
-## scout_evidence.py — Evidence selection and telemetry helpers for read-only scout work.
-
-## serve.py — orchestrator.serve: the per-user goal endpoint that kgpt's modules/orchestrator…
-
-## spawn.py — Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CON…
-
-## speculation.py — Policy and shadow evidence for selective speculative execution.
-
-## stale.py — Pure stale-wor
+## sched_scorecard.py — Join scheduler predictions to

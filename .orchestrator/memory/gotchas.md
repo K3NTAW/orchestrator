@@ -349,3 +349,21 @@ type: gotcha · goal: T-0561 · tasks: T-0622,T-0625 · provenance: repo
 - both had a tempdir worktree, no parent, no codex thread and no process; status() showed luna running 2 while codex running 0; Planner closed them failed at 15:45
 - cause: tests/test_scorecard.py:858 test_start_forwards_scorecard_scores_to_pick_executor calls bus.create_task and executor.start with no bus root patch, so each local run of that test writes a task into .orchestrator/tasks and leaves it running
 outcome: rule: after any local test run, bus_read(status=running) should be empty of parentless tasks; backlog c2: find the test and make it fail when STATE is the repo root
+
+## 2026-09-21 Sonnet spec reviews bounce nearly every first-round module spec; the findings were real (unnamed producers, dict vs attribute access, notify_once needing a bus id, sign-inverted criteria, cache keys without the subject, whole-file plan hash) so the third round is the right waiver point
+type: gotcha · goal: T-0674 · tasks: T-0677,T-0681,T-0683,T-0687,T-0709,T-0713,T-0731 · provenance: repo
+- GOAL T-0674: 7 Wave A modules took 20 spec-review rounds (Q1 0, Q4 2, Q12 3, Q2 4, Q3 3, Q6 3, Q5 3), Wave B 6 more; every round found at least one defect that would have shipped; waivers after 3 rounds with all risks folded, dispatch via scratchpad dispatch_direct.py (daemon._dispatch_worker path) because the daemon has no waiver flag
+- the daemon's auto spec review still runs on a waived task; its nits were folded with codex_reply before the gate, which also clears gated_at and the hold
+outcome: rule: write specs that name the producer module of every consumed shape as depends_on, say dict or object, cite real helper names and return shapes (memory_recall()['hits'], _decision_task), and give every acceptance a value not just a key; expect 2-3 rounds on c6+ specs and budget for it
+
+## 2026-09-21 A spec that quotes a double-brace template placeholder literally kills spawn.render in the daemon thread for the task and every spec review of it (Q6 T-0684: T-0686 and T-0712 stamped respawned_at, no worker, no error on the bus)
+type: gotcha · goal: T-0674 · tasks: T-0684,T-0686,T-0712 · provenance: repo
+- same failure as R20/T-0660 on 2026-09-21; the daemon marks the review respawned_at but never retries (backlog R22)
+- prompt files are Planner-owned but planner-mode also blocks Edit and cherry-picking inside wt worktrees; the only route to change a prompt on a task branch is a new task (fix_round_for the held task) whose scope lists the prompt path (T-0750)
+outcome: rule: never put the double-brace placeholder syntax in a spec, acceptance or title; describe placeholders in words. When a Codex diff must touch .orchestrator/prompts, give the task that path in scope explicitly
+
+## 2026-09-21 merge.merge refuses with rebase_changed_diff when the goal branch moved a file the reviewed diff also touched; the daemon has no handler, the task sits held
+type: gotcha · goal: T-0674 · tasks: T-0751,T-0753,T-0754 · provenance: repo
+- B2 v3 approved at d05749e; B3 landed planner_runs.py changes; rebase onto goal/T-0674 changed the diff hash; merge returned rebase_changed_diff and the daemon held the task with hold_reason merge rebase_changed_diff
+- recovery: create a review task (inputs [task]) and spawn_review it on the already-rebased worktree head, then merge(task) after approve; merge compares before/after diff hashes on the (now no-op) rebase and proceeds
+outcome: backlog c3: daemon respawns a review automatically on rebase_changed_diff instead of holding
