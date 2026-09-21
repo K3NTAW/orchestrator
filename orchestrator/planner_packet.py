@@ -252,6 +252,12 @@ def build(sections, *, goal, previous=None, changes=None, scout_findings=None,
 
 def _opus_lines(opus_decision):
     source = _mapping(opus_decision)
+    try:
+        confidence = float(source.get("confidence"))
+        # NaN has no ordering and cannot represent a confidence score.
+        confidence = None if confidence != confidence else max(0.0, min(1.0, confidence))
+    except (TypeError, ValueError, OverflowError):
+        confidence = None
     tasks = []
     for raw in list(source.get("tasks_proposed") or ())[:10]:
         task = _mapping(raw)
@@ -263,8 +269,8 @@ def _opus_lines(opus_decision):
         "proposed_action": _clean(source.get("proposed_action"), 400),
         "summary": _clean(source.get("summary"), 800),
         "tasks_proposed": tasks,
-        "confidence": source.get("confidence"),
-        "needs_fable": source.get("needs_fable"),
+        "confidence": confidence,
+        "needs_fable": bool(source.get("needs_fable")),
         "unresolved": [_clean(item, 200) for item in list(source.get("unresolved") or ())[:10]],
     }
     return ["Opus proposed decision (data)", *_fenced("decision", json.dumps(whitelisted, sort_keys=True))]
