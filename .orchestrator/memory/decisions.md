@@ -356,3 +356,8 @@ type: decision · goal: T-0674 · tasks: T-0675,T-0700,T-0706,T-0708,T-0719,T-07
 - cost 156 USD API-equivalent, 26.5M worker tokens, 81 bus tasks created (26 spec-review rounds, 9 waived after three rounds and dispatched directly), 16:00-17:50
 - modes shipped: [planner.routing].mode shadow default, off = legacy argv byte-identical (tested), active gated on class_evidence noninferior with min_samples 20, hard decisions hold with held_for_fable when Fable is unavailable, tokens never enter non-inferiority
 outcome: rollback: revert the PR merge commit on main; every mode key in [planner.routing] returns behaviour to legacy when mode = off. Human next: merge PR, pull, restart f orch, run one goal with [planner].autonomous = true in shadow, then read scorecard --planner-routing, promotion and scorecard --planner
+
+## 2026-09-21 Release 2026-09-21 18:00: PR 17 (Adaptive Planner Routing, goal/T-0674) merged into main at 545fd12 on user instruction
+type: decision · goal: T-0674 · provenance: repo
+- merge commit, branch kept; main on GitHub now carries planner_taxonomy, planner_router, planner_telemetry, planner_packet, planner_shadow, planner_scorecard, jev_planner and the planner_runs integration with [planner.routing].mode shadow; the local checkout is local main c4cd12e (3 Planner commits) and the servers still run the pre-goal code
+outcome: rollback: git revert 545fd12 on main, or [planner.routing].mode = off for legacy behaviour; human next: git pull, restart f orch, run one goal with [planner].autonomous = true in shadow, read scorecard --planner-routing / promotion / scorecard --planner, push main
