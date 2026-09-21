@@ -10,6 +10,9 @@ class FakePool:
     def __init__(self, mode="shadow"):
         self.cfg = {"jev": {"routing": {"mode": mode, "cache_ttl_s": 86400}}}
 
+    def eligible_executors(self, role, complexity, task):
+        return task["eligible"]
+
 
 class JevRoute(unittest.TestCase):
     def setUp(self):
@@ -149,3 +152,67 @@ class JevRoute(unittest.TestCase):
         self.assertEqual(ask.call_count, 2)
         cache = self.root / "runs" / "jev" / "route_cache.json"
         self.assertTrue(not cache.exists() or json.loads(cache.read_text()) == {})
+
+    def route_signals(self, **overrides):
+        signals = {key: .2 for key in jev_route.QUESTIONS}
+        signals.update(overrides)
+        return signals
+
+    def test_active_mode_adjusts_ranking_within_bounds(self):
+        eligible = self.eligible + [Executor("middle", "codex", "m", ["execute"])]
+        evidence = {"weak": {"class_success": .4, "expected_cost": 1, "n": 20},
+                    "middle": {"class_success": .6, "expected_cost": 2, "n": 10},
+                    "strong": {"class_success": .9, "expected_cost": 3, "n": 3}}
+        classification = {"signals": self.route_signals(substantial_reasoning=.8), "confidence": .9}
+        scores = jev_route.active_scores(self.task, FakePool("active"), eligible,
+                                         classification, evidence,
+                                         {"weak": 1, "middle": 1, "strong": 1})
+        multipliers = jev_route.adjustment(classification["signals"], evidence,
+                                           [ex.id for ex in eligible],
+                                           {"confidence": .9})
+        self.assertEqual(sum(value > 1 for value in multipliers.values()), 1)
+        self.assertTrue(all(1 <= value <= 1.25 for value in multipliers.values()))
+        self.assertGreater(scores["strong"], max(scores["weak"], scores["middle"]))
+
+    def test_shadow_mode_never_changes_scores(self):
+        classification = {"signals": self.route_signals(substantial_reasoning=.9), "confidence": .9}
+        evidence = {"weak": {"class_success": .4, "n": 3},
+                    "strong": {"class_success": .9, "n": 3}}
+        base = {"weak": 1.2, "strong": 1}
+        self.assertEqual(jev_route.active_scores(self.task, FakePool("shadow"), self.eligible,
+                                                classification, evidence, base), base)
+        task = {**self.task, "eligible": self.eligible}
+        with mock.patch.object(jev_route, "classify", return_value=classification), \
+                mock.patch.object(jev_route, "evidence_for", return_value=evidence):
+            context = jev_route.shadow_context(task, FakePool("shadow"))
+        self.assertGreater(context["adjustment"]["strong"], 1)
+        self.assertFalse(context["active"])
+
+    def test_extreme_probability_cannot_overturn_strong_evidence(self):
+        evidence = {"weak": {"class_success": .95, "n": 200},
+                    "strong": {"class_success": 1, "n": 2}}
+        classification = {"signals": self.route_signals(substantial_reasoning=1), "confidence": 1}
+        scores = jev_route.active_scores(self.task, FakePool("active"), self.eligible,
+                                         classification, evidence, {"weak": 1.3, "strong": 1})
+        self.assertGreater(scores["weak"], scores["strong"])
+
+    def test_cold_start_default_scores_and_failure_reproduce_baseline(self):
+        signals = self.route_signals(substantial_reasoning=1)
+        self.assertEqual(jev_route.adjustment(signals, {}, ["weak", "strong"], {"confidence": 1}),
+                         {"weak": 1, "strong": 1})
+        self.assertEqual(jev_route.active_scores(self.task, FakePool("active"), self.eligible,
+                                                {"signals": signals, "confidence": 1}, {}, None),
+                         {"weak": 1, "strong": 1})
+        baseline = {"weak": .8, "strong": 1.2}
+        self.assertEqual(jev_route.active_scores(self.task, FakePool("active"), self.eligible,
+                                                None, {}, baseline), baseline)
+
+    def test_active_scores_never_add_ineligible_executor(self):
+        signals = self.route_signals(substantial_reasoning=1)
+        evidence = {"weak": {"class_success": .4, "n": 3},
+                    "strong": {"class_success": .8, "n": 3},
+                    "outside": {"class_success": 1, "n": 0}}
+        scores = jev_route.active_scores(self.task, FakePool("active"), self.eligible,
+                                         {"signals": signals, "confidence": 1}, evidence,
+                                         {"weak": 1, "strong": 1, "outside": 100})
+        self.assertNotIn("outside", scores)

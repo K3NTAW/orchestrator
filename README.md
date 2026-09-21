@@ -25,6 +25,13 @@ cp .mcp.planner.json .mcp.json         # Planner session config (already done)
 Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` to `$CODEX_HOME/config.toml` inside it only.
 
 ## Run it
+
+| Command | Purpose |
+| --- | --- |
+| `orchestrator scorecard --scheduling` | Show scheduling interference scorecard. |
+| `orchestrator scorecard --strategies` | Show workflow-strategy scorecard. |
+| `orchestrator explain <task>` | Show recorded decision evidence for a task. |
+| `orchestrator promotion` | Show shadow-first feature promotion recommendations. |
 `f orch [goal]` (from anywhere) launches the Planner on account A in this repo. `f orch status|cost|daemon|hold|resume|merge` is the CLI.
 `f orch survey` is the old cross-repo briefing session.
 `orchestrator pick planner|scout|review|execute` tallies Planner usage fresh, then prints `<account_id>\t<config_dir>`

@@ -1,6 +1,6 @@
 """Account pool selection (PoolSel), the [[executors]] routing table (Executors), and Planner-transcript token
 tallying (PlannerTally): bands, quota groups, cooldowns, budgets, scored ranking."""
-import io, json, os, shutil, sys, tempfile, time, unittest
+import io, json, os, shutil, sys, tempfile, time, tomllib, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -62,6 +62,43 @@ class PoolSel(unittest.TestCase):
     def test_trust_workspace(self):
         cfg = TMP / "prof"; spawn.trust_workspace(str(cfg), TMP / "wt" / "T-0099")
         self.assertTrue(json.loads((cfg / ".claude.json").read_text())["projects"][str(TMP / "wt" / "T-0099")]["hasTrustDialogAccepted"])
+
+    def test_pool_toml_documents_roadmap_defaults(self):
+        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        self.assertEqual(cfg["scheduler"]["mode"], "shadow")
+        self.assertEqual(cfg["scheduler"], {
+            **cfg["scheduler"],
+            "duration_mode": "empirical",
+            "duration_min_samples": 5,
+            "duration_trim": 0.1,
+            "reserve_imminent": True,
+            "concurrency_mode": "adaptive",
+            "merge_pressure_mode": "observe",
+            "merge_queue_elevated": 3,
+            "merge_queue_saturated": 5,
+            "merge_conflicts_saturated": 2,
+            "jev_mode": "shadow",
+            "jev_max_pairs": 8,
+            "jev_cache_ttl_s": 3600,
+            "jev_cache_max_entries": 200,
+        })
+        self.assertEqual(cfg["jev"]["routing"]["mode"], "shadow")
+        self.assertEqual(cfg["jev"]["routing"], {
+            **cfg["jev"]["routing"], "max_adjustment": 0.25, "evidence_floor_n": 10,
+        })
+        self.assertEqual(cfg["jev"]["points"], {
+            "scout_necessity": "shadow", "context_escalation": "shadow",
+            "review_escalation": "shadow", "planner_relaunch": "shadow",
+        })
+        self.assertEqual(cfg["allocation"], {
+            "mode": "shadow", "min_samples": 5, "latency_weight_usd_per_hour": 2.0,
+            "critical_factor": 1.0, "non_critical_factor": 0.25,
+        })
+        self.assertEqual(cfg["strategy"], {"mode": "shadow", "min_samples": 10})
+        self.assertEqual(cfg["speculation"], {
+            "mode": "off", "min_fix_round_p": 0.5, "min_samples": 5, "min_retry_cost_usd": 1.0,
+        })
+        self.assertEqual(cfg["promotion"], {"min_samples": 20})
 
 
 class Reservations(unittest.TestCase):

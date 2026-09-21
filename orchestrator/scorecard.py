@@ -61,15 +61,8 @@ def task_class(task):
     return attribution.task_class(task)
 
 
-def class_success(executor_id, task_class_name, root=STATE, min_samples=None):
-    """Return an executor's merge rate for a class, using only tasks with execute run rows."""
-    if min_samples is None:
-        try:
-            from .pool import config
-            min_samples = config().get("models", {}).get("min_samples", 3)
-        except Exception:
-            min_samples = 3
-
+def _class_resolved(executor_id, task_class_name, root):
+    """Resolved execute tasks in a class that have a corresponding execute run."""
     tasks_dir = root / "tasks"
     tasks = {}
     for p in sorted(tasks_dir.glob("T-*.json")) if tasks_dir.exists() else []:
@@ -81,10 +74,27 @@ def class_success(executor_id, task_class_name, root=STATE, min_samples=None):
 
     run_task_ids = {entry.get("task") for _, entry in _read_jsonl_entries(root)
                     if entry.get("role") == "execute" and entry.get("task")}
-    resolved = [task for tid, task in tasks.items()
-                if tid in run_task_ids and task.get("role") == "execute"
-                and task.get("executor") == executor_id and task_class(task) == task_class_name
-                and (task.get("merged_into") or task.get("status") == "failed")]
+    return [task for tid, task in tasks.items()
+            if tid in run_task_ids and task.get("role") == "execute"
+            and task.get("executor") == executor_id and task_class(task) == task_class_name
+            and (task.get("merged_into") or task.get("status") == "failed")]
+
+
+def class_sample_size(executor_id, task_class_name, root=STATE):
+    """Number of resolved tasks used by :func:`class_success`."""
+    return len(_class_resolved(executor_id, task_class_name, root))
+
+
+def class_success(executor_id, task_class_name, root=STATE, min_samples=None):
+    """Return an executor's merge rate for a class, using only tasks with execute run rows."""
+    if min_samples is None:
+        try:
+            from .pool import config
+            min_samples = config().get("models", {}).get("min_samples", 3)
+        except Exception:
+            min_samples = 3
+
+    resolved = _class_resolved(executor_id, task_class_name, root)
     if len(resolved) < min_samples:
         return None
     merged = sum(bool(task.get("merged_into")) for task in resolved)
@@ -1024,7 +1034,7 @@ def efficiency(root=STATE, by=None):
             "time_to_first_green_s": green - created if green is not None and created is not None else None,
             "time_to_accepted_s": end - created if end is not None and created is not None else None,
             "fix_rounds": fixes, "fix_round_tokens": sum(_tokens_of(r) for r in own if r["bucket"] == "fix_round"),
-            "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None}
+            "first_pass": fixes == 0 and (reds or 0) == 0 if green is not None else None}
     goal_card = {}
     for gid in accepted_goals(root):
         members = {tid for tid, task in accepted.items() if task["goal_id"] == gid}
@@ -1144,7 +1154,7 @@ def routing_eval(root=STATE, min_samples=None):
                     verdicts.append(verdict)
         accepted = bool(task.get("merged_into"))
         joined.append({**route, "lineage_root": tid, "accepted": accepted,
-                       "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None,
+                       "first_pass": fixes == 0 and (reds or 0) == 0 if green is not None else None,
                        "fix_rounds": fixes, "gate_reds": reds,
                        "tokens": sum(_tokens_of(row) for row in own),
                        "cost": sum(row.get("usd") or 0 for row in own),
@@ -1303,7 +1313,7 @@ def executor_economics(root=STATE, by="executor"):
                       "initial_tokens": sum(_tokens_of(row) for row in initial),
                       "tokens": sum(_tokens_of(row) for row in own),
                       "usd": sum(row.get("usd") or 0 for row in own), "fix_rounds": fixes,
-                      "first_pass": fixes == 0 and reds == 0 if green is not None and reds is not None else None,
+                      "first_pass": fixes == 0 and (reds or 0) == 0 if green is not None else None,
                       "reasons": reasons, "verdicts": verdicts})
     grouped = {}
     for root_row in roots:
@@ -1552,7 +1562,7 @@ def parallelism(root=STATE, goal=None):
         for row in sched['dispatch']:
             for considered in row.get('considered', []):
                 if (not isinstance(considered, dict) or row_goal(considered) != gid
-                        or considered.get('action') != 'skip'):
+                        or considered.get('action') not in ('skip', 'skipped')):
                     continue
                 reason = considered.get('reason') or 'other'
                 skips[reason] = skips.get(reason, 0) + 1
