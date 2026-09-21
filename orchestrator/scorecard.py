@@ -1461,7 +1461,7 @@ def parallelism(root=STATE, goal=None):
     grouped = {gid: {tid: t for tid, t in tasks.items() if t.get('parent') == gid}
                for gid in sorted(goal_ids)}
     wait_names = ('queue_wait_s', 'dependency_wait_s', 'execution_s', 'review_s', 'merge_wait_s')
-    intervals, samples, boundaries, paths = {}, {}, {}, {}
+    intervals, samples, boundaries, paths, path_tasks = {}, {}, {}, {}, {}
     cards = {}
     for gid, members in grouped.items():
         execute = {tid: t for tid, t in members.items() if t.get('role') == 'execute'}
@@ -1502,17 +1502,26 @@ def parallelism(root=STATE, goal=None):
         def longest(tid):
             if tid in memo:
                 return memo[tid]
-            if tid in visiting or durations[tid] is None:
+            if tid in visiting:
                 return None
+            duration = durations[tid]
+            if duration is None and not execute[tid].get('merged_into'):
+                return (0, 0)
             visiting.add(tid)
             parents = [longest(dep) for dep in execute[tid].get('depends_on', []) if dep in execute]
             visiting.remove(tid)
-            memo[tid] = (None if any(v is None for v in parents)
-                         else durations[tid] + max(parents, default=0))
+            if any(v is None for v in parents):
+                memo[tid] = None
+            else:
+                parent = max((v for v in parents if v is not None), default=(0, 0))
+                memo[tid] = (parent[0] + (duration or 0), parent[1] + (duration is not None))
             return memo[tid]
 
-        lengths = [longest(tid) for tid in execute]
-        paths[gid] = max(lengths) if lengths and all(v is not None for v in lengths) else None
+        lengths = [longest(tid) for tid in execute if durations[tid] is not None]
+        best = max(lengths, default=None) if lengths and all(v is not None for v in lengths) else None
+        paths[gid] = best[0] if best is not None else None
+        path_tasks[gid] = best[1] if best is not None else None
+        path_partial = any(duration is None for duration in durations.values())
         goal_task = tasks.get(gid, {})
         start, end = stamp(goal_task, 'created_at'), done(goal_task)
         if end is None:
@@ -1549,6 +1558,7 @@ def parallelism(root=STATE, goal=None):
                 skips[reason] = skips.get(reason, 0) + 1
         cards[gid] = {
             'wall_clock_s': difference(end, start), 'critical_path_s': paths[gid],
+            'critical_path_tasks': path_tasks[gid], 'critical_path_partial': path_partial,
             'merge_conflicts': sum(t.get('reason') == 'rebase_conflict' or
                                    (t.get('last_merge') or {}).get('status') == 'conflict' for t in execute.values()),
             'rebase_failures': sum('rebase' in str(t.get('failure_kind') or
@@ -1567,7 +1577,11 @@ def parallelism(root=STATE, goal=None):
     for card in cards.values():
         for reason, count in card['skip_reasons'].items():
             totals['skip_reasons'][reason] = totals['skip_reasons'].get(reason, 0) + count
-    totals['critical_path_s'] = max(paths.values()) if paths and all(v is not None for v in paths.values()) else None
+    defined_paths = [(duration, path_tasks[gid]) for gid, duration in paths.items() if duration is not None]
+    best_path = max(defined_paths, default=None)
+    totals['critical_path_s'] = best_path[0] if best_path is not None else None
+    totals['critical_path_tasks'] = best_path[1] if best_path is not None else None
+    totals['critical_path_partial'] = any(card['critical_path_partial'] for card in cards.values())
     complete = boundaries and all(difference(end, start) is not None for start, end in boundaries.values())
     totals['wall_clock_s'] = (max(end for start, end in boundaries.values()) -
                               min(start for start, end in boundaries.values())) if complete else None

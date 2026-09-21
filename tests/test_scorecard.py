@@ -56,11 +56,30 @@ class Scorecard(unittest.TestCase):
             self.write_task(tid, parent="G", claimed_at=0, gated_at=duration, depends_on=deps)
         self.assertEqual(scorecard.parallelism(self.root)["goals"]["G"]["critical_path_s"], 37)
         self.write_task("C", parent="G", depends_on=["A"])
-        self.assertIsNone(scorecard.parallelism(self.root)["totals"]["critical_path_s"])
+        partial = scorecard.parallelism(self.root)["totals"]
+        self.assertEqual(partial["critical_path_s"], 37)
+        self.assertTrue(partial["critical_path_partial"])
         self.write_runs({"task": "C", "role": "execute", "account": "codex", "duration_s": 5})
         self.assertEqual(scorecard.parallelism(self.root)["totals"]["critical_path_s"], 37)
         self.write_task("A", parent="G", claimed_at=0, gated_at=10, depends_on=["D"])
         self.assertIsNone(scorecard.parallelism(self.root)["totals"]["critical_path_s"])
+
+    def test_parallelism_critical_path_ignores_unstamped_tasks_off_the_path(self):
+        self.write_task("A", parent="G", claimed_at=0, gated_at=10)
+        self.write_task("B", parent="G", claimed_at=10, gated_at=30, depends_on=["A"])
+        self.write_task("C", parent="G", claimed_at=5)
+        row = scorecard.parallelism(self.root)["goals"]["G"]
+        self.assertEqual((row["critical_path_s"], row["critical_path_tasks"]), (30, 2))
+        self.assertTrue(row["critical_path_partial"])
+
+    def test_parallelism_critical_path_partial_flag(self):
+        self.write_task("A", parent="G", claimed_at=0, gated_at=10)
+        self.write_task("legacy", parent="G", status="done", merged_into="goal/G", depends_on=["A"])
+        self.write_task("B", parent="G", claimed_at=10, gated_at=25, depends_on=["legacy"])
+        row = scorecard.parallelism(self.root)["goals"]["G"]
+        self.assertEqual((row["critical_path_s"], row["critical_path_tasks"]), (25, 2))
+        self.assertTrue(row["critical_path_partial"])
+        self.assertIn("critical_path_tasks", scorecard.format_parallelism(scorecard.parallelism(self.root)))
 
     def test_parallelism_skip_reasons_from_sched_log(self):
         sched = self.root / "runs" / "sched"

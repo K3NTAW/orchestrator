@@ -202,3 +202,10 @@ def test_baseline_carries_parallelism_block():
         result = baseline.compare(saved, after)
         assert result['parallelism']['totals.merge_conflicts']['absolute'] is None
         assert 'undefined' in baseline.format_comparison(result)
+
+
+def test_parallelism_deltas_missing_skip_reason_is_zero():
+    result = baseline._parallelism_deltas(
+        {'skip_reasons': {'capacity': 2}},
+        {'skip_reasons': {'capacity': 1, 'dependency': 3}})
+    assert result['skip_reasons.dependency'] == {'before': 0, 'after': 3, 'absolute': 3}

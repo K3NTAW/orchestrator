@@ -292,7 +292,9 @@ def _parallelism_deltas(before, after, prefix=''):
     result = {}
     for key in sorted(before.keys() | after.keys()):
         name = f'{prefix}.{key}' if prefix else key
-        x, y = before.get(key), after.get(key)
+        skip_reason = prefix.endswith('skip_reasons')
+        x = before[key] if key in before else 0 if skip_reason else None
+        y = after[key] if key in after else 0 if skip_reason else None
         if isinstance(x, dict) or isinstance(y, dict):
             result.update(_parallelism_deltas(x or {}, y or {}, name))
         elif all(v is None or isinstance(v, (int, float)) for v in (x, y)):
