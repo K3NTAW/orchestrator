@@ -52,20 +52,21 @@ class JevRouteDispatch(unittest.TestCase):
         self.assertEqual(row["baseline"], "terra")
         self.assertIn("hypothetical", row); self.assertIn("evidence", row)
 
-    def test_active_mode_behaves_as_shadow_and_notifies_once(self):
+    def test_active_mode_reports_adjustment_without_notifying(self):
         class Pool:
             cfg = {"jev": {"routing": {"mode": "active"}}}
-            def notification_transition(self, key, active):
-                previous = getattr(self, "seen", False); self.seen = True; return not previous
-            def eligible_executors(self, *args): return []
-        pool = Pool(); notices = []
-        with mock.patch.object(daemon, "notify", side_effect=notices.append), \
+            def eligible_executors(self, *args): return [mock.Mock(id="terra")]
+        pool = Pool()
+        with mock.patch.object(daemon, "notify") as notify, \
              mock.patch.object(jev_route, "classify", return_value=None), \
              mock.patch.object(jev_route, "evidence_for", return_value={}):
             first = jev_route.shadow_context(self.task, pool)
             second = jev_route.shadow_context(self.task, pool)
         self.assertEqual((first["mode"], second["mode"]), ("active", "active"))
-        self.assertEqual(notices, ["jev routing active requested; active ranking lands in P5"])
+        for context in (first, second):
+            self.assertIs(context["active"], True)
+            self.assertEqual(context["adjustment"], {"terra": 1.0})
+        notify.assert_not_called()
 
     def test_classification_failure_still_dispatches_baseline(self):
         self.run_worker(None, "sol")
@@ -87,15 +88,25 @@ class Daemon(unittest.TestCase):
         self.swap(spawn, "packet", lambda *args: {})
         self.swap(spawn, "render", lambda *args, **kwargs: "prompt")
         self.swap(spawn, "packet_run_meta", lambda packet: {})
-        return P.Pool()
+        pool = P.Pool()
+        pool.cfg["scheduler"] = {"mode": "off"}
+        return pool
 
     def scheduler_pool(self, mode="active", slots=2, **cfg):
         pool = self.dispatch_telemetry(slots)
         pool.cfg["scheduler"] = {"mode": mode, **cfg}
+        snap = daemon.capacity.snapshot(pool)
+        for executor_row in snap["executors"].values():
+            executor_row["free"] = 100
+        self.swap(daemon.capacity, "snapshot", mock.Mock(return_value=snap))
+        self.swap(daemon.merge_pressure, "assess", mock.Mock(return_value={"waiting": [], "pressure": "none"}))
+        self.swap(daemon.jev_sched, "annotate", mock.Mock(side_effect=lambda result, *a, **kw:
+                  {**result, "signals": {}}))
         return pool
 
     def scheduler_task(self, title, path, **fields):
-        tid = bus.create_task(title, "spec", ["works"], [path], role="execute", complexity=2,
+        tid = bus.create_task(title, "spec", ["works"], [path], role="execute",
+                              complexity=fields.pop("complexity", 2),
                               parent=fields.pop("parent", "T-0043"),
                               depends_on=fields.pop("depends_on", None))["id"]
         if fields:
@@ -186,10 +197,123 @@ class Daemon(unittest.TestCase):
                     for tid in (first, second, conflict, *clean):
                         bus.update(tid, status="done")
 
+    def test_scheduler_cfg_defaults_cover_new_keys(self):
+        pool = self.scheduler_pool()
+        pool.cfg["scheduler"] = {}
+        expected = {"duration_mode": "empirical", "duration_min_samples": 5, "duration_trim": .1,
+                    "reserve_imminent": True, "concurrency_mode": "adaptive",
+                    "merge_pressure_mode": "observe", "merge_queue_elevated": 3,
+                    "merge_queue_saturated": 5, "merge_conflicts_saturated": 2,
+                    "jev_mode": "shadow", "jev_max_pairs": 8, "jev_cache_ttl_s": 3600,
+                    "jev_cache_max_entries": 200}
+        cfg = daemon._load_scheduler_cfg(pool)
+        self.assertEqual({key: cfg[key] for key in expected}, expected)
+        pool.cfg["scheduler"] = {key: "override" for key in expected}
+        self.assertTrue(all(daemon._load_scheduler_cfg(pool)[key] == "override" for key in expected))
+
+    def test_dispatch_off_mode_is_unchanged(self):
+        pool = self.scheduler_pool("off", slots=1)
+        a = self.scheduler_task("first", "a/file.py")
+        b = self.scheduler_task("second", "b/file.py")
+        for module in ("duration", "capacity", "concurrency", "merge_pressure", "jev_sched", "decision_log"):
+            self.swap(daemon, module, mock.Mock())
+        with mock.patch.object(daemon.time, "time", return_value=123):
+            daemon.dispatch(pool)
+        for module in ("duration", "capacity", "concurrency", "merge_pressure", "jev_sched", "decision_log"):
+            self.assertEqual(getattr(daemon, module).mock_calls, [])
+        self.assertEqual(daemon.schedlog.read("dispatch"), [{"ts": 123, "free_slots": 1,
+            "fallback": False, "running_execute": 0, "running_claude": 0, "considered": [
+                {"task": a, "goal_id": "T-0043", "ready": True, "action": "dispatched"},
+                {"task": b, "goal_id": "T-0043", "ready": True, "action": "skipped",
+                 "reason": "executor_capacity"}]}])
+
+    def test_dispatch_shadow_records_durations_capacity_limit_and_pressure_without_applying(self):
+        pool = self.scheduler_pool("shadow", slots=2)
+        a = self.scheduler_task("first", "a/file.py")
+        b = self.scheduler_task("second", "a/file.py")
+        c = self.scheduler_task("third", "c/file.py")
+        with mock.patch.object(daemon.duration, "durations_for", return_value={a: 91, b: 92, c: 93}) as durations, \
+             mock.patch.object(daemon.duration, "explain_for", return_value={a: {"source": "band"}}), \
+             mock.patch.object(daemon.decision_log, "record", wraps=daemon.decision_log.record) as record:
+            daemon.dispatch(pool)
+        durations.assert_called_once()
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(self.scheduler_dispatched(), [a, b])
+        for key in ("duration_sources", "capacity", "concurrency", "merge_pressure", "jev_sched"):
+            self.assertIn(key, wave)
+        self.assertEqual(wave["priority"][a]["est_duration_s"], 91)
+        self.assertEqual(len(daemon.schedlog.read("concurrency")), 1)
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs["kind"], "wave")
+        self.assertEqual(record.call_args.kwargs["subject"], "T-0043")
+        self.assertEqual(record.call_args.kwargs["selected"], [a, b])
+
+    def test_dispatch_active_applies_admission_then_limit(self):
+        pool = self.scheduler_pool(slots=3)
+        low = self.scheduler_task("low", "low/file.py")
+        others = [self.scheduler_task(str(i), f"other{i}/file.py", complexity=4) for i in range(2)]
+        dep = self.scheduler_task("gated", "dep/file.py", status="done", pipeline={"gated_at": 12})
+        imminent = self.scheduler_task("imminent", "imm/file.py", depends_on=[dep], complexity=3)
+        snap = {"executors": {
+            "small": {"free": 1, "cooling_s": 0, "enabled": True, "roles": ["execute"],
+                      "complexity": [1, 3], "day_tasks_left": None, "weight": 1},
+            "large": {"free": 3, "cooling_s": 0, "enabled": True, "roles": ["execute"],
+                      "complexity": [4, 10], "day_tasks_left": None, "weight": 1}}}
+        daemon.capacity.snapshot.return_value = snap
+        with mock.patch.object(daemon.duration, "durations_for", return_value={low: 10, imminent: 100}), \
+             mock.patch.object(daemon.capacity, "admit", wraps=daemon.capacity.admit) as admit, \
+             mock.patch.object(daemon.concurrency, "select_limit", return_value={"limit": 1, "reasons": ["test"]}), \
+             mock.patch.object(daemon.concurrency, "log_row", return_value={}):
+            daemon.dispatch(pool)
+        self.assertIn(imminent, admit.call_args.kwargs["imminent"])
+        self.assertIn(imminent, admit.call_args.args[1])
+        self.assertGreater(admit.call_args.args[3][imminent]["priority"], admit.call_args.args[3][low]["priority"])
+        self.assertEqual(self.scheduler_dispatched(), others[:1])
+        entries = {r["task"]: r for r in daemon.schedlog.read("dispatch")[-1]["considered"]}
+        self.assertEqual(entries[low]["reason"], "reserved_for_critical:" + imminent)
+        self.assertEqual(entries[imminent]["reason"], "dependency")
+
+    def test_dispatch_active_merge_pressure_throttle_defers_only_coupled(self):
+        pool = self.scheduler_pool(slots=2, merge_pressure_mode="throttle")
+        waiting = self.scheduler_task("waiting", "coupled/file.py", status="done", pipeline={"gated_at": 12})
+        coupled = self.scheduler_task("coupled", "coupled/file.py")
+        independent = self.scheduler_task("independent", "independent/file.py")
+        daemon.merge_pressure.assess.return_value = {"pressure": "saturated", "waiting": [waiting]}
+        daemon.dispatch(pool)
+        self.assertEqual(self.scheduler_dispatched(), [independent])
+        entries = {r["task"]: r for r in daemon.schedlog.read("dispatch")[-1]["considered"]}
+        self.assertEqual(entries[coupled]["reason"], "merge_pressure")
+
+    def test_dispatch_retry_branch_reuses_deferrals_and_never_exceeds_slots(self):
+        pool = self.scheduler_pool(slots=2, jev_mode="active")
+        ids = [self.scheduler_task(str(i), f"task{i}/file.py") for i in range(5)]
+        original = daemon.stamp
+        def claim(tid, stage, **kwargs):
+            if tid == ids[0] and stage == "dispatched_at":
+                return False
+            return original(tid, stage, **kwargs)
+        with mock.patch.object(daemon, "stamp", side_effect=claim), \
+             mock.patch.object(daemon.duration, "durations_for", side_effect=RuntimeError("duration unavailable")), \
+             mock.patch.object(daemon.capacity, "admit", return_value={"admit": ids, "deferred": {ids[2]: "budget"},
+                              "assignments": {}}) as admit, \
+             mock.patch.object(daemon.concurrency, "select_limit", wraps=daemon.concurrency.select_limit) as limit:
+            daemon.jev_sched.annotate.side_effect = RuntimeError("jev unavailable")
+            daemon.dispatch(pool)
+        self.assertEqual(self.scheduler_dispatched(), [ids[1], ids[3]])
+        admit.assert_called_once()
+        limit.assert_called_once()
+        daemon.merge_pressure.assess.assert_called_once()
+        daemon.jev_sched.annotate.assert_called_once()
+        wave, = daemon.schedlog.read("waves")
+        self.assertEqual(wave["duration_error"], "duration unavailable")
+        self.assertEqual(wave["jev_sched"], {"error": "jev unavailable"})
+        self.assertLessEqual(len(wave["wave"]), 2)
+
     def test_scheduler_cfg_defaults(self):
         pool = self.scheduler_pool()
         pool.cfg.pop("scheduler")
-        self.assertEqual(daemon._load_scheduler_cfg(pool),
+        cfg = daemon._load_scheduler_cfg(pool)
+        self.assertEqual({k: cfg[k] for k in ("mode", "soft_conflict_policy", "max_wave", "stale_rebase")},
                          {"mode": "shadow", "soft_conflict_policy": "defer", "max_wave": 0,
                           "stale_rebase": False})
 
@@ -211,10 +335,38 @@ class Daemon(unittest.TestCase):
         bus.update(tid, worktree=str(self.sandbox), branch=f"task/{tid}")
         return bus.get(tid)
 
+    def test_stale_check_returns_extended_evidence_and_only_high_rebases(self):
+        task = self.stale_subject(["orchestrator/example.py"])
+        with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["tests/test_example.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["orchestrator/example.py"]), \
+                mock.patch.object(daemon.stale_evidence, "load_links", return_value=None), \
+                mock.patch.object(daemon.interference, "load_graph", return_value=None):
+            evidence = daemon.stale_check(task)
+        self.assertEqual(evidence["risk"], "medium")
+        self.assertEqual(evidence["risk_reasons"], ["tests_changed"])
+        self.assertEqual(evidence["signals"]["tests_changed"], ["tests/test_example.py"])
+        self.assertEqual(evidence["graph"], "absent")
+        bus.update(task["id"], status="done")
+        with mock.patch.object(daemon, "stale", return_value=False), \
+                mock.patch.object(daemon, "already_merged", return_value=False), \
+                mock.patch.object(daemon, "_dirty_scope_paths", return_value=[]), \
+                mock.patch.object(daemon, "_review_plan", return_value=(1, "always")), \
+                mock.patch.object(daemon, "_record_stale_check", return_value=(evidence, True)), \
+                mock.patch.object(daemon, "_load_scheduler_cfg", return_value={"stale_rebase": True}), \
+                mock.patch.object(daemon, "_stale_rebase", return_value=True) as rebase, \
+                mock.patch.object(daemon, "_open_reviews") as reviews:
+            daemon.gate(P.Pool())
+            rebase.assert_not_called()
+            reviews.assert_called_once()
+            daemon.clear_stage(task["id"], "gated_at")
+            evidence["risk"] = "high"
+            daemon.gate(P.Pool())
+            rebase.assert_called_once()
+
     def test_stale_check_none_when_goal_unmoved(self):
         task = self.stale_subject()
         with mock.patch.object(daemon.gitutil, "moved_paths", return_value=[]), \
-                mock.patch.object(daemon, "changed_paths", return_value=["scope/changed.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["scope/changed.py"]), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
             result = daemon.stale_check(task)
         self.assertEqual(result["risk"], "none")
@@ -223,7 +375,7 @@ class Daemon(unittest.TestCase):
     def test_stale_check_low_when_scope_overlaps_moved_paths(self):
         task = self.stale_subject()
         with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
-                mock.patch.object(daemon, "changed_paths", return_value=["other.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["other.py"]), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
             result = daemon.stale_check(task)
         self.assertEqual(result["risk"], "low")
@@ -232,7 +384,7 @@ class Daemon(unittest.TestCase):
     def test_stale_check_high_when_changed_file_moved(self):
         task = self.stale_subject()
         with mock.patch.object(daemon.gitutil, "moved_paths", return_value=["scope/api.py"]), \
-                mock.patch.object(daemon, "changed_paths", return_value=["scope/api.py"]), \
+                mock.patch.object(daemon.gitutil, "changed_paths", return_value=["scope/api.py"]), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("goalsha\n")):
             result = daemon.stale_check(task)
         self.assertEqual(result["risk"], "high")
@@ -249,7 +401,7 @@ class Daemon(unittest.TestCase):
         order = []
         with mock.patch.object(daemon, "stale_check", side_effect=lambda task: (order.append("stale") or {
                 "base": task["branch"], "goal_head": "goalsha", "moved_count": 0,
-                "stale_paths": [], "risk": "none"})), \
+                "stale_paths": [], "risk": "none", "risk_reasons": []})), \
                 mock.patch.object(daemon, "_git_in", return_value=FakeProc("headsha\n")):
             evidence, recorded = daemon._record_stale_check(task)
             order.append("reviews")
@@ -271,7 +423,7 @@ class Daemon(unittest.TestCase):
             return FakeProc("tasksha\n")
         with mock.patch.object(daemon, "_git_in", side_effect=git):
             self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
-                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high", "risk_reasons": ["changed_files_moved"]}))
         held = bus.get(task["id"])
         self.assertEqual(held["hold_reason"], "stale_rebase_conflict")
         self.assertNotIn("gated_at", held["pipeline"])
@@ -282,7 +434,7 @@ class Daemon(unittest.TestCase):
         bus.update(task["id"], pipeline={"gated_at": 1, "stale_check": {"risk": "high"}})
         with mock.patch.object(daemon, "_git_in", side_effect=[FakeProc(""), FakeProc("newhead\n")]):
             self.assertTrue(daemon._stale_rebase(task, {"base": task["branch"], "goal_head": "goalsha",
-                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high"}))
+                "moved_count": 1, "stale_paths": ["scope/api.py"], "risk": "high", "risk_reasons": ["changed_files_moved"]}))
         pipeline = bus.get(task["id"])["pipeline"]
         self.assertNotIn("gated_at", pipeline)
         self.assertEqual(pipeline["stale_check"]["rebased_to"], "newhead")
@@ -355,7 +507,7 @@ class Daemon(unittest.TestCase):
         blocked = self.scheduler_task("blocked", "e/file.py", depends_on=[a])
         launches = []
         self.swap(daemon, "spawn_async", lambda fn, tid, *args: launches.append(tid))
-        self.swap(daemon, "_wave_order", lambda ids, tasks: list(reversed(ids)))
+        self.swap(daemon, "_wave_order", lambda ids, tasks, durations=None: list(reversed(ids)))
         daemon.dispatch(pool)
         self.assertEqual(launches, [d, c])
         self.assertEqual(daemon.schedlog.read("waves")[0]["wave"], launches)
@@ -716,6 +868,13 @@ class Daemon(unittest.TestCase):
         self.assertEqual(pipeline["gated_at"], 2000.0)
         self.assertEqual(pipeline["first_green_at"], 1000.0)
         self.assertEqual(pipeline["gate_attempts"], 2)
+
+    def test_green_gate_stamps_gate_reds_zero(self):
+        tid = self.metric_gate_task()
+        daemon.gate(P.Pool())
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertEqual(pipeline["gate_reds"], 0)
+        self.assertIn("first_green_at", pipeline)
 
     def test_gate_red_increments_reds_and_keeps_hold(self):
         tid = self.metric_gate_task()

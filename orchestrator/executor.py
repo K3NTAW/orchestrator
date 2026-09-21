@@ -11,7 +11,7 @@ import inspect, json, re, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
-from . import scorecard
+from . import scorecard, allocation, critical_path, duration, jev_route, decision_log
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
@@ -242,7 +242,15 @@ def post_tool_result(task_id, result, replace_result=False):
     }
     if replace_result and previous:
         posted["previous_commits"] = [*previous.get("previous_commits", []), previous.get("commit")]
-    bus.post_result(task_id, posted, "done")
+    with bus.locked():
+        if replace_result:
+            pipeline = dict(bus.get(task_id).get("pipeline") or {})
+            for key in list(pipeline):
+                if key.startswith("gated_at") or key in ("hold_reason", "resume_hint"):
+                    pipeline.pop(key)
+            pipeline["regated_by"] = "codex_reply"
+            bus.update(task_id, pipeline=pipeline, hold_reason=None, resume_hint=None)
+        bus.post_result(task_id, posted, "done")
     return True, "result posted"
 
 
@@ -270,7 +278,46 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
                 scores = scorecard.scores(scorecard.build())
             except Exception:
                 scores = {}
-            ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
+            baseline_scores = dict(scores)
+            try:
+                if pool.cfg.get("jev", {}).get("routing", {}).get("mode") == "active":
+                    routing = jev_route.shadow_context(t, pool)
+                    scores = jev_route.active_scores(t, pool, routing["eligible"],
+                                                     routing["classification"], routing["evidence"], scores)
+                ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
+                mode = pool.cfg.get("allocation", {}).get("mode", "shadow")
+                if mode != "off" and ex is not None:
+                    graph = {x["id"]: x for x in bus.read(role="execute", compact=False)
+                             if not x.get("merged_into") and x.get("status") != "failed"}
+                    graph[t["id"]] = t
+                    durations = duration.durations_for(list(graph.values()))
+                    ready_ids = {x["id"] for x in graph.values()
+                                 if x["status"] in ("queued", "running") and bus.ready(x)}
+                    ready_ids.add(t["id"])
+                    priority = critical_path.explain(t["id"], graph, durations)
+                    ready_priorities = [critical_path.explain(i, graph, durations)["critical_path_s"]
+                                        for i in sorted(ready_ids)]
+                    eligible_ids = [e.id for e in pool.eligible_executors("execute", t["complexity"], t)]
+                    ev = allocation.evidence_for(eligible_ids, scorecard.task_class(t))
+                    choice = allocation.choose(t, eligible_ids, baseline=ex.id, priority=priority,
+                                               ready_priorities=ready_priorities, evidence=ev, cfg=pool.cfg)
+                    if choice["executor"] not in eligible_ids:
+                        raise ValueError("allocation returned an ineligible executor")
+                    factor_key = ("critical_factor" if priority["critical_path_s"] >= max(ready_priorities)
+                                  else "non_critical_factor")
+                    factor = pool.cfg.get("allocation", {}).get(factor_key, allocation.DEFAULTS[factor_key])
+                    for candidate in choice["candidates"]:
+                        candidate[factor_key] = factor
+                    allocation.record(t["id"], choice)
+                    # Preserve ranking inputs and candidate costs alongside the allocation decision.
+                    decision_log.outcome(t["id"], "allocation", priority=priority,
+                                         ready_priorities=ready_priorities, candidates=choice["candidates"])
+                    if mode == "active":
+                        ex = pool.executors[choice["executor"]]
+            except Exception as exc:
+                ex = pool.pick_executor("execute", t["complexity"], scores=baseline_scores, task=t)
+                bus.log_run(task=task_id, role="execute", outcome="routing_fallback",
+                            allocation_error=str(exc), executor=ex.id if ex else None)
         if ex is None or ex.provider != "codex":
             result = _exhausted(pool, t)
             handed_off = result.get("status") == "fallback"

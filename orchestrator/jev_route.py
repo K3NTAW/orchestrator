@@ -1,8 +1,9 @@
-"""Fail-open Jev classification for shadow executor-routing evidence.
+"""Fail-open Jev classification and bounded executor-routing adjustment.
 
 The hypothetical policy is intentionally small: strong reasoning signals choose the
 highest-success candidate; a very simple, low-risk task chooses the cheapest; all
-other cases retain the baseline. It can never introduce an ineligible executor.
+other cases retain the baseline. Active routing defaults to ``max_adjustment=0.25``
+and ``evidence_floor_n=10``; it can never introduce an ineligible executor.
 """
 import fcntl, hashlib, json, os, tempfile, time
 from pathlib import Path
@@ -139,8 +140,56 @@ def evidence_for(eligible, task, root=STATE):
     except Exception:
         economics = {}
     return {ex.id: {"class_success": scorecard.class_success(ex.id, task_class, root=root),
+                    "n": scorecard.class_sample_size(ex.id, task_class, root=root),
                     "expected_cost": scorecard.expected_cost(ex.id, task_class, root=root),
                     "economics": economics.get(ex.id)} for ex in eligible}
+
+
+def _branch_and_favoured(signals, evidence, ids):
+    reasoning = max(signals[k] for k in
+                    ("substantial_reasoning", "architectural", "stronger_executor_helps"))
+    if reasoning >= .6:
+        measured = [(evidence.get(eid, {}).get("class_success"), eid) for eid in ids]
+        measured = [(value, eid) for value, eid in measured if value is not None]
+        return (reasoning, max(measured, default=(None, None), key=lambda row: (row[0], row[1]))[1])
+    if signals["localized_simple"] >= .7 and signals["elevated_risk"] < .3:
+        measured = [(evidence.get(eid, {}).get("expected_cost"), eid) for eid in ids]
+        measured = [(value, eid) for value, eid in measured if value is not None]
+        return (signals["localized_simple"],
+                min(measured, default=(None, None), key=lambda row: (row[0], row[1]))[1])
+    return None, None
+
+
+def adjustment(signals, evidence, eligible_ids, cfg):
+    """Return one bounded, sample-shrunk suitability boost, or neutral multipliers."""
+    ids = list(eligible_ids)
+    neutral = {eid: 1.0 for eid in ids}
+    if not ids or not isinstance(signals, dict) or not isinstance(evidence, dict):
+        return neutral
+    values = [signals.get(key) for key in QUESTIONS]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1
+           for value in values):
+        return neutral
+    signal, favoured = _branch_and_favoured(signals, evidence, ids)
+    if favoured is None:
+        return neutral
+    row = evidence.get(favoured, {})
+    n = row.get("n") if isinstance(row, dict) else None
+    if isinstance(n, bool) or not isinstance(n, (int, float)) or n < 0:
+        return neutral
+    confidence = cfg.get("confidence")
+    if confidence is None:
+        confidence = .5
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        return neutral
+    maximum = cfg.get("max_adjustment", .25)
+    floor = cfg.get("evidence_floor_n", 10)
+    if (isinstance(maximum, bool) or not isinstance(maximum, (int, float)) or maximum < 0 or
+            isinstance(floor, bool) or not isinstance(floor, (int, float)) or floor <= 0):
+        return neutral
+    magnitude = maximum * signal * confidence * floor / (n + floor)
+    neutral[favoured] = min(1 + maximum, max(1 - maximum, 1 + magnitude))
+    return neutral
 
 
 def hypothetical(eligible, signals, evidence, baseline=None):
@@ -149,30 +198,36 @@ def hypothetical(eligible, signals, evidence, baseline=None):
         return None
     ids = [ex.id for ex in eligible]
     fallback = baseline if baseline in ids else ids[0]
-    if max(signals.get(k, 0) for k in ("substantial_reasoning", "architectural", "stronger_executor_helps")) >= .6:
-        measured = [(evidence.get(eid, {}).get("class_success"), eid) for eid in ids]
-        measured = [(value, eid) for value, eid in measured if value is not None]
-        return max(measured, default=(None, fallback), key=lambda row: (row[0], row[1]))[1]
-    if signals.get("localized_simple", 0) >= .7 and signals.get("elevated_risk", 0) < .3:
-        def cheap(eid):
-            cost = evidence.get(eid, {}).get("expected_cost")
-            ex = next(ex for ex in eligible if ex.id == eid)
-            return (cost is None, cost if cost is not None else ex.weight, eid)
-        return min(ids, key=cheap)
-    return fallback
+    complete = {key: signals.get(key, 0) for key in QUESTIONS}
+    _, favoured = _branch_and_favoured(complete, evidence, ids)
+    return favoured or fallback
+
+
+def active_scores(task, pool, eligible, classification, evidence, base_scores=None):
+    """Apply Jev suitability only in active mode, failing open to baseline scores."""
+    ids = [ex.id for ex in eligible]
+    baseline = dict(base_scores) if base_scores is not None else {eid: 1.0 for eid in ids}
+    if _routing_cfg(pool).get("mode", "off") != "active" or not ids or classification is None:
+        return baseline
+    signals = classification.get("signals") if isinstance(classification, dict) else None
+    cfg = {**_routing_cfg(pool), "confidence": classification.get("confidence")}
+    multipliers = adjustment(signals, evidence, ids, cfg)
+    return {eid: baseline.get(eid, 1.0) * multipliers[eid] for eid in ids}
 
 
 def shadow_context(task, pool):
     mode = _routing_cfg(pool).get("mode", "off")
     if mode not in ("shadow", "active"):
         return None
-    if mode == "active" and pool.notification_transition("jev_routing_active", True):
-        from .daemon import notify
-        notify("jev routing active requested; active ranking lands in P5")
     eligible = pool.eligible_executors("execute", task["complexity"], task)
     classification = classify(task, pool, eligible)
+    evidence = evidence_for(eligible, task)
+    signals = (classification or {}).get("signals") or {}
+    cfg = {**_routing_cfg(pool), "confidence": (classification or {}).get("confidence")}
     return {"mode": mode, "eligible": eligible, "classification": classification,
-            "evidence": evidence_for(eligible, task)}
+            "evidence": evidence, "adjustment": adjustment(signals, evidence,
+                                                             [ex.id for ex in eligible], cfg),
+            "active": mode == "active"}
 
 
 def record_shadow(task_id, context):
@@ -183,11 +238,15 @@ def record_shadow(task_id, context):
     hyp = hypothetical(context["eligible"], signals, context["evidence"], baseline)
     key = (classification or {}).get("key") or _key(task)
     pipeline = dict(task.get("pipeline") or {})
-    pipeline["jev_route"] = {"baseline": baseline, "hypothetical": hyp, "key": key}
+    route_adjustment = context.get("adjustment", {ex.id: 1.0 for ex in context["eligible"]})
+    active = context.get("active", context["mode"] == "active")
+    pipeline["jev_route"] = {"baseline": baseline, "hypothetical": hyp, "key": key,
+                             "adjustment": route_adjustment, "mode": context["mode"]}
     bus.update(task_id, pipeline=pipeline)
     bus.log_run(role="jev_route", task=task_id, mode=context["mode"],
                 eligible=[ex.id for ex in context["eligible"]], baseline=baseline, hypothetical=hyp,
                 agrees=baseline == hyp, signals=signals, confidence=(classification or {}).get("confidence"),
                 evidence=context["evidence"], latency_ms=(classification or {}).get("latency_ms"),
+                adjustment=route_adjustment, active=active,
                 usage=(classification or {}).get("usage"), cache=(classification or {}).get("cache"),
                 error=None if classification else "classification_failed")

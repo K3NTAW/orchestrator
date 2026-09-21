@@ -1,6 +1,6 @@
 """Serial merge queue: one at a time, rebase onto target -> tests-green -> fast-forward the target branch.
 Target defaults to goal/<parent> (or 'integration'); main only ever moves via a human-approved PR."""
-import fcntl, hashlib, subprocess, sys
+import fcntl, hashlib, subprocess, sys, time
 from . import ROOT, bus, scorecard
 from .repomap import build
 from .spawn import git
@@ -90,7 +90,13 @@ def merge(task_id, target=None, *, refresh_repomap=True):
         except Exception as e:
             result["repomap_error"] = str(e)[:200]
             print(f"[merge] repomap refresh failed: {e}", file=sys.stderr)
-        bus.update(task_id, status="done", merged_into=target, sha=sha)
+        changed_files = git("diff", "--name-only", f"{previous_sha}..{sha}", check=False).stdout.splitlines()[:500]
+        merged_at = time.time()
+        with bus.locked():
+            pipeline = dict(bus.get(task_id).get("pipeline") or {})
+            pipeline.setdefault("merged_at", merged_at)
+            bus.update(task_id, status="done", merged_into=target, sha=sha,
+                       merged_at=merged_at, changed_files=changed_files, pipeline=pipeline)
         bus.commit_state()
         try:
             scorecard.write(scorecard.build())

@@ -3,6 +3,7 @@ import atexit, json, os, sys, tempfile, threading, time
 from mcp.server.mcpserver import MCPServer
 from . import STATE, bus, daemon, executor, goals, merge as mq, spawn
 from .pool import Pool, fallback_tier
+from . import scout_evidence
 
 srv = MCPServer("orchestrator")
 
@@ -74,7 +75,30 @@ def _wrong_role(task_id, *allowed):
 @srv.tool()
 def spawn_scout(task_id: str) -> dict:
     """Run a queued scout/triage task as a `claude -p` worker on whichever account has headroom (held if none)."""
-    return _wrong_role(task_id, "scout", "triage") or _bg(task_id)
+    error = _wrong_role(task_id, "scout", "triage")
+    if error:
+        return error
+    task = bus.get(task_id)
+    constraints = task.get("constraints") or {}
+    try:
+        head = spawn.git("rev-parse", "HEAD", check=False).stdout.strip()
+        check = scout_evidence.reuse_check(task["spec"], objective=constraints.get("objective"), head_sha=head)
+        skip = check["sufficient"] and constraints.get("force") is not True
+        scout_evidence.record_decision(question=task["spec"], objective=constraints.get("objective"),
+                                       considered=1, launched=0 if skip else 1,
+                                       skipped_reason=check["reason"] if skip else None,
+                                       hits=check["hits"], task_id=task_id)
+        if skip:
+            fresh = [hit for hit in check["hits"] if hit.get("fresh")]
+            result = {"summary": "reused evidence: " + ", ".join(str(hit["id"]) for hit in fresh),
+                      "findings": [{"finding": hit["title"], "source": hit["id"], "confidence": 0.8,
+                                    "relevance": "reused", "unresolved": ""} for hit in fresh],
+                      "reused_evidence": check["hits"], "provenance": ["repo"]}
+            bus.post_result(task_id, result, "done")
+            return {"task": task_id, "status": "skipped: reusable evidence", "hits": check["hits"]}
+    except Exception:
+        pass  # Evidence collection must not prevent a scout from launching.
+    return _bg(task_id)
 
 
 @srv.tool()

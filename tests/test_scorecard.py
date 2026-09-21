@@ -107,6 +107,15 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(set(filtered["goals"]), {"G"})
         self.assertEqual(filtered["skip_reasons"], {"dependency": 1, "capacity": 1})
 
+    def test_parallelism_skip_reasons_count_skipped_rows(self):
+        sched = self.root / "runs" / "sched"
+        sched.mkdir()
+        (sched / "dispatch.jsonl").write_text(json.dumps({"ts": 123, "free_slots": 1,
+            "fallback": False, "running_execute": 0, "running_claude": 0, "considered": [
+                {"task": "T-2", "goal_id": "G", "ready": True, "action": "skipped",
+                 "reason": "reserved_for_critical:T-1"}]}) + "\n")
+        self.assertEqual(scorecard.parallelism(self.root)["skip_reasons"], {"reserved_for_critical:T-1": 1})
+
     def test_parallelism_missing_files_are_zero(self):
         self.write_task("A", parent="G")
         card = scorecard.parallelism(self.root)
@@ -254,6 +263,20 @@ class Scorecard(unittest.TestCase):
                           [{"task": f"T-sec{n}", "role": "execute"} for n in range(3)]))
         self.assertEqual(scorecard.class_success("good", "mechanical", self.root), 1.0)
         self.assertAlmostEqual(scorecard.class_success("good", "security", self.root), 1 / 3)
+
+    def test_class_sample_size_matches_class_success_filter(self):
+        for tid, fields in (
+                ("T-merged", {"executor": "good", "merged_into": "goal/G"}),
+                ("T-failed", {"executor": "good", "status": "failed"}),
+                ("T-unresolved", {"executor": "good"}),
+                ("T-other", {"executor": "other", "merged_into": "goal/G"}),
+                ("T-review", {"executor": "good", "role": "review", "merged_into": "goal/G"})):
+            self.write_task(tid, constraints={"task_class": "mechanical"}, **fields)
+        self.write_runs(*[{"task": tid, "role": "execute"}
+                          for tid in ("T-merged", "T-failed", "T-unresolved", "T-other", "T-review")])
+        self.assertEqual(scorecard.class_sample_size("good", "mechanical", self.root), 2)
+        self.assertEqual(scorecard.class_success("good", "mechanical", self.root, min_samples=1), .5)
+        self.assertIsNone(scorecard.class_success("good", "mechanical", self.root))
 
     def test_expected_cost_needs_samples(self):
         for n in range(2):
@@ -1017,6 +1040,15 @@ class Efficiency(unittest.TestCase):
         self.assertEqual((card["first_pass_rate"], card["fix_round_rate"], card["avg_fix_rounds"]), (.5, .5, .5))
         self.assertEqual(card["first_pass_defined_count"], 2)
         self.assertEqual(card["fix_round_defined_count"], 2)
+
+    def test_first_pass_defined_when_green_without_recorded_reds(self):
+        self.write_task("T-root", merged_into="main", executor="worker",
+                        pipeline={"first_green_at": 130}, lineage_fix_rounds=0)
+        task = scorecard.efficiency(self.root)["tasks"]["T-root"]
+        self.assertIs(task["first_pass"], True)
+        economics = scorecard.executor_economics(self.root)["worker"]
+        self.assertEqual(economics["first_pass_green_rate"], 1)
+        self.assertEqual(economics["first_pass_defined_count"], 1)
 
     def test_efficiency_tokens_and_time_to_first_green_use_stamps(self):
         task = scorecard.efficiency(self.root)["tasks"]["T-root"]

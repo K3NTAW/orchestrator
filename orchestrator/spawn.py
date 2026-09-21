@@ -645,6 +645,48 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
 
 def extract_json(text):
     """Workers are told to return ONLY JSON; tolerate fences or prose around it."""
+    fences = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    for body in reversed(fences):
+        try:
+            value = json.loads(body)
+            if isinstance(value, dict):
+                return value
+        except json.JSONDecodeError:
+            pass
+
+    candidates = []
+    start = None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidates.append(text[start:index + 1])
+                start = None
+    for candidate in reversed(candidates):
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, dict):
+                return value
+        except json.JSONDecodeError:
+            pass
+
     s, e = text.find("{"), text.rfind("}")
     try:
         return json.loads(text[s:e + 1]) if s >= 0 else {"summary": text[:2000]}

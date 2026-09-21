@@ -446,3 +446,116 @@ class Executor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoutingIntegration(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        directory = tempfile.TemporaryDirectory(prefix="orch-routing-")
+        self.addCleanup(directory.cleanup)
+        state = Path(directory.name)
+        p = patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs")
+        p.start(); self.addCleanup(p.stop)
+        p = patch.object(executor.decision_log.schedlog, "SCHED_DIR", state / "runs" / "sched")
+        p.start(); self.addCleanup(p.stop)
+        self.pool = MagicMock()
+        self.pool.cfg = {"allocation": {"mode": "off"}, "jev": {"routing": {"mode": "shadow"}}}
+        self.pool.executors = {}
+        for eid in ("sol", "terra"):
+            ex = MagicMock()
+            ex.id, ex.provider, ex.model = eid, "codex", eid
+            self.pool.executors[eid] = ex
+        self.pool.pick_executor.return_value = self.pool.executors["sol"]
+        self.pool.eligible_executors.return_value = list(self.pool.executors.values())
+        for p in (patch.object(executor, "Pool", return_value=self.pool),
+                  patch.object(executor.scorecard, "build", return_value={}),
+                  patch.object(executor.scorecard, "scores", return_value={"sol": 1.0}),
+                  patch.object(executor, "_run", return_value={"status": "done"})):
+            p.start(); self.addCleanup(p.stop)
+
+    def task(self, title="routing", **kwargs):
+        task = bus.create_task(title, "spec", ["passes"], ["x.py"], role="execute", complexity=3, **kwargs)
+        bus.update(task["id"], worktree=str(TMP))
+        return task["id"]
+
+    def test_reply_result_clears_gate_stamps_for_regating(self):
+        tid = self.task()
+        bus.claim(tid, "codex", str(TMP))
+        bus.update(tid, executor="sol", hold_reason="gate_red", resume_hint={"failures": "old"},
+                   pipeline={"gated_at": 1, "gated_at_lease": 2, "gated_at_done": 3,
+                             "hold_reason": "old", "resume_hint": "old", "reviews_expected": 2})
+        bus.post_result(tid, {"commit": "aaaaaaa"})
+        ok, _ = executor.post_tool_result(tid, {"status": "done", "message": "commit bbbbbbb"}, replace_result=True)
+        self.assertTrue(ok)
+        updated = bus.get(tid)
+        self.assertEqual(updated["pipeline"], {"regated_by": "codex_reply", "reviews_expected": 2})
+        self.assertIsNone(updated["hold_reason"])
+        self.assertIsNone(updated["resume_hint"])
+
+    def test_start_with_explicit_executor_id_skips_routing_hooks(self):
+        self.pool.cfg["allocation"]["mode"] = "active"
+        self.pool.cfg["jev"]["routing"]["mode"] = "active"
+        tid = self.task()
+        with patch.object(executor.jev_route, "shadow_context") as route, \
+                patch.object(executor.jev_route, "active_scores") as scores, \
+                patch.object(executor.allocation, "choose") as choose, \
+                patch.object(executor.allocation, "evidence_for") as evidence:
+            executor.start(tid, "prompt", executor_id="sol")
+        route.assert_not_called(); scores.assert_not_called()
+        choose.assert_not_called(); evidence.assert_not_called()
+        self.pool.pick_executor.assert_not_called()
+        self.assertEqual(bus.get(tid)["executor"], "sol")
+
+    def test_start_applies_active_jev_scores_only_when_mode_active(self):
+        adjusted = {"terra": 3.0}
+        context = {"eligible": [], "classification": {}, "evidence": {}}
+        for mode in ("shadow", "active"):
+            with self.subTest(mode=mode), \
+                    patch.object(executor.jev_route, "shadow_context", return_value=context) as route, \
+                    patch.object(executor.jev_route, "active_scores", return_value=adjusted) as adjust:
+                self.pool.cfg["jev"]["routing"]["mode"] = mode
+                executor.start(self.task(), "prompt")
+                expected = adjusted if mode == "active" else {"sol": 1.0}
+                self.assertEqual(self.pool.pick_executor.call_args.kwargs["scores"], expected)
+                self.assertEqual(adjust.call_count, int(mode == "active"))
+                self.assertEqual(route.call_count, int(mode == "active"))
+        with patch.object(executor.jev_route, "shadow_context", side_effect=RuntimeError("jev failed")):
+            executor.start(self.task(), "prompt")
+        self.assertEqual(self.pool.pick_executor.call_args.kwargs["scores"], {"sol": 1.0})
+
+    def test_start_uses_allocation_only_in_active_mode_and_fails_open(self):
+        short = self.task("short")
+        critical = self.task("critical")
+        child = self.task("blocked child", depends_on=[critical])
+        durations = {short: 10, critical: 100, child: 100}
+        ev = {eid: {"cost_to_accepted_usd": cost, "first_pass_p": .9, "n": 10}
+              for eid, cost in (("sol", 5), ("terra", 1))}
+        with patch.object(executor.duration, "durations_for", return_value=durations), \
+                patch.object(executor.allocation, "evidence_for", return_value=ev):
+            self.pool.cfg["allocation"]["mode"] = "shadow"
+            executor.start(short, "prompt")
+            self.assertEqual(bus.get(short)["executor"], "sol")
+            rows = executor.decision_log.explain(short, kinds=["allocation"])
+            self.assertEqual(rows[0]["selected"], "sol")
+            ranking = rows[0]["outcomes"][0]
+            self.assertEqual(ranking["priority"]["critical_path_s"], 10)
+            self.assertEqual(sorted(ranking["ready_priorities"]), [10, 200])
+            for candidate in ranking["candidates"]:
+                self.assertEqual(candidate["non_critical_factor"], .25)
+                self.assertAlmostEqual(candidate["score_usd"], candidate["cost_to_accepted_usd"] + 2 * 600 / 3600 * .25)
+            self.pool.cfg["allocation"]["mode"] = "active"
+            executor.start(critical, "prompt")
+            self.assertEqual(bus.get(critical)["executor"], "terra")
+            with patch.object(executor.allocation, "choose", side_effect=RuntimeError("choose failed")):
+                executor.start(short, "prompt")
+            self.assertEqual(bus.get(short)["executor"], "sol")
+            rows = [json.loads(line) for path in bus.RUNS.glob("*.jsonl") for line in path.read_text().splitlines()]
+            self.assertTrue(any(row.get("allocation_error") == "choose failed" for row in rows))
+            with patch.object(executor.allocation, "choose", return_value={"executor": "ineligible"}):
+                executor.start(short, "prompt")
+            self.assertEqual(bus.get(short)["executor"], "sol")
+            self.pool.cfg["allocation"]["mode"] = "off"
+            with patch.object(executor.allocation, "choose") as choose:
+                executor.start(short, "prompt")
+            choose.assert_not_called()
