@@ -1,4 +1,4 @@
-# plan.md — Planner checkpoint (updated 2026-09-21 18:30; GOAL T-0755 R22 open: render errors visible + review respawn retry, run under [planner].autonomous = true shadow)
+# plan.md — Planner checkpoint (updated 2026-09-21 18:45; GOAL T-0755 R22 closed, PR open goal/T-0755 → main, awaiting the human)
 
 ## GOAL (user 18:25 "flip autonomous to true and run one goal"): R22 — spawn.render validates placeholders against the template, dispatch and run_worker hold on render errors, review respawn retries and caps
 Complexity 5 (two files in orchestrator/, both `[review]` security paths → one security review each on security_review_tier; below spec_review_min 6, so no spec review). Route: clear localized change → two atomic specs, T2 depends_on T1 (both edit daemon.py and tests/test_daemon.py), deterministic gate, human PR. Zero scouts: all facts below are Planner grep, provenance repo.
@@ -24,8 +24,16 @@ Complexity 5 (two files in orchestrator/, both `[review]` security paths → one
 - T2 c3 execute (depends_on T1): review respawn retries every respawn_after_s while queued and unassigned, counts pipeline.respawn_count, holds with hold_reason respawn_exhausted at [daemon].respawn_max (default 3). Scope orchestrator/daemon.py, tests/test_daemon.py, .orchestrator/pool.toml.
 - Then: gate on goal/T-0755, retrospective (record.sh), PR goal/T-0755 → main. Read `scorecard --planner-routing`, `promotion`, and runs/sched/planner_skips.jsonl.
 
+### Progress
+- T1 T-0756 merged into goal/T-0755 at 77fb206 (18:12 UTC+2 stamp chain: gate green first attempt, gate_reds 0; security review T-0758 approve, review_reason security_paths:orchestrator/*.py). Diff 4 files +147/-38. Codex's own final full-gate run was red on one new test it then fixed; the external gate is the bar and passed.
+- T2 T-0757 became ready on T1's merge and was dispatched to Codex (terra) at 18:13:21. The Planner session restarted at 18:14 (daemon.lock re-created), which killed the MCP server and its codex exec child: the task sat running with pid null, no process, clean worktree at 77fb206. reconcile_dead never fires for pid-null tasks (gotcha 2026-09-19, polish candidate still open). 18:17 Planner ran daemon.reconcile_dead(T-0757) by hand → requeued; in-process daemon redispatches. One background wait armed on merged/held/failed.
+- Backlog from this incident (c3, next goal): reconcile_dead treats running tasks with pid null and claimed_at older than the daemon start as dead; codex()/codex_reply() record the codex exec pid on the task.
+
+### Progress (closed)
+- T-0757 merged into goal/T-0755 at 160f28c (18:35; gate green, 0 reds; security review T-0759 approve). Retrospective recorded in decisions.md 2026-09-21 (378 lines, compact-memory due). Branch pushed, PR opened 18:45.
+
 ### Next step
-Filed 18:28: GOAL T-0755, T1 T-0756 (c5, running on Codex since 18:28), T2 T-0757 (c3, depends_on T-0756). Note: pool.toml [daemon] has no respawn_after_s line today; T2 may add it alongside respawn_max, fine. Daemon (in-process, autostart) dispatches. Wait with one Monitor on T1 merged; then T2. Human PR at the end.
+Human: review and merge the PR goal/T-0755 → main, then git pull the checkout and restart with f orch. No open goal. Backlog (next goal candidates, in order): (c3) reconcile_dead treats pid-null running tasks with claimed_at older than the daemon start as dead and the codex tools record the pid; (c2) planner_runs.decision_points yields closable for long-closed goals; (c2) tests/test_scorecard.py:858 live-bus leak; compact-memory.
 
 ## History (closed)
 - GOAL T-0674 Adaptive Planner Routing: closed 17:55, PR 17 merged into main 545fd12 at 18:00, local main = origin/main 363942a. Details: decisions.md 2026-09-21. Backlog still open after this goal: tests/test_scorecard.py:858 live-bus leak (c2); compact-memory (decisions.md and gotchas.md over 300 lines); rebase_changed_diff review respawn.
@@ -41,20 +49,18 @@ Filed 18:28: GOAL T-0755, T1 T-0756 (c5, running on Codex since 18:28), T2 T-075
 ## Prior art (ids for recall)
 - Hosts: Hetzner `ssh kgpt@46.62.167.12` dir /home/kgpt/kgpt, home `ssh k3ntaw@192.168.1.167` (fish), kgpt home side /opt/kgpt-home. docs.kentawaibel.com: repo /Users/k3ntaw/code/docs-kentawaibel, Vercel project docs-kentawaibel.
 
-## Auto-handover 2026-09-21T18:03:36+02:00 — daemon tick
+## Auto-handover 2026-09-21T18:34:05+02:00 — daemon tick
 
 [planner].handover_context_tokens is the configured handover threshold.
-### T-0755 GOAL: R22 — render errors become visible holds, spawn.render validates placeholders against the template, review respawns retry and cap
-- queued: T-0757 T2: daemon re-respawns a queued unassigned review after respawn_after_s, counts respawns and holds with respawn_exhausted at [daemon].respawn_max (depends_on=['T-0756'])
-- running: T-0756 T1: spawn.render validates placeholders against the template with single-pass substitution; dispatch, fresh-fix dispatch and run_worker hold on render errors with hold_reason render_error (executor=sol, started=2026-09-21T18:01:40+02:00)
+Open goals: none
 
-Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 352 more
+Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 353 more
 
 Last events:
-- 2026-09-21T18:01:26+02:00 T-0756 update {"pipeline": {"first_ready_at": 1790006483.880789, "dispatched_at": 1790006483.8
-- 2026-09-21T18:01:40+02:00 T-0756 update {"packet_meta": {"chars": 3613, "est_tokens": 903, "hash": "702842a4ba6e", "vers
-- 2026-09-21T18:01:40+02:00 T-0756 update {"status": "running", "assigned_to": "codex", "worktree": "/Users/k3ntaw/code/or
-- 2026-09-21T18:01:40+02:00 T-0756 update {"rounds": 0, "executor": "sol", "tier": "sol"}
-- 2026-09-21T18:01:48+02:00 T-0757 created {}
+- 2026-09-21T18:32:27+02:00 T-0757 update {"pipeline": {"first_ready_at": 1790007184.3929868, "dispatched_at": 1790007469.
+- 2026-09-21T18:32:28+02:00 T-0755 update {"pipeline": {"last_merge": {"status": "merged", "target": "goal/T-0755", "sha":
+- 2026-09-21T18:32:28+02:00 T-0755 update {"status": "done", "result": {"goal_closed": true, "pr_url": null, "summary": "G
+- 2026-09-21T18:32:28+02:00 T-0755 update {"pipeline": {"last_merge": {"status": "merged", "target": "goal/T-0755", "sha":
+- 2026-09-21T18:32:28+02:00 T-0755 update {"pipeline": {"last_merge": {"status": "merged", "target": "goal/T-0755", "sha":
 
 Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
