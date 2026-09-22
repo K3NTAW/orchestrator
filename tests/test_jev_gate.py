@@ -345,19 +345,45 @@ class JevGateTests(unittest.TestCase):
         self.assertEqual(entries[0]["mode"], "log")
 
     def test_block_mode_blocks_redundant_read(self):
+        task, payload, target = self._sample_fixture()
+        self.assertEqual(self._run(payload, task), 0)
+        target.write_text("changed source content")
         jev_gate._cfg = lambda: BLOCK_CFG
         jev.ask = lambda state, questions: answers(needed=(0.5, 0.9), redundant=(0.95, 0.9))
-        task = self._task()
-        payload = {"tool_name": "Bash", "tool_input": {"command": "echo x"}, "transcript_path": "", "session_id": "s1"}
 
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            rc = self._run(payload, task["id"])
+            rc = self._run(payload, task)
         self.assertEqual(rc, 2)
         self.assertIn("jev-gate", err.getvalue())
-        self.assertIn("Bash", err.getvalue())
+        self.assertIn("Read", err.getvalue())
         entries = self._log_lines()
-        self.assertTrue(entries[0]["blocked"])
+        self.assertTrue(entries[-1]["blocked"])
+
+    def test_sampled_read_can_still_be_blocked_with_economy_logged(self):
+        from orchestrator import decision_log
+        task, payload, target = self._sample_fixture(1.0)
+        self.assertEqual(self._run(payload, task), 0)
+        jev_gate._cfg = lambda: {**BLOCK_CFG, "block_repeats": False}
+        for response in (answers(redundant=(0.95, 0.9)), answers(needed=(0.05, 0.9))):
+            target.write_text(target.read_text() + "changed")
+            with patch.object(jev, "ask", return_value=response) as ask, \
+                    patch.object(decision_log, "record") as record, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(self._run(payload, task), 2)
+            ask.assert_called_once()
+            record.assert_called_once()
+            self.assertEqual(record.call_args.kwargs["selected"], "allow")
+            self.assertIsNotNone(record.call_args.kwargs["jev"])
+            self.assertIn("jev-gate", err.getvalue())
+            row = self._log_lines()[-1]
+            self.assertEqual(row["tool"], "Read")
+            self.assertEqual(row["read_kind"], "repeated_read_changed")
+            self.assertEqual(row["tokens_estimate"], target.stat().st_size // 4)
+            self.assertFalse(row["would_suppress"])
+            self.assertTrue(row["blocked"])
+            self.assertTrue(row["sampled"])
+            self.assertTrue(row["scored"])
 
     def test_block_mode_allows_needed_call(self):
         jev_gate._cfg = lambda: BLOCK_CFG

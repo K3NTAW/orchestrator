@@ -375,8 +375,9 @@ def run(payload):
     constraints = task.get("constraints") or {}
     task_class = task.get("task_class") or constraints.get("task_class")
 
-    def finish(answers, *, scored=False, sampled=False, latency_ms=0.0, startup_ms=0.0):
-        _log(task_id, session_id, tool_name, answers, mode, blocked=False, scored=scored,
+    def finish(answers, *, scored=False, sampled=False, latency_ms=0.0, startup_ms=0.0,
+               blocked=False):
+        _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=scored,
              latency_ms=latency_ms, startup_ms=startup_ms, tool_target=target,
              input_hash=input_hash, repeat=repeat, sampled=sampled, economy=economy,
              transcript_path=transcript_path, call_index=call_index, role=task.get("role"),
@@ -434,10 +435,12 @@ def run(payload):
 
     blocked, reason = decide(answers, mode)
     if economy:
-        return finish(answers, scored=True, sampled=sampled, latency_ms=latency_ms, startup_ms=startup_ms)
-    _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms,
-         startup_ms=startup_ms, tool_target=target, input_hash=input_hash, repeat=repeat, sampled=sampled,
-         transcript_path=transcript_path, call_index=call_index, role=task.get("role"), task_class=task_class)
+        finish(answers, scored=True, sampled=sampled, latency_ms=latency_ms,
+               startup_ms=startup_ms, blocked=blocked)
+    else:
+        _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms,
+             startup_ms=startup_ms, tool_target=target, input_hash=input_hash, repeat=repeat, sampled=sampled,
+             transcript_path=transcript_path, call_index=call_index, role=task.get("role"), task_class=task_class)
     if blocked:
         print(_message(reason, tool_name, tool_input), file=sys.stderr)
         return 2
