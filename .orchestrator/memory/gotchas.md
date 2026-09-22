@@ -421,3 +421,8 @@ outcome: rule: a spec that adds an import names the package's own pyproject depe
 type: gotcha · goal: T-0106 · provenance: repo
 - 2026-09-22 11:08: rollback.py checked out 57932e5 and ran make up; make migrate exited 255 because the DB was at 0028 and the checkout only knows 0027, so compose up never ran and the crash-looping gateway stayed up; make restart (compose up -d --build --force-recreate gateway) at 57932e5 brought healthz 200 within 30 s; the extra nullable column context_layers is ignored by the old code
 outcome: rollback recipe: git checkout the good sha, make restart, verify healthz and docker logs; only downgrade the database when a migration is not backward-compatible
+
+## 2026-09-22 an executor that stops to ask a question posts it as its result; the daemon gates the untouched worktree green and merges an empty diff, marking the task done
+type: gotcha · goal: T-0109 · tasks: T-0011 · provenance: repo
+- kgpt-ios 2026-09-22 12:18: Codex astra answered 'Blocked: the voice sender is in Sources/Core/VoiceConversation.swift, excluded by your final strict scope. May I include that helper?' with no commit; the daemon gated wt (build green, nothing changed) and merged T-0011 into goal/T-0010 with zero files; the task shows done/merged
+outcome: always check git diff --stat of the merge before trusting done; backlog c2 (orchestrator): the gate or merge refuses a result whose worktree has no commits ahead of the base, holding the task with hold_reason no_diff instead; spec rule: scope every file the acceptance implies (the sender helper here) and say 'do not ask, implement'
