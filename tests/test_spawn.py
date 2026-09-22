@@ -90,18 +90,17 @@ class ReviewVerdict(unittest.TestCase):
 
     def test_render_validates_against_template_not_output(self):
         token = "{" * 2 + "acceptance" + "}" * 2
-        text = spawn.render("execute", packet="p", spec="quotes " + token,
-                            acceptance=["a"], scope=["x.py"])
+        text = spawn.render("execute", packet="quotes " + token)
         self.assertEqual(text.count(token), 1)
         with self.assertRaisesRegex(ValueError, "unfilled_placeholder: packet"):
-            spawn.render("execute", spec="s", acceptance=["a"], scope=["x.py"])
+            spawn.render("execute")
 
     def test_render_single_pass_never_resubstitutes(self):
-        token = "{" * 2 + "scope" + "}" * 2
-        scope = ["z.py"]
-        text = spawn.render("execute", packet="p", spec=token, acceptance=["a"], scope=scope)
+        token = "{" * 2 + "packet" + "}" * 2
+        contract = "The packet above is the task contract"
+        text = spawn.render("execute", packet=token)
         self.assertEqual(text.count(token), 1)
-        self.assertEqual(text.count(json.dumps(scope, indent=0)), 1)
+        self.assertEqual(text.count(contract), 1)
 
     def test_run_worker_holds_on_render_error(self):
         source = bus.create_task("render source", "s", ["a"], ["x.py"], role="execute")
@@ -717,14 +716,27 @@ class Render(unittest.TestCase):
         relevant = spawn.packet(task, TMP).split("## relevant_tests\n", 1)[1].split("\n## ", 1)[0].splitlines()
         self.assertEqual(relevant[1:3], ["- tests/test_other.py::test_two", "- tests/test_other.py::test_one"])
 
+    def test_execute_prompt_carries_contract_once(self):
+        task = self.packet_fixture()
+        task["spec"] = "full-spec:" + "x" * 9000
+        task["acceptance"] = [f"unique acceptance criterion {i}" for i in range(6)]
+        task["scope"] = ["alpha.py", "nested/beta.py", "docs/gamma.md"]
+        text = spawn.render("execute", packet=spawn.packet(task, TMP))
+        self.assertEqual(text.count(task["spec"]), 1)
+        for criterion in task["acceptance"]:
+            self.assertEqual(text.count(criterion), 1)
+        for path in task["scope"]:
+            self.assertEqual(text.count(path), 1)
+        self.assertNotIn("Spec:", text)
+
     def test_execute_prompt_contains_packet(self):
         p = spawn.packet(self.packet_fixture(), TMP)
-        text = spawn.render("execute", packet=p, spec="s", acceptance=["a"], scope=["widget.py"])
+        text = spawn.render("execute", packet=p)
         self.assertTrue(text.startswith("packet v"))
         self.assertIn("Build widget", text)
 
     def test_execute_prompt_names_gate_and_commit(self):
-        text = spawn.render("execute", packet="", spec="s", acceptance=["a"], scope=["widget.py"])
+        text = spawn.render("execute", packet="")
         self.assertIn(".claude/hooks/tests-green.sh", text)
         self.assertIn("git commit", text)
         self.assertNotIn("scripts/tests_green.sh", text)

@@ -356,10 +356,6 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
                 break
         if changed:
             continue
-        # Keep the objective title, but trim any supplemental discovery text.
-        if len(objective) > 1:
-            objective.pop()
-            continue
         break
     body = build()
     gotchas_sha = hashlib.sha256("\n".join(matched_gotchas).encode()).hexdigest()[:12]
@@ -824,8 +820,7 @@ def run_worker(task_id, account_id=None):
             bus.update(task_id, executor=t["executor"])
             packet_worktree = t.get("worktree") or ROOT
             role_packet = packet(t, packet_worktree)
-            prompt = render("execute", packet=role_packet, spec=t["spec"],
-                            acceptance=t["acceptance"], scope=t["scope"]) + \
+            prompt = render("execute", packet=role_packet) + \
                 "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         else:

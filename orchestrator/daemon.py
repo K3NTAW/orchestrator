@@ -578,8 +578,7 @@ def _dispatch_fresh_fix(task_id, reason):
     fix = bus.get(task_id)
     try:
         packet = spawn.packet(fix, spawn.ROOT)
-        prompt = spawn.render("execute", packet=packet, spec=fix["spec"],
-                              acceptance=fix["acceptance"], scope=fix["scope"])
+        prompt = spawn.render("execute", packet=packet)
     except Exception as exc:
         hold_render_error(task_id, exc)
         return
@@ -875,8 +874,7 @@ def dispatch(pool):
                     bus.update(t["id"], pipeline=pipeline)
                 try:
                     packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
-                    prompt = spawn.render("execute", packet=packet, spec=t["spec"],
-                                          acceptance=t["acceptance"], scope=t["scope"])
+                    prompt = spawn.render("execute", packet=packet)
                 except Exception as exc:
                     hold_render_error(t["id"], exc)
                     continue

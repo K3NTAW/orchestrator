@@ -843,6 +843,27 @@ class Daemon(unittest.TestCase):
         self.assertTrue(updated["hold_reason"].startswith("render_error"))
         worker.assert_not_called()
 
+    def test_fresh_fix_prompt_renders_without_contract_kwargs(self):
+        fix_spec = "unique fresh-fix failures and acceptance"
+        tid = bus.create_task("fresh fix contract", fix_spec, ["passes"], ["x.py"],
+                              role="execute", complexity=3)["id"]
+        original_render = spawn.render
+        rendered = []
+
+        def render(name, **kwargs):
+            self.assertEqual(set(kwargs), {"packet"})
+            prompt = original_render(name, **kwargs)
+            rendered.append(prompt)
+            return prompt
+
+        with mock.patch.object(spawn, "render", side_effect=render), \
+                mock.patch.object(daemon, "_dispatch_worker") as worker:
+            daemon._dispatch_fresh_fix(tid, "compat_changed:test")
+
+        worker.assert_called_once()
+        self.assertEqual(len(rendered), 1)
+        self.assertEqual(rendered[0].count(fix_spec), 1)
+
     def test_auto_fix_round_skips_render_error_hold(self):
         tid = self.task("render-held")
         bus.update(tid, status="held", hold_reason="render_error: unfilled_placeholder: spec")
