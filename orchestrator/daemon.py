@@ -497,6 +497,8 @@ def hold_failed(tid, error_key, stage_label, exc):
         t = bus.get(tid)
         pipeline = dict(t.get("pipeline") or {})
         pipeline[error_key] = str(exc)[:300]
+        if error_key == "dispatch_error":
+            pipeline.pop("dispatched_at", None)
         bus.update(tid, status="held", hold_reason=f"{stage_label} failed: {type(exc).__name__}", pipeline=pipeline)
     notify(f"{tid}: {stage_label} failed: {exc}")
 
@@ -545,6 +547,18 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
             }), "done")
         elif r["status"] == "failed":
             bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+        elif r["status"] in ("held", "budget"):
+            with bus.locked():
+                task = bus.get(task_id)
+                pipeline = dict(task.get("pipeline") or {})
+                pipeline.pop("dispatched_at", None)
+                pipeline["hold_note"] = r.get("reason", r["status"])
+                bus.update(task_id, status="queued", pipeline=pipeline)
+        elif r["status"] in ("refused", "incompatible"):
+            reason = r.get("reason", r["status"])
+            bus.post_result(task_id, spawn.fit_result({"reason": reason[:3000]}), "failed")
+        elif r["status"] == "fallback":
+            pass
     except Exception as e:
         with bus.locked():
             t = bus.get(task_id)
@@ -875,11 +889,11 @@ def dispatch(pool):
                 try:
                     packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
                     prompt = spawn.render("execute", packet=packet)
+                    meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
+                    spawn_async(_dispatch_worker, t["id"], prompt, None, meta)
                 except Exception as exc:
-                    hold_render_error(t["id"], exc)
+                    hold_failed(t["id"], "dispatch_error", "dispatch", exc)
                     continue
-                meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
-                spawn_async(_dispatch_worker, t["id"], prompt, None, meta)
                 complete(t["id"], "dispatched_at")
             else:
                 # A competing dispatcher owns this task. Its failed claim costs us no

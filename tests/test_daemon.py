@@ -808,8 +808,10 @@ class Daemon(unittest.TestCase):
         self.assertNotIn("{{", seen["prompt"])
         self.assertIn(seen["packet_meta"]["hash"], seen["prompt"].splitlines()[0])
 
-    def test_dispatch_holds_execute_task_on_render_error(self):
-        broken = self.task("broken render")
+    def test_dispatch_render_error_holds_task(self):
+        broken = bus.create_task("broken render", "keep this literal token: {{unfilled_placeholder}}",
+                                 ["works"], ["x.py"], role="execute", complexity=2,
+                                 parent="T-0043")["id"]
         normal = self.task("normal render")
         messages = []
         self.swap(daemon, "notify", messages.append)
@@ -825,8 +827,8 @@ class Daemon(unittest.TestCase):
         daemon.dispatch(P.Pool())
         updated = bus.get(broken)
         self.assertEqual(updated["status"], "held")
-        self.assertTrue(updated["hold_reason"].startswith("render_error: unfilled_placeholder"))
-        self.assertEqual(updated["pipeline"]["render_error"], "unfilled_placeholder: spec")
+        self.assertTrue(updated["hold_reason"].startswith("dispatch failed"))
+        self.assertIn("unfilled_placeholder", updated["pipeline"]["dispatch_error"])
         self.assertNotIn("dispatched_at", updated["pipeline"])
         self.assertEqual(messages, [mock.ANY])
         self.assertIn(broken, messages[0])
@@ -3410,7 +3412,6 @@ class DirtyScopePaths(unittest.TestCase):
             self.assertEqual(daemon._dirty_scope_paths(root, ["*"]),
                              ["outside.py", "src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
 
-
 class DispatchWorker(unittest.TestCase):
     def setUp(self):
         from contextlib import nullcontext
@@ -3463,11 +3464,23 @@ class DispatchWorker(unittest.TestCase):
             return {"status": "held", "reason": "quota exhausted"}
         self.start.side_effect = held
         daemon._dispatch_worker(self.task_id, "prompt")
-        self.assertEqual(self.state["status"], "held")
+        self.assertEqual(self.state["status"], "queued")
         self.assertEqual(self.state["hold_reason"], "quota exhausted")
         self.assertEqual(self.state["resume_hint"], {"thread": "thread-1"})
         self.assertNotIn("result", self.state)
-        self.assertEqual(self.state["pipeline"], {"dispatched_at": 123})
+        self.assertEqual(self.state["pipeline"], {"hold_note": "quota exhausted"})
+
+    def test_dispatch_worker_handles_non_terminal_start_statuses(self):
+        self.start.return_value = {"status": "held", "reason": "quota exhausted"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "queued")
+        self.assertEqual(self.state["pipeline"], {"hold_note": "quota exhausted"})
+
+        self.state.update(status="running", pipeline={"dispatched_at": 456})
+        self.start.return_value = {"status": "refused", "reason": "x"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "failed")
+        self.assertEqual(self.state["result"]["reason"], "x")
 
     def test_dispatch_worker_exception_marks_failed(self):
         self.start.side_effect = RuntimeError("launch failed")
