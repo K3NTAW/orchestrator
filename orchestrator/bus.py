@@ -283,7 +283,9 @@ def log_run(*, attempt=1, **fields):
     if isinstance(packet_meta, dict) and (packet_meta.get("hash") or packet_meta.get("version")):
         fields["context"] = {key: packet_meta.get(key) for key in
                              ("sections", "presented_tokens", "candidate_tokens", "candidate_known",
-                              "instruction_tokens", "packet_version")}
+                              "instruction_tokens", "packet_version", "routed_tokens",
+                              "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
+                              "routed_rules_version", "evidence_ids")}
         fields["context"]["packet_version"] = packet_meta.get("packet_version") or packet_meta.get("version")
     else:
         fields["context"] = None

@@ -1051,6 +1051,55 @@ class OauthTokenInjection(unittest.TestCase):
 
 
 class ContextTelemetry(unittest.TestCase):
+    def test_execute_packet_bytes_unchanged_under_context_router_shadow(self):
+        task = {"id": "T-shadow", "title": "shadow", "spec": "route it", "acceptance": ["works"],
+                "scope": [], "role": "execute", "constraints": {}}
+        with mock.patch.object(spawn.promotion, "mode", return_value="off"):
+            off = spawn.packet(task, TMP)
+            off_meta = spawn.packet_run_meta(off)
+        with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                mock.patch.object(spawn.decision_log, "record"):
+            shadow = spawn.packet(task, TMP)
+            shadow_meta = spawn.packet_run_meta(shadow)
+        self.assertEqual(off, shadow)
+        self.assertNotIn("routed_tokens", off_meta)
+        self.assertIn("routed_tokens", shadow_meta)
+
+    def test_execute_packet_logs_context_selection_decision(self):
+        task = {"id": "T-log", "title": "log", "spec": "route it", "acceptance": ["works"],
+                "scope": [], "role": "execute", "constraints": {}}
+        with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                mock.patch.object(spawn.decision_log, "record") as record:
+            spawn.packet(task, TMP)
+        row = record.call_args.kwargs
+        self.assertEqual((row["kind"], row["subject"]), ("context_selection", task["id"]))
+        self.assertNotIn("content", row)
+
+    def test_review_packet_routes_diff_files_per_path(self):
+        raw = ("diff --git a/a.py b/a.py\n@@ -0,0 +1 @@\n+A=1\n"
+               "diff --git a/b.py b/b.py\n@@ -0,0 +1 @@\n+B=1\n")
+        task = {"id": "T-review-route", "spec": "s", "acceptance": [],
+                "scope": ["a.py", "b.py"], "worktree": str(TMP), "complexity": 1}
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw), \
+                mock.patch.object(spawn, "_base_sha", return_value="dead"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                mock.patch.object(spawn.context_router, "route", wraps=spawn.context_router.route) as route, \
+                mock.patch.object(spawn.decision_log, "record"):
+            spawn.review_packet(task, task)
+        candidates = route.call_args.args[1]
+        self.assertEqual([item.location for item in candidates if item.source_type == "source_chunk"],
+                         ["a.py", "b.py"])
+
+    def test_router_failure_never_breaks_packet(self):
+        task = {"id": "T-router-fail", "title": "failure", "spec": "s", "acceptance": [],
+                "scope": [], "role": "execute", "constraints": {}}
+        with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                mock.patch.object(spawn.context_router, "route", side_effect=RuntimeError("boom")), \
+                mock.patch.object(spawn.notify, "notify") as notice:
+            packet = spawn.packet(task, TMP)
+        self.assertIn("## objective", packet)
+        self.assertTrue(any(task["id"] in call.args[0] for call in notice.call_args_list))
+
     def test_section_meta_splits_named_sections(self):
         text = "packet header\n## spec\nhello\n## scope\nx.py"
         meta = spawn.section_meta(text)

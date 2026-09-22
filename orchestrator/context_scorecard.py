@@ -19,6 +19,22 @@ def _avg(values):
     return round(sum(values) / len(values), 2) if values else None
 
 
+def _shadow(rows):
+    contexts = [row["context"] for row in rows if isinstance(row.get("context"), dict)]
+    measured = [context for context in contexts if context.get("routed_tokens") is not None]
+    candidates = [len(context.get("evidence_ids") or []) for context in measured]
+    return {
+        "shadow_routed_tokens": _avg([context["routed_tokens"] for context in measured]),
+        "shadow_reduction": _avg([context["routed_reduction_ratio"] for context in measured
+                                  if context.get("routed_reduction_ratio") is not None]),
+        "shadow_hidden": _avg([context["routed_hidden"] for context in measured
+                               if context.get("routed_hidden") is not None]),
+        "shadow_ambiguous_rate": _avg([
+            context.get("routed_ambiguous", 0) / count for context, count in zip(measured, candidates) if count]),
+        "shadow_unmeasured": len(rows) - len(measured),
+    }
+
+
 def build(root=STATE):
     entries = list(_entries(root))
     roles = {}
@@ -44,7 +60,7 @@ def build(root=STATE):
                        if candidate and sum(candidate) else None,
                        "avg_instruction_tokens": _avg(instructions),
                        "top_sections": sorted(((name, _avg(values)) for name, values in sections.items()),
-                                              key=lambda item: (-item[1], item[0]))[:5]}
+                                              key=lambda item: (-item[1], item[0]))[:5], **_shadow(rows)}
     goals = {}
     for goal in sorted({row.get("goal_id") for row in entries if row.get("goal_id")}):
         rows = [row for row in entries if row.get("goal_id") == goal]
@@ -68,18 +84,25 @@ def build(root=STATE):
         goals[goal] = {"runs": len(rows), "measured": len(measured),
                        "amplification": round(total / unique, 3) if unique else None,
                        "amplification_by_section": by_section, "repeated_sections": repeated,
-                       "lineage_roots": sorted({row.get("lineage_root") for row in rows if row.get("lineage_root")})}
+                       "lineage_roots": sorted({row.get("lineage_root") for row in rows if row.get("lineage_root")}),
+                       **_shadow(rows)}
     return {"roles": roles, "goals": goals}
 
 
 def format_report(card):
-    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\ttop sections"]
+    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\ttop sections"]
     for role, row in card["roles"].items():
         lines.append("\t".join(map(str, (role, row["runs"], row["measured"], row["unmeasured"],
                                           row["avg_presented"], row["avg_candidate"], row["reduction_ratio"],
-                                          row["avg_instruction_tokens"], row["top_sections"]))))
-    lines += ["", "Per goal", "goal\truns\tmeasured\tamplification\tby section\trepeated\tlineage roots"]
+                                          row["avg_instruction_tokens"], row["shadow_routed_tokens"],
+                                          row["shadow_reduction"], row["shadow_hidden"],
+                                          row["shadow_ambiguous_rate"], row["shadow_unmeasured"],
+                                          row["top_sections"]))))
+    lines += ["", "Per goal", "goal\truns\tmeasured\tamplification\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\tby section\trepeated\tlineage roots"]
     for goal, row in card["goals"].items():
         lines.append("\t".join(map(str, (goal, row["runs"], row["measured"], row["amplification"],
+                                          row["shadow_routed_tokens"], row["shadow_reduction"],
+                                          row["shadow_hidden"], row["shadow_ambiguous_rate"],
+                                          row["shadow_unmeasured"],
                                           row["amplification_by_section"], row["repeated_sections"], row["lineage_roots"]))))
     return "\n".join(lines)

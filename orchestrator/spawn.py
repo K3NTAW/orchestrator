@@ -3,12 +3,13 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, notify
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, notify, promotion
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
 _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
+_CONTEXT_ROUTER_ACTIVE_WARNED = False
 
 
 def _remember_packet_meta(version, meta):
@@ -46,6 +47,10 @@ def git(*a, cwd=ROOT, check=True):
     if check and r.returncode:
         raise RuntimeError(f"git {' '.join(a)} (cwd={cwd}) failed: {r.stderr.strip()}")
     return r
+
+
+# Imported after ``git`` because context_router -> failures -> merge imports it.
+from . import context_router
 
 
 def branch_exists(name):
@@ -202,6 +207,33 @@ def _memory_entries(path):
             for n, (i, title) in enumerate(starts)]
 
 
+def _shadow_route(task, candidates, *, role, head_sha, cfg):
+    """Persist and route evidence for telemetry without changing packet bytes."""
+    global _CONTEXT_ROUTER_ACTIVE_WARNED
+    mode = promotion.mode("context_router", cfg)
+    if mode == "off" or not task.get("id"):
+        return {}
+    if mode == "active" and not _CONTEXT_ROUTER_ACTIVE_WARNED:
+        notify.notify("context_router active not implemented; running shadow")
+        _CONTEXT_ROUTER_ACTIVE_WARNED = True
+    try:
+        pool = evidence.EvidencePool(task.get("parent") or task["id"])
+        candidates = [pool.add(candidate) for candidate in candidates]
+        routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg)
+        decision_log.record(**context_router.decision_row(task, routed, mode=mode))
+        return {
+            "routed_tokens": routed.routed_tokens,
+            "routed_reduction_ratio": routed.reduction_ratio,
+            "routed_hidden": sum(item.level == "HIDE" for item in routed.items),
+            "routed_ambiguous": len(routed.ambiguous_ids),
+            "routed_rules_version": routed.rules_version,
+            "evidence_ids": [item.evidence_id for item in routed.items][:200],
+        }
+    except Exception as exc:
+        notify.notify(f"{task.get('id', '(unknown)')}: context_router shadow failed: {exc}")
+        return {}
+
+
 def _packet_body(task, worktree) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
@@ -294,7 +326,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
                      if parent != "(none)" and parent.lower() in f"{title}\n{body}".lower()][:3]
         if candidate.exists():
             break
-    evidence = []
+    evidence_lines = []
     for item in task.get("inputs", []):
         value = item
         if isinstance(item, str):
@@ -303,7 +335,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
             except KeyError:
                 value = {}
         summary = value.get("summary", value) if isinstance(value, dict) else value
-        evidence.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
+        evidence_lines.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
 
     objective = [str(task.get("title", ""))]
     if task.get("spec"):
@@ -321,8 +353,44 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
         ("gotchas", gotchas[:5] or ["- (none)"]),
         ("decisions", decisions or ["- (none)"]),
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
-        ("evidence", evidence or ["- (none)"]),
+        ("evidence", evidence_lines or ["- (none)"]),
     ]
+    cfg = Pool().cfg
+    candidates = []
+    task_id = task.get("id", "(none)")
+    if task.get("spec"):
+        candidates.append(evidence.make(
+            "architecture_note", f"task:{task_id}:spec", task["spec"], provenance="repo", task=task))
+    candidates.extend(evidence.make(
+        "architecture_note", f"task:{task_id}:acceptance:{index}", value,
+        provenance="repo", task=task)
+        for index, value in enumerate(task.get("acceptance", []), 1))
+    for path in scope_files:
+        candidates.append(evidence.make(
+            "source_chunk", str(path.relative_to(wt)), path.read_text(errors="replace")[:12000],
+            commit=merge_base, provenance="repo", task=task))
+    for path in sorted(read_scope):
+        path_symbols = "\n".join(line for line in symbols if line.startswith(f"- {path}"))
+        candidates.append(evidence.make(
+            "source_chunk", path or ".", path_symbols, commit=merge_base, provenance="repo", task=task))
+    candidates.extend(evidence.make(
+        "memory_entry", f"task:{task_id}:gotcha:{index}", value,
+        provenance="memory", task=task) for index, value in enumerate(gotchas, 1))
+    candidates.extend(evidence.make(
+        "decision", f"task:{task_id}:decision:{index}", value,
+        provenance="memory", task=task) for index, value in enumerate(decisions, 1))
+    candidates.extend(evidence.make(
+        "previous_result", f"task:{task_id}:evidence:{index}", value,
+        provenance="bus", task=task) for index, value in enumerate(evidence_lines, 1))
+    candidates.extend(evidence.make(
+        "test_result", value, value, commit=merge_base, provenance="repo", task=task)
+        for value in tests)
+    failure_match = re.search(r"(?ms)^Failures:\s*(.*)$", str(task.get("spec") or ""))
+    if (task.get("constraints") or {}).get("fix_round_for") and failure_match:
+        candidates.append(evidence.make(
+            "test_result", f"task:{task_id}:failures", failure_match.group(1),
+            commit=merge_base, provenance="repo", task=task))
+    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg)
     dependencies = []
     for dependency_id in task.get("depends_on", []):
         try:
@@ -371,7 +439,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
                   "memory_layers": ",".join(memory["layers_consulted"]),
-                  "candidate_tokens": candidate_tokens, "candidate_known": True}
+                  "candidate_tokens": candidate_tokens, "candidate_known": True, **shadow_meta}
 
 
 def packet_meta(task, worktree) -> dict:
@@ -431,7 +499,10 @@ def packet(task, worktree) -> str:
             over = actual
     result = header + "\n" + body
     _remember_packet_meta(meta["hash"],
-                          {key: meta[key] for key in ("candidate_tokens", "candidate_known")})
+                          {key: value for key, value in meta.items()
+                           if key in ("candidate_tokens", "candidate_known", "routed_tokens",
+                                      "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
+                                      "routed_rules_version", "evidence_ids")})
     return result
 
 
@@ -528,6 +599,8 @@ def review_packet(task, reviewed) -> str:
                 if comments:
                     break
         sections.append(_section("fix-round context", [json.dumps(x, sort_keys=True) for x in comments] or ["(none)"]))
+    else:
+        comments = []
     other_chars = len("\n".join(section for section in sections if section is not None)) + 1
     diff_heading_chars = len("## diff\n")
     configured_cap = Pool().cfg.get("limits", {}).get("review_diff_chars", 12000)
@@ -535,9 +608,30 @@ def review_packet(task, reviewed) -> str:
     sections[3] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
+    cfg = Pool().cfg
+    candidates = []
+    if src.get("spec"):
+        candidates.append(evidence.make("architecture_note", f"task:{src['id']}:spec", src["spec"],
+                                        provenance="repo", task=src))
+    candidates.extend(evidence.make("architecture_note", f"task:{src['id']}:acceptance:{index}", value,
+                                    provenance="repo", task=src)
+                      for index, value in enumerate(src.get("acceptance", []), 1))
+    for chunk in raw_diff.split("diff --git ")[1:]:
+        header = chunk.splitlines()[0] if chunk else ""
+        match = re.match(r"a/(\S+) b/(\S+)", header)
+        location = match.group(2) if match else header
+        candidates.append(evidence.make("source_chunk", location, "diff --git " + chunk,
+                                        commit=_base_sha(src, wt), provenance="repo", task=src))
+    candidates.extend(evidence.make("review_finding", f"task:{src['id']}:review:{index}",
+                                    json.dumps(value, sort_keys=True), provenance="bus", task=src)
+                      for index, value in enumerate(comments, 1))
+    shadow_meta = _shadow_route(task, candidates,
+                                role="security_review" if any(section.startswith("## security\n")
+                                                               for section in sections) else "review",
+                                head_sha=_base_sha(src, wt), cfg=cfg)
     return _role_packet(body, _base_sha(src, wt),
                         f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}",
-                        candidate_tokens=len(raw_diff) // 4, candidate_known=True)
+                        candidate_tokens=len(raw_diff) // 4, candidate_known=True, **shadow_meta)
 
 
 def spec_review_packet(task) -> str:

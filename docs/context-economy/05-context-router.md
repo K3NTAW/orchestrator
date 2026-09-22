@@ -40,6 +40,23 @@ ids and levels, full-selection reasons, per-level counts, token estimates,
 reduction ratio, ambiguity count, mode, and rules version. It will not log
 evidence content or chain-of-thought.
 
+## Shadow wiring
+
+Execute and review packet builders now create goal-bound evidence candidates and
+route them whenever `[context_router] mode` is `shadow` or `active`. The original
+packet is still sent unchanged; active currently emits a warning and behaves as
+shadow. Selection decisions are recorded as `context_selection` rows, while
+packet and run context metadata carry routed token estimates, reduction ratio,
+hidden and ambiguous counts, rules version, and up to 200 evidence ids.
+
+`orchestrator scorecard --context` reports average shadow routed tokens,
+reduction, hidden candidates, and ambiguous-candidate rate for each role and
+goal. `shadow_unmeasured` counts runs that predate the wiring or lack routing
+metadata without treating their ordinary packet telemetry as unmeasured.
+
+To disable the experiment, set `[context_router] mode = "off"` in `pool.toml`.
+To remove the wiring entirely, revert its implementation commit.
+
 ## Not in this task
 
 - Jev ambiguity classification (P5)

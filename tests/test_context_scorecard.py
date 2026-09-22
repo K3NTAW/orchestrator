@@ -29,6 +29,22 @@ class ContextScorecard(unittest.TestCase):
         self.assertEqual((roles["execute"]["runs"], roles["execute"]["unmeasured"]), (2, 1))
         self.assertEqual(roles["review"]["unmeasured"], 1)
 
+    def test_shadow_columns_present_and_unmeasured_rows_counted(self):
+        routed = {"sections": {}, "routed_tokens": 30, "routed_reduction_ratio": .5,
+                  "routed_hidden": 2, "routed_ambiguous": 1, "evidence_ids": ["a", "b", "c", "d"]}
+        rows = [{"role": "execute", "goal_id": "G", "context": routed},
+                {"role": "execute", "goal_id": "G", "context": {"sections": {}}},
+                {"role": "execute", "goal_id": "G", "context": None}]
+        card = context_scorecard.build(self.root_with(rows))
+        for row in (card["roles"]["execute"], card["goals"]["G"]):
+            self.assertEqual(row["shadow_routed_tokens"], 30)
+            self.assertEqual(row["shadow_reduction"], .5)
+            self.assertEqual(row["shadow_hidden"], 2)
+            self.assertEqual(row["shadow_ambiguous_rate"], .25)
+            self.assertEqual(row["shadow_unmeasured"], 2)
+        report = context_scorecard.format_report(card)
+        self.assertIn("shadow routed", report)
+
 
 if __name__ == "__main__":
     unittest.main()
