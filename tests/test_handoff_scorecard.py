@@ -93,7 +93,15 @@ class TestHandoffScorecard(unittest.TestCase):
             self.task(root, "T-two", executor="strong", status="failed",
                       pipeline={"handoff": stamp})
             self.add_run(root, task="T-two", executor="strong", input_tokens=5, usd=.1)
-            row = handoff_scorecard.by_start(root)[("strong", "unfamiliar")]
+            self.task(root, "T-three", executor="cheap", pipeline={"handoff": {
+                **stamp, "baseline": "cheap", "selected": "cheap"}})
+            self.add_run(root, task="T-three", executor="cheap", input_tokens=3)
+            self.task(root, "T-legacy", executor="legacy")
+            self.add_run(root, task="T-legacy", executor="legacy", input_tokens=3)
+            groups = handoff_scorecard.by_start(root)
+            self.assertEqual(groups[("cheap", "unfamiliar")]["active_share"], 0)
+            self.assertEqual(groups[("legacy", "unfamiliar")]["active_share"], 0)
+            row = groups[("strong", "unfamiliar")]
             self.assertEqual(row["active_share"], .5)
             self.assertEqual(row["avg_rounds"], 1)
             self.assertEqual(row["avg_accepted_tokens"], 5)

@@ -622,6 +622,30 @@ class RoutingIntegration(unittest.TestCase):
         self.assertEqual(bus.get(second)["executor"], "sol")
         self.assertEqual(bus.get(second)["pipeline"]["handoff"]["reason"], "cap_reached")
 
+    def test_active_share_cap_resets_per_calendar_day(self):
+        self.pool.cfg["handoff"] = {"mode": "active", "max_active_share": .5}
+        costs = {"sol": 100, "terra": 50}
+        before = time.mktime((2026, 9, 21, 23, 59, 59, 0, 0, -1))
+        after = time.mktime((2026, 9, 22, 0, 0, 1, 0, 0, -1))
+        with patch("orchestrator.handoff_scorecard.expected_route_cost",
+                   side_effect=lambda _class, eid, cfg=None: {
+                       "insufficient": False, "n": 20, "expected_route_cost": costs[eid]}):
+            with patch.object(executor.time, "time", return_value=before):
+                yesterday = self.task("yesterday switch")
+                executor.start(yesterday, "prompt")
+            with patch.object(executor.time, "time", return_value=after):
+                today = self.task("new day switch")
+                capped = self.task("new day capped")
+                executor.start(today, "prompt")
+                executor.start(capped, "prompt")
+        for tid in (yesterday, today):
+            self.assertEqual(bus.get(tid)["executor"], "terra")
+            decision = executor.decision_log.explain(tid, kinds=["handoff"])[0]
+            self.assertEqual(decision["reason"], "expected_route_cost")
+        self.assertEqual(bus.get(capped)["executor"], "sol")
+        decision = executor.decision_log.explain(capped, kinds=["handoff"])[0]
+        self.assertEqual(decision["reason"], "cap_reached")
+
     def test_handoff_yields_to_active_allocation(self):
         task_id = self.task("allocation wins")
         self.pool.cfg["handoff"] = {"mode": "active"}

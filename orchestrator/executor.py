@@ -350,13 +350,13 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
                         else:
                             max_share = pool.cfg.get("handoff", {}).get("max_active_share", 0.5)
                             now = time.time()
-                            today = time.localtime(now)[:2]
+                            today = time.localtime(now)[:3]
                             with bus.locked():
                                 stamped = []
                                 for row in bus.read(role="execute", compact=False):
                                     handoff = (row.get("pipeline") or {}).get("handoff") or {}
                                     ts = handoff.get("ts")
-                                    if ts is not None and time.localtime(ts)[:2] == today:
+                                    if ts is not None and time.localtime(ts)[:3] == today:
                                         stamped.append(handoff)
                                 if stamped and sum(bool(row.get("switched")) for row in stamped) / len(stamped) >= max_share:
                                     reason = "cap_reached"

@@ -141,15 +141,15 @@ def lineage_rows(root=STATE):
 
 def by_start(root=STATE):
     lineage = lineage_rows(root)
-    stamped = [row for row in lineage if row.get("handoff")]
-    active_share = (sum(bool(row["handoff"].get("switched")) for row in stamped) / len(stamped)
-                    if stamped else 0.0)
     grouped = defaultdict(list)
     for row in lineage:
         grouped[(row["first_executor"], row["task_class"])].append(row)
     result = {}
     for key, rows in grouped.items():
         n = len(rows)
+        stamped = [row for row in rows if row.get("handoff")]
+        active_share = (sum(bool(row["handoff"].get("switched")) for row in stamped) / len(stamped)
+                        if stamped else 0.0)
         result[key] = {
             "n": n,
             "first_pass_rate": sum(row["first_pass"] for row in rows) / n,
