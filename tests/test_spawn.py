@@ -1,3 +1,4 @@
+import _harness
 """spawn.run_worker's review-verdict propagation, prompt template rendering / result fitting, base-branch
 selection for stacked/challenge/review tasks (review T-0026, T-0030), and headless-host secret/token wiring
 (env-form secrets, CLAUDE_CODE_OAUTH_TOKEN injection)."""
@@ -531,6 +532,101 @@ class SpecReview(unittest.TestCase):
 
 
 class Render(unittest.TestCase):
+    def active_eval(self):
+        from datetime import datetime, timezone
+        path = spawn.STATE / "context_eval.json"
+        previous = path.read_bytes() if path.exists() else None
+        self.addCleanup(lambda: path.write_bytes(previous) if previous is not None else path.unlink(missing_ok=True))
+        path.write_text(json.dumps({"ran_at": datetime.now(timezone.utc).isoformat(), "suite_passed": True}))
+        return path
+
+    def test_execute_packet_active_replaces_routed_sections_only(self):
+        self.active_eval()
+        task = self.packet_fixture()
+        task.update(spec="Keep the contract", inputs=[{"summary": "widget prior result"},
+                                                      {"summary": "irrelevant historical fact"}])
+        hits = {"hits": [{"id": "mem:gotchas.md:1", "title": "widget useful gotcha"},
+                         {"id": "mem:gotchas.md:2", "title": "irrelevant dinosaur"}],
+                "layers_consulted": ["notes"]}
+        with mock.patch.object(spawn, "memory_recall", return_value=hits):
+            shadow = spawn.packet(task, TMP, cfg={"context_router": {"mode": "shadow"}})
+            active = spawn.packet(task, TMP, cfg={"context_router": {"mode": "active"}})
+        a, b = spawn.section_meta(active), spawn.section_meta(shadow)
+        for name in ("objective", "acceptance", "base", "write_scope", "constraints", "relevant_tests", "symbols", "verify"):
+            self.assertEqual(a[name], b[name], name)
+        for name in ("gotchas", "decisions", "evidence", "read_scope"):
+            self.assertNotEqual(a[name], b[name], name)
+        self.assertIn("task:T-P:gotcha:1", active)
+        self.assertIn("widget prior result", active)
+        self.assertNotIn("irrelevant", active)
+        self.assertNotIn("return json.dumps", active)
+        self.assertIn("routed=active", active.splitlines()[0])
+        self.assertLessEqual(len(active), 4800)
+
+    def test_review_packet_active_keeps_diff_and_security_section(self):
+        from dataclasses import replace
+        self.active_eval()
+        task = {**self.packet_fixture(), "spec": "security widget", "constraints": {"fix_round_for": "T-prior"},
+                "result": {"summary": "widget previous result"}}
+        comments = [{"text": "widget long finding details"}, {"text": "unrelated hidden finding"}]
+        original = spawn.context_router.route
+        def route(*args, **kwargs):
+            routed = original(*args, **kwargs)
+            return replace(routed, items=[replace(item, level="LONG")
+                if item.evidence_id == next(ev.id for ev in args[1] if ev.source_type == "review_finding")
+                else item for item in routed.items])
+        raw = "diff --git a/widget.py b/widget.py\n@@ -1 +1 @@\n-old\n+new\n"
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw), \
+             mock.patch.object(bus, "get", return_value={"role": "review", "result": {"comments": comments}}), \
+             mock.patch.object(spawn.context_router, "route", side_effect=route):
+            shadow = spawn.review_packet(task, task, cfg={"context_router": {"mode": "shadow"}})
+            active = spawn.review_packet(task, task, cfg={"context_router": {"mode": "active"}})
+        for name in ("diff", "security", "spec", "acceptance", "scope", "gate"):
+            self.assertEqual(spawn.section_meta(active)[name], spawn.section_meta(shadow)[name])
+        self.assertIn("## fix-round context\n\n## routed-findings", active)
+        findings = active.split("## routed-findings\n")[1]
+        self.assertIn("widget long finding details", findings)
+        self.assertIn("widget previous result", findings)
+        self.assertNotIn("unrelated hidden finding", active)
+        self.assertIn("routed=active", active.splitlines()[0])
+
+    def test_active_refused_without_passing_context_eval(self):
+        path = self.active_eval()
+        task = self.packet_fixture()
+        shadow = spawn.packet(task, TMP, cfg={"context_router": {"mode": "shadow"}})
+        for report in (None, {"suite_passed": False},
+                       {"suite_passed": True, "ran_at": "2000-01-01T00:00:00+00:00"}):
+            if report is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(json.dumps(report))
+            with mock.patch.object(spawn.notify, "notify") as notice:
+                active = spawn.packet(task, TMP, cfg={"context_router": {"mode": "active"}})
+            self.assertEqual(active, shadow)
+            self.assertTrue(any("active refused" in call.args[0] for call in notice.call_args_list))
+
+    def test_packet_run_meta_parses_routed_marker(self):
+        for mode in ("active", "shadow"):
+            text = f"packet vabcdef base deadbeef sources pool.toml@policy gotchas@notes memory@notes routed={mode}\n## objective\nwork"
+            meta = spawn.packet_run_meta(text)
+            self.assertEqual((meta["hash"], meta["base"], meta["policy_version"], meta["gotchas"]),
+                             ("abcdef", "deadbeef", "policy", "notes"))
+            self.assertTrue(meta["sources"].endswith("routed=" + mode))
+
+    def test_cap_trim_removes_whole_routed_items(self):
+        self.active_eval()
+        task = self.packet_fixture()
+        items = [("FULL", "full item\n```\n" + "body\n" * 40 + "```"),
+                 ("SHORT", "short item " * 400), ("LONG", "long item " * 400)]
+        meta = {"routed_mode": "active", "_routed_sections": {"evidence": items}}
+        with mock.patch.object(spawn, "_shadow_route", return_value=meta):
+            text = spawn.packet(task, TMP)
+        self.assertLessEqual(len(text), 4800)
+        self.assertIn("full item\n```", text)
+        self.assertNotIn("short item", text)
+        self.assertNotIn("long item", text)
+        self.assertEqual(text.count("```"), 2)
+
     def packet_fixture(self):
         scratch_repo(TMP)
         (TMP / "widget.py").write_text("import json\n\ndef build_widget():\n    return json.dumps({})\n")
@@ -707,7 +803,7 @@ class Render(unittest.TestCase):
         meta = spawn.packet_meta(self.packet_fixture(), TMP)
         self.assertEqual(text.splitlines()[0],
                          f"packet v{meta['hash']} base {meta['base']} sources "
-                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@notes,bus")
+                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@notes,bus routed=shadow")
 
     def test_packet_hash_changes_when_body_changes(self):
         task = self.packet_fixture()

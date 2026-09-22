@@ -3,7 +3,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from . import STATE, attribution
+from . import STATE, attribution, decision_log
 
 
 def _entries(root):
@@ -35,6 +35,28 @@ def _shadow(rows):
     }
 
 
+
+def recovery(root=STATE):
+    """P21: recovery Read events divided by HIDE items in active selections."""
+    roles = {}
+    task_roles = {}
+    for row in decision_log.read_all(root=root):
+        data = row.get("deterministic") or {}
+        if row.get("kind") == "context_selection":
+            task_roles[row.get("subject")] = data.get("role") or str(row.get("reason", "unknown")).split()[0]
+        if row.get("mode") != "active":
+            continue
+        role = data.get("role") or task_roles.get(row.get("subject"), "unknown")
+        if row.get("kind") == "context_selection":
+            item = roles.setdefault(role, {"recovery_reads": 0, "hidden_items": 0})
+            item["hidden_items"] += sum(value.endswith(":HIDE") for value in row.get("candidates", []))
+        elif row.get("kind") == "evidence_reuse" and row.get("reason") == "recovery_read":
+            item = roles.setdefault(role, {"recovery_reads": 0, "hidden_items": 0})
+            item["recovery_reads"] += 1
+    for item in roles.values():
+        item["recovery_rate"] = item["recovery_reads"] / item["hidden_items"] if item["hidden_items"] else 0.0
+    return roles
+
 def build(root=STATE):
     entries = list(_entries(root))
     tasks = {}
@@ -45,7 +67,8 @@ def build(root=STATE):
         except (OSError, ValueError, TypeError):
             continue
     roles = {}
-    for role in sorted({row.get("role") or "?" for row in entries}):
+    recoveries = recovery(root)
+    for role in sorted({row.get("role") or "?" for row in entries} | set(recoveries)):
         rows = [row for row in entries if (row.get("role") or "?") == role]
         measured = [row for row in rows if isinstance(row.get("context"), dict)]
         presented = [row["context"].get("presented_tokens") for row in measured
@@ -68,7 +91,7 @@ def build(root=STATE):
         for row in measured:
             for name, meta in (row["context"].get("sections") or {}).items():
                 sections[name].append(meta.get("est_tokens", 0))
-        roles[role] = {"runs": len(rows), "measured": len(measured),
+        roles[role] = {**recoveries.get(role, {"recovery_reads": 0, "hidden_items": 0, "recovery_rate": 0.0}), "runs": len(rows), "measured": len(measured),
                        "unmeasured": len(rows) - len(measured), "avg_presented": _avg(presented),
                        "avg_candidate": _avg(candidate),
                        "reduction_ratio": round(1 - sum(candidate_presented) / sum(candidate), 3)
@@ -117,7 +140,8 @@ def build(root=STATE):
         contexts = [row["context"] for row in selected if isinstance(row.get("context"), dict)]
         disclosed = [c["tool_tokens_disclosed"] for c in contexts if c.get("tool_tokens_disclosed") is not None]
         minimal = [c["tool_tokens_minimal"] for c in contexts if c.get("tool_tokens_minimal") is not None]
-        by_role_class[key] = {"runs": len(selected), "measured": len(contexts),
+        by_role_class[key] = {**recoveries.get(key[0], {"recovery_reads": 0, "hidden_items": 0, "recovery_rate": 0.0}),
+                              "runs": len(selected), "measured": len(contexts),
                               "tool_tokens_disclosed": _avg(disclosed), "tool_tokens_minimal": _avg(minimal),
                               "tool_reduction": round(sum(minimal) / sum(disclosed), 3) if disclosed and sum(disclosed) else None,
                               **_shadow(selected)}
@@ -125,7 +149,7 @@ def build(root=STATE):
 
 
 def format_report(card):
-    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\tmodular instructions\tinstruction reduction\ttool disclosed\ttool minimal\ttool reduction\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\ttop sections"]
+    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\tmodular instructions\tinstruction reduction\ttool disclosed\ttool minimal\ttool reduction\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\trecovery_rate\ttop sections"]
     for role, row in card["roles"].items():
         lines.append("\t".join(map(str, (role, row["runs"], row["measured"], row["unmeasured"],
                                           row["avg_presented"], row["avg_candidate"], row["reduction_ratio"],
@@ -135,7 +159,7 @@ def format_report(card):
                                           row["shadow_routed_tokens"],
                                           row["shadow_reduction"], row["shadow_hidden"],
                                           row["shadow_ambiguous_rate"], row["shadow_unmeasured"],
-                                          row["top_sections"]))))
+                                          row["recovery_rate"], row["top_sections"]))))
     lines += ["", "Per goal", "goal\truns\tmeasured\tamplification\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\tby section\trepeated\tlineage roots"]
     for goal, row in card["goals"].items():
         lines.append("\t".join(map(str, (goal, row["runs"], row["measured"], row["amplification"],

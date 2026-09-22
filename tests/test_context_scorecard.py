@@ -14,6 +14,28 @@ class ContextScorecard(unittest.TestCase):
         (root / "runs" / "day.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
         return root
 
+    def test_recovery_rate_from_evidence_reuse_rows(self):
+        from orchestrator import decision_log, promotion
+        root = self.root_with([])
+        for role, hidden, reads in (("execute", 4, 2), ("review", 2, 1)):
+            decision_log.record(kind="context_selection", subject=role,
+                candidates=[f"{i}:HIDE" for i in range(hidden)] + ["short:SHORT"],
+                hard_constraints=[], deterministic={"role": role}, selected="routed v1", reason="selection",
+                mode="active", root=root)
+            for _ in range(reads):
+                decision_log.record(kind="evidence_reuse", subject=role, candidates=["0"],
+                    hard_constraints=[], deterministic={"role": role}, selected="0", reason="recovery_read",
+                    mode="active", root=root)
+        decision_log.record(kind="evidence_reuse", subject="execute", candidates=["0"],
+            hard_constraints=[], deterministic={}, selected="0", reason="recovery_read", mode="shadow", root=root)
+        card = context_scorecard.build(root)
+        for role in ("execute", "review"):
+            self.assertEqual(card["roles"][role]["recovery_rate"], .5)
+        self.assertIn("recovery_rate", context_scorecard.format_report(card))
+        result = promotion.collect("context_router", root)
+        self.assertEqual(result["context_recovery_rate"], .5)
+        self.assertEqual(result["context_recovery_n"], 6)
+
     def test_amplification_by_section_groups_by_goal(self):
         section = {"est_tokens": 10, "sha256": "same"}
         rows = [{"goal_id": "G", "role": role, "context": {"sections": {"spec": section}}}

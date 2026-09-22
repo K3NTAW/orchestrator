@@ -67,7 +67,7 @@ def _collapse(value):
 
 
 def make(source_type, location, content, *, commit="", provenance, task=None,
-         scope=(), summary_long=None, observed_at=None):
+         scope=(), summary_long=None, observed_at=None, section=None):
     if source_type not in SOURCE_TYPES:
         raise ValueError(f"invalid source_type: {source_type}")
     if provenance not in PROVENANCE:
@@ -89,7 +89,10 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
         time.time() if observed_at is None else float(observed_at),
         "trusted" if provenance in ("repo", "memory") else "untrusted",
     )
-    return replace(provisional, relevance=relevance_for(provisional, relevance_task))
+    relevance = relevance_for(provisional, relevance_task)
+    if section is not None:
+        relevance["section"] = section
+    return replace(provisional, relevance=relevance)
 
 
 def fresh(ev, head_sha):

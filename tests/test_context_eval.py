@@ -18,6 +18,8 @@ class ContextEval(unittest.TestCase):
         row = self.result("localized_fix")
         self.assertGreaterEqual(row["reduction"], .4)
         self.assertTrue(row["kept"])
+        self.assertGreater(row["active"], 0)
+        self.assertIn("active", context_eval.format_report([row]))
 
     def test_security_fixture_keeps_security_evidence_full(self):
         self.assertTrue(self.result("security")["kept"])

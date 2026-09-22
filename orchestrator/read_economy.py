@@ -83,7 +83,7 @@ def _has_evidence(evidence, path, head_sha):
     return False
 
 
-def classify(call, history, *, evidence=None, head_sha=None):
+def classify(call, history, *, evidence=None, head_sha=None, selection=None):
     """Classify *call* against earlier calls without consulting Jev."""
     name, path = _name(call), _path(call)
     prior_path = [old for old in history if _path(old) == path]
@@ -121,7 +121,18 @@ def classify(call, history, *, evidence=None, head_sha=None):
             if narrower is not None:
                 kind, tokens = "narrower_search", _result_size(narrower)
 
-    return {"kind": kind, "tokens_estimate": tokens,
+    recovery_ids = []
+    if name in READ_TOOLS and evidence is not None and (selection or {}).get("mode") == "active":
+        for candidate in selection.get("candidates", []):
+            evidence_id, _, level = candidate.rpartition(":")
+            item = evidence.get(evidence_id)
+            if level not in ("HIDE", "SHORT") or item is None or item.source_type != "source_chunk":
+                continue
+            location = os.path.normpath(str(item.location).split(":", 1)[0])
+            normalized = os.path.normpath(path)
+            if normalized == location or normalized.endswith(os.sep + location):
+                recovery_ids.append(evidence_id)
+    return {"kind": kind, **({"recovery_ids": recovery_ids} if recovery_ids else {}), "tokens_estimate": tokens,
             "would_suppress": kind in ("repeated_read_unchanged", "repeated_search")}
 
 

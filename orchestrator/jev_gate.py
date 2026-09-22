@@ -27,7 +27,7 @@ RECENT_LIMIT = 20
 NEEDED_LOW = 0.15
 REDUNDANT_HIGH = 0.85
 CONFIDENCE_MIN = 0.6
-GATED_ROLES = frozenset({"scout", "triage", "execute", "review", "challenge", "spec_review"})
+GATED_ROLES = frozenset({"scout", "triage", "execute", "review", "security_review", "challenge", "spec_review"})
 # Empty input on any tool, or a Glob containing only its pattern, needs no judgment.
 SKIP_RULES = ("empty_input", "bare_glob")
 
@@ -436,7 +436,17 @@ def run(payload):
         call = _call_record(tool_name, tool_input)
         call["call_index"] = call_index
         history = _history(session_id)
-        economy = read_economy.classify(call, history)
+        from . import decision_log, evidence, spawn
+        selections = [row for row in decision_log.read_all(root=STATE)
+                      if row.get("kind") == "context_selection" and row.get("subject") == task_id]
+        selection = max(enumerate(selections), key=lambda pair: (pair[1].get("ts", 0), pair[0]))[1] if selections else {}
+        head_sha = (selection.get("extra") or {}).get("head_sha")
+        if not head_sha:
+            head_sha = spawn.git("rev-parse", "HEAD", cwd=task.get("worktree") or payload.get("cwd") or spawn.ROOT,
+                                 check=False).stdout.strip()
+        economy = read_economy.classify(call, history,
+                                       evidence=evidence.EvidencePool(task.get("parent") or task_id),
+                                       head_sha=head_sha, selection=selection)
         _history(session_id, call)
 
     constraints = task.get("constraints") or {}
@@ -454,6 +464,14 @@ def run(payload):
         if economy:
             try:
                 from . import decision_log
+                if not blocked:
+                    for evidence_id in economy.get("recovery_ids", []):
+                        decision_log.record(
+                            kind="evidence_reuse", subject=task_id, candidates=[evidence_id],
+                            hard_constraints=[], selected=evidence_id, reason="recovery_read", mode="active",
+                            deterministic={"role": (selection.get("deterministic") or {}).get("role") or task.get("role"),
+                                           "evidence_id": evidence_id},
+                            extra={"session": session_id, "call_index": call_index}, root=STATE)
                 jev_data = None
                 if answers:
                     jev_data = {"needed_p": (answers.get("needed") or {}).get("p"),

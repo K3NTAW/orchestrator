@@ -76,6 +76,30 @@ class JevGateTests(unittest.TestCase):
                    "tool_input": {"file_path": str(target)}}
         return self._task()["id"], payload, target
 
+    def test_recovery_read_records_evidence_reuse_for_hidden_evidence(self):
+        from orchestrator import decision_log, evidence
+        task = self._task()
+        target = TMP / "recovery-source.py"
+        target.write_text("hidden source")
+        self.addCleanup(lambda: target.unlink(missing_ok=True))
+        ev = evidence.make("source_chunk", "recovery-source.py", "hidden source", commit="base",
+                           provenance="repo", task=task)
+        evidence.EvidencePool(task["id"]).add(ev)
+        jev_gate._cfg = lambda: LOG_CFG
+        payload = {"session_id": task["id"], "tool_name": "Read", "tool_input": {"file_path": str(target)}}
+        for level, mode, expected in (("HIDE", "active", 1), ("SHORT", "active", 2),
+                                      ("FULL", "active", 2), ("LONG", "active", 2), ("HIDE", "shadow", 2)):
+            decision_log.record(kind="context_selection", subject=task["id"], candidates=[ev.id + ":" + level],
+                hard_constraints=[], deterministic={"role": "execute"}, selected="routed v1", reason="test",
+                mode=mode, extra={"head_sha": "base"})
+            with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
+                self.assertEqual(self._run(payload, task["id"]), 0)
+            rows = [row for row in decision_log.read_all() if row.get("subject") == task["id"]
+                    and row.get("kind") == "evidence_reuse"]
+            self.assertEqual(len(rows), expected)
+        self.assertEqual(rows[0]["selected"], ev.id)
+        self.assertEqual(rows[0]["reason"], "recovery_read")
+
     def test_sample_mode_is_deterministic(self):
         task, payload, _ = self._sample_fixture(0.1)
         payload["tool_name"] = "Edit"

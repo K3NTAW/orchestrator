@@ -2,7 +2,7 @@
 
 The library represents context as immutable, content-addressed `Evidence` and
 routes each candidate deterministically to `HIDE`, `SHORT`, `LONG`, or `FULL`.
-It is pure packet-building infrastructure; spawn-packet wiring is a later task.
+Execute and review packet builders use it for shadow telemetry and guarded active routing.
 
 ## Evidence schema
 
@@ -35,7 +35,7 @@ an Evidence object is only a cache for the task that created it.
 
 ## Shadow logging
 
-The later wiring task will log a `context_selection` decision containing only
+Packet builders log a `context_selection` decision containing only
 ids and levels, full-selection reasons, per-level counts, token estimates,
 reduction ratio, ambiguity count, mode, and rules version. It will not log
 evidence content or chain-of-thought.
@@ -44,8 +44,7 @@ evidence content or chain-of-thought.
 
 Execute and review packet builders now create goal-bound evidence candidates and
 route them whenever `[context_router] mode` is `shadow` or `active`. The original
-packet is still sent unchanged; active currently emits a warning and behaves as
-shadow. Selection decisions are recorded as `context_selection` rows, while
+packet body is sent unchanged in shadow; headers identify the effective mode. Selection decisions are recorded as `context_selection` rows, while
 packet and run context metadata carry routed token estimates, reduction ratio,
 hidden and ambiguous counts, rules version, and up to 200 evidence ids.
 
@@ -61,4 +60,38 @@ To remove the wiring entirely, revert its implementation commit.
 
 - Jev ambiguity classification (P5)
 - Query-time summarisation and summary caching (P7)
-- Active routing mode (P21)
+
+## Active
+
+Set `[context_router] mode = "active"` in `pool.toml` after running
+`uv run orchestrator context-eval`. Active is refused with a notification and
+falls back to the shadow packet when `.orchestrator/context_eval.json` is
+missing, malformed, more than seven days old (using `ran_at`), or does not have
+`suite_passed = true`. The evaluation table includes `active`, the complete
+active packet length in characters, and checks protected sections in both modes.
+To revert immediately, set the mode back to `"shadow"`.
+
+Execute replaces only gotchas, decisions, evidence, and read_scope. Each
+candidate is tagged with its section in `Evidence.relevance["section"]`.
+HIDE items are omitted; SHORT gives a one-line summary, LONG a longer summary,
+and FULL the verbatim content. Read-scope source candidates are always SHORT.
+In-scope source files are never injected: FULL means the executor opens the
+file. Symbols and the task contract, verification, dependencies, and test
+sections retain their existing behavior. The 4,800-character cap includes the
+header; trimming removes whole routed items, SHORT before LONG before FULL.
+As before, an oversized task contract is kept whole and flagged in the header.
+
+Review and security review put routed findings and previous results under
+`## routed-findings`, immediately after fix-round context when present.
+The legacy fix-round heading remains but findings move to the routed section.
+Diff and security sections retain their existing rendering and diff budget.
+Headers end with `routed=active` or `routed=shadow`.
+
+The read-economy gate resolves the most recent task selection through the
+same goal evidence pool. An allowed Read of a source selected HIDE or SHORT
+under active mode logs `evidence_reuse` with reason `recovery_read` and the
+evidence id. FULL, LONG, and shadow selections do not count. P21
+`recovery_rate` is recovery Read events divided by HIDE items in active
+selection rows, per role; a zero denominator reports zero. SHORT recovery
+reads count in the numerator, so this diagnostic can exceed one. Both
+`scorecard --economy` and promotion evidence use these same rows.
