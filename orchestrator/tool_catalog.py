@@ -89,7 +89,8 @@ def tokens(ids):
 
 
 def _task_class(task):
-    return task.get("task_class") or (task.get("constraints") or {}).get("task_class") or "refactor"
+    from .attribution import task_class
+    return task_class(task)
 
 
 def minimal_set(task, role):
@@ -105,10 +106,11 @@ def minimal_set(task, role):
         "triage": {"read", "search", "bus"},
         "challenge": {"read", "search", "git", "bus"},
         "spec_review": {"read", "search", "git", "bus", "review"},
-        "execute": {"read", "search", "edit", "test", "git", "bus"},
+        # Routing classes describe difficulty/risk, not the implementation's
+        # command needs. Keep shell and tests conservatively for every class;
+        # only concrete task evidence (docs-only scope below) narrows them.
+        "execute": {"read", "search", "edit", "shell", "test", "git", "bus"},
     }.get(role, {"read", "search", "bus"})
-    if role == "execute" and task_class not in {"refactor", "feature", "fix", "test"}:
-        needed.discard("test")
     acceptance = " ".join(map(str, task.get("acceptance") or [])).lower()
     if role == "execute" and ("test" in acceptance or "gate" in acceptance):
         needed.add("test")

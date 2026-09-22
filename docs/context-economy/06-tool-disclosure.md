@@ -21,7 +21,12 @@ zero-token gap because its CLI built-ins are not controlled here.
 | scout | read, search, git, bus |
 | triage | read, search, bus |
 | challenge/spec review | read, search, git, bus |
-| execute refactor/feature/fix | read, search, edit, test, git, bus |
+| execute (all routing classes) | read, search, edit, shell, test, git, bus |
+
+Task classification uses canonical `attribution.task_class`: explicit constraint
+or inferred security/architectural/debugging/mechanical/unfamiliar. These classes
+describe risk and difficulty, not command needs, so execution conservatively
+retains shell and test categories for all classes, including explicit overrides.
 
 Read and `bus_post_result` are mandatory for every Claude role. Git is mandatory
 for review/scout, and the tests-green gate is mandatory for execute. A docs-only
