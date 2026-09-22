@@ -1226,6 +1226,44 @@ class ContextTelemetry(unittest.TestCase):
         for _, meta, rendered in seen:
             self.assertEqual(meta["instruction_tokens"], len(rendered) // 4 - len(packet) // 4)
 
+    def test_run_worker_records_skills_exposed_and_l0_tokens(self):
+        task = bus.create_task("skills", "s", ["a"], ["x.py"], role="execute")
+        records = {"execute/a": {"state": "active", "provenance": "builtin", "est_tokens_l0": 3},
+                   "review/b": {"state": "active", "provenance": "builtin", "est_tokens_l0": 5},
+                   "execute/off": {"state": "disabled", "provenance": "builtin", "est_tokens_l0": 99}}
+        seen = {}
+        def run_claude(pool, account, worker, *args, **kwargs):
+            seen.update(worker["packet_meta"])
+            return {"status": "done", "output": {"result": "ok", "usage": {}}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "packet", return_value="packet"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run_claude), \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.decision_log, "record"):
+            spawn.run_worker(task["id"])
+        self.assertEqual(seen["skills_exposed"], ["execute/a", "review/b"])
+        self.assertEqual(seen["skill_tokens_l0"], 8)
+
+    def test_skill_usage_from_gate_rows_for_claude_workers(self):
+        path = spawn.STATE / "runs/jev/gate.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"task": "T-gate", "tool": "Read",
+                                    "input": '{"file_path":"skills/scout/find/SKILL.md"}'}) + "\n")
+        records = {"scout/find": {"est_tokens_l2": 17}}
+        with mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}):
+            self.assertEqual(spawn._skills_from_gate("T-gate"), (["scout/find"], 17))
+
+    def test_skill_usage_parsed_from_codex_summary(self):
+        from orchestrator import executor
+        records = {"executor/implement-spec": {"est_tokens_l0": 4, "est_tokens_l2": 20}}
+        with mock.patch("orchestrator.skills_registry.load", return_value={"skills": records}):
+            meta = executor._codex_skill_meta("done\nSkill used: implement-spec\n")
+        self.assertEqual(meta["skills_used"], ["executor/implement-spec"])
+        self.assertEqual(meta["skill_tokens_l2"], 20)
+
     def test_packet_build_meta_evicts_beyond_cap(self):
         original = spawn._PACKET_BUILD_META.copy()
         self.addCleanup(lambda: (spawn._PACKET_BUILD_META.clear(),

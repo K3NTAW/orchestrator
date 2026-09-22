@@ -3,7 +3,7 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, tool_catalog
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -12,6 +12,50 @@ _PACKET_BUILD_META = OrderedDict()
 _CONTEXT_ROUTER_ACTIVE_WARNED = False
 _TOOL_DISCLOSURE_ACTIVE_WARNED = False
 _INSTRUCTION_RENDER_META = OrderedDict()
+
+
+def _skill_records():
+    return skills_registry.load().get("skills", {})
+
+
+def _skill_exposure(task, role):
+    """Stage-1 exposure mirrors the shared Claude skills directory; it does not route skills."""
+    records = _skill_records()
+    exposed = sorted(skill_id for skill_id, record in records.items()
+                     if record.get("state") == "active" and record.get("provenance") == "builtin")
+    tokens = sum(int(records[skill_id].get("est_tokens_l0") or 0) for skill_id in exposed)
+    decision_log.record("skill_selection", task["id"], candidates=sorted(records),
+                        hard_constraints=["static exposure (stage 1)"],
+                        deterministic={"role": role, "task_class": attribution.task_class(task),
+                                       "exposed": exposed, "skill_tokens_l0": tokens},
+                        selected=exposed, reason="stage1 static", mode="shadow")
+    return {"skills_exposed": exposed, "skill_tokens_l0": tokens}
+
+
+def _skills_from_gate(task_id, session_id=None):
+    used = set()
+    path = STATE / "runs" / "jev" / "gate.jsonl"
+    records = _skill_records()
+    if not path.exists():
+        return [], 0
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if row.get("task") != task_id and not (session_id and row.get("session") == session_id):
+            continue
+        raw = row.get("input") or ""
+        if isinstance(raw, dict):
+            raw = json.dumps(raw)
+        for skill_id, record in records.items():
+            role, name = skill_id.split("/", 1)
+            base = f"skills/{role}/{name}/"
+            if (row.get("tool") == "Read" and base + "SKILL.md" in raw) or \
+                    (row.get("tool") == "Bash" and base + "scripts/" in raw):
+                used.add(skill_id)
+    ordered = sorted(used)
+    return ordered, sum(int(records[item].get("est_tokens_l2") or 0) for item in ordered)
 
 
 def _remember_packet_meta(version, meta):
@@ -824,6 +868,21 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         out = json.loads(stdout)
     except json.JSONDecodeError:
         return {"status": "failed", "reason": f"non-JSON output (rc={p.returncode}): {text[-500:]}"}
+    session_id = out.get("session_id")
+    if session_id is not None:
+        task.setdefault("packet_meta", {})["session_id"] = session_id
+        bus.update(task["id"], packet_meta=task["packet_meta"])
+    try:
+        skills_used, skill_tokens_l2 = _skills_from_gate(task["id"], session_id)
+        task.setdefault("packet_meta", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)
+        pipeline = dict(bus.get(task["id"]).get("pipeline") or {})
+        pipeline["skills_used"] = skills_used
+        bus.update(task["id"], packet_meta=task["packet_meta"], pipeline=pipeline)
+        decision_log.outcome(task["id"], "skill_selection", skills_used=skills_used,
+                             skill_tokens_l2=skill_tokens_l2)
+        log["packet_meta"] = task["packet_meta"]
+    except Exception as exc:
+        notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
     used = out.get("usage", {})
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
@@ -838,7 +897,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
                       "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
     bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
                 outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
-                provider="claude", usage=used, **log, **review_log, **used)
+                provider="claude", usage=used, session_id=session_id, **log, **review_log, **used)
     if not out.get("is_error") and p.returncode == 0:
         return {"status": "done", "output": out}
     reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
@@ -986,6 +1045,11 @@ def run_worker(task_id, account_id=None):
         return {"status": "held", "reason": "render_error"}
     disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg)
     t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
+    try:
+        t["packet_meta"].update(_skill_exposure(t, role))
+        bus.update(task_id, packet_meta=t["packet_meta"])
+    except Exception as exc:
+        notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
         pipeline["hold_note"] = "budget"

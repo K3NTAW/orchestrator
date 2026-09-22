@@ -104,6 +104,19 @@ class DecisionLogTests(unittest.TestCase):
                 deterministic={}, selected=None, reason="invalid", root=self.tmp,
             )
 
+    def test_skill_selection_kind_records_and_outcome(self):
+        decision = decision_log.record(
+            "skill_selection", "T-skill", candidates=["executor/implement-spec"],
+            hard_constraints=["static exposure (stage 1)"],
+            deterministic={"role": "codex_execute", "task_class": "feature",
+                           "exposed": ["executor/implement-spec"], "skill_tokens_l0": 5},
+            selected=["executor/implement-spec"], reason="stage1 static", mode="shadow", root=self.tmp)
+        outcome = decision_log.outcome("T-skill", "skill_selection", root=self.tmp,
+                                       skills_used=["executor/implement-spec"], skill_tokens_l2=30)
+        self.assertIn("skill_selection", decision_log.CONTEXT_KINDS)
+        self.assertEqual(decision_log.explain("T-skill", root=self.tmp),
+                         [{**decision, "outcomes": [outcome]}])
+
     def test_malformed_lines_are_tolerated_and_counted(self):
         first = self._record()
         with (self.tmp / "runs/sched/decisions.jsonl").open("a") as stream:

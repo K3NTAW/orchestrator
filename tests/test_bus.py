@@ -335,6 +335,14 @@ class ContextLog(BusSandbox):
         row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
         self.assertIsNone(row["context"])
 
+    def test_log_run_carries_skill_keys(self):
+        values = {"skills_exposed": ["executor/x"], "skills_used": ["executor/x"],
+                  "skill_tokens_l0": 4, "skill_tokens_l2": 12}
+        bus.log_run(packet_meta={"hash": "skill", **values})
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        for key, value in values.items():
+            self.assertEqual(row["context"][key], value)
+
 
 if __name__ == "__main__":
     unittest.main()

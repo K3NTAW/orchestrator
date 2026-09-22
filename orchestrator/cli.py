@@ -151,6 +151,7 @@ def main():
     sc.add_argument("--reads", action="store_true")
     sc.add_argument("--handoffs", action="store_true")
     sc.add_argument("--economy", action="store_true")
+    sc.add_argument("--skills", action="store_true")
     ce = sub.add_parser("context-eval"); ce.add_argument("--json", action="store_true"); ce.add_argument("--root")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
@@ -195,7 +196,7 @@ def main():
     if a.cmd == "scorecard":
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
@@ -211,6 +212,7 @@ def main():
             "--reads": (),
             "--handoffs": (),
             "--economy": (),
+            "--skills": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
@@ -224,6 +226,8 @@ def main():
             mode = "--handoffs"
         if a.economy:
             mode = "--economy"
+        if a.skills:
+            mode = "--skills"
         if a.goal is not None and not a.parallelism:
             ap.error("--goal requires --parallelism")
         if a.parallelism and a.planner:
@@ -405,8 +409,12 @@ def main():
         if not document["suite_passed"]:
             raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.economy:
-            from . import context_scorecard, handoff_scorecard, promotion, read_economy
+        if a.skills:
+            from . import skill_scorecard
+            card = skill_scorecard.build(scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else skill_scorecard.format_report(card))
+        elif a.economy:
+            from . import context_scorecard, handoff_scorecard, promotion, read_economy, skill_scorecard
             context = context_scorecard.build(scorecard.STATE)
             handoffs = handoff_scorecard.by_start(scorecard.STATE)
             reads = read_economy.summary(scorecard.STATE)
@@ -421,7 +429,7 @@ def main():
             except (OSError, ValueError):
                 last_eval = None
             features = ("context_router", "tool_disclosure", "conditional_instructions", "handoff_routing")
-            card = {"by_role_task_class": joined,
+            card = {"by_role_task_class": joined, "skills": skill_scorecard.build(scorecard.STATE),
                     "handoffs_by_executor_task_class": handoffs_by_executor,
                     "promotion": [promotion.evaluate(name, promotion.collect(name, scorecard.STATE), Pool().cfg)
                                   for name in features], "last_context_eval": last_eval}
