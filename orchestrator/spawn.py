@@ -3,7 +3,7 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, decision_log, evidence, notify, promotion, tool_catalog
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, tool_catalog
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -11,6 +11,7 @@ _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
 _CONTEXT_ROUTER_ACTIVE_WARNED = False
 _TOOL_DISCLOSURE_ACTIVE_WARNED = False
+_INSTRUCTION_RENDER_META = OrderedDict()
 
 
 def _remember_packet_meta(version, meta):
@@ -114,13 +115,43 @@ def ensure_worktree(task_id, base=None):
     return wt
 
 
-def render(name, **kw):
+def render(name, *, task=None, signals=None, **kw):
     if name in ("review", "spec-review", "scout") and "packet" not in kw:
         raise ValueError(f"packet is required for {name}")
     if name == "scout":
         kw.setdefault("base_branch", "origin/main")
         kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
+    legacy_template = t
+    if task is not None and instructions.mode() in ("shadow", "active"):
+        role = "security_review" if name == "review" and (signals or {}).get("security") else name.replace("-", "_")
+        choice = instructions.select(task, role, signals=signals)
+        base = legacy_template
+        for module, _ in instructions.RULES:
+            text = instructions.module_text(module)
+            if text in base:
+                base = base.replace(text, "", 1)
+        modular_template = instructions.compose(base, choice["modules"])
+        placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+        def fill(template):
+            missing = next((m.group(1) for m in placeholder.finditer(template) if m.group(1) not in kw), None)
+            if missing is not None:
+                raise ValueError(f"unfilled_placeholder: {missing}")
+            return placeholder.sub(lambda m: kw[m.group(1)] if isinstance(kw[m.group(1)], str)
+                                   else json.dumps(kw[m.group(1)], indent=0), template)
+        legacy, modular = fill(legacy_template), fill(modular_template)
+        decision_log.record(
+            kind="instruction_loading", subject=task.get("id", "(unknown)"),
+            candidates=[module for module, _ in instructions.RULES], hard_constraints=choice["mandatory"],
+            deterministic={"selected": choice["modules"], "reasons": choice["reasons"],
+                           "legacy_tokens": len(legacy) // 4, "modular_tokens": len(modular) // 4,
+                           "delta_tokens": len(modular) // 4 - len(legacy) // 4},
+            selected=choice["modules"], reason="deterministic rules v1", mode=instructions.mode())
+        result = modular if instructions.mode() == "active" else legacy
+        _INSTRUCTION_RENDER_META[result] = {"instruction_tokens_modular": len(modular) // 4}
+        while len(_INSTRUCTION_RENDER_META) > _PACKET_BUILD_META_MAX:
+            _INSTRUCTION_RENDER_META.popitem(last=False)
+        return result
     placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
     missing = next((match.group(1) for match in placeholder.finditer(t) if match.group(1) not in kw), None)
     if missing is not None:
@@ -503,7 +534,11 @@ def section_meta(text) -> dict:
 
 def with_instruction_tokens(meta, rendered_prompt, packet):
     """Return packet metadata augmented with deterministic prompt-wrapper cost."""
-    return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4}
+    rendered = next((text for text in reversed(_INSTRUCTION_RENDER_META) if rendered_prompt.startswith(text)), None)
+    extra = _INSTRUCTION_RENDER_META.get(rendered, {})
+    if extra:
+        extra = {"instruction_tokens_modular": extra["instruction_tokens_modular"] - len(packet) // 4}
+    return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
 def packet(task, worktree) -> str:
@@ -923,27 +958,28 @@ def run_worker(task_id, account_id=None):
         if role == "review":
             src = reviewed if reviewed is not None else t
             role_packet = review_packet(t, src)
-            prompt = render("review", packet=role_packet)
+            security_signals = {"security": "## security\n" in role_packet}
+            prompt = render("review", packet=role_packet, task=t, signals=security_signals)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         elif role == "challenge":
-            prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
+            prompt = render("challenge", task=t, **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                             for k in ("claim", "evidence", "confidence")})
         elif role == "spec_review":
             src = bus.get(t["inputs"][0])
             role_packet = spec_review_packet(src)
-            prompt = render("spec-review", packet=role_packet)
+            prompt = render("spec-review", packet=role_packet, task=t)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         elif role == "execute":
             t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
             bus.update(task_id, executor=t["executor"])
             packet_worktree = t.get("worktree") or ROOT
             role_packet = packet(t, packet_worktree)
-            prompt = render("execute", packet=role_packet) + \
+            prompt = render("execute", packet=role_packet, task=t) + \
                 "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         else:
             role_packet = scout_packet(t)
-            prompt = render("scout", packet=role_packet)
+            prompt = render("scout", packet=role_packet, task=t)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
     except Exception as exc:
         hold_render_error(task_id, exc)

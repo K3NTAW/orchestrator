@@ -300,7 +300,7 @@ def log_run(*, attempt=1, **fields):
     if isinstance(packet_meta, dict) and (packet_meta.get("hash") or packet_meta.get("version")):
         fields["context"] = {key: {**packet_meta, **tool_context}.get(key) for key in
                              ("sections", "presented_tokens", "candidate_tokens", "candidate_known",
-                              "instruction_tokens", "packet_version", "routed_tokens",
+                              "instruction_tokens", "instruction_tokens_modular", "packet_version", "routed_tokens",
                               "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
                               "routed_rules_version", "evidence_ids", "tool_tokens_disclosed",
                               "tool_tokens_minimal")}

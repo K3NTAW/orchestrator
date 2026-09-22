@@ -49,6 +49,10 @@ def build(root=STATE):
         candidate_presented = [row["context"].get("presented_tokens", 0) for row in candidate_rows]
         instructions = [row["context"].get("instruction_tokens") for row in measured
                         if row["context"].get("instruction_tokens") is not None]
+        modular_rows = [row for row in measured
+                        if row["context"].get("instruction_tokens_modular") is not None]
+        modular = [row["context"]["instruction_tokens_modular"] for row in modular_rows]
+        modular_legacy = [row["context"].get("instruction_tokens") for row in modular_rows]
         disclosed = [row["context"].get("tool_tokens_disclosed") for row in measured
                      if row["context"].get("tool_tokens_disclosed") is not None]
         minimal = [row["context"].get("tool_tokens_minimal") for row in measured
@@ -63,6 +67,11 @@ def build(root=STATE):
                        "reduction_ratio": round(1 - sum(candidate_presented) / sum(candidate), 3)
                        if candidate and sum(candidate) else None,
                        "avg_instruction_tokens": _avg(instructions),
+                       "instruction_tokens": _avg(instructions),
+                       "instruction_tokens_modular": _avg(modular),
+                       "instruction_reduction": round(sum(modular) / sum(modular_legacy), 3)
+                       if modular_legacy and sum(modular_legacy) else None,
+                       "instruction_unmeasured": len(rows) - len(modular_rows),
                        "tool_tokens_disclosed": _avg(disclosed), "tool_tokens_minimal": _avg(minimal),
                        "tool_reduction": round(sum(minimal) / sum(disclosed), 3) if disclosed and sum(disclosed) else None,
                        "top_sections": sorted(((name, _avg(values)) for name, values in sections.items()),
@@ -96,11 +105,12 @@ def build(root=STATE):
 
 
 def format_report(card):
-    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\ttool disclosed\ttool minimal\ttool reduction\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\ttop sections"]
+    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\tmodular instructions\tinstruction reduction\ttool disclosed\ttool minimal\ttool reduction\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\ttop sections"]
     for role, row in card["roles"].items():
         lines.append("\t".join(map(str, (role, row["runs"], row["measured"], row["unmeasured"],
                                           row["avg_presented"], row["avg_candidate"], row["reduction_ratio"],
-                                          row["avg_instruction_tokens"], row["tool_tokens_disclosed"],
+                                          row["avg_instruction_tokens"], row["instruction_tokens_modular"],
+                                          row["instruction_reduction"], row["tool_tokens_disclosed"],
                                           row["tool_tokens_minimal"], row["tool_reduction"],
                                           row["shadow_routed_tokens"],
                                           row["shadow_reduction"], row["shadow_hidden"],

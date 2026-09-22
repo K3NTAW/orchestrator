@@ -24,6 +24,24 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_render_bytes_identical_in_shadow(self):
+        task = {"id": "T-shadow", "scope": ["x.py"]}
+        with mock.patch.object(spawn.instructions, "mode", return_value="shadow"), \
+                mock.patch.object(spawn.decision_log, "record"):
+            cases = (("execute", {"packet": "p"}), ("review", {"packet": "p"}),
+                     ("scout", {"packet": "p"}))
+            for name, kwargs in cases:
+                self.assertEqual(spawn.render(name, **kwargs), spawn.render(name, task=task, **kwargs))
+
+    def test_render_active_appends_selected_modules_only(self):
+        task = {"id": "T-active", "scope": ["src/x.py"]}
+        with mock.patch.object(spawn.instructions, "mode", return_value="active"), \
+                mock.patch.object(spawn.decision_log, "record"):
+            text = spawn.render("execute", packet="p", task=task)
+        selected = spawn.instructions.module_text("python-unittest").strip()
+        self.assertEqual(text.count(selected), 1)
+        self.assertNotIn(spawn.instructions.module_text("docs-task").strip(), text)
+
     def test_review_completion_keeps_reviewed_sha(self):
         reviewed = bus.create_task("review sha target", "s", ["a"], ["sha.py"], role="execute")
         review = bus.create_task("review sha", "s", ["a"], ["sha.py"], role="review",
