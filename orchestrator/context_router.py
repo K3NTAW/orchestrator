@@ -55,11 +55,11 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
 
     if ev.source_type == "source_chunk" and in_scope and role in ("execute", "scout"):
         return "FULL", "in_scope_file"
-    if ev.source_type == "source_chunk" and in_scope and role in ("review", "security_review"):
-        return "LONG", "in_scope_file"
     if (role == "security_review" and ev.source_type == "source_chunk"
             and _security_match(_path(ev), cfg)):
         return "FULL", "security_path"
+    if ev.source_type == "source_chunk" and in_scope and role in ("review", "security_review"):
+        return "LONG", "in_scope_file"
     if role == "planner" and ev.source_type == "source_chunk":
         return "SHORT", "read_scope"
     if ev.source_type == "test_result" and role in ("review", "security_review"):
@@ -144,4 +144,3 @@ def decision_row(task, routed_packet, *, mode):
         "mode": mode,
         "extra": None,
     }
-

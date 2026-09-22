@@ -13,6 +13,17 @@ def ev(kind, location, content, task=None, commit=""):
 
 
 class ContextRouterTests(unittest.TestCase):
+    def test_security_review_full_for_security_path_in_scope(self):
+        task = {"id": "T", "scope": ["orchestrator/auth.py"]}
+        item = ev("source_chunk", "orchestrator/auth.py:1-4", "authentication code")
+        cfg = {"review": {"security_paths": ["orchestrator/*.py"]}}
+        routed = context_router.route(task, [item], role="security_review", cfg=cfg).items[0]
+        self.assertEqual(("FULL", "security_path"), (routed.level, routed.reason))
+        for role, config in (("review", cfg), ("security_review", {})):
+            with self.subTest(role=role, cfg=config):
+                ordinary = context_router.route(task, [item], role=role, cfg=config).items[0]
+                self.assertEqual(("LONG", "in_scope_file"), (ordinary.level, ordinary.reason))
+
     def test_execute_profile_full_for_scope_hide_unrelated_memory(self):
         task = {"id": "T-1", "title": "build router", "scope": ["router.py"]}
         source = ev("source_chunk", "router.py:1-4", "code", task)
@@ -75,4 +86,3 @@ class ContextRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
