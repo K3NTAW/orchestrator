@@ -1251,10 +1251,36 @@ class ContextTelemetry(unittest.TestCase):
         path = spawn.STATE / "runs/jev/gate.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"task": "T-gate", "tool": "Read",
-                                    "input": '{"file_path":"skills/scout/find/SKILL.md"}'}) + "\n")
+                                    "tool_target": "skills/scout/find/SKILL.md"}) + "\n")
         records = {"scout/find": {"est_tokens_l2": 17}}
         with mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}):
             self.assertEqual(spawn._skills_from_gate("T-gate"), (["scout/find"], 17))
+
+    def test_skills_from_gate_matches_real_gate_row_shape(self):
+        from orchestrator import jev_gate
+        records = {"scout/find": {"est_tokens_l2": 17},
+                   "review/check": {"est_tokens_l2": 23},
+                   "scout/other": {"est_tokens_l2": 99}}
+        with tempfile.TemporaryDirectory() as directory:
+            gate_path = Path(directory) / "gate.jsonl"
+            with mock.patch.object(jev_gate, "GATE_LOG", gate_path):
+                for task, session, tool, target in (
+                    ("T-real", "s-real", "Read", "/repo/skills/scout/find/SKILL.md"),
+                    ("T-real", "s-real", "Read", "/repo/skills/scout/find/SKILL.md"),
+                    ("", "s-real", "Bash", "bash skills/review/check/scripts/check.sh"),
+                    ("T-other", "s-other", "Read", "skills/scout/other/SKILL.md"),
+                    ("T-real", "s-real", "Edit", "skills/scout/other/SKILL.md"),
+                ):
+                    jev_gate._log(task, session, tool, {}, "shadow", False, False, 0,
+                                  tool_target=target, input_hash="hash")
+            rows = [json.loads(line) for line in gate_path.read_text().splitlines()]
+            self.assertTrue(all("tool_target" in row and "input" not in row for row in rows))
+            with mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                    mock.patch.object(Path, "read_text", return_value=gate_path.read_text()), \
+                    mock.patch.object(Path, "exists", return_value=True):
+                self.assertEqual(spawn._skills_from_gate("T-real", "s-real"),
+                                 (["review/check", "scout/find"], 40))
+                self.assertEqual(spawn._skills_from_gate("T-real"), (["scout/find"], 17))
 
     def test_skill_usage_parsed_from_codex_summary(self):
         from orchestrator import executor

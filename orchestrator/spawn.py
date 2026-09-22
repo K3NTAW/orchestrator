@@ -45,9 +45,7 @@ def _skills_from_gate(task_id, session_id=None):
             continue
         if row.get("task") != task_id and not (session_id and row.get("session") == session_id):
             continue
-        raw = row.get("input") or ""
-        if isinstance(raw, dict):
-            raw = json.dumps(raw)
+        raw = row.get("tool_target") or ""
         for skill_id, record in records.items():
             role, name = skill_id.split("/", 1)
             base = f"skills/{role}/{name}/"

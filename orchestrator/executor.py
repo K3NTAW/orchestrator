@@ -9,7 +9,7 @@ Usage-limit errors cool Codex down and hold the task (§4.10).
 """
 import inspect, json, re, subprocess, time
 from pathlib import Path
-from . import ROOT, STATE, bus
+from . import ROOT, bus
 import threading
 from . import scorecard, allocation, critical_path, duration, jev_route, decision_log
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
