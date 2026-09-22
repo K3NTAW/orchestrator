@@ -422,3 +422,10 @@ type: decision · goal: T-0760 (orchestrator), T-0109 (kgpt), T-0010 (kgpt-ios) 
 - kgpt PR 44 → main 071601c (harness checkpoint 4, migration 0029); deployed on Hetzner with make up (deploy_main.py); health verified separately below.
 - kgpt-ios PR 18 → main c99047c (voice modality). Phone build waits for the phone (user not home).
 outcome: revert paths: git revert 41be3d8 -m 1 (orchestrator); kgpt: git revert 071601c -m 1 + make restart at the previous sha (rollback.py) if the gateway misbehaves, migration 0029 downgrades; kgpt-ios: git revert c99047c -m 1.
+
+## 2026-09-22 22:25 — user: "do that" (flip every existing active path; build the missing ones)
+type: decision · goal: T-0760 / kgpt T-0109 · provenance: repo, hetzner
+- kgpt Hetzner .env: KGPT_HARNESS_MODEL_ROUTING, JEV_ROUTING, JEV_TOOL_GATE, VOICE_ROUTING, DYNAMIC_TOOLS = active (were shadow/unset); .env backed up as .env.bak-<stamp> on the server; make restart; gateway healthy, flags visible in the container, no tracebacks. Revert: set the lines back to shadow (or remove) and make restart.
+- orchestrator pool.toml [instructions] mode = active (was shadow); daemon restarted (pid 44865). Revert: mode back to shadow.
+- Four active-path tasks filed under the reopened goal T-0760: context_router active packet (c7), tool_disclosure active allowlist + escalation (c6, depends on the first), handoff-aware routing (c6), read suppression (c6). Each keeps a safety refusal (falls back to shadow without a passing eval / enough evidence).
+outcome: watch the kgpt harness scorecards (GET /harness/scorecard, /harness/tool-economy, /harness/voice) tomorrow; demote any feature whose success or latency regresses (env line + make restart).
