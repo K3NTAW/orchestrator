@@ -586,3 +586,58 @@ class RoutingIntegration(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["selected"], baseline)
         self.assertEqual(rows[0]["deterministic"]["baseline"], baseline)
+
+    def test_active_handoff_switches_executor_when_gain_exceeds_threshold(self):
+        task_id = self.task("handoff active")
+        self.pool.cfg["handoff"] = {"mode": "active", "min_gain": .15}
+        costs = {"sol": 100, "terra": 50}
+        with patch("orchestrator.handoff_scorecard.expected_route_cost",
+                   side_effect=lambda _class, eid, cfg=None: {
+                       "insufficient": False, "n": 20, "expected_route_cost": costs[eid]}):
+            executor.start(task_id, "prompt")
+        task = bus.get(task_id)
+        self.assertEqual(task["executor"], "terra")
+        self.assertEqual(task["pipeline"]["handoff"]["reason"], "expected_route_cost")
+        self.assertTrue(task["pipeline"]["handoff"]["switched"])
+
+    def test_active_handoff_keeps_baseline_without_evidence(self):
+        task_id = self.task("handoff insufficient")
+        self.pool.cfg["handoff"] = {"mode": "active"}
+        with patch("orchestrator.handoff_scorecard.expected_route_cost",
+                   return_value={"insufficient": True, "n": 2}):
+            executor.start(task_id, "prompt")
+        self.assertEqual(bus.get(task_id)["executor"], "sol")
+        self.assertEqual(bus.get(task_id)["pipeline"]["handoff"]["reason"], "insufficient_evidence")
+
+    def test_active_share_cap_enforced(self):
+        self.pool.cfg["handoff"] = {"mode": "active", "max_active_share": .5}
+        costs = {"sol": 100, "terra": 50}
+        with patch("orchestrator.handoff_scorecard.expected_route_cost",
+                   side_effect=lambda _class, eid, cfg=None: {
+                       "insufficient": False, "n": 20, "expected_route_cost": costs[eid]}):
+            first, second = self.task("first switch"), self.task("capped")
+            executor.start(first, "prompt")
+            executor.start(second, "prompt")
+        self.assertEqual(bus.get(first)["executor"], "terra")
+        self.assertEqual(bus.get(second)["executor"], "sol")
+        self.assertEqual(bus.get(second)["pipeline"]["handoff"]["reason"], "cap_reached")
+
+    def test_handoff_yields_to_active_allocation(self):
+        task_id = self.task("allocation wins")
+        self.pool.cfg["handoff"] = {"mode": "active"}
+        self.pool.cfg["allocation"]["mode"] = "active"
+        allocation_choice = {
+            "executor": "terra", "mode": "active", "reason": "expected_value",
+            "baseline": "sol", "would_pick": "terra", "rejected": {"sol": "higher_expected_value_cost"},
+            "candidates": [
+                {"id": eid, "score_usd": cost, "cost_to_accepted_usd": cost,
+                 "first_pass_p": .9, "est_duration_s": 1, "n": 20, "measured": True}
+                for eid, cost in (("sol", 2), ("terra", 1))],
+        }
+        with patch.object(executor.allocation, "choose", return_value=allocation_choice), \
+                patch("orchestrator.handoff_scorecard.expected_route_cost",
+                      return_value={"insufficient": False, "n": 20, "expected_route_cost": 1}):
+            executor.start(task_id, "prompt")
+        task = bus.get(task_id)
+        self.assertEqual(task["executor"], "terra")
+        self.assertEqual(task["pipeline"]["handoff"]["reason"], "allocation_active")

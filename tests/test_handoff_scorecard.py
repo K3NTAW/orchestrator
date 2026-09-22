@@ -79,3 +79,22 @@ class TestHandoffScorecard(unittest.TestCase):
             self.assertEqual(row["before_tokens"], "unmeasured")
             self.assertEqual(row["escalation_packet_tokens"], "unmeasured")
             self.assertEqual(row["after_tokens"], 15)
+
+    def test_active_share_and_outcomes_from_task_stamps(self):
+        with tempfile.TemporaryDirectory() as root:
+            stamp = {"baseline": "cheap", "selected": "strong", "switched": True,
+                     "gain": .5, "reason": "expected_route_cost", "ts": 1}
+            self.task(root, "T-one", executor="strong", merged_into="main",
+                      pipeline={"handoff": stamp})
+            self.add_run(root, task="T-one", executor="strong", input_tokens=8,
+                         output_tokens=2, usd=.4)
+            stamp = {"baseline": "strong", "selected": "strong", "switched": False,
+                     "gain": 0, "reason": "gain_below_threshold", "ts": 2}
+            self.task(root, "T-two", executor="strong", status="failed",
+                      pipeline={"handoff": stamp})
+            self.add_run(root, task="T-two", executor="strong", input_tokens=5, usd=.1)
+            row = handoff_scorecard.by_start(root)[("strong", "unfamiliar")]
+            self.assertEqual(row["active_share"], .5)
+            self.assertEqual(row["avg_rounds"], 1)
+            self.assertEqual(row["avg_accepted_tokens"], 5)
+            self.assertEqual(row["avg_accepted_usd"], .2)
