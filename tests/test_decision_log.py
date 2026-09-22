@@ -1,3 +1,4 @@
+import _harness  # noqa: F401 - share the suite's single isolated ORCH_ROOT
 import json
 import tempfile
 import unittest
@@ -82,6 +83,26 @@ class DecisionLogTests(unittest.TestCase):
 
         self.assertFalse((self.tmp / "runs/sched/decisions.jsonl").exists())
         self.assertEqual(decision_log.read_all(root=self.tmp), [])
+
+    def test_context_program_kinds_record(self):
+        legacy_kinds = set(decision_log.KINDS) - set(decision_log.CONTEXT_KINDS)
+        self.assertTrue({"routing", "wave", "jev_sched", "strategy", "planner_route"} <= legacy_kinds)
+        for kind in decision_log.CONTEXT_KINDS:
+            with self.subTest(kind=kind):
+                row = decision_log.record(
+                    kind, "T-context", candidates=["candidate"], hard_constraints={},
+                    deterministic={}, selected="candidate", reason="context decision",
+                    root=self.tmp,
+                )
+                self.assertEqual(row["kind"], kind)
+        for kind in legacy_kinds:
+            with self.subTest(legacy_kind=kind):
+                self.assertIn(kind, decision_log.KINDS)
+        with self.assertRaisesRegex(ValueError, "invalid decision kind"):
+            decision_log.record(
+                "unknown_context_kind", "T-context", candidates=[], hard_constraints={},
+                deterministic={}, selected=None, reason="invalid", root=self.tmp,
+            )
 
     def test_malformed_lines_are_tolerated_and_counted(self):
         first = self._record()

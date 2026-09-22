@@ -3,6 +3,7 @@
 from collections import OrderedDict
 import json
 from pathlib import Path
+import tomllib
 
 from . import STATE, decision_log
 
@@ -23,6 +24,15 @@ FEATURES = OrderedDict((
     ("planner_routing", {"table": "planner.routing", "key": "mode",
                          "modes": ("off", "shadow", "active"),
                          "default": "shadow", "evidence": "planner_routing"}),
+    ("context_router", {"table": "context_router", "key": "mode",
+                        "modes": ("off", "shadow", "active"),
+                        "default": "shadow", "evidence": "context_router"}),
+    ("tool_disclosure", {"table": "tool_disclosure", "key": "mode",
+                         "modes": ("off", "shadow", "active"),
+                         "default": "shadow", "evidence": "tool_disclosure"}),
+    ("conditional_instructions", {"table": "instructions", "key": "mode",
+                                  "modes": ("off", "shadow", "active"),
+                                  "default": "shadow", "evidence": "conditional_instructions"}),
 ))
 
 CRITERIA = {
@@ -51,6 +61,16 @@ def current_mode(feature, cfg):
     if value not in spec["modes"]:
         return spec["default"], ["invalid_config"]
     return value, []
+
+
+def mode(feature, cfg=None):
+    """Return a feature's configured mode, loading pool.toml when omitted."""
+    if cfg is None:
+        try:
+            cfg = tomllib.loads((Path(STATE) / "pool.toml").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cfg = {}
+    return current_mode(feature, cfg)[0]
 
 
 def _criteria(cfg):
@@ -133,6 +153,9 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature in {"context_router", "tool_disclosure", "conditional_instructions"}:
+        # Evidence arrives with P27/P28 context scorecards.
+        return {"n": 0}
     if feature == "planner_routing":
         try:
             import tomllib
