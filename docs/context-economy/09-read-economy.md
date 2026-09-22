@@ -26,5 +26,17 @@ An active policy would suppress deterministic repeats with a structured
 over the configured minimum sample count. `block_repeats` remains false and
 `guardrails.sh` remains the sole destructive-command authority.
 
-To revert, remove the classifier call and `--reads` scorecard branch, then discard the
-shadow fields and action-gate rows. Existing Jev and guardrail behavior remains intact.
+## Active
+
+Set `[jev].read_suppression = "active"` to deny exact unchanged Read repeats and
+identical searches before Jev sampling. Different Read ranges and narrower searches
+are always allowed. The reply cites the earlier call index; each exact signature gets
+only one suppression before an override permanently allows it for that session, and
+the session cap defaults to 20 suppressions.
+
+Active mode automatically falls back to shadow unless the preceding seven days contain
+at least 50 `would_suppress` rows and `false_suppression_rate` is no more than
+`max_false_suppression` (default 0.02). The safety result is cached for ten minutes.
+
+To revert immediately, set `read_suppression = "shadow"` (or `"off"`). This leaves the
+classifier, telemetry, existing Jev behavior, and guardrail authority intact.

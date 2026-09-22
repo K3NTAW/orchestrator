@@ -2,6 +2,7 @@ import _harness  # noqa: F401 - share the suite's single isolated ORCH_ROOT
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,17 @@ from orchestrator import evidence, read_economy
 
 
 class ReadEconomyTests(unittest.TestCase):
+    def test_different_range_is_never_repeated_read_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.py"
+            path.write_text("x" * 100)
+            old = {"name": "Read", "input": {"file_path": str(path), "offset": 0, "limit": 10},
+                   "mtime": path.stat().st_mtime_ns, "size": path.stat().st_size}
+            result = read_economy.classify(
+                {"name": "Read", "input": {"file_path": str(path), "offset": 10, "limit": 10}}, [old])
+        self.assertEqual(result["kind"], "same_file_different_range")
+        self.assertFalse(result["would_suppress"])
+
     def test_repeated_read_unchanged_detected_by_mtime_and_size(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.py"
@@ -78,6 +90,36 @@ class ReadEconomyTests(unittest.TestCase):
         self.assertEqual(result["tokens_avoidable"], 70)
         self.assertEqual(result["jev_calls_avoided"], 1)
         self.assertEqual(result["false_suppression_proxy"], 1)
+
+    def test_summary_counts_suppressions_and_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "runs/jev").mkdir(parents=True)
+            rows = [
+                {"ts": time.time(), "task": "T", "session": "s", "tool": "Read",
+                 "read_kind": "repeated_read_unchanged", "would_suppress": True,
+                 "suppressed": True, "tool_target": "a"},
+                {"ts": time.time(), "task": "T", "session": "s", "tool": "Read",
+                 "read_kind": "repeated_read_unchanged", "would_suppress": True,
+                 "suppression_override": True, "tool_target": "a"},
+            ]
+            (root / "runs/jev/gate.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+            card = read_economy.summary(root)
+        self.assertEqual(card["total"]["suppressed"], 1)
+        self.assertEqual(card["total"]["overrides"], 1)
+
+    def test_summary_total_block_respects_since_and_counts_rows_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "runs/jev").mkdir(parents=True)
+            rows = [{"ts": 10, "task": "T", "tool": "Read", "read_kind": "repeated_search",
+                     "would_suppress": True},
+                    {"ts": 20, "task": "T", "tool": "Read", "read_kind": "repeated_search",
+                     "would_suppress": True, "suppressed": True}]
+            (root / "runs/jev/gate.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+            total = read_economy.summary(root, since_s=15)["total"]
+        self.assertEqual(total["would_suppress"], 1)
+        self.assertEqual(total["suppressed"], 1)
 
 
 if __name__ == "__main__":

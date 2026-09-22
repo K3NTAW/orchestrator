@@ -36,6 +36,9 @@ FEATURES = OrderedDict((
     ("handoff_routing", {"table": "handoff", "key": "mode",
                           "modes": ("off", "shadow", "active"),
                           "default": "shadow", "evidence": "handoff_routing"}),
+    ("read_suppression", {"table": "jev", "key": "read_suppression",
+                           "modes": ("off", "shadow", "active"),
+                           "default": "shadow", "evidence": "read_suppression"}),
 ))
 
 CRITERIA = {
@@ -167,6 +170,10 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "read_suppression":
+        from . import read_economy
+        total = read_economy.summary(root, since_s=__import__("time").time() - 7 * 86400)["total"]
+        return {"n": total["would_suppress"], **total}
     shadow_keys = {"context_router": "routed_tokens", "tool_disclosure": "tool_tokens_minimal",
                    "conditional_instructions": "instruction_tokens_modular"}
     if feature in {*shadow_keys, "handoff_routing"}:

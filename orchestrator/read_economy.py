@@ -40,6 +40,11 @@ def _search_signature(call):
                         for key, value in data.items() if key not in ignored))
 
 
+def _read_signature(call):
+    """The complete meaningful Read input (result/output metadata is cosmetic)."""
+    return _search_signature(call)
+
+
 def _result_size(call):
     for key in ("result_size", "output_size", "tokens_estimate"):
         value = call.get(key)
@@ -94,9 +99,14 @@ def classify(call, history, *, evidence=None, head_sha=None):
         elif not prior_reads:
             kind = "first_read"
         else:
-            old_mtime, old_size = _stat(prior_reads[-1])
-            kind = ("repeated_read_unchanged" if (old_mtime, old_size) == (_mtime, size)
-                    else "repeated_read_changed")
+            exact = next((old for old in reversed(prior_reads)
+                          if _read_signature(old) == _read_signature(call)), None)
+            if exact is None:
+                kind = "same_file_different_range"
+            else:
+                old_mtime, old_size = _stat(exact)
+                kind = ("repeated_read_unchanged" if (old_mtime, old_size) == (_mtime, size)
+                        else "repeated_read_changed")
     elif name in SEARCH_TOOLS:
         prior_searches = [old for old in prior_path if _name(old) == name]
         signature = _search_signature(call)
@@ -118,7 +128,7 @@ def classify(call, history, *, evidence=None, head_sha=None):
 def _empty():
     return {"reads": 0, "repeated_read_unchanged": 0, "repeated_search": 0,
             "evidence_available": 0, "tokens_avoidable": 0, "jev_calls_avoided": 0,
-            "false_suppression_proxy": 0}
+            "false_suppression_proxy": 0, "suppressed": 0, "overrides": 0}
 
 
 def _later_transcript_edit(row):
@@ -144,7 +154,7 @@ def _later_transcript_edit(row):
                for call in calls[start:start + 5])
 
 
-def summary(root):
+def summary(root, since_s=None):
     """Aggregate gate shadow rows per role and task class."""
     root = Path(root)
     log = root / "runs" / "jev" / "gate.jsonl"
@@ -152,7 +162,9 @@ def summary(root):
     if log.exists():
         for line in log.read_text().splitlines():
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                if since_s is None or float(row.get("ts", 0)) >= float(since_s):
+                    rows.append(row)
             except (ValueError, TypeError):
                 continue
     tasks = {}
@@ -165,6 +177,8 @@ def summary(root):
                 tasks[task_id] = {}
 
     out = {"by_role": {}, "by_task_class": {}}
+    total = {"would_suppress": 0, "suppressed": 0, "overrides": 0,
+             "false_suppression_rate": 0.0}
     for index, row in enumerate(rows):
         kind = row.get("read_kind")
         if not kind:
@@ -180,6 +194,9 @@ def summary(root):
             and candidate.get("tool") in EDIT_TOOLS
             and candidate.get("tool_target") == target for candidate in later)
             or _later_transcript_edit(row)))
+        total["would_suppress"] += bool(row.get("would_suppress"))
+        total["suppressed"] += bool(row.get("suppressed") or row.get("selected") == "suppress")
+        total["overrides"] += bool(row.get("suppression_override"))
         for group, key in (("by_role", role), ("by_task_class", task_class)):
             item = out[group].setdefault(key, _empty())
             item["reads"] += row.get("tool") == "Read"
@@ -188,6 +205,14 @@ def summary(root):
             item["tokens_avoidable"] += int(row.get("tokens_estimate") or 0) if row.get("would_suppress") else 0
             item["jev_calls_avoided"] += kind == "first_read" and not row.get("sampled")
             item["false_suppression_proxy"] += false_proxy
+            item["suppressed"] += bool(row.get("suppressed") or row.get("selected") == "suppress")
+            item["overrides"] += bool(row.get("suppression_override"))
+        if (row.get("suppressed") or row.get("selected") == "suppress") and false_proxy:
+            total.setdefault("later_edits", 0)
+            total["later_edits"] += 1
+    false_count = total["overrides"] + total.pop("later_edits", 0)
+    total["false_suppression_rate"] = false_count / total["suppressed"] if total["suppressed"] else 0.0
+    out["total"] = total
     return out
 
 
