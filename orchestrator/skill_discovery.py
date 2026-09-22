@@ -197,8 +197,9 @@ def _store(candidate, root, *, new_version=False):
     document = registry._read_json(path, {"version": 1, "skills": {}})
     records = document["skills"]
     now, content_hash = registry._now(), _hash(files)
-    previous = next((r for r in records.values() if r["provenance_info"]["source_repo"] == repo
-                     and r["provenance_info"]["source_path"] == source_path), None)
+    previous = next((r for r in records.values()
+                     if (r.get("provenance_info") or {}).get("source_repo") == repo
+                     and (r.get("provenance_info") or {}).get("source_path") == source_path), None)
     if previous and not new_version and previous["content_hash"] == content_hash:
         previous["provenance_info"]["retrieved_at"] = now
         registry._write_json(path, document)

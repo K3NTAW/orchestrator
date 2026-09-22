@@ -186,6 +186,8 @@ def main():
     sksync = sksub.add_parser("sync"); sksync.add_argument("--json", action="store_true")
     sklist = sksub.add_parser("list"); sklist.add_argument("--json", action="store_true")
     skshow = sksub.add_parser("show"); skshow.add_argument("id"); skshow.add_argument("--json", action="store_true")
+    sklearn = sksub.add_parser("learn"); sklearn.add_argument("--since")
+    sklearn.add_argument("--min-support", type=int, default=3); sklearn.add_argument("--propose", action="store_true")
     sktransition = sksub.add_parser("transition"); sktransition.add_argument("id"); sktransition.add_argument("state")
     sktransition.add_argument("--reason", required=True)
     skrollback = sksub.add_parser("rollback"); skrollback.add_argument("id")
@@ -282,6 +284,15 @@ def main():
                 if record is None:
                     raise KeyError(a.id)
                 print(json.dumps(record, indent=2) if a.json else "\n".join(f"{key}: {value}" for key, value in record.items()))
+            elif a.skills_cmd == "learn":
+                from . import skill_learning
+                found = skill_learning.patterns(since_s=a.since, min_support=a.min_support)
+                if a.propose:
+                    for pattern in found:
+                        print(skill_learning.propose(pattern)["id"])
+                else:
+                    for pattern in found:
+                        print(f"{pattern['source']}\t{pattern['support']}\t{pattern['confidence']:.3f}\t{pattern['procedure_signature']}")
             elif a.skills_cmd == "transition":
                 print(json.dumps(skills_registry.transition(a.id, a.state, a.reason), indent=2))
             else:
