@@ -11,7 +11,15 @@ os.environ["ORCH_ROOT"] = str(TMP)
 for f in ("pool.toml",):
     config = (REPO / ".orchestrator" / f).read_text()
     # Tests opt into autonomous planning explicitly; never inherit the live repository setting.
-    config = re.sub(r"(?m)^(\s*autonomous\s*=\s*).*$", r"\1false", config, count=1)
+    sections = re.split(r"(?m)(?=^\[)", config)
+    for index, section in enumerate(sections):
+        if section.splitlines()[:1] == ["[planner]"]:
+            section = re.sub(r"(?m)^([ \t]*autonomous[ \t]*=[ \t]*).*$", r"\1false", section)
+        if section.startswith("[[claude_accounts]]") and re.search(r'^id\s*=\s*"B"\s*$', section, re.M):
+            # Selection fixtures assume A alone plans; live B planner affinity must not leak into tests.
+            section = re.sub(r'(?m)^(role_affinity\s*=\s*\[)"planner",\s*', r'\1', section)
+        sections[index] = section
+    config = "".join(sections)
     (TMP / ".orchestrator" / f).write_text(config)
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")

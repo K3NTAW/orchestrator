@@ -183,13 +183,16 @@ def auto_fix_round(pool):
             if point["goal_id"]:
                 try:
                     ctx = planner_runs.build_ctx(point, pool)
-                    routine = planner_runs.decision.route(point, ctx).name == "routine"
-                    if routine:
-                        ids = ctx["failing_ids"] or None
-                        comments = _rejecting_reviews(held)
+                    routed_routine = planner_runs.decision.route(point, ctx).name == "routine"
+                    routed_ids, routed_comments = ids, comments
+                    if routed_routine:
+                        routed_ids = ctx["failing_ids"] or None
+                        routed_comments = _rejecting_reviews(held)
+                    routine, ids, comments = routed_routine, routed_ids, routed_comments
                 except Exception as exc:
-                    notify(f"{held['id']}: autonomous routing failed for missing goal {point['goal_id']}; "
-                           f"using routine fallback ({exc})")
+                    detail = " ".join(str(exc).splitlines())
+                    notify(f"{held['id']}: warning: autonomous routing failed for goal {point['goal_id']}; "
+                           f"using routine fallback ({type(exc).__name__}: {detail})")
         if routine and rounds < cap and not repeated:
             with bus.locked():
                 current = bus.get(held["id"])
