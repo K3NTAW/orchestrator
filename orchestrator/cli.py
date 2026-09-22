@@ -148,6 +148,7 @@ def main():
     sc.add_argument("--planner", action="store_true")
     sc.add_argument("--planner-routing", action="store_true")
     sc.add_argument("--context", action="store_true")
+    sc.add_argument("--reads", action="store_true")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -178,7 +179,7 @@ def main():
     if a.cmd == "scorecard":
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+        if sum((a.planner_routing, a.context, a.reads, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
@@ -191,6 +192,7 @@ def main():
             "--strategies": (),
             "--planner-routing": (),
             "--context": (),
+            "--reads": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
@@ -198,6 +200,8 @@ def main():
             mode = "--planner-routing"
         if a.context:
             mode = "--context"
+        if a.reads:
+            mode = "--reads"
         if a.goal is not None and not a.parallelism:
             ap.error("--goal requires --parallelism")
         if a.parallelism and a.planner:
@@ -330,7 +334,11 @@ def main():
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
     elif a.cmd == "scorecard":
-        if a.context:
+        if a.reads:
+            from . import read_economy
+            card = read_economy.summary(scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else read_economy.format_summary(card))
+        elif a.context:
             from . import context_scorecard
             card = context_scorecard.build(root=scorecard.STATE)
             print(json.dumps(card, indent=1) if a.json else context_scorecard.format_report(card))

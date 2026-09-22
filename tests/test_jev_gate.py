@@ -1,3 +1,4 @@
+import _harness
 """orchestrator/jev_gate.py: the PreToolUse gate that asks Jev whether a worker's proposed tool call is
 needed/redundant/destructive. jev.ask() is monkeypatched throughout (same pattern as test_jev.py) -- never
 real network. Covers the transcript reader's error correlation, gate_mode="log" never blocking, gate_mode="block"
@@ -77,6 +78,7 @@ class JevGateTests(unittest.TestCase):
 
     def test_sample_mode_is_deterministic(self):
         task, payload, _ = self._sample_fixture(0.1)
+        payload["tool_name"] = "Edit"
         expected = [int(hashlib.sha1(f"sample-test{i}".encode()).hexdigest(), 16) % 1000 < 100
                     for i in range(50)]
         self.assertTrue(any(expected))
@@ -190,14 +192,19 @@ class JevGateTests(unittest.TestCase):
             self.assertEqual(first["input_hash"], second["input_hash"])
             self.assertFalse(first["repeat"])
             self.assertTrue(second["repeat"])
-            self.assertTrue(first["sampled"])
-            self.assertTrue(first["scored"])
+            expected_first = first["tool"] != "Read"
+            expected_second = first["tool"] not in ("Read", "Grep", "Glob")
+            self.assertEqual((first["sampled"], first["scored"]),
+                             (expected_first, expected_first))
+            self.assertEqual((second["sampled"], second["scored"]),
+                             (expected_second, expected_second))
         with patch.object(jev, "redact", return_value="[redacted]") as redact:
             self.assertEqual(jev_gate._target("Read", {"file_path": "secret"}), "[redacted]")
             redact.assert_called_once_with("secret")
 
     def test_block_repeats_denies(self):
         task, payload, _ = self._sample_fixture()
+        payload.update(tool_name="Bash", tool_input={"command": "echo safe"})
         with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
             self.assertEqual(self._run(payload, task), 0)
             jev_gate._cfg = lambda: {**BLOCK_CFG, "block_repeats": True}
@@ -236,8 +243,8 @@ class JevGateTests(unittest.TestCase):
                      for i in range(50)]
             count = flags.index(True) + 2
             for _ in range(count):
-                result = hook("jev-gate.sh", {"session_id": "hook-sample", "tool_name": "Read",
-                              "tool_input": {"file_path": str(state / "pool.toml")}}, cwd=root,
+                result = hook("jev-gate.sh", {"session_id": "hook-sample", "tool_name": "Edit",
+                              "tool_input": {"file_path": str(state / "pool.toml"), "offset": _}}, cwd=root,
                               env={"ORCH_ROOT": str(root), "ORCH_TASK_ID": task,
                                    "PYTHONPATH": os.pathsep.join((str(root), str(REPO)))})
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -245,7 +252,7 @@ class JevGateTests(unittest.TestCase):
             self.assertEqual([r["sampled"] for r in rows], flags[:count])
             self.assertEqual((root / "requests").read_text().splitlines(), ["called"] * sum(flags[:count]))
             self.assertTrue(all(r["mode"] == "sample" and not r["blocked"] for r in rows))
-            self.assertTrue(all(r["repeat"] for r in rows[1:]))
+            self.assertTrue(all(not r["repeat"] for r in rows))
 
     def test_transcript_reader_correlates_errors(self):
         lines = [
@@ -316,19 +323,19 @@ class JevGateTests(unittest.TestCase):
             if confidence is None:
                 del response["answers"]["redundant"]["confidence"]
             jev.ask = lambda state, questions: response
-            self.assertEqual(self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}},
+            self.assertEqual(self._run({"tool_name": "Bash", "tool_input": {"command": "echo x"}},
                                        self._task()["id"]), 0)
             self.assertEqual(self._log_lines()[0]["rule"], rule)
         self._clean_log()
         jev.ask = lambda state, questions: None
-        self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}}, self._task()["id"])
+        self._run({"tool_name": "Bash", "tool_input": {"command": "echo x"}}, self._task()["id"])
         self.assertEqual(self._log_lines()[0]["rule"], "none")
 
     def test_log_mode_never_blocks(self):
         jev_gate._cfg = lambda: LOG_CFG
         jev.ask = lambda state, questions: answers(needed=(0.05, 0.9), redundant=(0.95, 0.9))
         task = self._task()
-        payload = {"tool_name": "Read", "tool_input": {"file_path": "/x.py"}, "transcript_path": "", "session_id": "s1"}
+        payload = {"tool_name": "Bash", "tool_input": {"command": "echo x"}, "transcript_path": "", "session_id": "s1"}
 
         rc = self._run(payload, task["id"])
         self.assertEqual(rc, 0)
@@ -342,14 +349,14 @@ class JevGateTests(unittest.TestCase):
         jev_gate._cfg = lambda: BLOCK_CFG
         jev.ask = lambda state, questions: answers(needed=(0.5, 0.9), redundant=(0.95, 0.9))
         task = self._task()
-        payload = {"tool_name": "Read", "tool_input": {"file_path": "/x.py"}, "transcript_path": "", "session_id": "s1"}
+        payload = {"tool_name": "Bash", "tool_input": {"command": "echo x"}, "transcript_path": "", "session_id": "s1"}
 
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = self._run(payload, task["id"])
         self.assertEqual(rc, 2)
         self.assertIn("jev-gate", err.getvalue())
-        self.assertIn("Read", err.getvalue())
+        self.assertIn("Bash", err.getvalue())
         entries = self._log_lines()
         self.assertTrue(entries[0]["blocked"])
 
@@ -456,7 +463,7 @@ assert attempted == []
         jev_gate._cfg = lambda: LOG_CFG
         jev.ask = lambda state, questions: answers()
         with patch.dict(os.environ, {"ORCH_JEV_STARTED_AT": str(jev_gate.time.time() - 0.1)}):
-            self.assertEqual(self._run({"tool_name": "Read", "tool_input": {"file_path": "/x"}},
+            self.assertEqual(self._run({"tool_name": "Bash", "tool_input": {"command": "echo x"}},
                                        self._task()["id"]), 0)
         entry = self._log_lines()[0]
         self.assertGreaterEqual(entry["startup_ms"], 100)
@@ -482,6 +489,26 @@ assert attempted == []
                 config.assert_called_once_with()
         finally:
             self._orig_cfg.cache_clear()
+
+    def test_first_reads_skip_jev_sample_and_log_read_kind(self):
+        task, payload, _target = self._sample_fixture(1.0)
+        with patch.object(jev, "ask", side_effect=AssertionError("first read must not call Jev")) as ask:
+            self.assertEqual(self._run(payload, task), 0)
+        ask.assert_not_called()
+        row, = self._log_lines()
+        self.assertEqual(row["read_kind"], "first_read")
+        self.assertFalse(row["sampled"])
+        self.assertFalse(row["would_suppress"])
+
+    def test_gate_never_denies_on_would_suppress(self):
+        task, payload, _target = self._sample_fixture(1.0)
+        with patch.object(jev, "ask", side_effect=AssertionError("deterministic repeat must not call Jev")):
+            self.assertEqual(self._run(payload, task), 0)
+            self.assertEqual(self._run(payload, task), 0)
+        row = self._log_lines()[-1]
+        self.assertEqual(row["read_kind"], "repeated_read_unchanged")
+        self.assertTrue(row["would_suppress"])
+        self.assertFalse(row["blocked"])
 
 
 if __name__ == "__main__":
