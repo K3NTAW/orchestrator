@@ -1051,6 +1051,40 @@ class OauthTokenInjection(unittest.TestCase):
 
 
 class ContextTelemetry(unittest.TestCase):
+    def test_worker_allowlist_unchanged_under_tool_disclosure_shadow(self):
+        reviewed = bus.create_task("disclosure target", "s", ["a"], ["x.py"], role="execute")
+        review = bus.create_task("disclosure review", "s", ["a"], ["x.py"], role="review",
+                                 inputs=[reviewed["id"]])
+        captured = []
+
+        def run_claude(*args, **kwargs):
+            captured.append(args[5])
+            return {"status": "done", "output": {"result": '{"verdict":"approve"}', "usage": {}}}
+
+        common = (mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")),
+                  mock.patch.object(P.Pool, "reserve", return_value={}),
+                  mock.patch.object(spawn, "ensure_worktree", return_value=TMP),
+                  mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"),
+                  mock.patch.object(spawn, "render", return_value="prompt"),
+                  mock.patch.object(spawn, "run_claude", side_effect=run_claude))
+        with common[0], common[1], common[2], common[3], common[4], common[5], \
+                mock.patch.object(spawn.promotion, "mode", return_value="off"), \
+                mock.patch.object(spawn.decision_log, "record") as off_record:
+            spawn.run_worker(review["id"])
+        bus.update(review["id"], status="queued", result=None, assigned_to=None)
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run_claude), \
+                mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                mock.patch.object(spawn.decision_log, "record") as shadow_record:
+            spawn.run_worker(review["id"])
+        self.assertEqual(captured, [spawn.TOOLS["review"], spawn.TOOLS["review"]])
+        self.assertFalse(any(call.kwargs.get("kind") == "tool_disclosure" for call in off_record.call_args_list))
+        self.assertTrue(any(call.kwargs.get("kind") == "tool_disclosure" for call in shadow_record.call_args_list))
+
     def test_execute_packet_bytes_unchanged_under_context_router_shadow(self):
         task = {"id": "T-shadow", "title": "shadow", "spec": "route it", "acceptance": ["works"],
                 "scope": [], "role": "execute", "constraints": {}}

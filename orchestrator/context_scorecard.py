@@ -49,6 +49,10 @@ def build(root=STATE):
         candidate_presented = [row["context"].get("presented_tokens", 0) for row in candidate_rows]
         instructions = [row["context"].get("instruction_tokens") for row in measured
                         if row["context"].get("instruction_tokens") is not None]
+        disclosed = [row["context"].get("tool_tokens_disclosed") for row in measured
+                     if row["context"].get("tool_tokens_disclosed") is not None]
+        minimal = [row["context"].get("tool_tokens_minimal") for row in measured
+                   if row["context"].get("tool_tokens_minimal") is not None]
         sections = defaultdict(list)
         for row in measured:
             for name, meta in (row["context"].get("sections") or {}).items():
@@ -59,6 +63,8 @@ def build(root=STATE):
                        "reduction_ratio": round(1 - sum(candidate_presented) / sum(candidate), 3)
                        if candidate and sum(candidate) else None,
                        "avg_instruction_tokens": _avg(instructions),
+                       "tool_tokens_disclosed": _avg(disclosed), "tool_tokens_minimal": _avg(minimal),
+                       "tool_reduction": round(sum(minimal) / sum(disclosed), 3) if disclosed and sum(disclosed) else None,
                        "top_sections": sorted(((name, _avg(values)) for name, values in sections.items()),
                                               key=lambda item: (-item[1], item[0]))[:5], **_shadow(rows)}
     goals = {}
@@ -90,11 +96,13 @@ def build(root=STATE):
 
 
 def format_report(card):
-    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\ttop sections"]
+    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\ttool disclosed\ttool minimal\ttool reduction\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\ttop sections"]
     for role, row in card["roles"].items():
         lines.append("\t".join(map(str, (role, row["runs"], row["measured"], row["unmeasured"],
                                           row["avg_presented"], row["avg_candidate"], row["reduction_ratio"],
-                                          row["avg_instruction_tokens"], row["shadow_routed_tokens"],
+                                          row["avg_instruction_tokens"], row["tool_tokens_disclosed"],
+                                          row["tool_tokens_minimal"], row["tool_reduction"],
+                                          row["shadow_routed_tokens"],
                                           row["shadow_reduction"], row["shadow_hidden"],
                                           row["shadow_ambiguous_rate"], row["shadow_unmeasured"],
                                           row["top_sections"]))))

@@ -3,13 +3,14 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, decision_log, evidence, notify, promotion
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, notify, promotion, tool_catalog
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
 _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
 _CONTEXT_ROUTER_ACTIVE_WARNED = False
+_TOOL_DISCLOSURE_ACTIVE_WARNED = False
 
 
 def _remember_packet_meta(version, meta):
@@ -232,6 +233,29 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg):
     except Exception as exc:
         notify.notify(f"{task.get('id', '(unknown)')}: context_router shadow failed: {exc}")
         return {}
+
+
+def _shadow_tool_disclosure(task, role, cfg):
+    """Measure the hypothetical minimum while preserving the dispatched allowlist."""
+    global _TOOL_DISCLOSURE_ACTIVE_WARNED
+    mode = promotion.mode("tool_disclosure", cfg)
+    if mode not in ("shadow", "active"):
+        return {}
+    if mode == "active" and not _TOOL_DISCLOSURE_ACTIVE_WARNED:
+        notify.notify("tool_disclosure active not implemented; running shadow")
+        _TOOL_DISCLOSURE_ACTIVE_WARNED = True
+    offered = tool_catalog.disclosed(role)
+    choice = tool_catalog.minimal_set(task, role)
+    disclosed_tokens = tool_catalog.tokens(offered)
+    minimal_tokens = tool_catalog.tokens(choice["keep"])
+    decision_log.record(
+        kind="tool_disclosure", subject=task.get("id", "(unknown)"), candidates=offered,
+        hard_constraints=choice["mandatory"], selected="allowlist unchanged (shadow)",
+        deterministic={"task_class": tool_catalog._task_class(task), "role": role,
+                       "kept": choice["keep"], "dropped": choice["drop"],
+                       "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens},
+        reason=choice["reason"], mode=mode)
+    return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens}
 
 
 def _packet_body(task, worktree) -> tuple[str, dict]:
@@ -924,6 +948,8 @@ def run_worker(task_id, account_id=None):
     except Exception as exc:
         hold_render_error(task_id, exc)
         return {"status": "held", "reason": "render_error"}
+    disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg)
+    t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
         pipeline["hold_note"] = "budget"
