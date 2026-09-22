@@ -11,35 +11,36 @@ import inspect, json, re, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
-from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router, notify
+from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
 FALLBACK_JOIN_TIMEOUT_S = 5
 _fallback_threads = []
 _fallback_threads_lock = threading.Lock()
-_SKILL_ROUTING_ACTIVE_WARNED = False
 
 
-def _route_skills(task, cfg, exposure):
-    global _SKILL_ROUTING_ACTIVE_WARNED
+def _route_skills(task, cfg, exposure, choice=None):
     mode = promotion.mode("skill_routing", cfg)
     if mode not in ("shadow", "active"):
         return {}
-    if mode == "active" and not _SKILL_ROUTING_ACTIVE_WARNED:
-        notify.notify("skill routing active is shadow-only until Stage 5; exposure is unchanged")
-        _SKILL_ROUTING_ACTIVE_WARNED = True
-    choice = skill_router.select(task, "codex_execute", cfg=cfg)
+    if choice is None:
+        from .spawn import _prepare_skills
+        choice = _prepare_skills(task, "codex_execute", cfg)
+    presented = choice["presented"] if choice["mode"] == "active" else choice["selected"]
     decision_log.record("skill_selection", _state_target(task), candidates=choice["candidates"],
                         hard_constraints=choice["mandatory"],
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
-                                       "mandatory": choice["mandatory"]}, selected=choice["selected"],
-                        rejected=choice["rejected"], reason=choice["reason"], mode=mode,
+                                       "mandatory": choice["mandatory"]}, selected=presented,
+                        rejected=choice["rejected"], reason=choice["reason"], mode=choice["mode"],
                         extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
-                                                            "tokens_selected_l2", "ambiguous")})
-    return {"skills_selected": choice["selected"],
+                                                            "tokens_selected_l2", "ambiguous")}
+                              | {"role": "codex_execute", "demoted": choice["demoted"]})
+    return {"skills_selected": presented,
             "skill_tokens_selected_l0": choice["tokens_selected_l0"],
-            "skill_tokens_selected_l2": choice["tokens_selected_l2"]}
+            "skill_tokens_selected_l2": choice["tokens_selected_l2"],
+            "skill_tokens_presented_l2": choice["skill_tokens_presented_l2"],
+            "skill_routing_mode": choice["mode"]}
 
 
 def _prune_fallback_threads():
@@ -402,14 +403,19 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
             return {"status": "budget", "reason": "budget reservation refused"}
         from .spawn import ensure_worktree
         wt = Path(t.get("worktree") or ensure_worktree(task_id))
-        from .spawn import packet_run_meta
+        from .spawn import _prepare_skills, packet, packet_run_meta
+        skill_choice = _prepare_skills(t, "codex_execute", pool.cfg)
+        if skill_choice and skill_choice["mode"] == "active":
+            briefing = packet(t, wt, cfg=pool.cfg, skills=skill_choice)
+            old_packet = packet_span(prompt)
+            prompt = prompt.replace(old_packet, briefing, 1) if old_packet else briefing + "\n" + prompt
         t = {**t, "packet_meta": packet_meta if packet_meta is not None else packet_run_meta(packet_span(prompt))}
         try:
             skill_meta = _codex_skill_meta()
             t["packet_meta"].update(skills_exposed=skill_meta["skills_exposed"],
                                     skill_tokens_l0=skill_meta["skill_tokens_l0"])
             if promotion.mode("skill_routing", pool.cfg) in ("shadow", "active"):
-                t["packet_meta"].update(_route_skills(t, pool.cfg, skill_meta))
+                t["packet_meta"].update(_route_skills(t, pool.cfg, skill_meta, skill_choice))
             else:
                 decision_log.record("skill_selection", task_id, candidates=skill_meta["skills_exposed"],
                                 hard_constraints=["static exposure (stage 1)"],

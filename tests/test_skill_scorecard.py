@@ -165,6 +165,29 @@ class SkillScorecardTests(unittest.TestCase):
                  redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 cli.main()
 
+    def test_selection_rows_by_role_and_window(self):
+        rows = [{"kind": "skill_selection", "role": "execute", "mode": "shadow"},
+                {"kind": "skill_selection", "role": "review", "mode": "shadow"}]
+        with mock.patch.object(skill_scorecard.decision_log, "read_all", return_value=rows):
+            self.assertEqual(skill_scorecard.selection_rows(self.root, "execute", 60), 1)
+
+    def test_recovery_rate_windowed(self):
+        rows = [{"kind": "skill_selection", "subject": "T-1", "role": "execute", "mode": "active"},
+                {"kind": "skill_selection", "subject": "T-2", "role": "execute", "mode": "shadow"},
+                {"kind": "outcome", "decision_kind": "skill_selection", "subject": "T-1",
+                 "skill_recovery": ["executor/x"]}]
+        with mock.patch.object(skill_scorecard.decision_log, "read_all", return_value=rows):
+            self.assertEqual(skill_scorecard.recovery_rate(self.root, "execute", 60), .5)
+
+    def test_presented_tokens_and_recovery_from_active_rows(self):
+        self._rows([{"role": "execute", "input_tokens": 100, "context": {
+            "skills_exposed": ["executor/x"], "skills_selected": ["executor/x"],
+            "skills_used": ["executor/y"], "skill_tokens_l0": 4,
+            "skill_tokens_presented_l2": 12}}])
+        card = skill_scorecard.build(self.root)
+        self.assertEqual(card["by_role_skill"]["execute/executor/x"]["skill_tokens_l2"], 12)
+        self.assertEqual(card["by_role"]["execute"]["skill_recovery_rate"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

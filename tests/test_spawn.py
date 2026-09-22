@@ -1333,6 +1333,61 @@ class ContextTelemetry(unittest.TestCase):
         self.assertEqual(len(spawn._PACKET_BUILD_META), spawn._PACKET_BUILD_META_MAX)
         self.assertNotIn(first_version, spawn._PACKET_BUILD_META)
 
+    def _active_choice(self):
+        return {"selected": ["executor/implement-spec"], "mandatory": ["executor/implement-spec"],
+                "ambiguous": [], "tokens_selected_l0": 2, "tokens_selected_l2": 3,
+                "tokens_exposed_l0": 2, "candidates": ["executor/implement-spec"],
+                "rejected": [], "triggers": {}, "task_class": "feature", "reason": "test"}
+
+    def test_active_skills_section_carries_level2_of_selected_only(self):
+        choice = self._active_choice()
+        with mock.patch.object(spawn.skills_registry, "render", side_effect=lambda skill, level: f"L{level}:{skill}"), \
+                mock.patch.object(spawn, "_skill_records", return_value={"executor/implement-spec": {"version": "1"}}):
+            section = spawn._skills_section(choice)["section"]
+        self.assertIn("### executor/implement-spec (v1)\nL2:executor/implement-spec", section)
+
+    def test_skills_section_is_first_packet_section_and_capped(self):
+        choice = {**self._active_choice(), "selected": ["executor/implement-spec", "executor/extra"]}
+        with mock.patch.object(spawn.skills_registry, "render",
+                               side_effect=lambda skill, level: ("x" * (100 if skill.endswith("implement-spec") else 2500)
+                                                                  if level == 2 else "short")), \
+                mock.patch.object(spawn, "_skill_records", return_value={
+                    "executor/implement-spec": {"version": "1"}, "executor/extra": {"version": "1"}}):
+            rendered = spawn._skills_section(choice)
+        self.assertLessEqual(100, spawn._SKILL_PRESENTATION_CAP)
+        self.assertIn("executor/extra", rendered["demoted"])
+
+    def test_active_refused_without_shadow_evidence_or_with_high_recovery(self):
+        cfg = {"skills": {"mode": "active", "max_recovery": .1}}
+        with mock.patch.object(spawn.skill_router, "select", return_value=self._active_choice()), \
+                mock.patch.object(spawn.skill_scorecard, "selection_rows", return_value=0), \
+                mock.patch.object(spawn.skill_scorecard, "recovery_rate", return_value=0), \
+                mock.patch.object(spawn.notify, "notify"):
+            self.assertEqual(spawn._prepare_skills({"id": "T"}, "execute", cfg)["mode"], "shadow")
+
+    def test_skill_use_detected_from_read_of_skill_file_and_script_invocation(self):
+        rows = [json.dumps({"task": "T-use", "tool": "Read",
+                            "tool_target": "skills/executor/a/SKILL.md"}),
+                json.dumps({"task": "T-use", "tool": "Bash",
+                            "tool_target": "bash skills/review/b/scripts/run.sh"})]
+        records = {"executor/a": {"est_tokens_l2": 2}, "review/b": {"est_tokens_l2": 3}}
+        with mock.patch.object(Path, "exists", return_value=True), \
+                mock.patch.object(Path, "read_text", return_value="\n".join(rows)), \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}):
+            self.assertEqual(spawn._skills_from_gate("T-use"), (["executor/a", "review/b"], 5))
+
+    def test_active_launch_adds_disable_slash_commands_and_shadow_does_not(self):
+        source = Path(spawn.__file__).read_text()
+        self.assertIn('cmd.append("--disable-slash-commands")', source)
+        self.assertIn('get("skill_routing_mode") == "active"', source)
+
+    def test_selection_runs_once_before_packet_build(self):
+        cfg = {"skills": {"mode": "shadow"}}
+        with mock.patch.object(spawn.skill_router, "select", return_value=self._active_choice()) as select:
+            choice = spawn._prepare_skills({"id": "T"}, "execute", cfg)
+            self.assertEqual(choice["mode"], "shadow")
+        select.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

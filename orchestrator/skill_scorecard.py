@@ -4,7 +4,7 @@ from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 
-from . import STATE, attribution, strategy
+from . import STATE, attribution, decision_log, strategy
 
 
 DIMENSIONS = ("role", "task_class", "band", "model", "strategy", "repo")
@@ -297,6 +297,33 @@ def redundancy(root=STATE):
     return output
 
 
+def _selection_rows(root, role, since_s):
+    since = __import__("time").time() - since_s
+    return [row for row in decision_log.read_all(root=root, since_ts=since)
+            if row.get("kind") == "skill_selection"
+            and (row.get("role") or (row.get("deterministic") or {}).get("role")
+                 or (row.get("extra") or {}).get("role")) == role
+            and row.get("mode") in ("shadow", "active")]
+
+
+def selection_rows(root, role, since_s):
+    """Count recent routing decisions for one role."""
+    return len(_selection_rows(root, role, since_s))
+
+
+def recovery_rate(root, role, since_s):
+    """Return recoveries per recent selection, matching outcomes by subject."""
+    selections = _selection_rows(root, role, since_s)
+    if not selections:
+        return 0.0
+    since = __import__("time").time() - since_s
+    subjects = {row.get("subject") for row in selections}
+    recovered = {row.get("subject") for row in decision_log.read_all(root=root, since_ts=since)
+                 if row.get("kind") == "outcome" and row.get("decision_kind") == "skill_selection"
+                 and row.get("subject") in subjects and row.get("skill_recovery")}
+    return round(len(recovered) / len(selections), 3)
+
+
 def build(root=STATE):
     root = Path(root)
     rows = []
@@ -326,7 +353,9 @@ def build(root=STATE):
             "role": role, "skill_id": skill_id, "exposures": len(selected), "uses": uses,
             "use_rate": round(uses / len(selected), 3),
             "skill_tokens_l0": _avg([row["context"].get("skill_tokens_l0", 0) for row in selected]),
-            "skill_tokens_l2": _avg([row["context"].get("skill_tokens_l2", 0) for row in selected]),
+            "skill_tokens_l2": _avg([row["context"].get("skill_tokens_presented_l2",
+                                                         row["context"].get("skill_tokens_l2", 0))
+                                      for row in selected]),
             "skill_overhead_ratio": _avg(overhead),
         }
     by_role = {}

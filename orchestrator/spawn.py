@@ -3,7 +3,7 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, tool_catalog, skills_registry
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -11,8 +11,10 @@ _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
 _CONTEXT_ROUTER_ACTIVE_WARNED = False
 _TOOL_DISCLOSURE_ACTIVE_WARNED = False
-_SKILL_ROUTING_ACTIVE_WARNED = False
 _INSTRUCTION_RENDER_META = OrderedDict()
+
+_SKILL_EVIDENCE_WINDOW_S = 7 * 24 * 60 * 60
+_SKILL_PRESENTATION_CAP = 2400
 
 
 def _skill_records():
@@ -33,26 +35,80 @@ def _skill_exposure(task, role):
     return {"skills_exposed": exposed, "skill_tokens_l0": tokens}
 
 
-def _skill_routing(task, role, cfg, exposure):
-    global _SKILL_ROUTING_ACTIVE_WARNED
+def _prepare_skills(task, role, cfg):
+    """Select once, apply the active safety gate, and prepare bounded rendering."""
     mode = promotion.mode("skill_routing", cfg)
     if mode not in ("shadow", "active"):
-        return {}
-    if mode == "active" and not _SKILL_ROUTING_ACTIVE_WARNED:
-        notify.notify("skill routing active is shadow-only until Stage 5; exposure is unchanged")
-        _SKILL_ROUTING_ACTIVE_WARNED = True
+        return None
     choice = skill_router.select(task, role, cfg=cfg)
+    choice["mode"] = mode
+    if role not in ("execute", "review", "codex_execute"):
+        choice["mode"] = "shadow"
+    if choice["mode"] == "active":
+        rows = skill_scorecard.selection_rows(STATE, role, _SKILL_EVIDENCE_WINDOW_S)
+        recovery = skill_scorecard.recovery_rate(STATE, role, _SKILL_EVIDENCE_WINDOW_S)
+        maximum = float((cfg.get("skills") or {}).get("max_recovery", .10))
+        if rows < 30 or recovery > maximum:
+            choice["mode"] = "shadow"
+            notify.notify(f"{task['id']}: active skill routing refused; using shadow "
+                          f"(role={role}, rows={rows}, recovery={recovery:.3f})")
+    choice.update(_skills_section(choice) if choice["mode"] == "active"
+                  else {"section": "", "presented": [], "demoted": [], "skill_tokens_presented_l2": 0})
+    return choice
+
+
+def _skills_section(choice):
+    selected = list(choice["selected"])
+    mandatory = set(choice.get("mandatory") or [])
+    levels = {skill_id: 2 for skill_id in selected}
+    dropped, demoted = [], []
+    def l2_chars():
+        return sum(len(skills_registry.render(skill_id, 2)) for skill_id in selected
+                   if levels.get(skill_id) == 2)
+    for skill_id in reversed(selected):
+        if l2_chars() <= _SKILL_PRESENTATION_CAP:
+            break
+        if skill_id in mandatory:
+            continue
+        levels[skill_id] = 1
+        demoted.append(skill_id)
+    while l2_chars() > _SKILL_PRESENTATION_CAP:
+        candidate = next((item for item in reversed(selected) if item not in mandatory), None)
+        if candidate is None:
+            break
+        selected.remove(candidate); levels.pop(candidate, None); dropped.append(candidate)
+    parts = []
+    for skill_id in selected:
+        version = _skill_records().get(skill_id, {}).get("version", "unknown")
+        parts.append(f"### {skill_id} (v{version})\n{skills_registry.render(skill_id, levels[skill_id])}")
+    ambiguous = [item for item in choice.get("ambiguous", []) if item not in selected]
+    if ambiguous:
+        parts.append("### available on request\n" + "\n".join(skills_registry.render(item, 0) for item in ambiguous))
+    return {"section": "## skills\n" + "\n\n".join(parts), "presented": selected,
+            "demoted": demoted, "dropped": dropped,
+            "skill_tokens_presented_l2": sum(len(skills_registry.render(item, 2)) // 4
+                                               for item in selected if levels[item] == 2)}
+
+
+def _skill_routing(task, role, cfg, exposure, choice=None):
+    choice = choice or _prepare_skills(task, role, cfg)
+    if choice is None:
+        return {}
+    presented = choice["presented"] if choice["mode"] == "active" else choice["selected"]
     decision_log.record("skill_selection", task["id"], candidates=choice["candidates"],
                         hard_constraints=choice["mandatory"],
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
                                        "mandatory": choice["mandatory"]},
-                        selected=choice["selected"], rejected=choice["rejected"],
-                        reason=choice["reason"], mode=mode,
+                        selected=presented, rejected=choice["rejected"],
+                        reason=choice["reason"], mode=choice["mode"],
                         extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
-                                                            "tokens_selected_l2", "ambiguous")})
-    return {"skills_selected": choice["selected"],
+                                                            "tokens_selected_l2", "ambiguous")}
+                              | {"role": role, "demoted": choice["demoted"]})
+    return {"skills_selected": presented,
             "skill_tokens_selected_l0": choice["tokens_selected_l0"],
-            "skill_tokens_selected_l2": choice["tokens_selected_l2"]}
+            "skill_tokens_selected_l2": choice["tokens_selected_l2"],
+            "skill_tokens_presented_l2": choice["skill_tokens_presented_l2"],
+            "skill_routing_mode": choice["mode"]}
 
 
 def _skills_from_gate(task_id, session_id=None):
@@ -354,7 +410,7 @@ def _shadow_tool_disclosure(task, role, cfg):
     return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens}
 
 
-def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
+def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
     scope = [str(p) for p in task.get("scope", [])]
@@ -475,6 +531,8 @@ def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
         ("evidence", evidence_lines or ["- (none)"]),
     ]
+    if skills and skills.get("section"):
+        sections.insert(0, ("skills", skills["section"].removeprefix("## skills\n").splitlines()))
     cfg = Pool().cfg if cfg is None else cfg
     candidates = []
     task_id = task.get("id", "(none)")
@@ -559,7 +617,9 @@ def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
                   "memory_layers": ",".join(memory["layers_consulted"]),
-                  "candidate_tokens": candidate_tokens, "candidate_known": True, **shadow_meta}
+                  "candidate_tokens": candidate_tokens, "candidate_known": True,
+                  "skill_tokens_presented_l2": (skills or {}).get("skill_tokens_presented_l2", 0),
+                  **shadow_meta}
 
 
 def packet_meta(task, worktree) -> dict:
@@ -606,9 +666,9 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
     return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree, *, cfg=None) -> str:
+def packet(task, worktree, *, cfg=None, skills=None) -> str:
     """Build a bounded executor briefing with a verifiable provenance header."""
-    body, meta = _packet_body(task, worktree, cfg=cfg)
+    body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
     # Account for the header itself, including a possible extra digit in n.
@@ -626,7 +686,7 @@ def packet(task, worktree, *, cfg=None) -> str:
                           {key: value for key, value in meta.items()
                            if key in ("candidate_tokens", "candidate_known", "routed_tokens",
                                       "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
-                                      "routed_rules_version", "evidence_ids")})
+                                      "routed_rules_version", "evidence_ids", "skill_tokens_presented_l2")})
     return result
 
 
@@ -652,7 +712,7 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed, *, cfg=None) -> str:
+def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
     src = reviewed or task
@@ -675,7 +735,8 @@ def review_packet(task, reviewed, *, cfg=None) -> str:
     if pipeline.get("gate_reds"):
         failure = pipeline.get("last_failure_text") or pipeline.get("gate_failure") or src.get("reason") or "(unavailable)"
         gate_lines.append("last_failure_head: " + str(failure).splitlines()[0][:500])
-    sections = [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
+    sections = ([_section("skills", skills["section"].removeprefix("## skills\n"))]
+                if skills and skills.get("section") else []) + [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
                 _section("scope", src.get("scope", [])), None,
                 _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines)]
     reviewer_role = (task.get("constraints") or {}).get("reviewer_role")
@@ -755,7 +816,9 @@ def review_packet(task, reviewed, *, cfg=None) -> str:
                                 head_sha=_base_sha(src, wt), cfg=cfg)
     return _role_packet(body, _base_sha(src, wt),
                         f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}",
-                        candidate_tokens=len(raw_diff) // 4, candidate_known=True, **shadow_meta)
+                        candidate_tokens=len(raw_diff) // 4, candidate_known=True,
+                        skill_tokens_presented_l2=(skills or {}).get("skill_tokens_presented_l2", 0),
+                        **shadow_meta)
 
 
 def spec_review_packet(task) -> str:
@@ -855,6 +918,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
            "--dangerously-skip-permissions", "--allowedTools", tools,
            "--strict-mcp-config", "--mcp-config", str(mcp_config)]
+    if (task.get("packet_meta") or {}).get("skill_routing_mode") == "active":
+        cmd.append("--disable-slash-commands")
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
@@ -1036,9 +1101,10 @@ def run_worker(task_id, account_id=None):
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
     try:
+        skill_choice = _prepare_skills(t, role, pool.cfg)
         if role == "review":
             src = reviewed if reviewed is not None else t
-            role_packet = review_packet(t, src)
+            role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice)
             security_signals = {"security": "## security\n" in role_packet}
             prompt = render("review", packet=role_packet, task=t, signals=security_signals)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
@@ -1054,7 +1120,7 @@ def run_worker(task_id, account_id=None):
             t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
             bus.update(task_id, executor=t["executor"])
             packet_worktree = t.get("worktree") or ROOT
-            role_packet = packet(t, packet_worktree)
+            role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice)
             prompt = render("execute", packet=role_packet, task=t) + \
                 "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
@@ -1076,7 +1142,7 @@ def run_worker(task_id, account_id=None):
             exposure = {"skills_exposed": exposed,
                         "skill_tokens_l0": sum(int(records[item].get("est_tokens_l0") or 0) for item in exposed)}
         t["packet_meta"].update(exposure)
-        t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure))
+        t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure, skill_choice))
         bus.update(task_id, packet_meta=t["packet_meta"])
     except Exception as exc:
         notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")
