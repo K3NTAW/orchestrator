@@ -1399,6 +1399,20 @@ class Daemon(unittest.TestCase):
                 daemon.auto_fix_round(P.Pool())
                 self.assertEqual(len(self.fixes_for(tid)), 1)
 
+    def test_auto_fix_round_survives_missing_goal_under_autonomous(self):
+        tid = self.held_for_fix()
+        pool = P.Pool()
+        pool.cfg.setdefault("planner", {})["autonomous"] = True
+        messages = []
+        with mock.patch.object(daemon.decision, "routes_enabled", return_value=True), \
+                mock.patch.object(daemon, "notify", messages.append):
+            daemon.auto_fix_round(pool)
+        fix, = self.fixes_for(tid)
+        self.assertEqual(fix["constraints"]["fix_round_for"], tid)
+        self.assertEqual(len(messages), 1)
+        self.assertIn(tid, messages[0])
+        self.assertIn("T-0043", messages[0])
+
     def test_gate_red_unknown_runner_escalates(self):
         messages = []
         self.swap(daemon, "notify", messages.append)
