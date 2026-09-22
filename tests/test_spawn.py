@@ -549,6 +549,27 @@ class Render(unittest.TestCase):
         self.assertIn("tests/test_widget.py", text)
         self.assertIn("widget.py:3 build_widget", text)
 
+    def test_packet_accepts_cfg_override(self):
+        task = self.packet_fixture()
+        off = spawn.packet(task, TMP, cfg={"context_router": {"mode": "off"}})
+        off_meta = spawn.packet_run_meta(off)
+        shadow = spawn.packet(task, TMP, cfg={"context_router": {"mode": "shadow"}})
+        self.assertEqual(off, shadow)
+        self.assertNotIn("routed_tokens", off_meta)
+        self.assertIn("routed_tokens", spawn.packet_run_meta(shadow))
+
+    def test_review_packet_accepts_cfg_override(self):
+        task = {**self.packet_fixture(), "spec": "ordinary"}
+        off_cfg = {"context_router": {"mode": "off"}, "review": {"security_paths": []}, "limits": {}}
+        shadow_cfg = {**off_cfg, "context_router": {"mode": "shadow"}}
+        with mock.patch.object(spawn, "Pool", side_effect=AssertionError("Pool constructed")):
+            off = spawn.review_packet(task, task, cfg=off_cfg)
+            off_meta = spawn.packet_run_meta(off)
+            shadow = spawn.review_packet(task, task, cfg=shadow_cfg)
+        self.assertEqual(off, shadow)
+        self.assertNotIn("routed_tokens", off_meta)
+        self.assertIn("routed_tokens", spawn.packet_run_meta(shadow))
+
     def test_review_packet_has_spec_acceptance_diff_tests_gate_in_order(self):
         task = self.packet_fixture()
         task.update(spec="precise spec", pipeline={"gated_at": "now", "gate_attempts": 2,

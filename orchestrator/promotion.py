@@ -93,10 +93,21 @@ def evaluate(feature, evidence, cfg=None):
     criteria = _criteria(cfg)
     n = evidence.get("n", 0) or 0
     reasons = list(mode_flags)
+    shadow_features = {"context_router", "tool_disclosure", "conditional_instructions", "handoff_routing"}
     if n < criteria["min_samples"]:
         reasons.append("insufficient_evidence")
         return {"feature": feature, "mode": mode, "n": n, "recommendation": "stay",
                 "reasons": reasons, "criteria": criteria}
+    if feature in shadow_features:
+        if evidence.get("suite_present") is False:
+            reasons.append("context_eval_missing")
+        elif evidence.get("suite_present") and not evidence.get("suite_passed"):
+            reasons.append("context_eval_failed")
+        if any(evidence.get(key) is None for key in
+               ("first_pass_delta", "fix_rounds_delta", "gate_success_delta", "review_findings_delta")):
+            reasons.append("shadow_quality_unmeasured")
+            return {"feature": feature, "mode": mode, "n": n,
+                    "recommendation": "stay", "reasons": reasons, "criteria": criteria}
 
     quality = (
         ("first_pass", evidence.get("first_pass_delta"), lambda value: value < criteria["first_pass_delta"]),
@@ -156,14 +167,46 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
-    if feature == "handoff_routing":
-        from . import handoff_scorecard
-        rows = handoff_scorecard.lineage_rows(root)
-        return {"n": sum(row.get("rounds", 0) >= 1 for row in rows),
-                "reason": "shadow_quality_unmeasured"}
-    if feature in {"context_router", "tool_disclosure", "conditional_instructions"}:
-        # Evidence arrives with P27/P28 context scorecards.
-        return {"n": 0}
+    shadow_keys = {"context_router": "routed_tokens", "tool_disclosure": "tool_tokens_minimal",
+                   "conditional_instructions": "instruction_tokens_modular"}
+    if feature in {*shadow_keys, "handoff_routing"}:
+        contexts = []
+        for path in (root / "runs").glob("*.jsonl") if (root / "runs").exists() else ():
+            contexts.extend(row.get("context") for row in _jsonl(path) if isinstance(row.get("context"), dict))
+        if feature == "handoff_routing":
+            rows = [row for row in decision_log.read_all(root=root) if row.get("kind") == "handoff_routing"]
+            n = len(rows)
+            reductions = [(row.get("deterministic") or {}).get("reduction_ratio") for row in rows]
+        else:
+            key = shadow_keys[feature]
+            measured = [row for row in contexts if row.get(key) is not None]
+            n = len(measured)
+            reductions = [row.get("routed_reduction_ratio") for row in measured]
+            if feature == "tool_disclosure":
+                reductions = [1 - row["tool_tokens_minimal"] / row["tool_tokens_disclosed"]
+                              for row in measured if row.get("tool_tokens_disclosed")]
+            elif feature == "conditional_instructions":
+                reductions = [1 - row["instruction_tokens_modular"] / row["instruction_tokens"]
+                              for row in measured if row.get("instruction_tokens")]
+            else:
+                reductions = [1 - value for value in reductions if isinstance(value, (int, float))]
+        eval_path = root / "context_eval.json"
+        try:
+            suite = json.loads(eval_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            suite = None
+        passed = bool(suite and suite.get("suite_passed"))
+        recovery_rows = [row for row in decision_log.read_all(root=root)
+                         if row.get("kind") == "read_economy" and
+                         (row.get("deterministic") or {}).get("read_kind") == "evidence_available"]
+        result = {"n": n, "first_pass_delta": None, "fix_rounds_delta": None,
+                  "gate_success_delta": None, "review_findings_delta": None,
+                  "accepted_cost_delta": None, "accepted_tokens_delta": None, "latency_delta": None,
+                  "security_ok": None, "suite_present": suite is not None, "suite_passed": passed,
+                  "context_recovery_rate": len(recovery_rows) / n if n else 0, "context_recovery_n": n}
+        if passed and reductions:
+            result["accepted_tokens_delta"] = -(sum(reductions) / len(reductions))
+        return result
     if feature == "planner_routing":
         try:
             import tomllib

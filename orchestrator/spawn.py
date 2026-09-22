@@ -289,7 +289,7 @@ def _shadow_tool_disclosure(task, role, cfg):
     return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens}
 
 
-def _packet_body(task, worktree) -> tuple[str, dict]:
+def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
     scope = [str(p) for p in task.get("scope", [])]
@@ -410,7 +410,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
         ("evidence", evidence_lines or ["- (none)"]),
     ]
-    cfg = Pool().cfg
+    cfg = Pool().cfg if cfg is None else cfg
     candidates = []
     task_id = task.get("id", "(none)")
     if task.get("spec"):
@@ -541,9 +541,9 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
     return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree) -> str:
+def packet(task, worktree, *, cfg=None) -> str:
     """Build a bounded executor briefing with a verifiable provenance header."""
-    body, meta = _packet_body(task, worktree)
+    body, meta = _packet_body(task, worktree, cfg=cfg)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
     # Account for the header itself, including a possible extra digit in n.
@@ -587,7 +587,7 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed) -> str:
+def review_packet(task, reviewed, *, cfg=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
     src = reviewed or task
@@ -624,7 +624,8 @@ def review_packet(task, reviewed) -> str:
     }
     if reviewer_role in role_focus:
         sections.append(_section("role", role_focus[reviewer_role]))
-    security_globs = Pool().cfg.get("review", {}).get("security_paths", [])
+    cfg = Pool().cfg if cfg is None else cfg
+    security_globs = cfg.get("review", {}).get("security_paths", [])
     matched = sorted({glob for glob in security_globs for path in src.get("scope", []) if Path(path).match(glob)})
     semantic = re.search(r"\b(auth|credential|secret|token|permission|crypt|security)\b",
                          f"{src.get('spec', '')}\n{raw_diff}", re.I)
@@ -662,12 +663,11 @@ def review_packet(task, reviewed) -> str:
         comments = []
     other_chars = len("\n".join(section for section in sections if section is not None)) + 1
     diff_heading_chars = len("## diff\n")
-    configured_cap = Pool().cfg.get("limits", {}).get("review_diff_chars", 12000)
+    configured_cap = cfg.get("limits", {}).get("review_diff_chars", 12000)
     diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
     sections[3] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
-    cfg = Pool().cfg
     candidates = []
     if src.get("spec"):
         candidates.append(evidence.make("architecture_note", f"task:{src['id']}:spec", src["spec"],

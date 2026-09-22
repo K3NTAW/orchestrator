@@ -150,6 +150,8 @@ def main():
     sc.add_argument("--context", action="store_true")
     sc.add_argument("--reads", action="store_true")
     sc.add_argument("--handoffs", action="store_true")
+    sc.add_argument("--economy", action="store_true")
+    ce = sub.add_parser("context-eval"); ce.add_argument("--json", action="store_true"); ce.add_argument("--root")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -180,7 +182,7 @@ def main():
     if a.cmd == "scorecard":
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
@@ -195,6 +197,7 @@ def main():
             "--context": (),
             "--reads": (),
             "--handoffs": (),
+            "--economy": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
@@ -206,6 +209,8 @@ def main():
             mode = "--reads"
         if a.handoffs:
             mode = "--handoffs"
+        if a.economy:
+            mode = "--economy"
         if a.goal is not None and not a.parallelism:
             ap.error("--goal requires --parallelism")
         if a.parallelism and a.planner:
@@ -337,8 +342,45 @@ def main():
         serve_main(host=a.host, port=a.port)
     elif a.cmd == "post":
         print(json.dumps(bus.post_result(a.task, {"summary": a.summary}, a.status)["result"]))
+    elif a.cmd == "context-eval":
+        from . import context_eval
+        real_state = ROOT / ".orchestrator"
+        results = context_eval.run_all(a.root)
+        document = context_eval.result_document(results)
+        real_state.mkdir(parents=True, exist_ok=True)
+        (real_state / "context_eval.json").write_text(json.dumps(document, indent=2) + "\n")
+        print(json.dumps(document, indent=1) if a.json else context_eval.format_report(results))
+        if not document["suite_passed"]:
+            raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.handoffs:
+        if a.economy:
+            from . import context_scorecard, handoff_scorecard, promotion, read_economy
+            context = context_scorecard.build(scorecard.STATE)
+            handoffs = handoff_scorecard.by_start(scorecard.STATE)
+            reads = read_economy.summary(scorecard.STATE)
+            keys = set(context["by_role_task_class"]) | set(handoffs)
+            joined = {"/".join(key): {"context_and_tools": context["by_role_task_class"].get(key),
+                                      "handoffs": handoffs.get(key),
+                                      "reads": {"role": reads["by_role"].get(key[0]),
+                                                "task_class": reads["by_task_class"].get(key[1])}}
+                      for key in sorted(keys)}
+            try:
+                last_eval = json.loads((scorecard.STATE / "context_eval.json").read_text())
+            except (OSError, ValueError):
+                last_eval = None
+            features = ("context_router", "tool_disclosure", "conditional_instructions", "handoff_routing")
+            card = {"by_role_task_class": joined,
+                    "promotion": [promotion.evaluate(name, promotion.collect(name, scorecard.STATE), Pool().cfg)
+                                  for name in features], "last_context_eval": last_eval}
+            if a.json:
+                print(json.dumps(card, indent=1))
+            else:
+                status = "never run" if not last_eval else f"{last_eval.get('ran_at')} {last_eval.get('git_head')} passed={last_eval.get('suite_passed')}"
+                print("Last context-eval result: " + status)
+                print("role/class\tcontext+tools\thandoffs\treads")
+                for key, value in joined.items(): print(f"{key}\t{value['context_and_tools']}\t{value['handoffs']}\t{value['reads']}")
+                print(promotion.format_report(card["promotion"]))
+        elif a.handoffs:
             from . import handoff_scorecard
             card = handoff_scorecard.build(root=scorecard.STATE, cfg=Pool().cfg)
             print(json.dumps(card, indent=1) if a.json else handoff_scorecard.format_report(card))

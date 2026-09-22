@@ -3,7 +3,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from . import STATE
+from . import STATE, attribution
 
 
 def _entries(root):
@@ -37,6 +37,13 @@ def _shadow(rows):
 
 def build(root=STATE):
     entries = list(_entries(root))
+    tasks = {}
+    for path in sorted((Path(root) / "tasks").glob("*.json")):
+        try:
+            task = json.loads(path.read_text())
+            tasks[task.get("id", path.stem)] = task
+        except (OSError, ValueError, TypeError):
+            continue
     roles = {}
     for role in sorted({row.get("role") or "?" for row in entries}):
         rows = [row for row in entries if (row.get("role") or "?") == role]
@@ -101,7 +108,20 @@ def build(root=STATE):
                        "amplification_by_section": by_section, "repeated_sections": repeated,
                        "lineage_roots": sorted({row.get("lineage_root") for row in rows if row.get("lineage_root")}),
                        **_shadow(rows)}
-    return {"roles": roles, "goals": goals}
+    by_role_class = {}
+    for key in sorted({(row.get("role") or "unknown",
+                        attribution.task_class(tasks[row.get("task")]) if row.get("task") in tasks else "unknown")
+                       for row in entries}):
+        selected = [row for row in entries if (row.get("role") or "unknown") == key[0] and
+                    (attribution.task_class(tasks[row.get("task")]) if row.get("task") in tasks else "unknown") == key[1]]
+        contexts = [row["context"] for row in selected if isinstance(row.get("context"), dict)]
+        disclosed = [c["tool_tokens_disclosed"] for c in contexts if c.get("tool_tokens_disclosed") is not None]
+        minimal = [c["tool_tokens_minimal"] for c in contexts if c.get("tool_tokens_minimal") is not None]
+        by_role_class[key] = {"runs": len(selected), "measured": len(contexts),
+                              "tool_tokens_disclosed": _avg(disclosed), "tool_tokens_minimal": _avg(minimal),
+                              "tool_reduction": round(sum(minimal) / sum(disclosed), 3) if disclosed and sum(disclosed) else None,
+                              **_shadow(selected)}
+    return {"roles": roles, "goals": goals, "by_role_task_class": by_role_class}
 
 
 def format_report(card):
