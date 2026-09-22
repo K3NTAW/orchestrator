@@ -358,18 +358,19 @@ def main():
             context = context_scorecard.build(scorecard.STATE)
             handoffs = handoff_scorecard.by_start(scorecard.STATE)
             reads = read_economy.summary(scorecard.STATE)
-            keys = set(context["by_role_task_class"]) | set(handoffs)
+            keys = set(context["by_role_task_class"])
             joined = {"/".join(key): {"context_and_tools": context["by_role_task_class"].get(key),
-                                      "handoffs": handoffs.get(key),
                                       "reads": {"role": reads["by_role"].get(key[0]),
                                                 "task_class": reads["by_task_class"].get(key[1])}}
                       for key in sorted(keys)}
+            handoffs_by_executor = {"/".join(key): value for key, value in sorted(handoffs.items())}
             try:
                 last_eval = json.loads((scorecard.STATE / "context_eval.json").read_text())
             except (OSError, ValueError):
                 last_eval = None
             features = ("context_router", "tool_disclosure", "conditional_instructions", "handoff_routing")
             card = {"by_role_task_class": joined,
+                    "handoffs_by_executor_task_class": handoffs_by_executor,
                     "promotion": [promotion.evaluate(name, promotion.collect(name, scorecard.STATE), Pool().cfg)
                                   for name in features], "last_context_eval": last_eval}
             if a.json:
@@ -377,8 +378,10 @@ def main():
             else:
                 status = "never run" if not last_eval else f"{last_eval.get('ran_at')} {last_eval.get('git_head')} passed={last_eval.get('suite_passed')}"
                 print("Last context-eval result: " + status)
-                print("role/class\tcontext+tools\thandoffs\treads")
-                for key, value in joined.items(): print(f"{key}\t{value['context_and_tools']}\t{value['handoffs']}\t{value['reads']}")
+                print("role/class\tcontext+tools\treads")
+                for key, value in joined.items(): print(f"{key}\t{value['context_and_tools']}\t{value['reads']}")
+                print("executor/class\thandoffs")
+                for key, value in handoffs_by_executor.items(): print(f"{key}\t{value}")
                 print(promotion.format_report(card["promotion"]))
         elif a.handoffs:
             from . import handoff_scorecard

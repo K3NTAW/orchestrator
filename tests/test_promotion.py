@@ -130,6 +130,13 @@ class TestPromotion(unittest.TestCase):
         self.assertEqual(result["n"], 0)
         self.assertIsNone(result["accepted_tokens_delta"])
 
+    def test_handoff_routing_evidence_counts_handoff_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            decision_log.record("handoff", "T-1", candidates=["codex"], selected=["codex"],
+                                rejected=[], hard_constraints=[], deterministic={}, jev={},
+                                reason="route", confidence=1, n=1, mode="shadow", root=root)
+            self.assertEqual(promotion.collect("handoff_routing", root=root)["n"], 1)
+
     def test_shadow_features_never_promote_without_quality_evidence(self):
         for feature in ("context_router", "tool_disclosure", "conditional_instructions", "handoff_routing"):
             result = promotion.evaluate(feature, {"n": 50, "first_pass_delta": None,

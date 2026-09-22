@@ -174,8 +174,9 @@ def collect(feature, root=STATE):
         for path in (root / "runs").glob("*.jsonl") if (root / "runs").exists() else ():
             contexts.extend(row.get("context") for row in _jsonl(path) if isinstance(row.get("context"), dict))
         if feature == "handoff_routing":
-            rows = [row for row in decision_log.read_all(root=root) if row.get("kind") == "handoff_routing"]
-            n = len(rows)
+            from . import handoff_scorecard
+            rows = [row for row in decision_log.read_all(root=root) if row.get("kind") == "handoff"]
+            n = max(len(rows), len(handoff_scorecard.lineage_rows(root)))
             reductions = [(row.get("deterministic") or {}).get("reduction_ratio") for row in rows]
         else:
             key = shadow_keys[feature]

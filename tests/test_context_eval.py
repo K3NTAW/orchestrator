@@ -53,3 +53,21 @@ class ContextEval(unittest.TestCase):
             cli.main()
         saved = json.loads((root / ".orchestrator" / "context_eval.json").read_text())
         self.assertTrue(saved["suite_passed"])
+
+    def test_economy_join_keys_align(self):
+        context = {"by_role_task_class": {("execute", "localized_fix"): {"n": 1}}}
+        handoffs = {("codex", "localized_fix"): {"n": 2}}
+        reads = {"by_role": {"execute": {"n": 3}},
+                 "by_task_class": {"localized_fix": {"n": 4}}}
+        with mock.patch("orchestrator.context_scorecard.build", return_value=context), \
+             mock.patch("orchestrator.handoff_scorecard.by_start", return_value=handoffs), \
+             mock.patch("orchestrator.read_economy.summary", return_value=reads), \
+             mock.patch("orchestrator.promotion.collect", return_value={"n": 0}), \
+             mock.patch("sys.argv", ["orchestrator", "scorecard", "--economy", "--json"]), \
+             mock.patch("builtins.print") as output:
+            cli.main()
+        card = json.loads(output.call_args.args[0])
+        joined = card["by_role_task_class"]["execute/localized_fix"]
+        self.assertEqual(joined["context_and_tools"], {"n": 1})
+        self.assertEqual(joined["reads"], {"role": {"n": 3}, "task_class": {"n": 4}})
+        self.assertEqual(card["handoffs_by_executor_task_class"]["codex/localized_fix"], {"n": 2})
