@@ -16,6 +16,27 @@ def evidence(**overrides):
 
 
 class TestPromotion(unittest.TestCase):
+    def test_context_features_default_shadow(self):
+        features = ("context_router", "tool_disclosure", "conditional_instructions")
+        for feature in features:
+            with self.subTest(feature=feature):
+                self.assertIn(feature, promotion.FEATURES)
+                self.assertEqual(promotion.FEATURES[feature]["default"], "shadow")
+                result = promotion.evaluate(feature, {"n": 0})
+                self.assertEqual(result["recommendation"], "stay")
+                self.assertIn("insufficient_evidence", result["reasons"])
+        rows = {row["feature"]: row for row in promotion.report(cfg={}, root="/missing")}
+        self.assertTrue(set(features) <= rows.keys())
+        self.assertTrue(all(rows[feature]["recommendation"] == "stay" for feature in features))
+
+    def test_mode_loads_pool_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            pool = promotion.Path(root) / "pool.toml"
+            pool.write_text('[context_router]\nmode = "active"\n', encoding="utf-8")
+            with mock.patch.object(promotion, "STATE", promotion.Path(root)):
+                self.assertEqual(promotion.mode("context_router"), "active")
+        self.assertEqual(promotion.mode("tool_disclosure", {}), "shadow")
+
     def test_planner_routing_feature_registered_and_collected(self):
         self.assertEqual(promotion.FEATURES["planner_routing"]["default"], "shadow")
         rows = [dict(tier="opus", decision_type="close", band="small",

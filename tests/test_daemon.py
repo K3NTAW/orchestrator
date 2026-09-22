@@ -80,6 +80,26 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_dispatch_records_instruction_tokens(self):
+        task = bus.create_task("fresh fix telemetry", "spec", ["passes"], ["x.py"],
+                               role="execute", complexity=3)
+        packet = "packet vabcdef base dead sources test\n## spec\nx"
+        prompt = "instructions\n" + packet
+        seen = []
+
+        def start(task_id, rendered, packet_meta=None, **kwargs):
+            seen.append((task_id, rendered, packet_meta))
+            return {"status": "held"}
+
+        with mock.patch.object(spawn, "packet", return_value=packet), \
+                mock.patch.object(spawn, "render", return_value=prompt), \
+                mock.patch.object(executor, "start", side_effect=start), \
+                mock.patch.object(daemon.jev_route, "shadow_context", return_value=None):
+            daemon._dispatch_fresh_fix(task["id"], "test")
+
+        self.assertEqual(seen[0][:2], (task["id"], prompt))
+        self.assertEqual(seen[0][2]["instruction_tokens"], len(prompt) // 4 - len(packet) // 4)
+
     def dispatch_telemetry(self, slots=0):
         self.swap(daemon.schedlog, "SCHED_DIR", self.sandbox / "sched")
         self.swap(daemon, "free_slots", lambda pool: slots)
@@ -788,8 +808,10 @@ class Daemon(unittest.TestCase):
         self.assertNotIn("{{", seen["prompt"])
         self.assertIn(seen["packet_meta"]["hash"], seen["prompt"].splitlines()[0])
 
-    def test_dispatch_holds_execute_task_on_render_error(self):
-        broken = self.task("broken render")
+    def test_dispatch_render_error_holds_task(self):
+        broken = bus.create_task("broken render", "keep this literal token: {{unfilled_placeholder}}",
+                                 ["works"], ["x.py"], role="execute", complexity=2,
+                                 parent="T-0043")["id"]
         normal = self.task("normal render")
         messages = []
         self.swap(daemon, "notify", messages.append)
@@ -805,8 +827,8 @@ class Daemon(unittest.TestCase):
         daemon.dispatch(P.Pool())
         updated = bus.get(broken)
         self.assertEqual(updated["status"], "held")
-        self.assertTrue(updated["hold_reason"].startswith("render_error: unfilled_placeholder"))
-        self.assertEqual(updated["pipeline"]["render_error"], "unfilled_placeholder: spec")
+        self.assertTrue(updated["hold_reason"].startswith("dispatch failed"))
+        self.assertIn("unfilled_placeholder", updated["pipeline"]["dispatch_error"])
         self.assertNotIn("dispatched_at", updated["pipeline"])
         self.assertEqual(messages, [mock.ANY])
         self.assertIn(broken, messages[0])
@@ -822,6 +844,27 @@ class Daemon(unittest.TestCase):
         self.assertEqual(updated["status"], "held")
         self.assertTrue(updated["hold_reason"].startswith("render_error"))
         worker.assert_not_called()
+
+    def test_fresh_fix_prompt_renders_without_contract_kwargs(self):
+        fix_spec = "unique fresh-fix failures and acceptance"
+        tid = bus.create_task("fresh fix contract", fix_spec, ["passes"], ["x.py"],
+                              role="execute", complexity=3)["id"]
+        original_render = spawn.render
+        rendered = []
+
+        def render(name, **kwargs):
+            self.assertEqual(set(kwargs), {"packet"})
+            prompt = original_render(name, **kwargs)
+            rendered.append(prompt)
+            return prompt
+
+        with mock.patch.object(spawn, "render", side_effect=render), \
+                mock.patch.object(daemon, "_dispatch_worker") as worker:
+            daemon._dispatch_fresh_fix(tid, "compat_changed:test")
+
+        worker.assert_called_once()
+        self.assertEqual(len(rendered), 1)
+        self.assertEqual(rendered[0].count(fix_spec), 1)
 
     def test_auto_fix_round_skips_render_error_hold(self):
         tid = self.task("render-held")
@@ -1398,6 +1441,20 @@ class Daemon(unittest.TestCase):
                 self.assertEqual(len(data), 3000)
                 daemon.auto_fix_round(P.Pool())
                 self.assertEqual(len(self.fixes_for(tid)), 1)
+
+    def test_auto_fix_round_survives_missing_goal_under_autonomous(self):
+        tid = self.held_for_fix()
+        pool = P.Pool()
+        pool.cfg.setdefault("planner", {})["autonomous"] = True
+        messages = []
+        with mock.patch.object(daemon.decision, "routes_enabled", return_value=True), \
+                mock.patch.object(daemon, "notify", messages.append):
+            daemon.auto_fix_round(pool)
+        fix, = self.fixes_for(tid)
+        self.assertEqual(fix["constraints"]["fix_round_for"], tid)
+        self.assertEqual(len(messages), 1)
+        self.assertIn(tid, messages[0])
+        self.assertIn("T-0043", messages[0])
 
     def test_gate_red_unknown_runner_escalates(self):
         messages = []
@@ -3355,7 +3412,6 @@ class DirtyScopePaths(unittest.TestCase):
             self.assertEqual(daemon._dirty_scope_paths(root, ["*"]),
                              ["outside.py", "src/new\nfile.py", "src/renamed.py", "src/tracked.py"])
 
-
 class DispatchWorker(unittest.TestCase):
     def setUp(self):
         from contextlib import nullcontext
@@ -3408,11 +3464,23 @@ class DispatchWorker(unittest.TestCase):
             return {"status": "held", "reason": "quota exhausted"}
         self.start.side_effect = held
         daemon._dispatch_worker(self.task_id, "prompt")
-        self.assertEqual(self.state["status"], "held")
+        self.assertEqual(self.state["status"], "queued")
         self.assertEqual(self.state["hold_reason"], "quota exhausted")
         self.assertEqual(self.state["resume_hint"], {"thread": "thread-1"})
         self.assertNotIn("result", self.state)
-        self.assertEqual(self.state["pipeline"], {"dispatched_at": 123})
+        self.assertEqual(self.state["pipeline"], {"hold_note": "quota exhausted"})
+
+    def test_dispatch_worker_handles_non_terminal_start_statuses(self):
+        self.start.return_value = {"status": "held", "reason": "quota exhausted"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "queued")
+        self.assertEqual(self.state["pipeline"], {"hold_note": "quota exhausted"})
+
+        self.state.update(status="running", pipeline={"dispatched_at": 456})
+        self.start.return_value = {"status": "refused", "reason": "x"}
+        daemon._dispatch_worker(self.task_id, "prompt")
+        self.assertEqual(self.state["status"], "failed")
+        self.assertEqual(self.state["result"]["reason"], "x")
 
     def test_dispatch_worker_exception_marks_failed(self):
         self.start.side_effect = RuntimeError("launch failed")

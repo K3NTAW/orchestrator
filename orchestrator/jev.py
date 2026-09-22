@@ -11,7 +11,7 @@ writes its own log to .orchestrator/runs/jev/gate.jsonl in that same subdirector
 """
 import fcntl, json, os, re, sys, tempfile, time, urllib.error, urllib.request
 from datetime import date
-from . import STATE, bus, spawn
+from . import STATE, bus, spawn, notify
 from . import pool as P
 
 URL = "https://api.typesafe.ai/v1/systemone"
@@ -23,6 +23,50 @@ DEFAULT_MODEL = "jev-latest"
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_DAILY_BUDGET_TOKENS = 20_000_000
 DEFAULT_MAX_STATE_CHARS = 100_000
+
+# Declarations describe state fields; question-carried text is documented in notes.
+BOUNDARIES = {}
+undeclared_calls = 0
+refused_calls = 0
+
+
+def declare_boundary(site, *, fields, max_chars, raw_source_allowed=False, notes=""):
+    """Register the reviewed outbound state contract for a call site."""
+    BOUNDARIES[site] = {"fields": frozenset(fields), "max_chars": max_chars,
+                        "raw_source_allowed": raw_source_allowed, "notes": notes}
+
+
+# The gate's disabled fast path cannot import networking modules. If it was
+# imported first, consume the declaration it prepared without importing us.
+_gate = sys.modules.get(__package__ + ".jev_gate")
+if _gate is not None and hasattr(_gate, "BOUNDARY"):
+    declare_boundary("gate", **_gate.BOUNDARY)
+
+
+def bind_site(site):
+    """Bind production requests while preserving legacy injected transports."""
+    from functools import partial
+    from inspect import Parameter, signature
+    parameters = signature(ask).parameters
+    if "site" in parameters or any(p.kind == Parameter.VAR_KEYWORD for p in parameters.values()):
+        return partial(ask, site=site)
+    return ask
+
+
+def allowed_for_class(data_class):
+    """P19 policy: unknown classes/configuration fail closed."""
+    levels = {"PUBLIC": 0, "INTERNAL": 1, "SENSITIVE": 2, "SECRET": 3}
+    ceiling = levels.get(_cfg().get("max_data_class", "INTERNAL"), -1)
+    return data_class in levels and levels[data_class] <= ceiling
+
+
+def _boundary_warning(message):
+    # Fixed messages only: neither payload values nor undeclared keys reach logs.
+    try:
+        notify.notify(message)
+    except Exception:
+        pass  # notification failures must not break the optional Jev signal
+
 
 RETRY_STATUS = (429, 529)
 RETRY_BACKOFF_S = 0.5
@@ -73,6 +117,7 @@ def _cfg():
         "daily_budget_tokens": jev.get("daily_budget_tokens", DEFAULT_DAILY_BUDGET_TOKENS),
         "max_state_chars": jev.get("max_state_chars", DEFAULT_MAX_STATE_CHARS),
         "votes": jev.get("votes", 1),
+        "max_data_class": jev.get("max_data_class", "INTERNAL"),
     }
 
 
@@ -181,11 +226,25 @@ def _api_key():
     return value
 
 
-def ask(state, questions, *, model=None, timeout_s=None, task=None):
+def ask(state, questions, *, site=None, data_class="INTERNAL", model=None, timeout_s=None, task=None):
     """POST typed `questions` about `state` to Jev, return the parsed {"answers", "usage"} dict, or None on any
     failure (fail-open by design: disabled, no key, timeout, HTTP error, invalid JSON, budget exhausted).
     One retry with a 0.5s backoff on 429/529; every other failure returns None immediately. timeout_s=None
     (the default) uses pool.toml [jev].timeout_s rather than hard-coding a value in the signature."""
+    global undeclared_calls, refused_calls
+    if not allowed_for_class(data_class):
+        refused_calls += 1
+        _boundary_warning("Jev boundary: data class refused; request not sent")
+        return None
+    boundary = BOUNDARIES.get(site)
+    if boundary is None:
+        undeclared_calls += 1
+        _boundary_warning("Jev boundary: undeclared call site")
+    elif isinstance(state, dict):
+        if not state.keys() <= boundary["fields"]:
+            undeclared_calls += 1
+            _boundary_warning("Jev boundary: undeclared state fields dropped")
+            state = {key: value for key, value in state.items() if key in boundary["fields"]}
     caller = sys._getframe(1).f_code.co_name
     cfg = _cfg()
     if not cfg["enabled"]:
@@ -199,7 +258,8 @@ def ask(state, questions, *, model=None, timeout_s=None, task=None):
     model = model or cfg["model"]
     timeout_s = cfg["timeout_s"] if timeout_s is None else timeout_s
     state_text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
-    state_text = redact(state_text)[:cfg["max_state_chars"]]
+    max_chars = min(cfg["max_state_chars"], boundary["max_chars"]) if boundary else cfg["max_state_chars"]
+    state_text = redact(state_text)[:max_chars]
 
     votes = cfg.get("votes", 1)
     if not isinstance(votes, int) or isinstance(votes, bool) or votes < 1:

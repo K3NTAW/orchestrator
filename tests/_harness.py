@@ -1,7 +1,7 @@
 """Shared test harness: one TMP orchestrator root per test process, the hook subprocess runner, and small git
 helpers. ORCH_ROOT must be set before the first `from orchestrator import ...` anywhere in the process, so this
 module does that at import time — every test file imports it first."""
-import json, os, subprocess, sys, tempfile
+import json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -9,7 +9,18 @@ TMP = Path(tempfile.mkdtemp(prefix="orch-"))
 os.environ["ORCH_ROOT"] = str(TMP)
 (TMP / ".orchestrator").mkdir()
 for f in ("pool.toml",):
-    (TMP / ".orchestrator" / f).write_text((REPO / ".orchestrator" / f).read_text())
+    config = (REPO / ".orchestrator" / f).read_text()
+    # Tests opt into autonomous planning explicitly; never inherit the live repository setting.
+    sections = re.split(r"(?m)(?=^\[)", config)
+    for index, section in enumerate(sections):
+        if section.splitlines()[:1] == ["[planner]"]:
+            section = re.sub(r"(?m)^([ \t]*autonomous[ \t]*=[ \t]*).*$", r"\1false", section)
+        if section.startswith("[[claude_accounts]]") and re.search(r'^id\s*=\s*"B"\s*$', section, re.M):
+            # Selection fixtures assume A alone plans; live B planner affinity must not leak into tests.
+            section = re.sub(r'(?m)^(role_affinity\s*=\s*\[)"planner",\s*', r'\1', section)
+        sections[index] = section
+    config = "".join(sections)
+    (TMP / ".orchestrator" / f).write_text(config)
 (TMP / ".orchestrator" / "prompts").symlink_to(REPO / ".orchestrator" / "prompts")
 (TMP / ".claude").symlink_to(REPO / ".claude")
 sys.path.insert(0, str(REPO))

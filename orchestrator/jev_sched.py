@@ -1,5 +1,7 @@
 """Bounded Jev shadow signals for ambiguous scheduler interference pairs."""
 
+from functools import partial
+
 import fcntl
 import hashlib
 import json
@@ -10,6 +12,10 @@ from pathlib import Path
 
 from . import STATE, decision_log, jev
 from .pool import config as pool_config
+
+jev.declare_boundary('sched', fields=('pairs',),
+                     max_chars=jev.DEFAULT_MAX_STATE_CHARS, raw_source_allowed=False,
+                     notes='Pair a/b, titles, scope, spec_excerpts (400 each), reasons; default 8 pairs.')
 
 
 PAIR_QUESTIONS = {
@@ -191,7 +197,7 @@ def _copy_wave(wave_result):
                                                   for row in (wave_result.get("deferred") or [])]
 
 
-def annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask):
+def annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=partial(jev.ask, site="sched")):
     """Annotate a deterministic wave with bounded Jev signals; fail open on every error."""
     settings = _cfg(cfg)
     mode = settings["jev_mode"]

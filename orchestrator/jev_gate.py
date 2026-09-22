@@ -13,6 +13,15 @@ from functools import cache
 from . import STATE
 from . import pool as P
 
+# Keep the disabled hook free of network imports. jev consumes this declaration
+# on import when the gate was loaded first; otherwise register immediately.
+BOUNDARY = dict(fields=("task", "recent", "proposed"), max_chars=100_000,
+                raw_source_allowed=False,
+                notes="Task title/spec/acceptance/scope/role; 20 recent calls; proposed tool/input.")
+_jev = sys.modules.get(__package__ + ".jev")
+if _jev is not None:
+    _jev.declare_boundary("gate", **BOUNDARY)
+
 GATE_LOG = STATE / "runs" / "jev" / "gate.jsonl"
 RECENT_LIMIT = 20
 NEEDED_LOW = 0.15
@@ -221,7 +230,8 @@ def build_state(task, recent, tool_name, tool_input):
 def ask_jev(state):
     """{"needed"|"redundant"|"destructive": {"p", "confidence"} or None}, or None if Jev is unavailable."""
     from . import jev
-    result = jev.ask(state, QUESTIONS)
+    ask_fn = jev.bind_site("gate")
+    result = ask_fn(state, QUESTIONS)
     if result is None:
         return None
     answers = result.get("answers") or {}

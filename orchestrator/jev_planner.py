@@ -10,6 +10,10 @@ from typing import Any
 
 from orchestrator import jev, schedlog
 
+jev.declare_boundary('planner', fields=('decision_type', 'band', 'task_class', 'architectural', 'ambiguous', 'risk_class', 'signals', 'subject_id', 'subject_title', 'spec_excerpt', 'goal_title', 'scope_count', 'scout_count', 'failing_test_count', 'spec_review_request_changes', 'auto_fix_rounds_used', 'signature_repeated'),
+                     max_chars=4000, raw_source_allowed=False,
+                     notes='Titles 200; spec 300; up to 10 signals of 100 chars.')
+
 
 QUESTIONS = OrderedDict(
     [
@@ -162,7 +166,7 @@ def ask(
         result = dict(base)
         result["asked"] = True
         try:
-            raw = ask_fn(state(classification, ctx, goal, task), QUESTIONS, task=subject_id)
+            raw = ask_fn(state(classification, ctx, goal, task), QUESTIONS, site="planner", task=subject_id)
         except Exception:
             raw = None
         if raw is None:

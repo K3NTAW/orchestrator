@@ -1,4 +1,9 @@
-"""Structured, bounded evidence for orchestrator decisions."""
+"""Structured, bounded evidence for orchestrator decisions.
+
+Generic mappings: model_routing~routing, scheduling~wave/jev_sched,
+workflow_strategy~strategy, and planner_routing~planner_route. Legacy call sites
+keep their kinds; new context-program code uses the generic kinds.
+"""
 
 import time
 from contextlib import contextmanager
@@ -8,6 +13,20 @@ from zoneinfo import ZoneInfo
 
 from . import schedlog
 
+
+CONTEXT_KINDS = (
+    "context_selection",
+    "evidence_reuse",
+    "retrieval",
+    "tool_disclosure",
+    "instruction_loading",
+    "model_routing",
+    "planner_routing",
+    "scheduling",
+    "action_gate",
+    "workflow_strategy",
+    "handoff",
+)
 
 KINDS = (
     "routing",
@@ -23,7 +42,7 @@ KINDS = (
     "scout",
     "review_plan",
     "planner_route",
-)
+) + CONTEXT_KINDS
 
 _MAX_TEXT = 2000
 _TRUNCATION_MARKER = "...[truncated]"

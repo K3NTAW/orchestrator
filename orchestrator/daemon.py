@@ -181,11 +181,18 @@ def auto_fix_round(pool):
             point = {"goal_id": held.get("parent"), "kind": "held", "task_id": held["id"],
                      "payload_key": planner_runs._held_key(held)}
             if point["goal_id"]:
-                ctx = planner_runs.build_ctx(point, pool)
-                routine = planner_runs.decision.route(point, ctx).name == "routine"
-                if routine:
-                    ids = ctx["failing_ids"] or None
-                    comments = _rejecting_reviews(held)
+                try:
+                    ctx = planner_runs.build_ctx(point, pool)
+                    routed_routine = planner_runs.decision.route(point, ctx).name == "routine"
+                    routed_ids, routed_comments = ids, comments
+                    if routed_routine:
+                        routed_ids = ctx["failing_ids"] or None
+                        routed_comments = _rejecting_reviews(held)
+                    routine, ids, comments = routed_routine, routed_ids, routed_comments
+                except Exception as exc:
+                    detail = " ".join(str(exc).splitlines())
+                    notify(f"{held['id']}: warning: autonomous routing failed for goal {point['goal_id']}; "
+                           f"using routine fallback ({type(exc).__name__}: {detail})")
         if routine and rounds < cap and not repeated:
             with bus.locked():
                 current = bus.get(held["id"])
@@ -490,6 +497,8 @@ def hold_failed(tid, error_key, stage_label, exc):
         t = bus.get(tid)
         pipeline = dict(t.get("pipeline") or {})
         pipeline[error_key] = str(exc)[:300]
+        if error_key == "dispatch_error":
+            pipeline.pop("dispatched_at", None)
         bus.update(tid, status="held", hold_reason=f"{stage_label} failed: {type(exc).__name__}", pipeline=pipeline)
     notify(f"{tid}: {stage_label} failed: {exc}")
 
@@ -538,6 +547,18 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
             }), "done")
         elif r["status"] == "failed":
             bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+        elif r["status"] in ("held", "budget"):
+            with bus.locked():
+                task = bus.get(task_id)
+                pipeline = dict(task.get("pipeline") or {})
+                pipeline.pop("dispatched_at", None)
+                pipeline["hold_note"] = r.get("reason", r["status"])
+                bus.update(task_id, status="queued", pipeline=pipeline)
+        elif r["status"] in ("refused", "incompatible"):
+            reason = r.get("reason", r["status"])
+            bus.post_result(task_id, spawn.fit_result({"reason": reason[:3000]}), "failed")
+        elif r["status"] == "fallback":
+            pass
     except Exception as e:
         with bus.locked():
             t = bus.get(task_id)
@@ -571,12 +592,12 @@ def _dispatch_fresh_fix(task_id, reason):
     fix = bus.get(task_id)
     try:
         packet = spawn.packet(fix, spawn.ROOT)
-        prompt = spawn.render("execute", packet=packet, spec=fix["spec"],
-                              acceptance=fix["acceptance"], scope=fix["scope"])
+        prompt = spawn.render("execute", packet=packet)
     except Exception as exc:
         hold_render_error(task_id, exc)
         return
-    _dispatch_worker(task_id, prompt, None, spawn.packet_run_meta(packet))
+    _dispatch_worker(task_id, prompt, None,
+                     spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet))
 
 
 def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
@@ -867,12 +888,12 @@ def dispatch(pool):
                     bus.update(t["id"], pipeline=pipeline)
                 try:
                     packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
-                    prompt = spawn.render("execute", packet=packet, spec=t["spec"],
-                                          acceptance=t["acceptance"], scope=t["scope"])
+                    prompt = spawn.render("execute", packet=packet)
+                    meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
+                    spawn_async(_dispatch_worker, t["id"], prompt, None, meta)
                 except Exception as exc:
-                    hold_render_error(t["id"], exc)
+                    hold_failed(t["id"], "dispatch_error", "dispatch", exc)
                     continue
-                spawn_async(_dispatch_worker, t["id"], prompt, None, spawn.packet_run_meta(packet))
                 complete(t["id"], "dispatched_at")
             else:
                 # A competing dispatcher owns this task. Its failed claim costs us no
