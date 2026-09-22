@@ -415,3 +415,10 @@ type: decision · goal: T-0760 · tasks: T-0800,T-0802,T-0809,T-0814,T-0831,T-08
 - PR 20 was still open, so the two commits were pushed onto it and its body extended (checkpoints 2 + 3, 11 commits) instead of opening a third PR against the same branch.
 - Program status: P0–P4, P6, P8 (pool), P10–P31 delivered in shadow; P5 and P7 deferred until shadow data shows the ambiguous bucket matters. Every mode stays shadow; promotion needs an active A/B first.
 outcome: revert path: git revert the PR 20 merge commit, or per feature mode = "off" in pool.toml.
+
+## 2026-09-22 22:05 — three merges on the user's word ("do the merges") and the kgpt deploy
+type: decision · goal: T-0760 (orchestrator), T-0109 (kgpt), T-0010 (kgpt-ios) · provenance: repo
+- orchestrator PR 20 → main 41be3d8 (checkpoints 2+3, shadow). Root main replayed onto origin/main (6020e26), daemon restarted (pid 42349) on the merged code; all program modules import in the root.
+- kgpt PR 44 → main 071601c (harness checkpoint 4, migration 0029); deployed on Hetzner with make up (deploy_main.py); health verified separately below.
+- kgpt-ios PR 18 → main c99047c (voice modality). Phone build waits for the phone (user not home).
+outcome: revert paths: git revert 41be3d8 -m 1 (orchestrator); kgpt: git revert 071601c -m 1 + make restart at the previous sha (rollback.py) if the gateway misbehaves, migration 0029 downgrades; kgpt-ios: git revert c99047c -m 1.
