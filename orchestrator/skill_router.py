@@ -7,9 +7,9 @@ from . import attribution, skills_registry
 MANDATORY = {
     "execute": ("executor/implement-spec",),
     "codex_execute": ("executor/implement-spec",),
-    "review": ("reviewer/adversarial-review",),
-    "spec_review": ("reviewer/adversarial-review",),
-    "challenge": ("reviewer/challenge",),
+    "review": ("review/adversarial-review",),
+    "spec_review": ("review/adversarial-review",),
+    "challenge": ("review/challenge",),
     "planner": ("planner/memory", "planner/orchestrate", "planner/resume", "planner/write-spec"),
 }
 

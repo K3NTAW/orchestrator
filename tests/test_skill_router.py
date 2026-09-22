@@ -2,7 +2,7 @@ import _harness  # noqa: F401
 import unittest
 from unittest import mock
 
-from orchestrator import skill_router
+from orchestrator import skill_router, skills_registry
 
 
 def record(roles, triggers=(), l0=1, l2=2):
@@ -45,6 +45,26 @@ class SkillRouterTests(unittest.TestCase):
         for role in ("execute", "codex_execute", "review", "spec_review", "challenge", "planner"):
             with self.subTest(role=role):
                 self.assertTrue(self.route({"title": "x"}, role, {})["selected"])
+
+    def test_mandatory_ids_exist_in_registry(self):
+        # Build real records without changing the suite's shared registry state.
+        with mock.patch.object(skills_registry, "_write_json"), \
+                mock.patch.object(skills_registry, "_state_document", return_value={}):
+            records = skills_registry.sync(skills_dir=_harness.REPO / "skills")["skills"]
+        for role, mandatory in skill_router.MANDATORY.items():
+            with self.subTest(role=role):
+                registry_role = "execute" if role == "codex_execute" else role
+                for skill_id in mandatory:
+                    self.assertIn(skill_id, records)
+                    self.assertIn(registry_role, records[skill_id]["roles"])
+                result = self.route({"title": "x"}, role, records, cap=0)
+                self.assertEqual(result["selected"], list(mandatory))
+                for level in (0, 2):
+                    expected = sum(records[item][f"est_tokens_l{level}"] for item in mandatory)
+                    self.assertGreater(expected, 0)
+                    self.assertEqual(result[f"tokens_selected_l{level}"], expected)
+                # Reading the real mandatory skill must not produce a recovery.
+                self.assertEqual(set(mandatory) - set(result["selected"]), set())
 
 
 if __name__ == "__main__":

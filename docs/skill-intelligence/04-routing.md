@@ -15,8 +15,8 @@ Stage 4 scorecard evidence.
 | Worker role | Mandatory skills |
 | --- | --- |
 | execute / Codex execute | `executor/implement-spec` |
-| review, spec_review | `reviewer/adversarial-review` |
-| challenge | `reviewer/challenge` |
+| review, spec_review | `review/adversarial-review` |
+| challenge | `review/challenge` |
 | planner | `planner/memory`, `planner/orchestrate`, `planner/resume`, `planner/write-spec` |
 | scout | Triggered `repo-map`, `test-gap`, or `trace-callers` only |
 | triage | Triggered `classify` or `compact-memory` only |
