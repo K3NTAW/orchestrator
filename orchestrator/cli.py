@@ -178,6 +178,13 @@ def main():
     rs = sub.add_parser("roadmap-status")
     rs.add_argument("--json", action="store_true")
     rs.add_argument("--write", action="store_true")
+    sk = sub.add_parser("skills"); sksub = sk.add_subparsers(dest="skills_cmd", required=True)
+    sksync = sksub.add_parser("sync"); sksync.add_argument("--json", action="store_true")
+    sklist = sksub.add_parser("list"); sklist.add_argument("--json", action="store_true")
+    skshow = sksub.add_parser("show"); skshow.add_argument("id"); skshow.add_argument("--json", action="store_true")
+    sktransition = sksub.add_parser("transition"); sktransition.add_argument("id"); sktransition.add_argument("state")
+    sktransition.add_argument("--reason", required=True)
+    skrollback = sksub.add_parser("rollback"); skrollback.add_argument("id")
     a = ap.parse_args()
     if a.cmd == "scorecard":
         if a.planner_routing and (a.planner or a.parallelism):
@@ -221,7 +228,35 @@ def main():
             ap.error(f"--by {a.by} is not supported by {mode}; {mode} supports --by {choices}")
         if mode == "default":
             a.by = a.by or "executor"
-    if a.cmd == "roadmap-status":
+    if a.cmd == "skills":
+        from . import skills_registry
+        try:
+            if a.skills_cmd == "sync":
+                document = skills_registry.sync()
+                print(json.dumps(document, indent=2) if a.json else f"synced {len(document['skills'])} skills")
+            elif a.skills_cmd == "list":
+                document = skills_registry.load()
+                rows = document["skills"]
+                if a.json:
+                    print(json.dumps(rows, indent=2))
+                else:
+                    print("id\tstate\ttrust\troles\tl0/l2\tversion")
+                    for skill_id, record in sorted(rows.items()):
+                        print(f"{skill_id}\t{record['state']}\t{record['trust']}\t{','.join(record['roles'])}\t"
+                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}")
+            elif a.skills_cmd == "show":
+                record = skills_registry.load()["skills"].get(a.id)
+                if record is None:
+                    raise KeyError(a.id)
+                print(json.dumps(record, indent=2) if a.json else "\n".join(f"{key}: {value}" for key, value in record.items()))
+            elif a.skills_cmd == "transition":
+                print(json.dumps(skills_registry.transition(a.id, a.state, a.reason), indent=2))
+            else:
+                print(json.dumps(skills_registry.rollback(a.id), indent=2))
+        except (KeyError, ValueError, OSError) as error:
+            print(f"skills: {error}", file=sys.stderr)
+            raise SystemExit(2)
+    elif a.cmd == "roadmap-status":
         from . import roadmap
         output = ROOT / ".orchestrator" / "roadmap-status.json"
         report = roadmap.write(output) if a.write else roadmap.build(ROOT)
