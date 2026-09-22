@@ -36,6 +36,20 @@ class SkillScorecardTests(unittest.TestCase):
         card = skill_scorecard.build(self.root)
         self.assertEqual(card["skill_tokens_per_accepted_task"]["G-1"], 10)
 
+    def test_skill_recovery_rate_and_reduction(self):
+        self._rows([
+            {"role": "execute", "context": {"skills_exposed": ["executor/x", "executor/y"],
+             "skills_selected": ["executor/x"], "skills_used": ["executor/y"],
+             "skill_tokens_l0": 10, "skill_tokens_selected_l0": 4}},
+            {"role": "execute", "context": {"skills_exposed": ["executor/x", "executor/y"],
+             "skills_selected": ["executor/x"], "skills_used": ["executor/x"],
+             "skill_tokens_l0": 10, "skill_tokens_selected_l0": 4}},
+        ])
+        row = skill_scorecard.build(self.root)["by_role"]["execute"]
+        self.assertEqual(row["selected_set_size_avg"], 1)
+        self.assertEqual(row["skill_reduction"], .6)
+        self.assertEqual(row["skill_recovery_rate"], .5)
+
 
 if __name__ == "__main__":
     unittest.main()

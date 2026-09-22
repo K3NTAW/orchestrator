@@ -82,6 +82,14 @@ class TestPromotion(unittest.TestCase):
             self.assertEqual(promotion.collect("jev_sched", root=root),
                              {"n": 2, "jev_disagreement_rate": .5, "applied": 0})
 
+    def test_skill_routing_evidence_excludes_static_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            common = dict(candidates=["executor/implement-spec"], hard_constraints=[],
+                          deterministic={}, selected=["executor/implement-spec"], rejected=[], mode="shadow")
+            decision_log.record("skill_selection", "T-static", reason="stage1 static", root=root, **common)
+            decision_log.record("skill_selection", "T-routed", reason="mandatory skills", root=root, **common)
+            self.assertEqual(promotion.collect("skill_routing", root=root), {"n": 1})
+
     def test_insufficient_evidence_stays_shadow(self):
         result = promotion.evaluate("scheduler", evidence(
             n=19, accepted_cost_delta=-.15, accepted_tokens_delta=-.3,

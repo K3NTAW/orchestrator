@@ -42,6 +42,20 @@ def build(root=STATE):
             "skill_tokens_l2": _avg([row["context"].get("skill_tokens_l2", 0) for row in selected]),
             "skill_overhead_ratio": _avg(overhead),
         }
+    by_role = {}
+    for role in sorted({row.get("role") or "unknown" for row in rows}):
+        selected = [row for row in rows if (row.get("role") or "unknown") == role
+                    and row["context"].get("skills_selected") is not None]
+        reductions = [1 - row["context"].get("skill_tokens_selected_l0", 0) /
+                      row["context"]["skill_tokens_l0"] for row in selected
+                      if row["context"].get("skill_tokens_l0")]
+        recoveries = [bool(set(row["context"].get("skills_used") or []) -
+                           set(row["context"].get("skills_selected") or [])) for row in selected]
+        by_role[role] = {"spawns_with_selection": len(selected),
+                         "selected_set_size_avg": _avg([len(row["context"].get("skills_selected") or [])
+                                                         for row in selected]),
+                         "skill_reduction": _avg(reductions),
+                         "skill_recovery_rate": _avg(recoveries)}
     accepted = {}
     for row in rows:
         task = row.get("task")
@@ -54,11 +68,15 @@ def build(root=STATE):
         lineage = row.get("lineage_root") or row.get("goal_id") or task
         accepted.setdefault(lineage, 0)
         accepted[lineage] += (row["context"].get("skill_tokens_l0") or 0) + (row["context"].get("skill_tokens_l2") or 0)
-    return {"by_role_skill": by_role_skill, "skill_tokens_per_accepted_task": accepted}
+    return {"by_role_skill": by_role_skill, "by_role": by_role,
+            "skill_tokens_per_accepted_task": accepted}
 
 
 def format_report(card):
-    lines = ["role/skill\texposures\tuses\tuse rate\tl0 avg\tl2 avg\toverhead ratio"]
+    lines = ["role\tselected avg\tskill reduction\tskill recovery rate"]
+    for role, row in card["by_role"].items():
+        lines.append(f"{role}\t{row['selected_set_size_avg']}\t{row['skill_reduction']}\t{row['skill_recovery_rate']}")
+    lines += ["", "role/skill\texposures\tuses\tuse rate\tl0 avg\tl2 avg\toverhead ratio"]
     for key, row in card["by_role_skill"].items():
         lines.append(f"{key}\t{row['exposures']}\t{row['uses']}\t{row['use_rate']}\t{row['skill_tokens_l0']}\t{row['skill_tokens_l2']}\t{row['skill_overhead_ratio']}")
     lines += ["", "accepted lineage\tskill tokens", *

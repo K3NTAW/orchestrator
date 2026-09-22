@@ -304,7 +304,8 @@ def log_run(*, attempt=1, **fields):
                               "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
                               "routed_rules_version", "evidence_ids", "tool_tokens_disclosed",
                               "tool_tokens_minimal", "skills_exposed", "skills_used",
-                              "skill_tokens_l0", "skill_tokens_l2")}
+                              "skill_tokens_l0", "skill_tokens_l2", "skills_selected",
+                              "skill_tokens_selected_l0", "skill_tokens_selected_l2")}
         fields["context"]["packet_version"] = packet_meta.get("packet_version") or packet_meta.get("version")
     else:
         fields["context"] = None

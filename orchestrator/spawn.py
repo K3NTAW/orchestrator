@@ -3,7 +3,7 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, tool_catalog, skills_registry
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -11,6 +11,7 @@ _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
 _CONTEXT_ROUTER_ACTIVE_WARNED = False
 _TOOL_DISCLOSURE_ACTIVE_WARNED = False
+_SKILL_ROUTING_ACTIVE_WARNED = False
 _INSTRUCTION_RENDER_META = OrderedDict()
 
 
@@ -30,6 +31,28 @@ def _skill_exposure(task, role):
                                        "exposed": exposed, "skill_tokens_l0": tokens},
                         selected=exposed, reason="stage1 static", mode="shadow")
     return {"skills_exposed": exposed, "skill_tokens_l0": tokens}
+
+
+def _skill_routing(task, role, cfg, exposure):
+    global _SKILL_ROUTING_ACTIVE_WARNED
+    mode = promotion.mode("skill_routing", cfg)
+    if mode not in ("shadow", "active"):
+        return {}
+    if mode == "active" and not _SKILL_ROUTING_ACTIVE_WARNED:
+        notify.notify("skill routing active is shadow-only until Stage 5; exposure is unchanged")
+        _SKILL_ROUTING_ACTIVE_WARNED = True
+    choice = skill_router.select(task, role, cfg=cfg)
+    decision_log.record("skill_selection", task["id"], candidates=choice["candidates"],
+                        hard_constraints=choice["mandatory"],
+                        deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
+                                       "mandatory": choice["mandatory"]},
+                        selected=choice["selected"], rejected=choice["rejected"],
+                        reason=choice["reason"], mode=mode,
+                        extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
+                                                            "tokens_selected_l2", "ambiguous")})
+    return {"skills_selected": choice["selected"],
+            "skill_tokens_selected_l0": choice["tokens_selected_l0"],
+            "skill_tokens_selected_l2": choice["tokens_selected_l2"]}
 
 
 def _skills_from_gate(task_id, session_id=None):
@@ -877,7 +900,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         pipeline["skills_used"] = skills_used
         bus.update(task["id"], packet_meta=task["packet_meta"], pipeline=pipeline)
         decision_log.outcome(task["id"], "skill_selection", skills_used=skills_used,
-                             skill_tokens_l2=skill_tokens_l2)
+                             skill_tokens_l2=skill_tokens_l2,
+                             skill_recovery=sorted(set(skills_used) - set(task["packet_meta"].get("skills_selected") or [])))
         log["packet_meta"] = task["packet_meta"]
     except Exception as exc:
         notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
@@ -1044,7 +1068,15 @@ def run_worker(task_id, account_id=None):
     disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg)
     t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
     try:
-        t["packet_meta"].update(_skill_exposure(t, role))
+        exposure = _skill_exposure(t, role) if promotion.mode("skill_routing", pool.cfg) == "off" else None
+        if exposure is None:
+            records = _skill_records()
+            exposed = sorted(skill_id for skill_id, record in records.items()
+                             if record.get("state") == "active" and record.get("provenance") == "builtin")
+            exposure = {"skills_exposed": exposed,
+                        "skill_tokens_l0": sum(int(records[item].get("est_tokens_l0") or 0) for item in exposed)}
+        t["packet_meta"].update(exposure)
+        t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure))
         bus.update(task_id, packet_meta=t["packet_meta"])
     except Exception as exc:
         notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")

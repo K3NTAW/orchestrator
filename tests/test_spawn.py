@@ -1247,6 +1247,37 @@ class ContextTelemetry(unittest.TestCase):
         self.assertEqual(seen["skills_exposed"], ["execute/a", "review/b"])
         self.assertEqual(seen["skill_tokens_l0"], 8)
 
+    def test_skill_selection_row_and_meta_in_shadow_without_exposure_change(self):
+        task = bus.create_task("who calls", "who calls this", ["a"], ["x.py"], role="scout")
+        records = {"executor/implement-spec": {"state": "active", "provenance": "builtin",
+                    "roles": ["execute"], "task_classes": ["*"], "triggers": [], "est_tokens_l0": 3,
+                    "est_tokens_l2": 7},
+                   "scout/trace-callers": {"state": "active", "provenance": "builtin",
+                    "roles": ["scout"], "task_classes": ["*"], "triggers": ["who calls"],
+                    "est_tokens_l0": 5, "est_tokens_l2": 11}}
+        seen = {}
+        decisions = []
+        def run_claude(pool, account, worker, *args, **kwargs):
+            seen.update(worker["packet_meta"])
+            return {"status": "done", "output": {"result": "ok", "usage": {}}}
+        def capture(*args, **kwargs):
+            decisions.append((args, kwargs))
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "scout_packet", return_value="packet"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run_claude), \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.decision_log, "record", side_effect=capture):
+            spawn.run_worker(task["id"])
+        self.assertEqual(seen["skills_exposed"], sorted(records))
+        self.assertEqual(seen["skills_selected"], ["scout/trace-callers"])
+        routed = next(kwargs for args, kwargs in decisions
+                      if (args[0] if args else kwargs.get("kind")) == "skill_selection")
+        self.assertEqual(routed["selected"], ["scout/trace-callers"])
+        self.assertEqual(routed["rejected"], [])
+
     def test_skill_usage_from_gate_rows_for_claude_workers(self):
         path = spawn.STATE / "runs/jev/gate.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)

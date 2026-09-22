@@ -11,13 +11,35 @@ import inspect, json, re, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
-from . import scorecard, allocation, critical_path, duration, jev_route, decision_log
+from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router, notify
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
 FALLBACK_JOIN_TIMEOUT_S = 5
 _fallback_threads = []
 _fallback_threads_lock = threading.Lock()
+_SKILL_ROUTING_ACTIVE_WARNED = False
+
+
+def _route_skills(task, cfg, exposure):
+    global _SKILL_ROUTING_ACTIVE_WARNED
+    mode = promotion.mode("skill_routing", cfg)
+    if mode not in ("shadow", "active"):
+        return {}
+    if mode == "active" and not _SKILL_ROUTING_ACTIVE_WARNED:
+        notify.notify("skill routing active is shadow-only until Stage 5; exposure is unchanged")
+        _SKILL_ROUTING_ACTIVE_WARNED = True
+    choice = skill_router.select(task, "codex_execute", cfg=cfg)
+    decision_log.record("skill_selection", _state_target(task), candidates=choice["candidates"],
+                        hard_constraints=choice["mandatory"],
+                        deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
+                                       "mandatory": choice["mandatory"]}, selected=choice["selected"],
+                        rejected=choice["rejected"], reason=choice["reason"], mode=mode,
+                        extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
+                                                            "tokens_selected_l2", "ambiguous")})
+    return {"skills_selected": choice["selected"],
+            "skill_tokens_selected_l0": choice["tokens_selected_l0"],
+            "skill_tokens_selected_l2": choice["tokens_selected_l2"]}
 
 
 def _prune_fallback_threads():
@@ -168,7 +190,9 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         pipeline["skills_used"] = skill_meta["skills_used"]
         bus.update(log_task, packet_meta=log["packet_meta"], pipeline=pipeline)
         decision_log.outcome(log_task, "skill_selection", skills_used=skill_meta["skills_used"],
-                             skill_tokens_l2=skill_meta["skill_tokens_l2"])
+                             skill_tokens_l2=skill_meta["skill_tokens_l2"],
+                             skill_recovery=sorted(set(skill_meta["skills_used"]) -
+                                                   set(log["packet_meta"].get("skills_selected") or [])))
     except Exception:
         pass
     bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
@@ -384,12 +408,15 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
             skill_meta = _codex_skill_meta()
             t["packet_meta"].update(skills_exposed=skill_meta["skills_exposed"],
                                     skill_tokens_l0=skill_meta["skill_tokens_l0"])
-            decision_log.record("skill_selection", task_id, candidates=skill_meta["skills_exposed"],
+            if promotion.mode("skill_routing", pool.cfg) in ("shadow", "active"):
+                t["packet_meta"].update(_route_skills(t, pool.cfg, skill_meta))
+            else:
+                decision_log.record("skill_selection", task_id, candidates=skill_meta["skills_exposed"],
                                 hard_constraints=["static exposure (stage 1)"],
                                 deterministic={"role": "codex_execute", "task_class": scorecard.task_class(t),
                                                "exposed": skill_meta["skills_exposed"],
                                                "skill_tokens_l0": skill_meta["skill_tokens_l0"]},
-                                selected=skill_meta["skills_exposed"], reason="stage1 static", mode="shadow")
+                                    selected=skill_meta["skills_exposed"], reason="stage1 static", mode="shadow")
         except Exception:
             pass
         bus.update(task_id, packet_meta=t["packet_meta"])
