@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import hashlib
 import json
 import re
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import STATE
+from . import STATE, attribution
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -149,6 +150,15 @@ def _output_contract(meta: dict[str, Any], body: str) -> str:
     return re.sub(r"\s+", " ", match.group(1)).strip()[:300] if match else ""
 
 
+def _token_estimate(text: str) -> int:
+    """Estimate the disclosed procedural payload; metadata sections are indexed separately."""
+    sections = _sections(text)
+    if sections:
+        text = "\n".join(sections[name].split("\n", 1)[-1]
+                         for name in ("Procedure", "Output contract"))
+    return len(text) // 4
+
+
 def _git_dates(path: Path) -> tuple[str, str]:
     try:
         result = subprocess.run(
@@ -247,7 +257,7 @@ def sync(root: Path = STATE, skills_dir: Path = REPO / "skills") -> dict[str, An
             context_requirements=_list(meta.get("requires_context")), output_contract=output,
             est_tokens_l0=len(str(meta.get("description", ""))) // 4,
             est_tokens_l1=len(" ".join(triggers + ([objective] if objective else []) + ([output] if output else []))) // 4,
-            est_tokens_l2=len(body) // 4, security_class=str(meta.get("security", "internal")),
+            est_tokens_l2=_token_estimate(body), security_class=str(meta.get("security", "internal")),
             repo_scope=str(meta.get("repo", "orchestrator")),
             validation={"tests": tests, "status": "tested" if tests else "untested"},
             promotion_state=entry["state"], created_at=created, updated_at=updated,
@@ -326,3 +336,71 @@ def _update_registry_state(root: Path, skill_id: str, entry: dict[str, Any]) -> 
 
 def load(root: Path = STATE) -> dict[str, Any]:
     return _read_json(_paths(Path(root))[0], {"version": 1, "synced_at": None, "skills": {}})
+
+
+_P6_HEADINGS = (
+    "Trigger", "Objective", "Procedure", "Tools", "Evidence requirements",
+    "Output contract", "Stop conditions", "Failure/recovery",
+)
+
+
+def _sections(body: str) -> dict[str, str]:
+    """Return P6 sections, preserving their markdown headings."""
+    matches = list(re.finditer(r"(?m)^## (.+?)\s*$", body))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        name = match.group(1)
+        if name in _P6_HEADINGS:
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+            sections[name] = body[match.start():end].strip()
+    return sections
+
+
+def render(skill_id: str, level: int, root: Path = STATE) -> str:
+    """Render an active registry skill at disclosure level 0, 1, or 2."""
+    if level not in (0, 1, 2):
+        raise ValueError(f"unknown disclosure level: {level}")
+    record = load(Path(root)).get("skills", {}).get(skill_id)
+    if record is None:
+        raise KeyError(skill_id)
+    if level == 0:
+        description = str(record.get("description", "")).strip()
+        first, separator, _ = description.partition(".")
+        first = first.strip() + ("." if separator else "")
+        return f"- {skill_id} — {first}"
+    source = REPO / record["source"]
+    _, body = _frontmatter(source.read_text())
+    body = body.strip()
+    if level == 2:
+        return body
+    sections = _sections(body)
+    return "\n\n".join(sections[name] for name in ("Trigger", "Objective", "Output contract"))
+
+
+def candidates(task: dict[str, Any], role: str, cfg: Any = None,
+               root: Path = STATE) -> list[dict[str, Any]]:
+    """Select active skills using only role, task class, and declared triggers."""
+    del cfg  # Reserved for later routing stages; deterministic Stage 2 ignores it.
+    records = load(Path(root)).get("skills", {})
+    task_kind = attribution.task_class(task)
+    haystack = " ".join(str(task.get(key, "")) for key in ("title", "spec")).lower()
+    scope = [str(path) for path in (task.get("scope") or task.get("write_scope") or [])]
+    selected = []
+    for skill_id, record in records.items():
+        if record.get("state") != "active" or role not in record.get("roles", []):
+            continue
+        classes = record.get("task_classes", [])
+        if "*" not in classes and task_kind not in classes:
+            continue
+        triggers = record.get("triggers", [])
+        matched = []
+        for trigger in triggers:
+            trigger = str(trigger)
+            if trigger.startswith("scope:"):
+                if any(fnmatch.fnmatch(path, trigger[6:]) for path in scope):
+                    matched.append(trigger)
+            elif trigger.lower() in haystack:
+                matched.append(trigger)
+        if not triggers or matched:
+            selected.append({"id": skill_id, "matched": matched, "level": 1})
+    return sorted(selected, key=lambda row: (-len(row["matched"]), row["id"]))

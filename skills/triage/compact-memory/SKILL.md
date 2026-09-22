@@ -1,6 +1,35 @@
 ---
 name: compact-memory
-description: Compact .orchestrator/memory/decisions.md to ≤300 lines and dedupe gotchas.md, preserving every dated decision's outcome. Use monthly or when memory is over budget.
+description: Compact decisions to at most 300 lines and deduplicate gotchas while preserving outcomes.
+roles: [triage, planner]
+task_classes: [mechanical]
+triggers: [compact, "over budget", dedupe]
+tools: [Read, Edit, bus_post_result]
+requires_context: [memory_entry, decision]
+output: "compacted memory and five-line diff summary"
+security: internal
+repo: orchestrator
 ---
-# Compact memory
-A human reviews merges. Fold superseded decisions into their successor with a one-line "superseded YYYY-MM-DD". Never drop a gotcha whose fix is still current. Overwrite in place; post a 5-line diff summary via bus_post_result.
+## Trigger
+Monthly, compact, dedupe, or memory over budget.
+
+## Objective
+Compact `.orchestrator/memory/decisions.md` to ≤300 lines and dedupe gotchas.md without losing outcomes.
+
+## Procedure
+Fold superseded decisions into successors with one-line “superseded YYYY-MM-DD”. Overwrite in place.
+
+## Tools
+Read, Edit; bus_post_result.
+
+## Evidence requirements
+Preserve every dated decision outcome and every gotcha whose fix remains current.
+
+## Output contract
+Post a 5-line diff summary via bus_post_result.
+
+## Stop conditions
+Stop at ≤300 decision lines with gotchas deduplicated.
+
+## Failure/recovery
+Never drop a current fix. A human reviews merges.

@@ -1,19 +1,35 @@
 ---
 name: write-spec
-description: Write one atomic execute-task spec for the Codex executor (one acceptance cluster and explicit scope). Use when splitting a synthesized plan into bus tasks.
+description: Write one atomic execute-task spec with one acceptance cluster and explicit scope.
+roles: [planner]
+task_classes: ["*"]
+triggers: [spec, acceptance, decompose, atomic]
+tools: [Read, bus_create_task]
+requires_context: [scout_finding, source_chunk, decision]
+output: "one bus execute task with complete atomic spec"
+security: internal
+repo: orchestrator
 ---
-# Write an atomic spec
-A human reviews merges. The TaskCreated hook rejects any task without Acceptance and Scope.
-- Title: verb + object. Spec: what and why in ≤12 lines, citing path:line from scout findings.
-- Acceptance: 2–5 externally checkable statements (test names, CLI output, observable behavior).
-- Name tests as `tests/test_<module>.py::test_name` (the gate parses only this form; bare names are not verified), and use `unittest.TestCase` methods unless pytest is a project dependency.
-- Scope: glob list; concurrent execute tasks must have disjoint scopes.
-- read_scope: paths the worker may inspect; list them so the execution packet can include them.
-- interface_contract: functions, signatures, and file formats that other tasks rely on; state it explicitly for parallel or dependent work.
-- task_class: `mechanical`, `unfamiliar`, `debugging`, `architectural`, or `security`; this feeds executor routing.
-- route: `straightforward` or `full`; select the route appropriate to the goal's uncertainty and risk.
-- Constraints: read_only=false, timeout_s, budget_turns; no new dependencies unless named here.
-- depends_on: ids that must be merged first; complexity ≥5 gets a spec review before dispatch; test file = tests/test_<module>.py.
-- Warn above five files; split only by independently verifiable behaviour and dependency boundaries, never to satisfy the count.
-- Render `.orchestrator/prompts/execute.md` with these fields for the `codex(task_id, prompt)` call.
-Call `bus_create_task(role="execute", tier="astra", complexity=N, parent=GOAL_ID, ...)`.
+## Trigger
+Splitting a synthesized plan into an atomic task.
+
+## Objective
+Create one independently verifiable execute-task spec.
+
+## Procedure
+Title: verb + object. Spec: what/why in ≤12 lines with scout `path:line`. Acceptance: 2–5 observable checks. Tests use `tests/test_<module>.py::test_name` and unittest.TestCase unless pytest is a dependency. Declare disjoint Scope, read_scope, interface_contract, task_class (`mechanical`, `unfamiliar`, `debugging`, `architectural`, `security`), route (`straightforward` or `full`), read_only=false, timeout_s, budget_turns, dependencies, and any allowed dependency. Complexity ≥5 gets spec review. Warn above five files; split only by behavior/dependency boundaries. Render `.orchestrator/prompts/execute.md`; call `bus_create_task(role="execute", tier="astra", complexity=N, parent=GOAL_ID, ...)`.
+
+## Tools
+Read; bus_create_task.
+
+## Evidence requirements
+Acceptance and Scope are mandatory; cite scout findings; explicit interfaces for parallel/dependent work.
+
+## Output contract
+One atomic execute bus task with complete fields and parseable test IDs.
+
+## Stop conditions
+Stop after task creation.
+
+## Failure/recovery
+The TaskCreated hook rejects missing Acceptance/Scope. No new dependencies unless named. A human reviews merges.
