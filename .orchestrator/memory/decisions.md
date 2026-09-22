@@ -398,6 +398,13 @@ outcome: revert path: git revert the PR 19 merge commit; modes to off in pool.to
 
 ## 2026-09-22 20:30 — PR 19 merged into main (32343f7): Jev context program checkpoints 1+2, every feature in shadow
 type: decision · goal: T-0760 · provenance: repo
-- User approved ("you can merge pr 19"); the PR had grown to 21 commits (checkpoint 2 features merged onto the goal branch while it was open), body rewritten to cover all of it before merging. GitGuardian flagged fake fixture strings in tests/test_jev_boundary.py and tests/test_evidence.py; verified not credentials.
+- User approved ("you can merge pr 19"). Correction 20:45: the merge took only the 12 commits pushed at 17:50 (checkpoint 1); the checkpoint-2 commits were local to goal/T-0760 and unpushed. PR 19's body was briefly rewritten to claim them, then restored. Checkpoint 2 pushed and opened as PR 20 (9 commits) for the human. GitGuardian flagged fake fixture strings in tests/test_jev_boundary.py and tests/test_evidence.py; verified not credentials.
 - After merge: root main replayed onto origin/main (Planner commits on top), standalone daemon restarted on the new code.
 outcome: revert path: git revert 32343f7 -m 1; or per feature, mode = "off" in pool.toml.
+
+## 2026-09-22 T-0839 spec-review hold closed by respec T-0841, not a fix round; plan commit c6cf5a1
+type: decision · goal: T-0760 · tasks: T-0839,T-0840,T-0841 · provenance: repo
+- .orchestrator/tasks/T-0839.json — held spec_review request_changes with worktree null and no codex thread; a fix round with depends_on=[T-0839] can never dispatch (T-0839 failed 21:00, superseded by T-0841)
+- .orchestrator/tasks/T-0841.json — v3 spec running on codex in wt/T-0841, spec_review_verdict approve by Planner waiver; constraints.respec_for=T-0839 added 21:10 so planner_runs._observed_outcome scores the decision as respec
+- orchestrator/evidence.py:108, orchestrator/promotion.py:153/243, orchestrator/spawn.py:497/533 — the three T-0840 risks verified by grep on main and each bound by a v3 item
+outcome: plan.md committed c6cf5a1; revert path: git revert c6cf5a1 and drop constraints.respec_for from T-0841.json. Rule for packets: a held task with worktree null is respec territory, never fix_round
