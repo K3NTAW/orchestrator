@@ -660,6 +660,28 @@ assert attempted == []
         self.assertEqual(self._run(payload, task), 0)
         self.assertTrue(self._log_lines()[-1]["suppression_override"])
 
+    def test_different_signature_on_same_path_remains_eligible(self):
+        task, payload, target = self._active_fixture()
+        for override_first in (False, True):
+            with self.subTest(override_first=override_first), contextlib.redirect_stderr(io.StringIO()):
+                payload["session_id"] = f"different-range-{override_first}"
+                payload["tool_input"] = {"file_path": str(target), "offset": 0}
+                self.assertEqual(self._run(payload, task), 0)
+                self.assertEqual(self._run(payload, task), 2)
+                if override_first:
+                    self.assertEqual(self._run(payload, task), 0)
+                    self.assertTrue(self._log_lines()[-1]["suppression_override"])
+                payload["tool_input"] = {"file_path": str(target), "offset": 1}
+                self.assertEqual(self._run(payload, task), 0)
+                self.assertEqual(self._log_lines()[-1]["read_kind"], "same_file_different_range")
+                self.assertEqual(self._run(payload, task), 2)
+                row = self._log_lines()[-1]
+                self.assertEqual(row["selected"], "suppress")
+                self.assertFalse(row["suppression_override"])
+                self.assertEqual(self._run(payload, task), 0)
+                self.assertTrue(self._log_lines()[-1]["suppression_override"])
+                self.assertEqual(self._run(payload, task), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

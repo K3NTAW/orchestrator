@@ -249,7 +249,7 @@ def _suppression_state(session_id, update=None):
         try:
             value = json.loads(path.read_text())
         except (OSError, ValueError, TypeError):
-            value = {"count": 0, "overrides": [], "last_path": None}
+            value = {"count": 0, "overrides": [], "last_signature": None}
         if update:
             value = update(value)
             value["overrides"] = list(dict.fromkeys(value.get("overrides", [])))[-100:]
@@ -485,10 +485,10 @@ def run(payload):
                 economy["reason"] = "suppression_override"
             elif int(state.get("count", 0)) >= int(cfg.get("max_suppressions_per_session", 20)):
                 economy["reason"] = "session_cap"
-            elif state.get("last_path") == target:
+            elif state.get("last_signature") == signature:
                 def override(value):
                     value.setdefault("overrides", []).append(signature)
-                    value["last_path"] = None
+                    value["last_signature"] = None
                     return value
                 _suppression_state(session_id, override)
                 economy["suppression_override"] = True
@@ -496,7 +496,7 @@ def run(payload):
             else:
                 def suppressed(value):
                     value["count"] = int(value.get("count", 0)) + 1
-                    value["last_path"] = target
+                    value["last_signature"] = signature
                     return value
                 _suppression_state(session_id, suppressed)
                 earlier = next((item for item in reversed(history)
