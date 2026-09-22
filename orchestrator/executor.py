@@ -28,7 +28,7 @@ def _route_skills(task, cfg, exposure, choice=None):
         from .spawn import _prepare_skills
         choice = _prepare_skills(task, "codex_execute", cfg)
     presented = choice["presented"] if choice["mode"] == "active" else choice["selected"]
-    decision_log.record("skill_selection", _state_target(task), candidates=choice["candidates"],
+    decision_log.record("skill_selection", _state_target(task), role="codex_execute", candidates=choice["candidates"],
                         hard_constraints=choice["mandatory"],
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
                                        "mandatory": choice["mandatory"]}, selected=presented,
@@ -417,7 +417,7 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
             if promotion.mode("skill_routing", pool.cfg) in ("shadow", "active"):
                 t["packet_meta"].update(_route_skills(t, pool.cfg, skill_meta, skill_choice))
             else:
-                decision_log.record("skill_selection", task_id, candidates=skill_meta["skills_exposed"],
+                decision_log.record("skill_selection", task_id, role="codex_execute", candidates=skill_meta["skills_exposed"],
                                 hard_constraints=["static exposure (stage 1)"],
                                 deterministic={"role": "codex_execute", "task_class": scorecard.task_class(t),
                                                "exposed": skill_meta["skills_exposed"],

@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from orchestrator import decision_log
 
@@ -43,6 +43,37 @@ class DecisionLogTests(unittest.TestCase):
         self.assertNotIn("chain_of_thought", row)
         self.assertNotIn("chain-of-thought", row)
         self.assertEqual(decision_log.read_all(root=self.tmp), [row])
+
+    def test_record_accepts_top_level_role(self):
+        row = self._record(role="execute", deterministic={"role": "review"})
+        self.assertEqual(row["role"], "execute")
+        self.assertEqual(decision_log.read_all(root=self.tmp)[0]["role"], "execute")
+        self.assertNotIn("role", self._record())
+
+    def test_skill_selection_call_sites_persist_top_level_role(self):
+        from orchestrator import executor, spawn
+
+        task = {"id": "T-role", "role": "execute", "status": "queued",
+                "complexity": 1, "constraints": {}, "worktree": str(self.tmp)}
+        cfg = {"skills": {"mode": "shadow"}}
+        with patch.object(decision_log.schedlog, "SCHED_DIR", self.tmp / "runs/sched"), \
+                patch.object(spawn.skills_registry, "load", return_value={"skills": {}}):
+            spawn._skill_exposure(task, "execute")
+            spawn._skill_routing(task, "review", cfg, {})
+            executor._route_skills(task, cfg, {})
+            pool = Mock()
+            pool.cfg = {"skills": {"mode": "off"}}
+            pool.executors = {"test": Mock(id="test", provider="codex", model="test", day_tasks=0)}
+            pool.codex.day_tasks = 0
+            with patch.object(executor, "Pool", return_value=pool), \
+                    patch.object(executor.bus, "get", return_value=task), \
+                    patch.object(executor.bus, "update"), patch.object(executor.bus, "claim"), \
+                    patch.object(executor, "_run", return_value={"status": "done"}):
+                self.assertEqual(executor.start("T-role", "prompt", executor_id="test")["status"], "done")
+        rows = decision_log.read_all(root=self.tmp)
+        self.assertEqual([row["kind"] for row in rows], ["skill_selection"] * 4)
+        self.assertEqual([row["role"] for row in rows],
+                         ["execute", "review", "codex_execute", "codex_execute"])
 
     def test_explain_pairs_decisions_with_later_outcomes(self):
         decision_log.outcome("T-0570", "routing", root=self.tmp, merged=False)

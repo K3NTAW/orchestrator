@@ -119,6 +119,7 @@ def record(
     confidence=None,
     n=None,
     mode=None,
+    role=None,
     extra=None,
     root=None,
 ):
@@ -146,6 +147,8 @@ def record(
         "mode": mode,
         "extra": extra,
     }
+    if role is not None:
+        row["role"] = role
     return _append(_bounded(row), root=root)
 
 

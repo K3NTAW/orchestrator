@@ -27,7 +27,7 @@ def _skill_exposure(task, role):
     exposed = sorted(skill_id for skill_id, record in records.items()
                      if record.get("state") == "active" and record.get("provenance") == "builtin")
     tokens = sum(int(records[skill_id].get("est_tokens_l0") or 0) for skill_id in exposed)
-    decision_log.record("skill_selection", task["id"], candidates=sorted(records),
+    decision_log.record("skill_selection", task["id"], role=role, candidates=sorted(records),
                         hard_constraints=["static exposure (stage 1)"],
                         deterministic={"role": role, "task_class": attribution.task_class(task),
                                        "exposed": exposed, "skill_tokens_l0": tokens},
@@ -95,7 +95,7 @@ def _skill_routing(task, role, cfg, exposure, choice=None):
     if choice is None:
         return {}
     presented = choice["presented"] if choice["mode"] == "active" else choice["selected"]
-    decision_log.record("skill_selection", task["id"], candidates=choice["candidates"],
+    decision_log.record("skill_selection", task["id"], role=role, candidates=choice["candidates"],
                         hard_constraints=choice["mandatory"],
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
                                        "mandatory": choice["mandatory"]},

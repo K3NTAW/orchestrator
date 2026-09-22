@@ -171,6 +171,24 @@ class SkillScorecardTests(unittest.TestCase):
         with mock.patch.object(skill_scorecard.decision_log, "read_all", return_value=rows):
             self.assertEqual(skill_scorecard.selection_rows(self.root, "execute", 60), 1)
 
+    def test_selection_rows_read_top_level_role_with_fallback(self):
+        log = skill_scorecard.decision_log
+        with mock.patch.object(log.time, "time", return_value=1000):
+            for fields in (
+                {"role": "execute", "deterministic": {"role": "review"}},
+                {"deterministic": {"role": "execute"}},
+                {"extra": {"role": "execute"}},
+                {"role": "review", "extra": {"role": "execute"}},
+                {},
+            ):
+                log.record("skill_selection", "T-role", root=self.root,
+                           candidates=[], hard_constraints=[], selected=[], reason="test",
+                           mode="shadow", **({"deterministic": {}} | fields))
+        with mock.patch.object(log.time, "time", return_value=1010):
+            self.assertEqual(skill_scorecard.selection_rows(self.root, "execute", 60), 3)
+            self.assertEqual(skill_scorecard.selection_rows(self.root, "review", 60), 1)
+            self.assertEqual(skill_scorecard.selection_rows(self.root, "execute", 5), 0)
+
     def test_recovery_rate_windowed(self):
         rows = [{"kind": "skill_selection", "subject": "T-1", "role": "execute", "mode": "active"},
                 {"kind": "skill_selection", "subject": "T-2", "role": "execute", "mode": "shadow"},
