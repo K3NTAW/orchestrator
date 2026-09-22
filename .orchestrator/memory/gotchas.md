@@ -444,3 +444,15 @@ outcome: when two tasks would become ready together, chain them with depends_on 
 - Cause: daemon.dispatch main loop (daemon.py ~853) renders outside any try/except; R22 covered _dispatch_fresh_fix and run_worker only. _dispatch_worker also ignores executor.start statuses other than done/failed (held/budget/refused/fallback leave the task queued).
 - Rule: never quote double-brace tokens in specs, acceptance or review comments (describe them in words). A queued task with dispatched_at stamped and no execute run row after one lease: render the prompt by hand first (spawn.packet + spawn.render) before suspecting Codex.
 - Fix task filed (daemon holds render errors visibly + handles every start status); until merged, re-file the task with the tokens described in words.
+
+## 2026-09-22 19:25 — workers held on "no account with headroom" during a quota cooldown stay held after the cooldown ends (T-0760; T-0817–T-0820)
+- Symptom: account B hit a quota cooldown (17:48–18:06); every review and spec review spawned in that window went held with hold_reason "no account with headroom" and their roots went "reviews failed: T-08xx" or "spec_review request_changes"-like holds. After B freed up nothing moved for 20 minutes.
+- Cause: the daemon's respawn logic covers dead/unclaimed workers, not workers that were held by the account picker; a held review is never re-picked.
+- Remedy used: `bus.update(tid, status="queued", hold_reason=None)` then `spawn.run_worker(tid)` one at a time (python, ORCH_ROOT set) once `pool.pick("review")` returns an account; then clear the root's "reviews failed" hold. Note: account A counts this session's Planner tokens (planner_day_tokens) toward its utilization, so a long interactive session pushes every worker onto B.
+- Backlog: c3 daemon task: re-queue "no account with headroom" holds automatically when pick() succeeds again (bounded retries), and let review respawn count them.
+
+## 2026-09-22 review of a fix round whose root merged first sees an empty scoped diff and rejects
+type: gotcha · goal: T-0760 · tasks: T-0809,T-0827,T-0833,T-0837 · provenance: repo
+- orchestrator/spawn.py:887 scoped_diff diffs goal/<parent>...HEAD; once merge() rebases the task branch onto the goal head the diff is empty, so T-0833 rejected round 2 of T-0809 as a no-op although 049cb87 held the fix
+- daemon accepted/merged T-0809 at 18:46 before the fix round's review T-0833 finished (accepted_at == T-0833 created_at), so the security review of the round-2 diff never had a diff
+outcome: remedy: supersede the fix round, file a review task whose spec names the explicit range (T-0837). backlog c4: daemon must not merge a root while a fix-round review is pending, and reviews should diff base_sha..HEAD not goal...HEAD

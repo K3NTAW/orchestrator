@@ -1,4 +1,4 @@
-repo map 8167b60 2026-09-22
+repo map 049cb87 2026-09-22
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
