@@ -274,7 +274,8 @@ def redundancy(root=STATE):
     paths = defaultdict(set)
     gate = Path(root) / "runs" / "jev" / "gate.jsonl"
     for row in _json_rows(gate.parent, gate.name):
-        if row.get("tool") not in ("read", "search", "find") or not row.get("tool_target"):
+        # The gate preserves Claude tool names; retain historical lowercase aliases.
+        if str(row.get("tool") or "").lower() not in ("read", "grep", "glob", "search", "find") or not row.get("tool_target"):
             continue
         for skill, tasks in single_tasks.items():
             if row.get("task") in tasks:

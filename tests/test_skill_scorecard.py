@@ -124,6 +124,33 @@ class SkillScorecardTests(unittest.TestCase):
         self.assertEqual((row["n"], row["overlap"]), (1, .5))
         self.assertEqual(row["duplicated_script_invocations"], ["script:same.py"])
 
+    def test_redundancy_reads_real_gate_row_tool_names(self):
+        self._rows([
+            {"task": "T-a", "context": {"skills_used": ["a"]}},
+            {"task": "T-b", "context": {"skills_used": ["b"]}},
+            {"task": "T-ab", "context": {"skills_used": ["a", "b"]}},
+        ])
+        gate = self.root / "runs/jev"
+        gate.mkdir()
+        for tool in ("Read", "Grep", "Glob"):
+            with self.subTest(tool=tool):
+                rows = [
+                    {"task": "T-a", "session": "a", "tool": tool, "tool_target": "src/shared.py"},
+                    {"task": "T-a", "session": "a", "tool": tool, "tool_target": "src/only_a.py"},
+                    {"task": "T-b", "session": "b", "tool": tool, "tool_target": "src/shared.py"},
+                    {"task": "T-ab", "session": "ab", "tool": "Read", "tool_target": "src/co_used.py"},
+                    {"task": "T-a", "session": "a", "tool": "Read", "tool_target": ""},
+                ]
+                rows.extend({"task": "T-b", "session": "b", "tool": excluded,
+                             "tool_target": "src/only_a.py"}
+                            for excluded in ("Edit", "Write", "Bash"))
+                (gate / "gate.jsonl").write_text(
+                    "".join(json.dumps(row) + "\n" for row in rows))
+                pair = skill_scorecard.redundancy(self.root)[0]
+                self.assertEqual(pair["n"], 1)
+                self.assertEqual(pair["overlap_proxy"], .5)
+                self.assertNotEqual(pair["note"], "no single-skill runs")
+
     def test_cli_by_model_and_strategy(self):
         with mock.patch.object(scorecard, "STATE", self.root), \
              mock.patch.object(skill_scorecard, "by_skill", return_value=[]) as grouped, \
