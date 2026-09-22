@@ -429,3 +429,8 @@ type: decision · goal: T-0760 / kgpt T-0109 · provenance: repo, hetzner
 - orchestrator pool.toml [instructions] mode = active (was shadow); daemon restarted (pid 44865). Revert: mode back to shadow.
 - Four active-path tasks filed under the reopened goal T-0760: context_router active packet (c7), tool_disclosure active allowlist + escalation (c6, depends on the first), handoff-aware routing (c6), read suppression (c6). Each keeps a safety refusal (falls back to shadow without a passing eval / enough evidence).
 outcome: watch the kgpt harness scorecards (GET /harness/scorecard, /harness/tool-economy, /harness/voice) tomorrow; demote any feature whose success or latency regresses (env line + make restart).
+
+## 2026-09-22 T-0847 handoff-routing spec-review hold resolved by the v2 respec T-0858, not a fix round
+type: decision · goal: T-0760 · tasks: T-0847,T-0858,T-0859 · provenance: repo
+- A fix round with depends_on on a never-executed held task never dispatches (bus.ready needs merged); the respec T-0858 binds all five T-0851 risks; T-0847 failed as superseded; constraints.respec_for=T-0847 set on T-0858
+outcome: watch T-0859 spec review once an account has headroom; revert path: git revert the plan commit "T-0847 spec-review hold resolved by the existing v2 respec T-0858", bus.update T-0858 constraints without respec_for
