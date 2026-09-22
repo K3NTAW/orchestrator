@@ -383,3 +383,8 @@ type: decision · goal: T-0755 · provenance: repo
 - Hetzner deploy: ssh kgpt@46.62.167.12, /home/kgpt/kgpt git pull --ff-only (behind 7) then make up (build, migrate, up -d); every mcp-*, gateway and scheduler container recreated at 19:47; the running gateway's kgpt_kernel.proposals.list_pending source contains the LEFT JOIN
 - local checkouts: kgpt main fast-forwarded to 8433149; kgpt-ios local main keeps the goal start scaffold commit 0321e34 plus the retrospective 65e4e49 ahead of origin/main (goal/T-0006 was cut from origin/main, not from it) and cannot fast-forward; orchestrator local main holds Planner checkpoints ahead of origin, the human pulls
 outcome: rollback: git revert e8c4687 (orchestrator), 0d8b192 (kgpt-ios), 8433149 (kgpt) then make up on Hetzner again; the iOS build on the phone is unchanged until the user is home; backlog: bump httpx2 to 2.12.0 in kgpt
+
+## 2026-09-22 16:15 — program brief committed onto goal/T-0760 (3acdc87)
+- What: .orchestrator/roadmap-context.md (user's verbatim Jev Context Intelligence & Harness Economy brief, P0–P31) added to the goal branch through a temporary detached worktree and a guarded update-ref (only when the branch still pointed at the base sha).
+- Why: it was committed on local main only (aedab27); spec reviews T-0784/T-0788 could not find it from goal-branch worktrees.
+- Revert path: `git revert 3acdc87` on goal/T-0760.

@@ -1,4 +1,4 @@
-repo map 160f28c 2026-09-21
+repo map 8167b60 2026-09-22
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
@@ -22,6 +22,10 @@ repo map 160f28c 2026-09-21
 
 ## concurrency.py — Pure adaptive-concurrency selection for scheduler-ready tasks.
 
+## context_router.py — Pure, deterministic routing of canonical evidence into context levels.
+
+## context_scorecard.py — Context-economy reporting from run-log packet telemetry.
+
 ## critical_path.py — Deterministic critical-path priority for ready execute tasks.
 
 ## daemon.py — Heartbeat and pipeline driver: requeue running tasks whose process died, notify…
@@ -31,6 +35,8 @@ repo map 160f28c 2026-09-21
 ## decision_log.py — Structured, bounded evidence for orchestrator decisions.
 
 ## duration.py — Empirical execution-duration estimates for scheduler task ranking.
+
+## evidence.py — Canonical, content-addressed evidence for deterministic context selection.
 
 ## executor.py — Executor: GPT-6 Astra via ``codex exec``.
 
@@ -84,10 +90,4 @@ repo map 160f28c 2026-09-21
 
 ## pool.py — Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with…
 
-## promotion.py — Evidence-based, shadow-first feature promotion recommendations.
-
-## repomap.py — A compact, static map of the orchestrator package for worker context.
-
-## roadmap.py — Machine-readable implementation status for the orchestrator roadmaps.
-
-## sched_scorecard.py — Join scheduler predictions to
+## promotion.py — Evidence-based, shad

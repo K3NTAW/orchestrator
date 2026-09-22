@@ -270,6 +270,7 @@ type: gotcha · goal: T-0445 · provenance: repo
 - external tests-green on goal/T-0445 head d7b942a: FAIL test_run_claims_before_launch_so_concurrent_callers_launch_once and test_tick_autonomous_launches_at_most_one_decision_per_tick; the two alone, the module alone and a second full run were all green; the merge queue's gate on the same sha was green
 - treat as flaky under full-suite timing (thread or shared-state leak from an earlier module, same family as the tests.test_cli autostart leak); rerun once before writing any fix round; candidate for the H7 flaky rerun list
 outcome: no fix round; if it recurs twice more, spec an isolation fix in tests/test_planner_runs.py setUp
+- recurrence 1 of 2 (2026-09-22 15:03): external gate on wt/T-0771 4ba6bb0 failed test_run_claims_before_launch_so_concurrent_callers_launch_once and test_run_launches_once_per_key while a Codex run and a review ran on the machine; module alone green twice, second full run green (1027, 118s). One more recurrence triggers the isolation fix.
 
 ## 2026-09-20 Fix rounds on the Phase F daemon can land on different branches: one fix round commits on its own task branch, the next may commit on the parent branch
 type: gotcha · goal: T-0445 · tasks: T-0463,T-0473,T-0475,T-0476 · provenance: repo
@@ -426,3 +427,20 @@ outcome: rollback recipe: git checkout the good sha, make restart, verify health
 type: gotcha · goal: T-0109 · tasks: T-0011 · provenance: repo
 - kgpt-ios 2026-09-22 12:18: Codex astra answered 'Blocked: the voice sender is in Sources/Core/VoiceConversation.swift, excluded by your final strict scope. May I include that helper?' with no commit; the daemon gated wt (build green, nothing changed) and merged T-0011 into goal/T-0010 with zero files; the task shows done/merged
 outcome: always check git diff --stat of the merge before trusting done; backlog c2 (orchestrator): the gate or merge refuses a result whose worktree has no commits ahead of the base, holding the task with hold_reason no_diff instead; spec rule: scope every file the acceptance implies (the sender helper here) and say 'do not ask, implement'
+
+## 2026-09-22 two tasks becoming ready in the same daemon tick race on .git/config during worktree creation; the loser fails at once with 'dispatch error: None'
+type: gotcha · goal: T-0109 · tasks: T-0119,T-0125 · provenance: repo
+- kgpt 2026-09-22 13:53: T-0119 and T-0125 both became ready when T-0118 merged; the daemon dispatched both in one tick, T-0119 got its worktree, T-0125 failed with result reason 'dispatch error: None' (pipeline.dispatch_error None, no worktree). Same root cause as the by-hand run_worker race recorded 2026-09-21
+outcome: when two tasks would become ready together, chain them with depends_on (T-0137 now depends on T-0126 as well); fix c2 in orchestrator: serialize worktree creation behind a lock or retry once on the config-lock error, and record the real error text in pipeline.dispatch_error
+
+## 2026-09-22 15:20 — tests/_harness.py copies the live pool.toml: any config flip turns the base suite red for every task (T-0760; T-0771, T-0775)
+- Symptom: tests/test_daemon.py auto_fix_round tests errored `KeyError: 'T-0043'` (autonomous branch calls planner_runs.build_ctx -> bus.get(fake parent)) after autonomous=true (2026-09-21 18:30); tests/test_pool.py::test_affinity_reserve_cooldown_budget failed `'B' != 'A'` after planner was added to B's role_affinity (18:40). Neither task under test touched those areas; T-0765 (markdown only) held gate_red.
+- Fix (T-0771 + fix round T-0775, merged into goal/T-0760): the harness rewrites the copied pool.toml (autonomous=false, planner stripped from B's role_affinity); auto_fix_round falls back to the routine path with a notify warning when build_ctx raises. Tests that need a live setting opt in explicitly.
+- Rule: after any pool.toml flip, run the suite once before dispatching. A gate_red whose failures name modules outside the task's scope is a base-suite problem: hold the task (hold_reason awaiting_base_fix) instead of spending a fix round on it; when a fix round resumes a Codex thread, the delta carries only failures + acceptance, not the Planner's fix spec (T-0775 edited _harness.py, outside the spec's scope, and that was the better fix).
+- Revert path: git revert the T-0771 merge commit on goal/T-0760.
+
+## 2026-09-22 16:35 — a spec that quotes a double-brace placeholder wedges dispatch silently on the main execute path (T-0773; recurrence of the 2026-09-21 render gotchas)
+- Symptom: task stays queued with pipeline.dispatched_at stamped and re-stamped every lease, no event, no hold, no execute run row (only memory-recall rows). Diagnosed by rendering the prompt by hand: spawn.render raised `unfilled_placeholder: spec` because the spec text contained the literal token.
+- Cause: daemon.dispatch main loop (daemon.py ~853) renders outside any try/except; R22 covered _dispatch_fresh_fix and run_worker only. _dispatch_worker also ignores executor.start statuses other than done/failed (held/budget/refused/fallback leave the task queued).
+- Rule: never quote double-brace tokens in specs, acceptance or review comments (describe them in words). A queued task with dispatched_at stamped and no execute run row after one lease: render the prompt by hand first (spawn.packet + spawn.render) before suspecting Codex.
+- Fix task filed (daemon holds render errors visibly + handles every start status); until merged, re-file the task with the tokens described in words.
