@@ -55,6 +55,7 @@ class SkillRecord:
     created_at: str
     updated_at: str
     source: str
+    provenance_info: dict[str, Any] | None = None
 
 
 def _now() -> str:
@@ -266,6 +267,9 @@ def sync(root: Path = STATE, skills_dir: Path = REPO / "skills") -> dict[str, An
         records[skill_id] = asdict(record)
 
     for skill_id, previous in old_records.items():
+        if previous.get("provenance") != "builtin":
+            records[skill_id] = previous
+            continue
         if skill_id in records:
             continue
         entry = states.setdefault(skill_id, {"state": previous.get("state", "discovered"),
@@ -296,9 +300,30 @@ def transition(skill_id: str, new_state: str, reason: str, root: Path = STATE) -
     old_state = entry["state"]
     if new_state not in ALLOWED_TRANSITIONS.get(old_state, set()):
         raise ValueError(f"invalid transition: {old_state}→{new_state}")
+    finding_ids = []
+    if old_state == "quarantined" and new_state == "testing":
+        record = load(root)["skills"][skill_id]
+        report = _read_json(root / "skills" / "quarantine" / skill_id / "findings.json", None)
+        if not report or report.get("content_hash") != record["content_hash"]:
+            raise ValueError("not inspected")
+        from .skill_discovery import _hash
+        directory = root / "skills" / "quarantine" / skill_id
+        files = {}
+        for path in directory.rglob("*"):
+            if path.is_symlink():
+                raise ValueError("not inspected: quarantine contains symlink")
+            if path.is_file() and path != directory / "findings.json":
+                files[path.relative_to(directory).as_posix()] = path.read_bytes()
+        if _hash(files) != report["content_hash"]:
+            raise ValueError("not inspected: quarantine content changed")
+        finding_ids = [f["id"] for f in report.get("findings", []) if f["severity"] == "block"]
+        if report.get("max_severity") == "block" and not reason.startswith("override:"):
+            raise ValueError("blocked findings: " + ", ".join(finding_ids))
     now = _now()
     entry.setdefault("history", []).append({"at": now, "from": old_state, "to": new_state,
                                             "reason": reason})
+    if finding_ids:
+        entry["history"][-1].update(override=reason, finding_ids=finding_ids)
     entry.update({"state": new_state, "since": now, "reason": reason})
     _write_json(_paths(root)[1], states)
     _update_registry_state(root, skill_id, entry)
@@ -326,16 +351,19 @@ def rollback(skill_id: str, root: Path = STATE) -> dict[str, Any]:
 
 
 def _update_registry_state(root: Path, skill_id: str, entry: dict[str, Any]) -> None:
-    registry_path, _ = _paths(root)
-    document = _read_json(registry_path, {})
-    record = document.get("skills", {}).get(skill_id)
-    if record is not None:
-        record.update(state=entry["state"], promotion_state=entry["state"], trust=entry["trust"])
-        _write_json(registry_path, document)
+    for registry_path in (_paths(root)[0], root / "skills" / "discovered.json"):
+        document = _read_json(registry_path, {})
+        record = document.get("skills", {}).get(skill_id)
+        if record is not None:
+            record.update(state=entry["state"], promotion_state=entry["state"], trust=entry["trust"])
+            _write_json(registry_path, document)
 
 
 def load(root: Path = STATE) -> dict[str, Any]:
-    return _read_json(_paths(Path(root))[0], {"version": 1, "synced_at": None, "skills": {}})
+    root = Path(root)
+    document = _read_json(_paths(root)[0], {"version": 1, "synced_at": None, "skills": {}})
+    document["skills"].update(_read_json(root / "skills" / "discovered.json", {}).get("skills", {}))
+    return document
 
 
 _P6_HEADINGS = (

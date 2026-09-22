@@ -185,6 +185,12 @@ def main():
     sktransition = sksub.add_parser("transition"); sktransition.add_argument("id"); sktransition.add_argument("state")
     sktransition.add_argument("--reason", required=True)
     skrollback = sksub.add_parser("rollback"); skrollback.add_argument("id")
+    for command in ("discover", "import"):
+        sksource = sksub.add_parser(command); sksource.add_argument("source")
+    for command in ("inspect", "check-upstream", "quarantine"):
+        skaction = sksub.add_parser(command); skaction.add_argument("id")
+        if command == "quarantine":
+            skaction.add_argument("--reason", default="external skill quarantine")
     a = ap.parse_args()
     if a.cmd == "scorecard":
         if a.planner_routing and (a.planner or a.parallelism):
@@ -231,7 +237,18 @@ def main():
     if a.cmd == "skills":
         from . import skills_registry
         try:
-            if a.skills_cmd == "sync":
+            if a.skills_cmd in ("discover", "import", "inspect", "check-upstream", "quarantine"):
+                from . import skill_discovery
+                if a.skills_cmd in ("discover", "import"):
+                    result = skill_discovery.discover(a.source)
+                elif a.skills_cmd == "quarantine":
+                    result = skills_registry.transition(a.id, "quarantined", a.reason)
+                elif a.skills_cmd == "inspect":
+                    result = skill_discovery.inspect(a.id)
+                else:
+                    result = skill_discovery.check_upstream(a.id)
+                print(json.dumps(result, indent=2))
+            elif a.skills_cmd == "sync":
                 document = skills_registry.sync()
                 print(json.dumps(document, indent=2) if a.json else f"synced {len(document['skills'])} skills")
             elif a.skills_cmd == "list":
