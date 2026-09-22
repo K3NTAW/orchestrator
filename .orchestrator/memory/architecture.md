@@ -1,4 +1,4 @@
-repo map 049cb87 2026-09-22
+repo map 0f550d7 2026-09-22
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
@@ -46,9 +46,13 @@ repo map 049cb87 2026-09-22
 
 ## goals.py — Goal lifecycle: launch a headless Planner session against any target repo, track…
 
+## handoff_scorecard.py — Read-only economics for executor and Planner handoffs.
+
 ## handover.py — Auto-handover: refreshes a resumable snapshot at the end of plan.md so a fresh P…
 
 ## install.py — Scaffold the §9 orchestrator layout into another repo, so `ORCH_ROOT=<target>` a…
+
+## instructions.py — Deterministic conditional instruction selection and composition.
 
 ## interference.py — Deterministic, side-effect-free interference checks for orchestrator tasks.
 
@@ -86,8 +90,4 @@ repo map 049cb87 2026-09-22
 
 ## planner_taxonomy.py — Purpose-first taxonomy for Planner decisions.
 
-## planner_telemetry.py — Per-invocation Planner telemetry and goal-level usage attribution.
-
-## pool.py — Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with…
-
-## promotion.py — Evidence-based, shad
+## planner_telemetry.py — Per-invocation Planner telemetry 
