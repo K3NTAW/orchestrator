@@ -152,6 +152,9 @@ def main():
     sc.add_argument("--handoffs", action="store_true")
     sc.add_argument("--economy", action="store_true")
     sc.add_argument("--skills", action="store_true")
+    sc.add_argument("--group-by")
+    sc.add_argument("--marginal")
+    sc.add_argument("--redundancy", action="store_true")
     ce = sub.add_parser("context-eval"); ce.add_argument("--json", action="store_true"); ce.add_argument("--root")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
@@ -194,6 +197,15 @@ def main():
             skaction.add_argument("--reason", default="external skill quarantine")
     a = ap.parse_args()
     if a.cmd == "scorecard":
+        if (a.group_by is not None or a.marginal is not None or a.redundancy) and not a.skills:
+            ap.error("--group-by, --marginal and --redundancy require --skills")
+        skill_group_by = ("role", "task_class")
+        if a.group_by is not None:
+            skill_group_by = tuple(part.strip() for part in a.group_by.split(",") if part.strip())
+            invalid = set(skill_group_by) - {"role", "task_class", "band", "model", "strategy", "repo"}
+            if not skill_group_by or invalid:
+                ap.error(("unknown --group-by dimension: " + ",".join(sorted(invalid))) if invalid
+                         else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
         if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
@@ -411,8 +423,15 @@ def main():
     elif a.cmd == "scorecard":
         if a.skills:
             from . import skill_scorecard
-            card = skill_scorecard.build(scorecard.STATE)
-            print(json.dumps(card, indent=1) if a.json else skill_scorecard.format_report(card))
+            card = {"by_skill": skill_scorecard.by_skill(scorecard.STATE, skill_group_by)}
+            if a.marginal:
+                card["marginal"] = skill_scorecard.marginal(
+                    scorecard.STATE, a.marginal, skill_group_by,
+                    Pool().cfg.get("promotion", {}).get("min_samples", 20))
+            if a.redundancy:
+                card["redundancy"] = skill_scorecard.redundancy(scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else
+                  skill_scorecard.format_skill_analysis(card, skill_group_by))
         elif a.economy:
             from . import context_scorecard, handoff_scorecard, promotion, read_economy, skill_scorecard
             context = context_scorecard.build(scorecard.STATE)
@@ -433,6 +452,16 @@ def main():
                     "handoffs_by_executor_task_class": handoffs_by_executor,
                     "promotion": [promotion.evaluate(name, promotion.collect(name, scorecard.STATE), Pool().cfg)
                                   for name in features], "last_context_eval": last_eval}
+            warnings = []
+            skill_ids = sorted({row["skill"] for row in skill_scorecard.by_skill(scorecard.STATE)})
+            for skill_id in skill_ids:
+                for row in skill_scorecard.marginal(
+                        scorecard.STATE, skill_id,
+                        min_samples=Pool().cfg.get("promotion", {}).get("min_samples", 20)):
+                    if not row.get("insufficient") and row.get("verdict") in ("costly", "harmful"):
+                        warnings.append({"skill": skill_id, **row})
+            card["skills"]["costly_or_harmful"] = sorted(
+                warnings, key=lambda row: (row["verdict"] != "harmful", row["skill"]))[:3]
             if a.json:
                 print(json.dumps(card, indent=1))
             else:

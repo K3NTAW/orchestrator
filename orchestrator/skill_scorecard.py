@@ -1,13 +1,299 @@
-"""Skill exposure, use, and token-overhead reporting from worker run rows."""
+"""Skill exposure, use, marginal-value, and redundancy reporting."""
 import json
 from collections import defaultdict
+from itertools import combinations
 from pathlib import Path
 
-from . import STATE
+from . import STATE, attribution, strategy
+
+
+DIMENSIONS = ("role", "task_class", "band", "model", "strategy", "repo")
+METRICS = ("first_pass", "fix_rounds", "gate_reds", "review_request_changes",
+           "accepted", "accepted_tokens", "accepted_usd", "latency_s", "tool_calls")
 
 
 def _avg(values):
     return round(sum(values) / len(values), 3) if values else None
+
+
+def _json_rows(directory, pattern="*.jsonl"):
+    for path in sorted(directory.glob(pattern)) if directory.exists() else []:
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(row, dict):
+                yield row
+
+
+def _tasks(root):
+    result = {}
+    for path in sorted((Path(root) / "tasks").glob("*.json")):
+        try:
+            row = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(row, dict):
+            result[row.get("id", path.stem)] = row
+    return result
+
+
+def _execute_root(task, tasks):
+    """Resolve the execute root served by a task, using durable task-graph links."""
+    current, seen = task, set()
+    while isinstance(current, dict) and current.get("id") not in seen:
+        seen.add(current.get("id"))
+        constraints = current.get("constraints") or {}
+        target = constraints.get("fix_round_for")
+        if not target and current.get("role") != "execute":
+            inputs = current.get("inputs") or []
+            target = (constraints.get("review_for") or constraints.get("spec_review_for")
+                      or (inputs[0] if inputs else None))
+        if isinstance(target, str) and target in tasks:
+            current = tasks[target]
+            continue
+        if current.get("role") == "execute":
+            return strategy._root_id(current, tasks)
+        break
+    parent = task.get("parent") if isinstance(task, dict) else None
+    candidates = [row for row in tasks.values()
+                  if row.get("role") == "execute" and row.get("parent") == parent
+                  and not (row.get("constraints") or {}).get("fix_round_for")]
+    if len(candidates) == 1:
+        return candidates[0].get("id")
+    if task.get("role") in ("scout", "spec_review") and candidates:
+        created = task.get("created_at")
+        later = [row for row in candidates if created is None or row.get("created_at") is None
+                 or row.get("created_at") >= created]
+        if len(later) == 1:
+            return later[0].get("id")
+    return None
+
+
+def _tokens(row):
+    usage = row.get("usage") or {}
+    values = [row.get("input_tokens", usage.get("input_tokens")),
+              row.get("output_tokens", usage.get("output_tokens")),
+              row.get("cache_read_input_tokens", usage.get("cache_read_input_tokens"))]
+    known = [value for value in values if value is not None]
+    return sum(known) if known else None
+
+
+def _pool_cfg(root):
+    import tomllib
+    for path in (Path(root) / "pool.toml", Path(root) / ".orchestrator" / "pool.toml"):
+        try:
+            return tomllib.loads(path.read_text())
+        except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError):
+            pass
+    return {}
+
+
+def usage_rows(root=STATE):
+    """Return one outcome-attributed row for each run that records skills used."""
+    root = Path(root)
+    tasks = _tasks(root)
+    raw = [row for row in _json_rows(root / "runs")
+           if isinstance(row.get("context"), dict)
+           and row["context"].get("skills_used") is not None]
+    roots = {tid: _execute_root(task, tasks) for tid, task in tasks.items()}
+    root_runs = defaultdict(list)
+    for row in raw:
+        root_id = roots.get(row.get("task"))
+        if root_id:
+            root_runs[root_id].append(row)
+    cfg = _pool_cfg(root)
+    result = []
+    for row in raw:
+        task = tasks.get(row.get("task"), {})
+        root_id = roots.get(row.get("task"))
+        execute = tasks.get(root_id) if root_id else None
+        pipeline = (execute or {}).get("pipeline") or {}
+        lineage_ids = {tid for tid, rid in roots.items() if rid == root_id} if root_id else set()
+        fixes = reds = None
+        reviews = []
+        if execute is not None:
+            fixes = execute.get("lineage_fix_rounds", pipeline.get("lineage_fix_rounds"))
+            if fixes is None:
+                fixes = sum(tid != root_id and tasks[tid].get("role") == "execute"
+                            for tid in lineage_ids)
+            reds = pipeline.get("gate_reds", execute.get("gate_reds"))
+            for candidate in tasks.values():
+                inputs = candidate.get("inputs") or []
+                constraints = candidate.get("constraints") or {}
+                target = constraints.get("review_for") or (inputs[0] if inputs else None)
+                if candidate.get("role") == "review" and isinstance(target, str) and target in lineage_ids:
+                    verdict = candidate.get("review_verdict") or (candidate.get("result") or {}).get("verdict")
+                    if verdict in ("approve", "request_changes"):
+                        reviews.append(verdict)
+        accepted = bool(execute.get("merged_into")) if execute is not None else None
+        own = root_runs.get(root_id, [])
+        own_tokens = [_tokens(item) for item in own]
+        own_usd = [item.get("usd") for item in own if item.get("usd") is not None]
+        own_latency = [item.get("duration_s") for item in own if item.get("duration_s") is not None]
+        own_calls = [item.get("tool_calls", item.get("calls")) for item in own
+                     if item.get("tool_calls", item.get("calls")) is not None]
+        tier = row.get("tier")
+        executor = row.get("executor") or row.get("executor_id")
+        complexity = (execute or task).get("complexity")
+        context = row["context"]
+        result.append({
+            **row, "skills_used": list(context.get("skills_used") or []),
+            "skills_selected": (list(context.get("skills_selected") or [])
+                                if context.get("skills_selected") is not None else None),
+            "skill_tokens_l2": context.get("skill_tokens_l2"), "lineage_root": root_id,
+            "first_pass": (fixes == 0 and reds == 0
+                           if fixes is not None and reds is not None else None),
+            "fix_rounds": fixes, "gate_reds": reds,
+            "review_request_changes": (sum(value == "request_changes" for value in reviews)
+                                       if reviews else None),
+            "accepted": accepted,
+            "accepted_tokens": (sum(value for value in own_tokens if value is not None)
+                                if accepted and any(value is not None for value in own_tokens) else None),
+            "accepted_usd": sum(own_usd) if accepted and own_usd else None,
+            "latency_s": sum(own_latency) if own_latency else None,
+            "tool_calls": sum(own_calls) if own_calls else None,
+            "role": row.get("role"),
+            "task_class": attribution.task_class(execute or task) if (execute or task) else None,
+            "band": attribution.band(complexity),
+            "model": row.get("model") or attribution.model_of(executor, tier, cfg),
+            "strategy": (strategy.derive(execute, tasks, waves_rows=[]).get("strategy")
+                         if execute is not None else None),
+            "repo": "orchestrator",
+        })
+    return result
+
+
+def _metric_summary(rows):
+    result = {"n": len(rows)}
+    for metric in METRICS:
+        values = [row.get(metric) for row in rows if row.get(metric) is not None]
+        name = metric + "_rate" if metric in ("first_pass", "accepted") else metric
+        result[name] = _avg(values)
+    result["skill_token_overhead"] = _avg(
+        [row.get("skill_tokens_l2") for row in rows if row.get("skill_tokens_l2") is not None])
+    return result
+
+
+def by_skill(root=STATE, group_by=("role", "task_class")):
+    group_by = tuple(group_by)
+    invalid = set(group_by) - set(DIMENSIONS)
+    if invalid:
+        raise ValueError("unknown skill scorecard dimension: " + ",".join(sorted(invalid)))
+    buckets = defaultdict(list)
+    for row in usage_rows(root):
+        for skill in row["skills_used"]:
+            buckets[(skill,) + tuple(row.get(name) for name in group_by)].append(row)
+    output = []
+    for key, rows in sorted(buckets.items(), key=lambda item: tuple(str(v) for v in item[0])):
+        output.append({"skill": key[0], **dict(zip(group_by, key[1:])), **_metric_summary(rows)})
+    return output
+
+
+def _configured_min_samples(root):
+    value = (_pool_cfg(root).get("promotion") or {}).get("min_samples", 20)
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 20
+
+
+def marginal(root, skill, group_by=("role", "task_class"), min_samples=None):
+    group_by = tuple(group_by)
+    invalid = set(group_by) - set(DIMENSIONS)
+    if invalid:
+        raise ValueError("unknown skill scorecard dimension: " + ",".join(sorted(invalid)))
+    minimum = _configured_min_samples(root) if min_samples is None else int(min_samples)
+    buckets = defaultdict(lambda: {"with": [], "without": []})
+    for row in usage_rows(root):
+        key = tuple(row.get(name) for name in group_by)
+        if skill in row["skills_used"]:
+            buckets[key]["with"].append(row)
+        elif skill not in (row.get("skills_selected") or []):
+            buckets[key]["without"].append(row)
+    output = []
+    for key, split in sorted(buckets.items(), key=lambda item: tuple(str(v) for v in item[0])):
+        with_rows, without_rows = split["with"], split["without"]
+        item = {**dict(zip(group_by, key)), "n_with": len(with_rows), "n_without": len(without_rows)}
+        if len(with_rows) < minimum or len(without_rows) < minimum:
+            output.append({**item, "insufficient": True})
+            continue
+        def delta(metric):
+            left = _avg([r[metric] for r in with_rows if r.get(metric) is not None])
+            right = _avg([r[metric] for r in without_rows if r.get(metric) is not None])
+            return round(left - right, 3) if left is not None and right is not None else None
+        deltas = {name + "_delta": delta(name) for name in
+                  ("first_pass", "fix_rounds", "accepted_tokens", "accepted_usd", "latency_s")}
+        overhead = _avg([r.get("skill_tokens_l2") for r in with_rows
+                         if r.get("skill_tokens_l2") is not None])
+        quality, cost = deltas["first_pass_delta"], deltas["accepted_tokens_delta"]
+        without_cost = _avg([r["accepted_tokens"] for r in without_rows
+                             if r.get("accepted_tokens") is not None])
+        within_ten = (cost is not None and without_cost not in (None, 0)
+                      and cost <= abs(without_cost) * .1)
+        if quality is not None and quality < 0:
+            verdict = "harmful"
+        elif quality is not None and cost is not None and (quality >= 0 and cost <= 0
+                                                            or quality > .05 and within_ten):
+            verdict = "valuable"
+        elif cost is not None and cost > 0 and (quality is None or abs(quality) <= .05):
+            verdict = "costly"
+        else:
+            verdict = "neutral"
+        output.append({**item, "insufficient": False, **deltas,
+                       "skill_token_overhead": overhead, "verdict": verdict})
+    return output
+
+
+def _declared_scripts(root):
+    candidates = [Path(root) / "skills" / "registry.json",
+                  Path(root) / ".orchestrator" / "skills" / "registry.json"]
+    document = {}
+    for path in candidates:
+        try:
+            document = json.loads(path.read_text())
+            break
+        except (OSError, ValueError, TypeError):
+            continue
+    records = document.get("skills", document) if isinstance(document, dict) else {}
+    return {skill: {tool for tool in (record.get("tools") or []) if tool.startswith("script:")}
+            for skill, record in records.items() if isinstance(record, dict)}
+
+
+def redundancy(root=STATE):
+    rows = usage_rows(root)
+    pairs = defaultdict(int)
+    single_tasks = defaultdict(set)
+    for row in rows:
+        skills = sorted(set(row["skills_used"]))
+        for pair in combinations(skills, 2):
+            pairs[pair] += 1
+        if len(skills) == 1 and row.get("task"):
+            single_tasks[skills[0]].add(row["task"])
+    paths = defaultdict(set)
+    gate = Path(root) / "runs" / "jev" / "gate.jsonl"
+    for row in _json_rows(gate.parent, gate.name):
+        if row.get("tool") not in ("read", "search", "find") or not row.get("tool_target"):
+            continue
+        for skill, tasks in single_tasks.items():
+            if row.get("task") in tasks:
+                paths[skill].add(row["tool_target"])
+    scripts = _declared_scripts(root)
+    output = []
+    for (left, right), count in sorted(pairs.items()):
+        if not paths[left] or not paths[right]:
+            overlap, note = None, "no single-skill runs"
+        else:
+            overlap = round(len(paths[left] & paths[right]) / len(paths[left] | paths[right]), 3)
+            note = "path overlap is a single-skill-run proxy"
+        duplicated = sorted(scripts.get(left, set()) & scripts.get(right, set()))
+        output.append({"skill_a": left, "skill_b": right, "n": count,
+                       "overlap": overlap, "overlap_proxy": overlap, "note": note,
+                       "duplicated_script_invocations": duplicated,
+                       "unique_findings_proxy": None,
+                       "unique_findings_note": "needs Stage 6 evidence sharing"})
+    return output
 
 
 def build(root=STATE):
@@ -81,4 +367,20 @@ def format_report(card):
         lines.append(f"{key}\t{row['exposures']}\t{row['uses']}\t{row['use_rate']}\t{row['skill_tokens_l0']}\t{row['skill_tokens_l2']}\t{row['skill_overhead_ratio']}")
     lines += ["", "accepted lineage\tskill tokens", *
               (f"{key}\t{value}" for key, value in card["skill_tokens_per_accepted_task"].items())]
+    return "\n".join(lines)
+
+
+def format_skill_analysis(card, group_by=("role", "task_class")):
+    columns = ["skill", *group_by, "n", "first_pass_rate", "fix_rounds",
+               "accepted_tokens", "accepted_usd", "latency_s", "skill_token_overhead"]
+    lines = ["\t".join(columns)]
+    for row in card.get("by_skill", []):
+        lines.append("\t".join(str(row.get(name)) for name in columns))
+    if "marginal" in card:
+        lines += ["", "marginal", json.dumps(card["marginal"], sort_keys=True)]
+    if "redundancy" in card:
+        lines += ["", "skill_a\tskill_b\tn\toverlap\tduplicated scripts\tnote"]
+        for row in card["redundancy"]:
+            lines.append(f"{row['skill_a']}\t{row['skill_b']}\t{row['n']}\t{row['overlap']}\t"
+                         f"{','.join(row['duplicated_script_invocations']) or '-'}\t{row['note']}")
     return "\n".join(lines)

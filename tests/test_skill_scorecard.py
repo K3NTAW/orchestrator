@@ -2,9 +2,12 @@ import _harness  # noqa: F401
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
-from orchestrator import skill_scorecard
+from orchestrator import cli, scorecard, skill_scorecard
 
 
 class SkillScorecardTests(unittest.TestCase):
@@ -49,6 +52,91 @@ class SkillScorecardTests(unittest.TestCase):
         self.assertEqual(row["selected_set_size_avg"], 1)
         self.assertEqual(row["skill_reduction"], .6)
         self.assertEqual(row["skill_recovery_rate"], .5)
+
+    def test_usage_rows_join_lineage_outcomes_and_dimensions(self):
+        (self.root / "tasks/T-1.json").write_text(json.dumps({
+            "id": "T-1", "role": "execute", "complexity": 5, "merged_into": "main",
+            "constraints": {"task_class": "feature"},
+            "pipeline": {"gate_reds": 0, "lineage_fix_rounds": 0}}))
+        (self.root / "tasks/T-2.json").write_text(json.dumps({
+            "id": "T-2", "role": "review", "inputs": ["T-1"],
+            "result": {"verdict": "request_changes"}}))
+        self._rows([
+            {"task": "T-1", "role": "execute", "model": "m", "input_tokens": 10,
+             "usd": 1, "duration_s": 2, "context": {"skills_used": ["s"]}},
+            {"task": "T-2", "role": "review", "model": "m", "input_tokens": 5,
+             "usd": .5, "duration_s": 1, "context": {"skills_used": ["r"]}},
+        ])
+        rows = skill_scorecard.usage_rows(self.root)
+        self.assertEqual(rows[1]["lineage_root"], "T-1")
+        self.assertEqual(rows[1]["accepted_tokens"], 15)
+        self.assertEqual(rows[1]["review_request_changes"], 1)
+        self.assertEqual((rows[1]["task_class"], rows[1]["band"], rows[1]["model"]),
+                         ("feature", "4-6", "m"))
+
+    def test_by_skill_groups_and_none_for_unknown(self):
+        self._rows([{"role": "execute", "context": {"skills_used": ["s"]}}])
+        row = skill_scorecard.by_skill(self.root)[0]
+        self.assertEqual(row["n"], 1)
+        self.assertIsNone(row["first_pass_rate"])
+        self.assertIsNone(row["accepted_tokens"])
+
+    def test_marginal_insufficient_below_min_samples(self):
+        rows = [{"role": "execute", "task_class": "feature", "skills_used": ["s"],
+                 "skills_selected": ["s"]}]
+        with mock.patch.object(skill_scorecard, "usage_rows", return_value=rows):
+            result = skill_scorecard.marginal(self.root, "s", min_samples=2)
+        self.assertEqual(result[0]["n_with"], 1)
+        self.assertTrue(result[0]["insufficient"])
+
+    def test_marginal_verdicts_valuable_costly_harmful(self):
+        def outcome(role, used, first_pass, tokens):
+            return {"role": role, "task_class": "feature", "skills_used": used,
+                    "skills_selected": used, "first_pass": first_pass, "fix_rounds": 0,
+                    "accepted_tokens": tokens, "accepted_usd": tokens / 100,
+                    "latency_s": tokens, "skill_tokens_l2": 3}
+        rows = []
+        for role, quality, cost in (("valuable", 1, 90), ("costly", 1, 110), ("harmful", 0, 90)):
+            rows += [outcome(role, ["s"], quality, cost), outcome(role, [], 1, 100)]
+        with mock.patch.object(skill_scorecard, "usage_rows", return_value=rows):
+            result = skill_scorecard.marginal(self.root, "s", group_by=("role",), min_samples=1)
+        self.assertEqual({row["role"]: row["verdict"] for row in result},
+                         {"valuable": "valuable", "costly": "costly", "harmful": "harmful"})
+
+    def test_redundancy_pairs_and_script_overlap(self):
+        self._rows([
+            {"task": "T-a", "context": {"skills_used": ["a"]}},
+            {"task": "T-b", "context": {"skills_used": ["b"]}},
+            {"task": "T-ab", "context": {"skills_used": ["a", "b"]}},
+        ])
+        gate = self.root / "runs/jev"
+        gate.mkdir()
+        (gate / "gate.jsonl").write_text("".join(json.dumps(row) + "\n" for row in [
+            {"task": "T-a", "tool": "read", "tool_target": "one"},
+            {"task": "T-a", "tool": "read", "tool_target": "shared"},
+            {"task": "T-b", "tool": "read", "tool_target": "shared"},
+        ]))
+        registry = self.root / "skills"
+        registry.mkdir()
+        (registry / "registry.json").write_text(json.dumps({"skills": {
+            "a": {"tools": ["script:same.py"]}, "b": {"tools": ["script:same.py"]}}}))
+        row = skill_scorecard.redundancy(self.root)[0]
+        self.assertEqual((row["n"], row["overlap"]), (1, .5))
+        self.assertEqual(row["duplicated_script_invocations"], ["script:same.py"])
+
+    def test_cli_by_model_and_strategy(self):
+        with mock.patch.object(scorecard, "STATE", self.root), \
+             mock.patch.object(skill_scorecard, "by_skill", return_value=[]) as grouped, \
+             mock.patch("sys.argv", ["orchestrator", "scorecard", "--skills", "--group-by", "model,strategy", "--json"]), \
+             redirect_stdout(StringIO()):
+            cli.main()
+        grouped.assert_called_once_with(self.root, ("model", "strategy"))
+
+    def test_cli_rejects_skill_flags_without_skills_mode(self):
+        for flag in (["--group-by", "model"], ["--marginal", "s"], ["--redundancy"]):
+            with self.subTest(flag=flag), mock.patch("sys.argv", ["orchestrator", "scorecard", *flag]), \
+                 redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                cli.main()
 
 
 if __name__ == "__main__":
