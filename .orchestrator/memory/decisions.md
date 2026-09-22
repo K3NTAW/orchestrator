@@ -395,3 +395,9 @@ type: decision · goal: T-0760 · tasks: T-0765,T-0769,T-0785,T-0771,T-0775,T-07
 - Process: 12 commits on the goal branch, every task gated green in its worktree and security-reviewed on sonnet; three spec-review rounds on the router library, fourth waived; two reviews were wrong for mechanical reasons (empty scoped diff of a fix round; a root checkout behind origin), both handled without a fix round.
 - Open: T-0800 router shadow wiring (running), T-0802 tool disclosure shadow, T-0803 conditional instructions shadow (spec review first). Then P14-16 handoff economics, P17/18 gating and read suppression, P27-29 scorecards, P30 promotion, P31 evals.
 outcome: revert path: git revert the PR 19 merge commit; modes to off in pool.toml stop every shadow computation without a revert.
+
+## 2026-09-22 20:30 — PR 19 merged into main (32343f7): Jev context program checkpoints 1+2, every feature in shadow
+type: decision · goal: T-0760 · provenance: repo
+- User approved ("you can merge pr 19"); the PR had grown to 21 commits (checkpoint 2 features merged onto the goal branch while it was open), body rewritten to cover all of it before merging. GitGuardian flagged fake fixture strings in tests/test_jev_boundary.py and tests/test_evidence.py; verified not credentials.
+- After merge: root main replayed onto origin/main (Planner commits on top), standalone daemon restarted on the new code.
+outcome: revert path: git revert 32343f7 -m 1; or per feature, mode = "off" in pool.toml.
