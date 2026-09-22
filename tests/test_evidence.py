@@ -3,11 +3,14 @@ import json
 import unittest
 
 from orchestrator import evidence
+from _fixtures import fake_secret
 
 
 class EvidenceTests(unittest.TestCase):
     def test_make_ids_are_content_addressed_and_redacted(self):
-        raw = "API_TOKEN=supersecretvalue\ndef useful(): pass"
+        token_name = "API_" + "TOKEN"
+        token_value = fake_secret("evidence")
+        raw = token_name + "=" + token_value + "\ndef useful(): pass"
         first = evidence.make("source_chunk", "x.py:1", raw, provenance="repo", observed_at=1)
         again = evidence.make("source_chunk", "x.py:1", raw, provenance="repo", observed_at=2)
         changed = evidence.make("source_chunk", "x.py:1", raw + "!", provenance="repo")
@@ -16,7 +19,7 @@ class EvidenceTests(unittest.TestCase):
         pool = evidence.EvidencePool("redaction")
         stored = pool.add(first)
         self.assertIn("[REDACTED]", stored.content)
-        self.assertNotIn("supersecretvalue", pool.path.read_text())
+        self.assertNotIn(token_value, pool.path.read_text())
 
     def test_pool_add_is_idempotent_and_fresh_by_commit(self):
         ev = evidence.make("source_chunk", "x.py", "x", commit="abc", provenance="repo")
@@ -30,4 +33,3 @@ class EvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
