@@ -444,6 +444,21 @@ class Executor(unittest.TestCase):
                           "output_tokens": 1, "reasoning_tokens": 0, "total_tokens": 8})
 
 
+class ContextFallback(unittest.TestCase):
+    def test_fallback_context_measures_only_the_packet(self):
+        packet = "packet vabcdef base dead sources task@T-1\n## spec\nhello"
+        self.assertEqual(executor.packet_span("wrapper\n" + packet + "\n\nRepair delta:\nfix"), packet)
+
+    def test_repair_delta_headings_are_not_packet_sections(self):
+        packet = "packet vabcdef base dead sources task@T-1\n## spec\nhello"
+        repaired = packet + "\n\nRepair delta:\n## fake\nno"
+        self.assertEqual(spawn.packet_run_meta(executor.packet_span(repaired))["sections"],
+                         spawn.packet_run_meta(packet)["sections"])
+
+    def test_bare_delta_yields_unmeasured_context(self):
+        self.assertIsNone(spawn.packet_run_meta(executor.packet_span("fix only"))["hash"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

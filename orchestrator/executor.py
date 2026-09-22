@@ -113,7 +113,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
         log["resume_mode"] = task.get("_resume_mode", "fresh")
     log["prompt_chars"] = len(args[-1])
     from .spawn import packet_run_meta
-    log["packet_meta"] = task.get("packet_meta") or packet_run_meta(args[-1])
+    log["packet_meta"] = task.get("packet_meta") or packet_run_meta(packet_span(args[-1]))
     t0 = time.time()
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
@@ -331,7 +331,7 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
         from .spawn import ensure_worktree
         wt = Path(t.get("worktree") or ensure_worktree(task_id))
         from .spawn import packet_run_meta
-        t = {**t, "packet_meta": packet_meta if packet_meta is not None else packet_run_meta(prompt)}
+        t = {**t, "packet_meta": packet_meta if packet_meta is not None else packet_run_meta(packet_span(prompt))}
         bus.update(task_id, packet_meta=t["packet_meta"])
         bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
         ex.roll_day(); ex.day_tasks += 1
@@ -381,6 +381,16 @@ def _exhausted(pool, t, run=None):
         _fallback_threads.append(thread)
     thread.start()
     return {"status": "fallback", "tier": tier, "note": "Claude is executing; result lands on the bus; label the PR same-family-review"}
+
+
+def packet_span(text):
+    """Return only the measurable packet prefix from a rendered or repair prompt."""
+    match = re.search(r"(?m)^packet v[0-9a-f]+ base \S+ sources .+$", text)
+    if not match:
+        return ""
+    start = match.start()
+    boundary = text.find("\n\nRepair delta:\n", start)
+    return text[start:boundary if boundary >= 0 else len(text)]
 
 
 def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):

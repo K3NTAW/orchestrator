@@ -16,6 +16,11 @@ REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fake
 
 
 class JevRouteDispatch(unittest.TestCase):
+    def test_dispatch_records_instruction_tokens(self):
+        packet = "packet vabcdef base dead sources test\n## spec\nx"
+        prompt = "instructions\n" + packet
+        meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
+        self.assertEqual(meta["instruction_tokens"], len(prompt) // 4 - len(packet) // 4)
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="jev-route-dispatch-")
         self.addCleanup(directory.cleanup)

@@ -583,7 +583,8 @@ def _dispatch_fresh_fix(task_id, reason):
     except Exception as exc:
         hold_render_error(task_id, exc)
         return
-    _dispatch_worker(task_id, prompt, None, spawn.packet_run_meta(packet))
+    _dispatch_worker(task_id, prompt, None,
+                     spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet))
 
 
 def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
@@ -879,7 +880,8 @@ def dispatch(pool):
                 except Exception as exc:
                     hold_render_error(t["id"], exc)
                     continue
-                spawn_async(_dispatch_worker, t["id"], prompt, None, spawn.packet_run_meta(packet))
+                meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
+                spawn_async(_dispatch_worker, t["id"], prompt, None, meta)
                 complete(t["id"], "dispatched_at")
             else:
                 # A competing dispatcher owns this task. Its failed claim costs us no

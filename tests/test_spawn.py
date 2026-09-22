@@ -1038,5 +1038,33 @@ class OauthTokenInjection(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
 
 
+class ContextTelemetry(unittest.TestCase):
+    def test_section_meta_splits_named_sections(self):
+        text = "packet header\n## spec\nhello\n## scope\nx.py"
+        meta = spawn.section_meta(text)
+        self.assertEqual(list(meta), ["_preamble", "spec", "scope"])
+        self.assertEqual(meta["spec"]["chars"], len("## spec\nhello\n"))
+        self.assertEqual(len(meta["spec"]["sha256"]), 64)
+
+    def test_packet_run_meta_reports_sections_and_presented_tokens(self):
+        text = "packet vabcdef base deadbeef sources task@T-1\n## spec\nhello"
+        meta = spawn.packet_run_meta(text)
+        self.assertEqual(meta["presented_tokens"], len(text) // 4)
+        self.assertIn("spec", meta["sections"])
+
+    def test_review_packet_records_candidate_tokens_before_diff_budget(self):
+        packet = spawn._role_packet("## diff\nshort", "dead", "test", candidate_tokens=99,
+                                    candidate_known=True)
+        meta = spawn.packet_run_meta(packet)
+        self.assertEqual(meta["candidate_tokens"], 99)
+        self.assertTrue(meta["candidate_known"])
+
+    def test_run_worker_records_instruction_tokens(self):
+        packet = "packet vabcdef base dead sources test\n## spec\nx"
+        prompt = "instructions\n" + packet
+        meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
+        self.assertEqual(meta["instruction_tokens"], len(prompt) // 4 - len(packet) // 4)
+
+
 if __name__ == "__main__":
     unittest.main()

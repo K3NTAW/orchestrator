@@ -6,6 +6,7 @@ from . import ROOT, STATE, attribution, bus, notify
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
+_PACKET_BUILD_META = {}
 
 
 def memory_recall(query, **kwargs):
@@ -330,6 +331,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
     def build():
         return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections
                          if name != "dependencies" or lines)
+    candidate_tokens = len(build()) // 4
     # The task contract is more valuable than discovery hints.  In particular,
     # acceptance criteria are never summarized: an over-cap packet says so in
     # its provenance header instead.
@@ -363,7 +365,8 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
             policy_version = "(unavailable)"
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
-                  "memory_layers": ",".join(memory["layers_consulted"])}
+                  "memory_layers": ",".join(memory["layers_consulted"]),
+                  "candidate_tokens": candidate_tokens, "candidate_known": True}
 
 
 def packet_meta(task, worktree) -> dict:
@@ -374,14 +377,36 @@ def packet_meta(task, worktree) -> dict:
 def packet_run_meta(text) -> dict:
     """Measure the exact packet sent, using its H8 header as the version identity."""
     header = re.match(r"packet v([0-9a-f]+) base (\S+) sources (.+)", text)
-    meta = {"chars": len(text), "est_tokens": len(text) // 4, "hash": None, "version": None}
+    meta = {"chars": len(text), "est_tokens": len(text) // 4, "presented_tokens": len(text) // 4,
+            "sections": section_meta(text), "hash": None, "version": None,
+            "candidate_known": False}
     if header:
         version, base, sources = header.groups()
         meta.update(hash=version, version=version, base=base, sources=sources)
         legacy = re.match(r"pool.toml@(\S+) gotchas@(\S+)", sources)
         if legacy:
             meta.update(policy_version=legacy.group(1), gotchas=legacy.group(2))
+        meta.update(_PACKET_BUILD_META.get(version, {}))
     return meta
+
+
+def section_meta(text) -> dict:
+    """Attribute every byte of a packet to its preamble or a named ``##`` section."""
+    matches = list(re.finditer(r"(?m)^## ([^\n]+)\n?", text))
+    spans = [("_preamble", 0, matches[0].start() if matches else len(text))]
+    spans.extend((match.group(1), match.start(), matches[i + 1].start() if i + 1 < len(matches) else len(text))
+                 for i, match in enumerate(matches))
+    out = {}
+    for name, start, end in spans:
+        value = text[start:end]
+        out[name] = {"chars": len(value), "est_tokens": len(value) // 4,
+                     "sha256": hashlib.sha256(value.encode()).hexdigest()}
+    return out
+
+
+def with_instruction_tokens(meta, rendered_prompt, packet):
+    """Return packet metadata augmented with deterministic prompt-wrapper cost."""
+    return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4}
 
 
 def packet(task, worktree) -> str:
@@ -399,11 +424,14 @@ def packet(task, worktree) -> str:
                 header = extended
                 break
             over = actual
-    return header + "\n" + body
+    result = header + "\n" + body
+    _PACKET_BUILD_META[meta["hash"]] = {key: meta[key] for key in ("candidate_tokens", "candidate_known")}
+    return result
 
 
-def _role_packet(body, base, sources):
+def _role_packet(body, base, sources, **build_meta):
     version = hashlib.sha256(body.encode()).hexdigest()[:12]
+    _PACKET_BUILD_META[version] = build_meta or {"candidate_known": False}
     return f"packet v{version} base {base or '(unavailable)'} sources {sources}\n{body}"
 
 
@@ -502,7 +530,8 @@ def review_packet(task, reviewed) -> str:
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
     return _role_packet(body, _base_sha(src, wt),
-                        f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}")
+                        f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}",
+                        candidate_tokens=len(raw_diff) // 4, candidate_known=True)
 
 
 def spec_review_packet(task) -> str:
@@ -770,28 +799,29 @@ def run_worker(task_id, account_id=None):
         if role == "review":
             src = reviewed if reviewed is not None else t
             role_packet = review_packet(t, src)
-            t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
             prompt = render("review", packet=role_packet)
+            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         elif role == "challenge":
             prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                             for k in ("claim", "evidence", "confidence")})
         elif role == "spec_review":
             src = bus.get(t["inputs"][0])
             role_packet = spec_review_packet(src)
-            t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
             prompt = render("spec-review", packet=role_packet)
+            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         elif role == "execute":
             t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
             bus.update(task_id, executor=t["executor"])
             packet_worktree = t.get("worktree") or ROOT
-            t["packet_meta"] = {**packet_meta(t, packet_worktree), "role": role}
-            prompt = render("execute", packet=packet(t, packet_worktree), spec=t["spec"],
+            role_packet = packet(t, packet_worktree)
+            prompt = render("execute", packet=role_packet, spec=t["spec"],
                             acceptance=t["acceptance"], scope=t["scope"]) + \
                 "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
+            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         else:
             role_packet = scout_packet(t)
-            t["packet_meta"] = {**packet_run_meta(role_packet), "role": role}
             prompt = render("scout", packet=role_packet)
+            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
     except Exception as exc:
         hold_render_error(task_id, exc)
         return {"status": "held", "reason": "render_error"}

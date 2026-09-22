@@ -316,5 +316,17 @@ class Bus(BusSandbox):
         self.assertEqual(bus.read(t["id"], compact=True), t)  # compact never applies to a single-task read
 
 
+class ContextLog(BusSandbox):
+    def test_log_run_derives_context_from_packet_meta(self):
+        meta = {"hash": "abc", "version": "abc", "sections": {}, "presented_tokens": 3,
+                "candidate_tokens": 4, "candidate_known": True, "instruction_tokens": 2}
+        bus.log_run(packet_meta=meta)
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(row["context"]["presented_tokens"], 3)
+        bus.log_run()
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertIsNone(row["context"])
+
+
 if __name__ == "__main__":
     unittest.main()
