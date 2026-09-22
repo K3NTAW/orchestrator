@@ -403,14 +403,16 @@ def run(payload):
     prior_same_path = any(item.get("path") == _target_path(tool_name, tool_input) for item in history) if economy else False
     ambiguous = bool(economy and (economy["kind"] in ("repeated_read_changed", "narrower_search")
                                  or (economy["kind"] == "other" and prior_same_path)))
-    if economy and not ambiguous:
-        return finish(None)
-
     if mode == "block" and cfg.get("block_repeats", False) and repeat:
         _log(task_id, session_id, tool_name, None, mode, blocked=True, scored=False, latency_ms=0.0,
-             tool_target=target, input_hash=input_hash, repeat=True)
+             tool_target=target, input_hash=input_hash, repeat=True, economy=economy,
+             transcript_path=transcript_path, call_index=call_index, role=task.get("role"),
+             task_class=task_class)
         print("jev-gate: identical read already made this session; use the earlier result", file=sys.stderr)
         return 2
+
+    if economy and not ambiguous:
+        return finish(None)
 
     sample_rate = float(cfg.get("sample_rate", 0.1))
     sampled = mode != "sample" or (int(hashlib.sha1(f"{session_id}{call_index}".encode()).hexdigest(), 16) % 1000

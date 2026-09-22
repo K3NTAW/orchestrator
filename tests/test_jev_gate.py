@@ -204,7 +204,6 @@ class JevGateTests(unittest.TestCase):
 
     def test_block_repeats_denies(self):
         task, payload, _ = self._sample_fixture()
-        payload.update(tool_name="Bash", tool_input={"command": "echo safe"})
         with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
             self.assertEqual(self._run(payload, task), 0)
             jev_gate._cfg = lambda: {**BLOCK_CFG, "block_repeats": True}
@@ -489,6 +488,42 @@ assert attempted == []
                 config.assert_called_once_with()
         finally:
             self._orig_cfg.cache_clear()
+
+    def test_block_repeats_still_reaches_block_path_with_economy(self):
+        task, payload, target = self._sample_fixture(1.0)
+        jev_gate._cfg = lambda: {**BLOCK_CFG, "block_repeats": True}
+        with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
+            for tool in ("Read", "Grep", "Glob"):
+                with self.subTest(tool=tool):
+                    payload.update(session_id="block-" + tool, tool_name=tool,
+                                   tool_input={"path": str(target), "pattern": "original"})
+                    self.assertEqual(self._run(payload, task), 0)
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        self.assertEqual(self._run(payload, task), 2)
+                    self.assertIn("identical read already made", err.getvalue())
+                    row = self._log_lines()[-1]
+                    self.assertTrue(row["blocked"])
+                    self.assertTrue(row["would_suppress"])
+                    self.assertFalse(row["scored"])
+
+    def test_block_path_row_carries_economy_fields(self):
+        task, payload, target = self._sample_fixture()
+        with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
+            self.assertEqual(self._run(payload, task), 0)
+            # Exact-repeat state compares mtime; economy also notices size changes.
+            stat = target.stat()
+            target.write_text("changed and longer")
+            os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            jev_gate._cfg = lambda: {**BLOCK_CFG, "block_repeats": True}
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self._run(payload, task), 2)
+        row = self._log_lines()[-1]
+        self.assertTrue(row["blocked"])
+        self.assertTrue(row["repeat"])
+        self.assertEqual(row["read_kind"], "repeated_read_changed")
+        self.assertEqual(row["tokens_estimate"], target.stat().st_size // 4)
+        self.assertFalse(row["would_suppress"])
+        self.assertFalse(row["scored"])
 
     def test_first_reads_skip_jev_sample_and_log_read_kind(self):
         task, payload, _target = self._sample_fixture(1.0)
