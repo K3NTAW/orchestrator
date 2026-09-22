@@ -7,6 +7,10 @@ ones which reduce deterministic safeguards.
 from . import STATE, decision_log, jev
 from . import pool as P
 
+jev.declare_boundary('points', fields=('title', 'spec', 'acceptance_count', 'scope', 'complexity', 'task_class', 'memory_titles', 'deterministic_evidence'),
+                     max_chars=jev.DEFAULT_MAX_STATE_CHARS, raw_source_allowed=False,
+                     notes='Title 300; spec 600; 100 scope entries of 300; evidence content stripped.')
+
 
 POINTS = (
     "scout_necessity",
@@ -154,7 +158,7 @@ def ask(point, task, evidence, *, cfg=None, ask_fn=jev.ask):
     signals, confidence, suggestion, error = {}, None, None, None
     if mode != "off":
         try:
-            response = ask_fn(_state(task, evidence), QUESTIONS[point], task=task.get("id"))
+            response = ask_fn(_state(task, evidence), QUESTIONS[point], site="points", task=task.get("id"))
             if response is None:
                 raise ValueError("Jev returned no answer")
             signals, confidence, suggestion = _answer(response, point)

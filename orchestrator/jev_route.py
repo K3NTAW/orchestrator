@@ -10,6 +10,10 @@ from pathlib import Path
 
 from . import STATE, bus, jev, scorecard
 
+jev.declare_boundary('route', fields=('spec', 'acceptance', 'scope', 'complexity', 'task_class', 'memory_titles'),
+                     max_chars=jev.DEFAULT_MAX_STATE_CHARS, raw_source_allowed=False,
+                     notes='Spec 1500 chars; up to 10 memory titles.')
+
 QUESTIONS = {
     "localized_simple": {"type": "noul", "instructions": "Is this a localized, mechanically simple change?"},
     "substantial_reasoning": {"type": "noul", "instructions": "Does this require substantial reasoning?"},
@@ -117,7 +121,7 @@ def classify(task, pool, eligible, root=STATE):
     }
     started = time.monotonic()
     try:
-        result = jev.ask(state, QUESTIONS, model=cfg["model"], timeout_s=cfg["timeout_s"], task=task.get("id"))
+        result = jev.ask(state, QUESTIONS, site="route", model=cfg["model"], timeout_s=cfg["timeout_s"], task=task.get("id"))
         answers = result["answers"]
         signals = {key: float(answers[key]["noul"]) for key in QUESTIONS}
         if any(not 0 <= value <= 1 for value in signals.values()):

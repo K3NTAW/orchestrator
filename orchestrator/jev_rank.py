@@ -14,6 +14,10 @@ import sys
 
 from . import jev
 
+jev.declare_boundary('rank', fields=(),
+                     max_chars=jev.DEFAULT_MAX_STATE_CHARS, raw_source_allowed=False,
+                     notes='String state: redacted goal_text; question criteria: redacted item texts; default batch 40.')
+
 DEFAULT_THRESHOLD = 0.35
 DEFAULT_BATCH = 40
 
@@ -49,10 +53,11 @@ def rank(items: list[dict], goal_text: str, *, threshold: float = DEFAULT_THRESH
     scored = []
     for start in range(0, len(items), batch):
         chunk = items[start:start + batch]
-        questions = {item["id"]: {"type": "noul", "instructions": INSTRUCTIONS, "criteria": item["text"]}
+        questions = {item["id"]: {"type": "noul", "instructions": INSTRUCTIONS, "criteria": jev.redact(item["text"])}
                      for item in chunk}
         try:
-            result = jev.ask(goal_text, questions)
+            ask_fn = jev.bind_site("rank")
+            result = ask_fn(jev.redact(goal_text), questions)
             if result is None:
                 return [{**item, "p_relevant": None} for item in items]
             answers = result.get("answers") or {}
