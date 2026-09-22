@@ -388,3 +388,10 @@ outcome: rollback: git revert e8c4687 (orchestrator), 0d8b192 (kgpt-ios), 843314
 - What: .orchestrator/roadmap-context.md (user's verbatim Jev Context Intelligence & Harness Economy brief, P0–P31) added to the goal branch through a temporary detached worktree and a guarded update-ref (only when the branch still pointed at the base sha).
 - Why: it was committed on local main only (aedab27); spec reviews T-0784/T-0788 could not find it from goal-branch worktrees.
 - Revert path: `git revert 3acdc87` on goal/T-0760.
+
+## 2026-09-22 17:50 — Jev context program checkpoint 1 opened as PR 19 (goal/T-0760 → main)
+type: decision · goal: T-0760 · tasks: T-0765,T-0769,T-0785,T-0771,T-0775,T-0772,T-0774,T-0794,T-0797,T-0799,T-0801,T-0806 · provenance: repo
+- Shipped: P0 audit doc, P1 context telemetry + context scorecard, P23-26 modes and decision kinds, P19/20 Jev boundary, P2/3/4/6 evidence + context router library (unwired), execute-prompt dedup, two harness fixes (test harness isolates live pool.toml; dispatch holds render errors and handles every start status).
+- Process: 12 commits on the goal branch, every task gated green in its worktree and security-reviewed on sonnet; three spec-review rounds on the router library, fourth waived; two reviews were wrong for mechanical reasons (empty scoped diff of a fix round; a root checkout behind origin), both handled without a fix round.
+- Open: T-0800 router shadow wiring (running), T-0802 tool disclosure shadow, T-0803 conditional instructions shadow (spec review first). Then P14-16 handoff economics, P17/18 gating and read suppression, P27-29 scorecards, P30 promotion, P31 evals.
+outcome: revert path: git revert the PR 19 merge commit; modes to off in pool.toml stop every shadow computation without a revert.
