@@ -574,3 +574,15 @@ class RoutingIntegration(unittest.TestCase):
             with patch.object(executor.allocation, "choose") as choose:
                 executor.start(short, "prompt")
             choose.assert_not_called()
+
+    def test_start_records_handoff_decision_in_shadow_without_changing_executor(self):
+        task_id = self.task("handoff shadow")
+        self.pool.cfg.setdefault("handoff", {})["mode"] = "shadow"
+        self.pool.save()
+        baseline = self.pool.pick_executor("execute", 3, task=bus.get(task_id)).id
+        executor.start(task_id, "prompt")
+        self.assertEqual(bus.get(task_id)["executor"], baseline)
+        rows = executor.decision_log.explain(task_id, kinds=["handoff"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["selected"], baseline)
+        self.assertEqual(rows[0]["deterministic"]["baseline"], baseline)

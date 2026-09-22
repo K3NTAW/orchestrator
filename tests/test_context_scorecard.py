@@ -29,6 +29,42 @@ class ContextScorecard(unittest.TestCase):
         self.assertEqual((roles["execute"]["runs"], roles["execute"]["unmeasured"]), (2, 1))
         self.assertEqual(roles["review"]["unmeasured"], 1)
 
+    def test_instruction_columns_keyed_like_bus_context(self):
+        rows = [
+            {"role": "execute", "context": {"instruction_tokens": 100,
+                                             "instruction_tokens_modular": 60}},
+            {"role": "execute", "context": {"instruction_tokens": 80}},
+            {"role": "review", "context": {"instruction_tokens": 40}},
+        ]
+        roles = context_scorecard.build(self.root_with(rows))["roles"]
+        execute = roles["execute"]
+        self.assertEqual(execute["instruction_tokens"], 90)
+        self.assertEqual(execute["instruction_tokens_modular"], 60)
+        self.assertEqual(execute["instruction_reduction"], .6)
+        self.assertEqual(execute["instruction_unmeasured"], 1)
+        self.assertEqual((execute["measured"], execute["unmeasured"]), (2, 0))
+        review = roles["review"]
+        self.assertEqual(review["instruction_tokens"], 40)
+        self.assertIsNone(review["instruction_tokens_modular"])
+        self.assertIsNone(review["instruction_reduction"])
+        self.assertEqual(review["instruction_unmeasured"], 1)
+
+    def test_shadow_columns_present_and_unmeasured_rows_counted(self):
+        routed = {"sections": {}, "routed_tokens": 30, "routed_reduction_ratio": .5,
+                  "routed_hidden": 2, "routed_ambiguous": 1, "evidence_ids": ["a", "b", "c", "d"]}
+        rows = [{"role": "execute", "goal_id": "G", "context": routed},
+                {"role": "execute", "goal_id": "G", "context": {"sections": {}}},
+                {"role": "execute", "goal_id": "G", "context": None}]
+        card = context_scorecard.build(self.root_with(rows))
+        for row in (card["roles"]["execute"], card["goals"]["G"]):
+            self.assertEqual(row["shadow_routed_tokens"], 30)
+            self.assertEqual(row["shadow_reduction"], .5)
+            self.assertEqual(row["shadow_hidden"], 2)
+            self.assertEqual(row["shadow_ambiguous_rate"], .25)
+            self.assertEqual(row["shadow_unmeasured"], 2)
+        report = context_scorecard.format_report(card)
+        self.assertIn("shadow routed", report)
+
 
 if __name__ == "__main__":
     unittest.main()

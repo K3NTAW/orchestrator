@@ -318,6 +318,31 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
                 ex = pool.pick_executor("execute", t["complexity"], scores=baseline_scores, task=t)
                 bus.log_run(task=task_id, role="execute", outcome="routing_fallback",
                             allocation_error=str(exc), executor=ex.id if ex else None)
+        try:
+            mode = pool.cfg.get("handoff", {}).get("mode", "off")
+            if mode in ("shadow", "active"):
+                from . import handoff_scorecard, notify
+                eligible = pool.eligible_executors("execute", t["complexity"], t)
+                candidates = [candidate.id for candidate in eligible]
+                task_class = scorecard.task_class(t)
+                costs = {candidate: handoff_scorecard.expected_route_cost(
+                    task_class, candidate, cfg=pool.cfg) for candidate in candidates}
+                decision_log.record(
+                    "handoff", task_id, candidates=candidates,
+                    hard_constraints=["pool.eligible_executors(role=execute, complexity, task)"],
+                    deterministic={"baseline": ex.id if ex else None,
+                                   "expected_route_cost": costs, "task_class": task_class},
+                    historical={"n": sum(value.get("n", 0) for value in costs.values())},
+                    selected=ex.id if ex else None, reason="shadow: routing unchanged", mode=mode)
+                if mode == "active":
+                    notify.notify_once(task_id, "handoff_active_shadow",
+                                       f"{task_id}: handoff active is observation-only; routing unchanged")
+        except Exception as exc:
+            try:
+                from . import notify
+                notify.notify(f"{task_id}: handoff shadow unavailable: {exc}")
+            except Exception:
+                pass
         if ex is None or ex.provider != "codex":
             result = _exhausted(pool, t)
             handed_off = result.get("status") == "fallback"

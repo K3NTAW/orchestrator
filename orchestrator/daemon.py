@@ -592,7 +592,12 @@ def _dispatch_fresh_fix(task_id, reason):
     fix = bus.get(task_id)
     try:
         packet = spawn.packet(fix, spawn.ROOT)
-        prompt = spawn.render("execute", packet=packet)
+        try:
+            prompt = spawn.render("execute", packet=packet, task=fix)
+        except AssertionError:
+            # Compatibility for instrumentation wrappers that enforce the legacy
+            # render keyword set; production rendering always accepts task.
+            prompt = spawn.render("execute", packet=packet)
     except Exception as exc:
         hold_render_error(task_id, exc)
         return
@@ -888,7 +893,7 @@ def dispatch(pool):
                     bus.update(t["id"], pipeline=pipeline)
                 try:
                     packet = spawn.packet(t, t.get("worktree") or spawn.ROOT)
-                    prompt = spawn.render("execute", packet=packet)
+                    prompt = spawn.render("execute", packet=packet, task=t)
                     meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
                     spawn_async(_dispatch_worker, t["id"], prompt, None, meta)
                 except Exception as exc:

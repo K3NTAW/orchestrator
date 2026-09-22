@@ -317,6 +317,14 @@ class Bus(BusSandbox):
 
 
 class ContextLog(BusSandbox):
+    def test_log_run_carries_routed_keys(self):
+        routed = {"routed_tokens": 12, "routed_reduction_ratio": .4, "routed_hidden": 2,
+                  "routed_ambiguous": 1, "routed_rules_version": "v1", "evidence_ids": ["abc"]}
+        bus.log_run(packet_meta={"hash": "abc", **routed})
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        for key, value in routed.items():
+            self.assertEqual(row["context"][key], value)
+
     def test_log_run_derives_context_from_packet_meta(self):
         meta = {"hash": "abc", "version": "abc", "sections": {}, "presented_tokens": 3,
                 "candidate_tokens": 4, "candidate_known": True, "instruction_tokens": 2}

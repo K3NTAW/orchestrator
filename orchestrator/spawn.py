@@ -3,12 +3,15 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, notify
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, tool_catalog
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
 _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
+_CONTEXT_ROUTER_ACTIVE_WARNED = False
+_TOOL_DISCLOSURE_ACTIVE_WARNED = False
+_INSTRUCTION_RENDER_META = OrderedDict()
 
 
 def _remember_packet_meta(version, meta):
@@ -46,6 +49,10 @@ def git(*a, cwd=ROOT, check=True):
     if check and r.returncode:
         raise RuntimeError(f"git {' '.join(a)} (cwd={cwd}) failed: {r.stderr.strip()}")
     return r
+
+
+# Imported after ``git`` because context_router -> failures -> merge imports it.
+from . import context_router
 
 
 def branch_exists(name):
@@ -108,13 +115,43 @@ def ensure_worktree(task_id, base=None):
     return wt
 
 
-def render(name, **kw):
+def render(name, *, task=None, signals=None, **kw):
     if name in ("review", "spec-review", "scout") and "packet" not in kw:
         raise ValueError(f"packet is required for {name}")
     if name == "scout":
         kw.setdefault("base_branch", "origin/main")
         kw.setdefault("base_sha", "(unavailable)")
     t = (STATE / "prompts" / f"{name}.md").read_text()
+    legacy_template = t
+    if task is not None and instructions.mode() in ("shadow", "active"):
+        role = "security_review" if name == "review" and (signals or {}).get("security") else name.replace("-", "_")
+        choice = instructions.select(task, role, signals=signals)
+        base = legacy_template
+        for module, _ in instructions.RULES:
+            text = instructions.module_text(module)
+            if text in base:
+                base = base.replace(text, "", 1)
+        modular_template = instructions.compose(base, choice["modules"])
+        placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+        def fill(template):
+            missing = next((m.group(1) for m in placeholder.finditer(template) if m.group(1) not in kw), None)
+            if missing is not None:
+                raise ValueError(f"unfilled_placeholder: {missing}")
+            return placeholder.sub(lambda m: kw[m.group(1)] if isinstance(kw[m.group(1)], str)
+                                   else json.dumps(kw[m.group(1)], indent=0), template)
+        legacy, modular = fill(legacy_template), fill(modular_template)
+        decision_log.record(
+            kind="instruction_loading", subject=task.get("id", "(unknown)"),
+            candidates=[module for module, _ in instructions.RULES], hard_constraints=choice["mandatory"],
+            deterministic={"selected": choice["modules"], "reasons": choice["reasons"],
+                           "legacy_tokens": len(legacy) // 4, "modular_tokens": len(modular) // 4,
+                           "delta_tokens": len(modular) // 4 - len(legacy) // 4},
+            selected=choice["modules"], reason="deterministic rules v1", mode=instructions.mode())
+        result = modular if instructions.mode() == "active" else legacy
+        _INSTRUCTION_RENDER_META[result] = {"instruction_tokens_modular": len(modular) // 4}
+        while len(_INSTRUCTION_RENDER_META) > _PACKET_BUILD_META_MAX:
+            _INSTRUCTION_RENDER_META.popitem(last=False)
+        return result
     placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
     missing = next((match.group(1) for match in placeholder.finditer(t) if match.group(1) not in kw), None)
     if missing is not None:
@@ -202,7 +239,57 @@ def _memory_entries(path):
             for n, (i, title) in enumerate(starts)]
 
 
-def _packet_body(task, worktree) -> tuple[str, dict]:
+def _shadow_route(task, candidates, *, role, head_sha, cfg):
+    """Persist and route evidence for telemetry without changing packet bytes."""
+    global _CONTEXT_ROUTER_ACTIVE_WARNED
+    mode = promotion.mode("context_router", cfg)
+    if mode == "off" or not task.get("id"):
+        return {}
+    if mode == "active" and not _CONTEXT_ROUTER_ACTIVE_WARNED:
+        notify.notify("context_router active not implemented; running shadow")
+        _CONTEXT_ROUTER_ACTIVE_WARNED = True
+    try:
+        pool = evidence.EvidencePool(task.get("parent") or task["id"])
+        candidates = [pool.add(candidate) for candidate in candidates]
+        routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg)
+        decision_log.record(**context_router.decision_row(task, routed, mode=mode))
+        return {
+            "routed_tokens": routed.routed_tokens,
+            "routed_reduction_ratio": routed.reduction_ratio,
+            "routed_hidden": sum(item.level == "HIDE" for item in routed.items),
+            "routed_ambiguous": len(routed.ambiguous_ids),
+            "routed_rules_version": routed.rules_version,
+            "evidence_ids": [item.evidence_id for item in routed.items][:200],
+        }
+    except Exception as exc:
+        notify.notify(f"{task.get('id', '(unknown)')}: context_router shadow failed: {exc}")
+        return {}
+
+
+def _shadow_tool_disclosure(task, role, cfg):
+    """Measure the hypothetical minimum while preserving the dispatched allowlist."""
+    global _TOOL_DISCLOSURE_ACTIVE_WARNED
+    mode = promotion.mode("tool_disclosure", cfg)
+    if mode not in ("shadow", "active"):
+        return {}
+    if mode == "active" and not _TOOL_DISCLOSURE_ACTIVE_WARNED:
+        notify.notify("tool_disclosure active not implemented; running shadow")
+        _TOOL_DISCLOSURE_ACTIVE_WARNED = True
+    offered = tool_catalog.disclosed(role)
+    choice = tool_catalog.minimal_set(task, role)
+    disclosed_tokens = tool_catalog.tokens(offered)
+    minimal_tokens = tool_catalog.tokens(choice["keep"])
+    decision_log.record(
+        kind="tool_disclosure", subject=task.get("id", "(unknown)"), candidates=offered,
+        hard_constraints=choice["mandatory"], selected="allowlist unchanged (shadow)",
+        deterministic={"task_class": tool_catalog._task_class(task), "role": role,
+                       "kept": choice["keep"], "dropped": choice["drop"],
+                       "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens},
+        reason=choice["reason"], mode=mode)
+    return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens}
+
+
+def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
     scope = [str(p) for p in task.get("scope", [])]
@@ -294,7 +381,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
                      if parent != "(none)" and parent.lower() in f"{title}\n{body}".lower()][:3]
         if candidate.exists():
             break
-    evidence = []
+    evidence_lines = []
     for item in task.get("inputs", []):
         value = item
         if isinstance(item, str):
@@ -303,7 +390,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
             except KeyError:
                 value = {}
         summary = value.get("summary", value) if isinstance(value, dict) else value
-        evidence.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
+        evidence_lines.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
 
     objective = [str(task.get("title", ""))]
     if task.get("spec"):
@@ -321,8 +408,44 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
         ("gotchas", gotchas[:5] or ["- (none)"]),
         ("decisions", decisions or ["- (none)"]),
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
-        ("evidence", evidence or ["- (none)"]),
+        ("evidence", evidence_lines or ["- (none)"]),
     ]
+    cfg = Pool().cfg if cfg is None else cfg
+    candidates = []
+    task_id = task.get("id", "(none)")
+    if task.get("spec"):
+        candidates.append(evidence.make(
+            "architecture_note", f"task:{task_id}:spec", task["spec"], provenance="repo", task=task))
+    candidates.extend(evidence.make(
+        "architecture_note", f"task:{task_id}:acceptance:{index}", value,
+        provenance="repo", task=task)
+        for index, value in enumerate(task.get("acceptance", []), 1))
+    for path in scope_files:
+        candidates.append(evidence.make(
+            "source_chunk", str(path.relative_to(wt)), path.read_text(errors="replace")[:12000],
+            commit=merge_base, provenance="repo", task=task))
+    for path in sorted(read_scope):
+        path_symbols = "\n".join(line for line in symbols if line.startswith(f"- {path}"))
+        candidates.append(evidence.make(
+            "source_chunk", path or ".", path_symbols, commit=merge_base, provenance="repo", task=task))
+    candidates.extend(evidence.make(
+        "memory_entry", f"task:{task_id}:gotcha:{index}", value,
+        provenance="memory", task=task) for index, value in enumerate(gotchas, 1))
+    candidates.extend(evidence.make(
+        "decision", f"task:{task_id}:decision:{index}", value,
+        provenance="memory", task=task) for index, value in enumerate(decisions, 1))
+    candidates.extend(evidence.make(
+        "previous_result", f"task:{task_id}:evidence:{index}", value,
+        provenance="bus", task=task) for index, value in enumerate(evidence_lines, 1))
+    candidates.extend(evidence.make(
+        "test_result", value, value, commit=merge_base, provenance="repo", task=task)
+        for value in tests)
+    failure_match = re.search(r"(?ms)^Failures:\s*(.*)$", str(task.get("spec") or ""))
+    if (task.get("constraints") or {}).get("fix_round_for") and failure_match:
+        candidates.append(evidence.make(
+            "test_result", f"task:{task_id}:failures", failure_match.group(1),
+            commit=merge_base, provenance="repo", task=task))
+    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg)
     dependencies = []
     for dependency_id in task.get("depends_on", []):
         try:
@@ -371,7 +494,7 @@ def _packet_body(task, worktree) -> tuple[str, dict]:
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
                   "memory_layers": ",".join(memory["layers_consulted"]),
-                  "candidate_tokens": candidate_tokens, "candidate_known": True}
+                  "candidate_tokens": candidate_tokens, "candidate_known": True, **shadow_meta}
 
 
 def packet_meta(task, worktree) -> dict:
@@ -411,12 +534,16 @@ def section_meta(text) -> dict:
 
 def with_instruction_tokens(meta, rendered_prompt, packet):
     """Return packet metadata augmented with deterministic prompt-wrapper cost."""
-    return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4}
+    rendered = next((text for text in reversed(_INSTRUCTION_RENDER_META) if rendered_prompt.startswith(text)), None)
+    extra = _INSTRUCTION_RENDER_META.get(rendered, {})
+    if extra:
+        extra = {"instruction_tokens_modular": extra["instruction_tokens_modular"] - len(packet) // 4}
+    return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree) -> str:
+def packet(task, worktree, *, cfg=None) -> str:
     """Build a bounded executor briefing with a verifiable provenance header."""
-    body, meta = _packet_body(task, worktree)
+    body, meta = _packet_body(task, worktree, cfg=cfg)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
     # Account for the header itself, including a possible extra digit in n.
@@ -431,7 +558,10 @@ def packet(task, worktree) -> str:
             over = actual
     result = header + "\n" + body
     _remember_packet_meta(meta["hash"],
-                          {key: meta[key] for key in ("candidate_tokens", "candidate_known")})
+                          {key: value for key, value in meta.items()
+                           if key in ("candidate_tokens", "candidate_known", "routed_tokens",
+                                      "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
+                                      "routed_rules_version", "evidence_ids")})
     return result
 
 
@@ -457,7 +587,7 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed) -> str:
+def review_packet(task, reviewed, *, cfg=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
     src = reviewed or task
@@ -494,7 +624,8 @@ def review_packet(task, reviewed) -> str:
     }
     if reviewer_role in role_focus:
         sections.append(_section("role", role_focus[reviewer_role]))
-    security_globs = Pool().cfg.get("review", {}).get("security_paths", [])
+    cfg = Pool().cfg if cfg is None else cfg
+    security_globs = cfg.get("review", {}).get("security_paths", [])
     matched = sorted({glob for glob in security_globs for path in src.get("scope", []) if Path(path).match(glob)})
     semantic = re.search(r"\b(auth|credential|secret|token|permission|crypt|security)\b",
                          f"{src.get('spec', '')}\n{raw_diff}", re.I)
@@ -528,16 +659,38 @@ def review_packet(task, reviewed) -> str:
                 if comments:
                     break
         sections.append(_section("fix-round context", [json.dumps(x, sort_keys=True) for x in comments] or ["(none)"]))
+    else:
+        comments = []
     other_chars = len("\n".join(section for section in sections if section is not None)) + 1
     diff_heading_chars = len("## diff\n")
-    configured_cap = Pool().cfg.get("limits", {}).get("review_diff_chars", 12000)
+    configured_cap = cfg.get("limits", {}).get("review_diff_chars", 12000)
     diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
     sections[3] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
+    candidates = []
+    if src.get("spec"):
+        candidates.append(evidence.make("architecture_note", f"task:{src['id']}:spec", src["spec"],
+                                        provenance="repo", task=src))
+    candidates.extend(evidence.make("architecture_note", f"task:{src['id']}:acceptance:{index}", value,
+                                    provenance="repo", task=src)
+                      for index, value in enumerate(src.get("acceptance", []), 1))
+    for chunk in raw_diff.split("diff --git ")[1:]:
+        header = chunk.splitlines()[0] if chunk else ""
+        match = re.match(r"a/(\S+) b/(\S+)", header)
+        location = match.group(2) if match else header
+        candidates.append(evidence.make("source_chunk", location, "diff --git " + chunk,
+                                        commit=_base_sha(src, wt), provenance="repo", task=src))
+    candidates.extend(evidence.make("review_finding", f"task:{src['id']}:review:{index}",
+                                    json.dumps(value, sort_keys=True), provenance="bus", task=src)
+                      for index, value in enumerate(comments, 1))
+    shadow_meta = _shadow_route(task, candidates,
+                                role="security_review" if any(section.startswith("## security\n")
+                                                               for section in sections) else "review",
+                                head_sha=_base_sha(src, wt), cfg=cfg)
     return _role_packet(body, _base_sha(src, wt),
                         f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}",
-                        candidate_tokens=len(raw_diff) // 4, candidate_known=True)
+                        candidate_tokens=len(raw_diff) // 4, candidate_known=True, **shadow_meta)
 
 
 def spec_review_packet(task) -> str:
@@ -805,31 +958,34 @@ def run_worker(task_id, account_id=None):
         if role == "review":
             src = reviewed if reviewed is not None else t
             role_packet = review_packet(t, src)
-            prompt = render("review", packet=role_packet)
+            security_signals = {"security": "## security\n" in role_packet}
+            prompt = render("review", packet=role_packet, task=t, signals=security_signals)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         elif role == "challenge":
-            prompt = render("challenge", **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
+            prompt = render("challenge", task=t, **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
                                             for k in ("claim", "evidence", "confidence")})
         elif role == "spec_review":
             src = bus.get(t["inputs"][0])
             role_packet = spec_review_packet(src)
-            prompt = render("spec-review", packet=role_packet)
+            prompt = render("spec-review", packet=role_packet, task=t)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         elif role == "execute":
             t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
             bus.update(task_id, executor=t["executor"])
             packet_worktree = t.get("worktree") or ROOT
             role_packet = packet(t, packet_worktree)
-            prompt = render("execute", packet=role_packet) + \
+            prompt = render("execute", packet=role_packet, task=t) + \
                 "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         else:
             role_packet = scout_packet(t)
-            prompt = render("scout", packet=role_packet)
+            prompt = render("scout", packet=role_packet, task=t)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
     except Exception as exc:
         hold_render_error(task_id, exc)
         return {"status": "held", "reason": "render_error"}
+    disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg)
+    t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
         pipeline["hold_note"] = "budget"

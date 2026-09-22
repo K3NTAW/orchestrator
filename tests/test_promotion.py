@@ -122,3 +122,36 @@ class TestPromotion(unittest.TestCase):
         self.assertEqual(mode, "shadow")
         self.assertIn("invalid_config", flags)
         self.assertEqual(promotion.current_mode("speculation", {})[0], "off")
+
+    def test_handoff_routing_feature_counts_completed_lineages(self):
+        self.assertEqual(promotion.FEATURES["handoff_routing"]["default"], "shadow")
+        with tempfile.TemporaryDirectory() as root:
+            result = promotion.collect("handoff_routing", root=root)
+        self.assertEqual(result["n"], 0)
+        self.assertIsNone(result["accepted_tokens_delta"])
+
+    def test_handoff_routing_evidence_counts_handoff_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            decision_log.record("handoff", "T-1", candidates=["codex"], selected=["codex"],
+                                rejected=[], hard_constraints=[], deterministic={}, jev={},
+                                reason="route", confidence=1, n=1, mode="shadow", root=root)
+            self.assertEqual(promotion.collect("handoff_routing", root=root)["n"], 1)
+
+    def test_shadow_features_never_promote_without_quality_evidence(self):
+        for feature in ("context_router", "tool_disclosure", "conditional_instructions", "handoff_routing"):
+            result = promotion.evaluate(feature, {"n": 50, "first_pass_delta": None,
+                "fix_rounds_delta": None, "gate_success_delta": None, "review_findings_delta": None,
+                "accepted_tokens_delta": -.5, "suite_present": True, "suite_passed": True})
+            self.assertEqual(result["recommendation"], "stay")
+            self.assertIn("shadow_quality_unmeasured", result["reasons"])
+
+    def test_shadow_features_need_a_passing_context_eval_for_efficiency_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = promotion.Path(root)
+            (path / "runs").mkdir()
+            (path / "runs" / "x.jsonl").write_text('{"context":{"routed_tokens":5,"routed_reduction_ratio":0.5}}\n')
+            missing = promotion.collect("context_router", root)
+            self.assertIsNone(missing["accepted_tokens_delta"])
+            (path / "context_eval.json").write_text('{"suite_passed":true}')
+            passed = promotion.collect("context_router", root)
+            self.assertEqual(passed["accepted_tokens_delta"], -.5)

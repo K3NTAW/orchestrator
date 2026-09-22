@@ -3,7 +3,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from . import STATE
+from . import STATE, attribution
 
 
 def _entries(root):
@@ -19,8 +19,31 @@ def _avg(values):
     return round(sum(values) / len(values), 2) if values else None
 
 
+def _shadow(rows):
+    contexts = [row["context"] for row in rows if isinstance(row.get("context"), dict)]
+    measured = [context for context in contexts if context.get("routed_tokens") is not None]
+    candidates = [len(context.get("evidence_ids") or []) for context in measured]
+    return {
+        "shadow_routed_tokens": _avg([context["routed_tokens"] for context in measured]),
+        "shadow_reduction": _avg([context["routed_reduction_ratio"] for context in measured
+                                  if context.get("routed_reduction_ratio") is not None]),
+        "shadow_hidden": _avg([context["routed_hidden"] for context in measured
+                               if context.get("routed_hidden") is not None]),
+        "shadow_ambiguous_rate": _avg([
+            context.get("routed_ambiguous", 0) / count for context, count in zip(measured, candidates) if count]),
+        "shadow_unmeasured": len(rows) - len(measured),
+    }
+
+
 def build(root=STATE):
     entries = list(_entries(root))
+    tasks = {}
+    for path in sorted((Path(root) / "tasks").glob("*.json")):
+        try:
+            task = json.loads(path.read_text())
+            tasks[task.get("id", path.stem)] = task
+        except (OSError, ValueError, TypeError):
+            continue
     roles = {}
     for role in sorted({row.get("role") or "?" for row in entries}):
         rows = [row for row in entries if (row.get("role") or "?") == role]
@@ -33,6 +56,14 @@ def build(root=STATE):
         candidate_presented = [row["context"].get("presented_tokens", 0) for row in candidate_rows]
         instructions = [row["context"].get("instruction_tokens") for row in measured
                         if row["context"].get("instruction_tokens") is not None]
+        modular_rows = [row for row in measured
+                        if row["context"].get("instruction_tokens_modular") is not None]
+        modular = [row["context"]["instruction_tokens_modular"] for row in modular_rows]
+        modular_legacy = [row["context"].get("instruction_tokens") for row in modular_rows]
+        disclosed = [row["context"].get("tool_tokens_disclosed") for row in measured
+                     if row["context"].get("tool_tokens_disclosed") is not None]
+        minimal = [row["context"].get("tool_tokens_minimal") for row in measured
+                   if row["context"].get("tool_tokens_minimal") is not None]
         sections = defaultdict(list)
         for row in measured:
             for name, meta in (row["context"].get("sections") or {}).items():
@@ -43,8 +74,15 @@ def build(root=STATE):
                        "reduction_ratio": round(1 - sum(candidate_presented) / sum(candidate), 3)
                        if candidate and sum(candidate) else None,
                        "avg_instruction_tokens": _avg(instructions),
+                       "instruction_tokens": _avg(instructions),
+                       "instruction_tokens_modular": _avg(modular),
+                       "instruction_reduction": round(sum(modular) / sum(modular_legacy), 3)
+                       if modular_legacy and sum(modular_legacy) else None,
+                       "instruction_unmeasured": len(rows) - len(modular_rows),
+                       "tool_tokens_disclosed": _avg(disclosed), "tool_tokens_minimal": _avg(minimal),
+                       "tool_reduction": round(sum(minimal) / sum(disclosed), 3) if disclosed and sum(disclosed) else None,
                        "top_sections": sorted(((name, _avg(values)) for name, values in sections.items()),
-                                              key=lambda item: (-item[1], item[0]))[:5]}
+                                              key=lambda item: (-item[1], item[0]))[:5], **_shadow(rows)}
     goals = {}
     for goal in sorted({row.get("goal_id") for row in entries if row.get("goal_id")}):
         rows = [row for row in entries if row.get("goal_id") == goal]
@@ -68,18 +106,41 @@ def build(root=STATE):
         goals[goal] = {"runs": len(rows), "measured": len(measured),
                        "amplification": round(total / unique, 3) if unique else None,
                        "amplification_by_section": by_section, "repeated_sections": repeated,
-                       "lineage_roots": sorted({row.get("lineage_root") for row in rows if row.get("lineage_root")})}
-    return {"roles": roles, "goals": goals}
+                       "lineage_roots": sorted({row.get("lineage_root") for row in rows if row.get("lineage_root")}),
+                       **_shadow(rows)}
+    by_role_class = {}
+    for key in sorted({(row.get("role") or "unknown",
+                        attribution.task_class(tasks[row.get("task")]) if row.get("task") in tasks else "unknown")
+                       for row in entries}):
+        selected = [row for row in entries if (row.get("role") or "unknown") == key[0] and
+                    (attribution.task_class(tasks[row.get("task")]) if row.get("task") in tasks else "unknown") == key[1]]
+        contexts = [row["context"] for row in selected if isinstance(row.get("context"), dict)]
+        disclosed = [c["tool_tokens_disclosed"] for c in contexts if c.get("tool_tokens_disclosed") is not None]
+        minimal = [c["tool_tokens_minimal"] for c in contexts if c.get("tool_tokens_minimal") is not None]
+        by_role_class[key] = {"runs": len(selected), "measured": len(contexts),
+                              "tool_tokens_disclosed": _avg(disclosed), "tool_tokens_minimal": _avg(minimal),
+                              "tool_reduction": round(sum(minimal) / sum(disclosed), 3) if disclosed and sum(disclosed) else None,
+                              **_shadow(selected)}
+    return {"roles": roles, "goals": goals, "by_role_task_class": by_role_class}
 
 
 def format_report(card):
-    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\ttop sections"]
+    lines = ["Per role", "role\truns\tmeasured\tunmeasured\tavg presented\tavg candidate\treduction\tavg instructions\tmodular instructions\tinstruction reduction\ttool disclosed\ttool minimal\ttool reduction\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\ttop sections"]
     for role, row in card["roles"].items():
         lines.append("\t".join(map(str, (role, row["runs"], row["measured"], row["unmeasured"],
                                           row["avg_presented"], row["avg_candidate"], row["reduction_ratio"],
-                                          row["avg_instruction_tokens"], row["top_sections"]))))
-    lines += ["", "Per goal", "goal\truns\tmeasured\tamplification\tby section\trepeated\tlineage roots"]
+                                          row["avg_instruction_tokens"], row["instruction_tokens_modular"],
+                                          row["instruction_reduction"], row["tool_tokens_disclosed"],
+                                          row["tool_tokens_minimal"], row["tool_reduction"],
+                                          row["shadow_routed_tokens"],
+                                          row["shadow_reduction"], row["shadow_hidden"],
+                                          row["shadow_ambiguous_rate"], row["shadow_unmeasured"],
+                                          row["top_sections"]))))
+    lines += ["", "Per goal", "goal\truns\tmeasured\tamplification\tshadow routed\tshadow reduction\tshadow hidden\tshadow ambiguous\tshadow unmeasured\tby section\trepeated\tlineage roots"]
     for goal, row in card["goals"].items():
         lines.append("\t".join(map(str, (goal, row["runs"], row["measured"], row["amplification"],
+                                          row["shadow_routed_tokens"], row["shadow_reduction"],
+                                          row["shadow_hidden"], row["shadow_ambiguous_rate"],
+                                          row["shadow_unmeasured"],
                                           row["amplification_by_section"], row["repeated_sections"], row["lineage_roots"]))))
     return "\n".join(lines)

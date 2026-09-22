@@ -279,11 +279,31 @@ def log_run(*, attempt=1, **fields):
     """Append one line per event to runs/<date>.jsonl: tokens, role, tier, account, executor, complexity, duration,
     outcome. Callers normalize cached tokens to cache_read_input_tokens so cli.cost sums one key across providers."""
     fields["attempt"] = attempt
+    tool_context = {}
+    if fields.get("provider") == "codex" or fields.get("account") == "codex":
+        try:
+            from . import decision_log, promotion, tool_catalog
+            task = get(fields["task"])
+            mode = promotion.mode("tool_disclosure")
+            if mode in ("shadow", "active"):
+                choice = tool_catalog.minimal_set(task, "codex_execute")
+                decision_log.record(kind="tool_disclosure", subject=fields["task"],
+                    candidates=["CODEX_TOOLS"], hard_constraints=choice["mandatory"],
+                    deterministic={"task_class": tool_catalog._task_class(task), "role": "codex_execute",
+                                   "kept": choice["keep"], "dropped": choice["drop"],
+                                   "tokens_disclosed": 0, "tokens_minimal": 0},
+                    selected="allowlist unchanged (shadow)", reason=choice["reason"], mode=mode)
+                tool_context = {"tool_tokens_disclosed": 0, "tool_tokens_minimal": 0}
+        except Exception:
+            pass
     packet_meta = fields.get("packet_meta")
     if isinstance(packet_meta, dict) and (packet_meta.get("hash") or packet_meta.get("version")):
-        fields["context"] = {key: packet_meta.get(key) for key in
+        fields["context"] = {key: {**packet_meta, **tool_context}.get(key) for key in
                              ("sections", "presented_tokens", "candidate_tokens", "candidate_known",
-                              "instruction_tokens", "packet_version")}
+                              "instruction_tokens", "instruction_tokens_modular", "packet_version", "routed_tokens",
+                              "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
+                              "routed_rules_version", "evidence_ids", "tool_tokens_disclosed",
+                              "tool_tokens_minimal")}
         fields["context"]["packet_version"] = packet_meta.get("packet_version") or packet_meta.get("version")
     else:
         fields["context"] = None

@@ -178,6 +178,39 @@ def _target_mtime(target):
         return None
 
 
+def _call_record(tool_name, tool_input):
+    path = _target_path(tool_name, tool_input)
+    try:
+        stat = os.stat(path)
+        mtime, size = stat.st_mtime_ns, stat.st_size
+    except (OSError, TypeError):
+        mtime = size = None
+    return {"name": tool_name, "input": tool_input or {}, "path": path,
+            "mtime": mtime, "size": size}
+
+
+def _history(session_id, new_call=None):
+    """Read, and optionally append to, the compact deterministic call history."""
+    from . import jev
+
+    def op():
+        path = STATE / "runs" / "jev" / f"history-{session_id or 'unknown'}.json"
+        try:
+            calls = json.loads(path.read_text())
+            if not isinstance(calls, list):
+                calls = []
+        except (OSError, ValueError):
+            calls = []
+        previous = calls[-RECENT_LIMIT:]
+        if new_call is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            calls.append(new_call)
+            path.write_text(json.dumps(calls[-RECENT_LIMIT:], sort_keys=True))
+        return previous
+
+    return jev._with_state_lock(op)
+
+
 def _record_call(session_id, tool_name, tool_input):
     """Return (hash, target, repeat, zero-based call index), updating the per-session index."""
     from . import jev
@@ -277,7 +310,8 @@ def _message(reason, tool_name, tool_input):
 
 
 def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency_ms, startup_ms=0.0,
-         tool_target="", input_hash="", repeat=False, sampled=False):
+         tool_target="", input_hash="", repeat=False, sampled=False, economy=None,
+         transcript_path="", call_index=None, role=None, task_class=None):
     answers = answers or {}
     _, reason = decide(answers, "block")
     rule = ("none" if reason is None else
@@ -293,7 +327,12 @@ def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency
         "mode": mode, "blocked": blocked, "latency_ms": latency_ms, "scored": scored,
         "startup_ms": startup_ms,
         "tool_target": tool_target, "input_hash": input_hash, "repeat": repeat, "sampled": sampled,
+        "transcript_path": transcript_path, "call_index": call_index, "role": role,
+        "task_class": task_class,
     }
+    if economy:
+        entry.update(read_kind=economy["kind"], tokens_estimate=economy["tokens_estimate"],
+                     would_suppress=economy["would_suppress"])
     GATE_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(GATE_LOG, "a") as fh:
         fh.write(json.dumps(entry) + "\n")
@@ -325,19 +364,62 @@ def run(payload):
              tool_target=target, input_hash=input_hash, repeat=repeat)
         return 0
 
+    economy = None
+    if tool_name in {"Read", "Grep", "Glob"}:
+        from . import read_economy
+        call = _call_record(tool_name, tool_input)
+        history = _history(session_id)
+        economy = read_economy.classify(call, history)
+        _history(session_id, call)
+
+    constraints = task.get("constraints") or {}
+    task_class = task.get("task_class") or constraints.get("task_class")
+
+    def finish(answers, *, scored=False, sampled=False, latency_ms=0.0, startup_ms=0.0,
+               blocked=False):
+        _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=scored,
+             latency_ms=latency_ms, startup_ms=startup_ms, tool_target=target,
+             input_hash=input_hash, repeat=repeat, sampled=sampled, economy=economy,
+             transcript_path=transcript_path, call_index=call_index, role=task.get("role"),
+             task_class=task_class)
+        if economy:
+            try:
+                from . import decision_log
+                jev_data = None
+                if answers:
+                    jev_data = {"needed_p": (answers.get("needed") or {}).get("p"),
+                                "redundant_p": (answers.get("redundant") or {}).get("p")}
+                decision_log.record(
+                    kind="action_gate", subject=task_id, candidates=["allow", "suppress"],
+                    hard_constraints=["guardrails.sh decides destructive", "block_repeats=false"],
+                    deterministic={"read_kind": economy["kind"],
+                                   "tokens_estimate": economy["tokens_estimate"],
+                                   "would_suppress": economy["would_suppress"]},
+                    jev=jev_data, selected="allow", reason=economy["kind"], mode=mode)
+            except Exception:
+                pass
+        return 0
+
+    # P18: Jev only judges ambiguous semantic equivalence. Deterministic cases are shadow-logged and allowed.
+    prior_same_path = any(item.get("path") == _target_path(tool_name, tool_input) for item in history) if economy else False
+    ambiguous = bool(economy and (economy["kind"] in ("repeated_read_changed", "narrower_search")
+                                 or (economy["kind"] == "other" and prior_same_path)))
     if mode == "block" and cfg.get("block_repeats", False) and repeat:
         _log(task_id, session_id, tool_name, None, mode, blocked=True, scored=False, latency_ms=0.0,
-             tool_target=target, input_hash=input_hash, repeat=True)
+             tool_target=target, input_hash=input_hash, repeat=True, economy=economy,
+             transcript_path=transcript_path, call_index=call_index, role=task.get("role"),
+             task_class=task_class)
         print("jev-gate: identical read already made this session; use the earlier result", file=sys.stderr)
         return 2
+
+    if economy and not ambiguous:
+        return finish(None)
 
     sample_rate = float(cfg.get("sample_rate", 0.1))
     sampled = mode != "sample" or (int(hashlib.sha1(f"{session_id}{call_index}".encode()).hexdigest(), 16) % 1000
                                     < sample_rate * 1000)
     if mode == "sample" and not sampled:
-        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=0.0,
-             tool_target=target, input_hash=input_hash, repeat=repeat, sampled=False)
-        return 0
+        return finish(None)
 
     from . import jev  # Network imports only after enabled, role and skip checks.
     recent = read_transcript(transcript_path)
@@ -349,13 +431,16 @@ def run(payload):
     latency_ms = (time.monotonic() - started) * 1000
 
     if answers is None:
-        _log(task_id, session_id, tool_name, None, mode, blocked=False, scored=False, latency_ms=latency_ms,
-             startup_ms=startup_ms, tool_target=target, input_hash=input_hash, repeat=repeat, sampled=sampled)
-        return 0
+        return finish(None, sampled=sampled, latency_ms=latency_ms, startup_ms=startup_ms)
 
     blocked, reason = decide(answers, mode)
-    _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms,
-         startup_ms=startup_ms, tool_target=target, input_hash=input_hash, repeat=repeat, sampled=sampled)
+    if economy:
+        finish(answers, scored=True, sampled=sampled, latency_ms=latency_ms,
+               startup_ms=startup_ms, blocked=blocked)
+    else:
+        _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=True, latency_ms=latency_ms,
+             startup_ms=startup_ms, tool_target=target, input_hash=input_hash, repeat=repeat, sampled=sampled,
+             transcript_path=transcript_path, call_index=call_index, role=task.get("role"), task_class=task_class)
     if blocked:
         print(_message(reason, tool_name, tool_input), file=sys.stderr)
         return 2
