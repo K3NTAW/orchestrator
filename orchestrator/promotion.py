@@ -33,6 +33,9 @@ FEATURES = OrderedDict((
     ("conditional_instructions", {"table": "instructions", "key": "mode",
                                   "modes": ("off", "shadow", "active"),
                                   "default": "shadow", "evidence": "conditional_instructions"}),
+    ("handoff_routing", {"table": "handoff", "key": "mode",
+                          "modes": ("off", "shadow", "active"),
+                          "default": "shadow", "evidence": "handoff_routing"}),
 ))
 
 CRITERIA = {
@@ -153,6 +156,11 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "handoff_routing":
+        from . import handoff_scorecard
+        rows = handoff_scorecard.lineage_rows(root)
+        return {"n": sum(row.get("rounds", 0) >= 1 for row in rows),
+                "reason": "shadow_quality_unmeasured"}
     if feature in {"context_router", "tool_disclosure", "conditional_instructions"}:
         # Evidence arrives with P27/P28 context scorecards.
         return {"n": 0}

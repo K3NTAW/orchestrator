@@ -122,3 +122,9 @@ class TestPromotion(unittest.TestCase):
         self.assertEqual(mode, "shadow")
         self.assertIn("invalid_config", flags)
         self.assertEqual(promotion.current_mode("speculation", {})[0], "off")
+
+    def test_handoff_routing_feature_counts_completed_lineages(self):
+        self.assertEqual(promotion.FEATURES["handoff_routing"]["default"], "shadow")
+        with tempfile.TemporaryDirectory() as root:
+            result = promotion.collect("handoff_routing", root=root)
+        self.assertEqual(result, {"n": 0, "reason": "shadow_quality_unmeasured"})
