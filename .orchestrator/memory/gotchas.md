@@ -410,3 +410,14 @@ outcome: until acceptance.py honours directory prefixes, kgpt specs must keep na
 type: gotcha · goal: T-0073 · tasks: T-0050,T-0094,T-0095,T-0096 · provenance: repo
 - kgpt 2026-09-22 01:52: the daemon's automatic fix round T-0094 and the Planner's T-0095 both resumed root T-0093's thread within seconds; T-0095 failed before starting (same as T-0050 on 2026-09-21). resume_plan() picks resume whenever the root has a codex_thread and a compatible worktree
 outcome: when the daemon has already opened an auto fix round, do not file a second one for the same root (retire one first); if a resume dies with the thread-store conflict, bus.update(root, codex_thread=None) and file the next round, which then runs fresh in the same worktree
+
+## 2026-09-22 a green gate in the dev venv does not prove the production image can import the code: kgpt PR 42 shipped jev.py importing httpx, a root-workspace-only dependency, and the gateway crash-looped after deploy
+type: gotcha · goal: T-0073 · tasks: T-0085,T-0106,T-0107 · provenance: repo
+- 2026-09-22 10:56: after make up on main 9161840 the gateway restarted in a loop (ModuleNotFoundError: No module named 'httpx'); the kernel package depends on httpx2 (push.py uses it), httpx exists only in the workspace root pyproject so the worktree gate and reviews passed; the Planner's spec had asserted httpx was already a dependency without checking kernel/pyproject.toml
+- detection: the post-deploy health wait reported healthz 000 and docker logs showed the traceback within two minutes; remedy: rollback.py checked out 57932e5 and rebuilt; hotfix goal T-0106/T-0107 switches jev.py to httpx2 and adds an AST guard test against top-level httpx imports in kgpt_kernel
+outcome: rule: a spec that adds an import names the package's own pyproject dependency line; the post-deploy check must include container restart status and a log grep for Traceback, not only healthz; backlog: a CI step that imports every kgpt_kernel module inside the built image
+
+## 2026-09-22 rolling kgpt back with make up fails once the database is ahead of the checkout (alembic cannot locate the newer revision); make restart rebuilds the gateway without migrating and restores service
+type: gotcha · goal: T-0106 · provenance: repo
+- 2026-09-22 11:08: rollback.py checked out 57932e5 and ran make up; make migrate exited 255 because the DB was at 0028 and the checkout only knows 0027, so compose up never ran and the crash-looping gateway stayed up; make restart (compose up -d --build --force-recreate gateway) at 57932e5 brought healthz 200 within 30 s; the extra nullable column context_layers is ignored by the old code
+outcome: rollback recipe: git checkout the good sha, make restart, verify healthz and docker logs; only downgrade the database when a migration is not backward-compatible
