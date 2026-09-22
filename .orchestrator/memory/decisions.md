@@ -408,3 +408,10 @@ type: decision · goal: T-0760 · tasks: T-0839,T-0840,T-0841 · provenance: rep
 - .orchestrator/tasks/T-0841.json — v3 spec running on codex in wt/T-0841, spec_review_verdict approve by Planner waiver; constraints.respec_for=T-0839 added 21:10 so planner_runs._observed_outcome scores the decision as respec
 - orchestrator/evidence.py:108, orchestrator/promotion.py:153/243, orchestrator/spawn.py:497/533 — the three T-0840 risks verified by grep on main and each bound by a v3 item
 outcome: plan.md committed c6cf5a1; revert path: git revert c6cf5a1 and drop constraints.respec_for from T-0841.json. Rule for packets: a held task with worktree null is respec territory, never fix_round
+
+## 2026-09-22 21:40 — Jev context program complete in shadow; checkpoint 3 appended to PR 20
+type: decision · goal: T-0760 · tasks: T-0800,T-0802,T-0809,T-0814,T-0831,T-0841,T-0843 · provenance: repo
+- T-0841 (+ fix round T-0843: handoff evidence counts kind=handoff rows; --economy joins role-keyed sources and lists handoffs by executor) merged into goal/T-0760: seven-category context-eval suite (all within expectation on first run; localized_fix reduction 0.69), promotion evidence loaders capped at stay without quality evidence, `scorecard --economy`, cfg overrides for packet builders.
+- PR 20 was still open, so the two commits were pushed onto it and its body extended (checkpoints 2 + 3, 11 commits) instead of opening a third PR against the same branch.
+- Program status: P0–P4, P6, P8 (pool), P10–P31 delivered in shadow; P5 and P7 deferred until shadow data shows the ambiguous bucket matters. Every mode stays shadow; promotion needs an active A/B first.
+outcome: revert path: git revert the PR 20 merge commit, or per feature mode = "off" in pool.toml.
