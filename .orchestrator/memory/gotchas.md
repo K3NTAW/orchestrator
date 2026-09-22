@@ -400,3 +400,13 @@ outcome: fix (c2, orchestrator): let _TEST_ID accept a directory prefix and reso
 type: gotcha · goal: T-0024 · tasks: T-0057 · provenance: repo
 - kgpt 2026-09-21 22:47: P20 fix round T-0057 (review T-0059 approve on be82d26) rebased onto goal/T-0024, which had taken P1a/P1b/P1c since the worktree was cut; the diff hash changed (generated packages/api-types and migration neighbours), merge.py returned rebase_changed_diff, the daemon set hold_reason 'merge rebase_changed_diff' and nothing re-reviews
 outcome: manual remedy: daemon.clear_stage(tid, 'gated_at', clear_pipeline_keys=('first_green_at','reviewed_sha','reviews_expected','review_reason','merged_at','merged_at_lease','merged_at_done','stale_check','failure_kind','auto_fix_skipped'), status='done', hold_reason=None) so the daemon re-gates the rebased worktree, spawns a fresh review on the new head and merges; backlog c3: daemon does this itself on rebase_changed_diff (already listed)
+
+## 2026-09-22 acceptance phrased without path::name ids (the kgpt parser workaround) disables the H6 named-test check: Codex shipped P3a with none of the required test files and the gate reported green; only the code review caught it
+type: gotcha · goal: T-0073 · tasks: T-0085,T-0087 · provenance: repo
+- kgpt 2026-09-22 01:03: T-0085 committed a34d2a1 with jev.py, jev_classify.py, chat.py wiring, docs, but no kernel/tests/test_harness_jev.py and no jev cases in gateway/tests/test_routing_modes.py; gate_reds 0 because tests.sh only runs the suite that exists; review T-0087 request_changes listed the missing tests
+outcome: until acceptance.py honours directory prefixes, kgpt specs must keep naming test modules and functions in words AND the Planner must check the diff stat for the named test files before trusting a green gate (as CLAUDE.md said pre-H6); fix c2 in orchestrator/acceptance.py stays top of the backlog
+
+## 2026-09-22 two fix rounds resuming the same Codex thread: the second dies at once with 'thread-store conflict: already has an active writer'; clear the root's codex_thread to force a fresh session in the same worktree
+type: gotcha · goal: T-0073 · tasks: T-0050,T-0094,T-0095,T-0096 · provenance: repo
+- kgpt 2026-09-22 01:52: the daemon's automatic fix round T-0094 and the Planner's T-0095 both resumed root T-0093's thread within seconds; T-0095 failed before starting (same as T-0050 on 2026-09-21). resume_plan() picks resume whenever the root has a codex_thread and a compatible worktree
+outcome: when the daemon has already opened an auto fix round, do not file a second one for the same root (retire one first); if a resume dies with the thread-store conflict, bus.update(root, codex_thread=None) and file the next round, which then runs fresh in the same worktree
