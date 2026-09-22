@@ -263,8 +263,7 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg):
         return {}
     try:
         pool = evidence.EvidencePool(task.get("parent") or task["id"])
-        for candidate in candidates:
-            pool.add(candidate)
+        candidates = [pool.add(candidate) for candidate in candidates]
         routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg)
         row = context_router.decision_row(task, routed, mode=mode)
         row["extra"] = {"head_sha": head_sha}

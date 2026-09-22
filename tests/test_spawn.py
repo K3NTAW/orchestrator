@@ -590,6 +590,50 @@ class Render(unittest.TestCase):
         self.assertNotIn("unrelated hidden finding", active)
         self.assertIn("routed=active", active.splitlines()[0])
 
+    def test_active_packet_never_contains_unredacted_evidence(self):
+        from dataclasses import replace
+        from orchestrator import jev
+        self.active_eval()
+        task = {**self.packet_fixture(), "id": "T-redaction", "parent": "G-redaction",
+                "constraints": {"fix_round_for": "T-prior"}}
+        secrets = ("sk-" + "a" * 24, "ghp_" + "b" * 36,
+                   "API_KEY=synthetic-private-value", "Bearer synthetic-private-token")
+        original_route = spawn.context_router.route
+        cfg = {"context_router": {"mode": "active"}}
+        for secret in secrets:
+            value = "widget " + secret
+            redacted = jev.redact(value)
+            self.assertNotEqual(value, redacted)
+            hits = {"hits": [{"id": "mem:gotchas.md:1", "title": value}],
+                    "layers_consulted": ["notes"]}
+            task["inputs"] = [{"summary": value}]
+            task["result"] = {"summary": value}
+            for level in ("SHORT", "LONG", "FULL"):
+                with self.subTest(secret_type=secret.split("-")[0], level=level):
+                    def route(*args, **kwargs):
+                        # Every field reaching routing must already be sanitized.
+                        for ev in args[1]:
+                            for field in (ev.content, ev.summary_short, ev.summary_long):
+                                self.assertNotIn(secret, field)
+                        routed = original_route(*args, **kwargs)
+                        return replace(routed, items=[replace(item, level=level) for item in routed.items])
+                    with mock.patch.object(spawn, "memory_recall", return_value=hits), \
+                         mock.patch.object(spawn, "_memory_entries", return_value=[(1, "G-redaction " + value, "")]), \
+                         mock.patch.object(spawn, "scoped_diff", return_value=""), \
+                         mock.patch.object(bus, "get", return_value={"role": "review", "result": {"comments": [{"text": value}]}}), \
+                         mock.patch.object(spawn.context_router, "route", side_effect=route):
+                        packets = (spawn.packet(task, TMP, cfg=cfg), spawn.review_packet(task, task, cfg=cfg))
+                        source = spawn.evidence.make("source_chunk", "support.py", value, commit="base",
+                            provenance="repo", task=task, section="read_scope")
+                        meta = spawn._shadow_route(task, [source], role="execute", head_sha="base", cfg=cfg)
+                    for packet in packets:
+                        self.assertIn("routed=active", packet.splitlines()[0])
+                        self.assertNotIn(secret, packet)
+                        self.assertIn(redacted, packet)
+                    source_text = meta["_routed_sections"]["read_scope"][0][1]
+                    self.assertNotIn(secret, source_text)
+                    self.assertIn(redacted, source_text)
+
     def test_active_refused_without_passing_context_eval(self):
         path = self.active_eval()
         task = self.packet_fixture()
