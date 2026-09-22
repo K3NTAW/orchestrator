@@ -289,20 +289,11 @@ def sync(root: Path = STATE, skills_dir: Path = REPO / "skills") -> dict[str, An
     return document
 
 
-def transition(skill_id: str, new_state: str, reason: str, root: Path = STATE) -> dict[str, Any]:
-    if new_state not in STATES:
-        raise ValueError(f"unknown state: {new_state}")
-    root = Path(root)
-    states = _state_document(root)
-    if skill_id not in states:
-        raise KeyError(skill_id)
-    entry = states[skill_id]
-    old_state = entry["state"]
-    if new_state not in ALLOWED_TRANSITIONS.get(old_state, set()):
-        raise ValueError(f"invalid transition: {old_state}→{new_state}")
+def _testing_findings(skill_id: str, old_state: str, reason: str, root: Path) -> list[str]:
+    """Apply the same inspection requirement on every entry into testing."""
     finding_ids = []
-    if old_state == "quarantined" and new_state == "testing":
-        record = load(root)["skills"][skill_id]
+    record = load(root)["skills"][skill_id]
+    if record["provenance"] != "builtin" or old_state == "quarantined":
         report = _read_json(root / "skills" / "quarantine" / skill_id / "findings.json", None)
         if not report or report.get("content_hash") != record["content_hash"]:
             raise ValueError("not inspected")
@@ -319,6 +310,21 @@ def transition(skill_id: str, new_state: str, reason: str, root: Path = STATE) -
         finding_ids = [f["id"] for f in report.get("findings", []) if f["severity"] == "block"]
         if report.get("max_severity") == "block" and not reason.startswith("override:"):
             raise ValueError("blocked findings: " + ", ".join(finding_ids))
+    return finding_ids
+
+
+def transition(skill_id: str, new_state: str, reason: str, root: Path = STATE) -> dict[str, Any]:
+    if new_state not in STATES:
+        raise ValueError(f"unknown state: {new_state}")
+    root = Path(root)
+    states = _state_document(root)
+    if skill_id not in states:
+        raise KeyError(skill_id)
+    entry = states[skill_id]
+    old_state = entry["state"]
+    if new_state not in ALLOWED_TRANSITIONS.get(old_state, set()):
+        raise ValueError(f"invalid transition: {old_state}→{new_state}")
+    finding_ids = _testing_findings(skill_id, old_state, reason, root) if new_state == "testing" else []
     now = _now()
     entry.setdefault("history", []).append({"at": now, "from": old_state, "to": new_state,
                                             "reason": reason})
@@ -341,6 +347,8 @@ def rollback(skill_id: str, root: Path = STATE) -> dict[str, Any]:
         raise ValueError(f"no transition to roll back for {skill_id}")
     previous = history[-1]["from"]
     current = entry["state"]
+    if previous == "testing":
+        _testing_findings(skill_id, current, f"rollback: {history[-1]['reason']}", root)
     now = _now()
     history.append({"at": now, "from": current, "to": previous,
                     "reason": f"rollback: {history[-1]['reason']}"})

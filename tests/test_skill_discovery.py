@@ -139,6 +139,53 @@ class SkillDiscoveryTests(unittest.TestCase):
         discovery.inspect(record["id"], self.root)
         registry.transition(record["id"], "testing", "reviewed", self.root)
 
+    def test_every_path_into_testing_requires_inspection(self):
+        self.malicious()
+        record = self.quarantine()
+        skill_id = record["id"]
+        report = discovery.inspect(skill_id, self.root)
+        report_path = Path(record["source"]).parent / "findings.json"
+        state_path = self.root / "skills" / "state.json"
+        incoming = [state for state, targets in registry.ALLOWED_TRANSITIONS.items()
+                    if "testing" in targets]
+        for origin in incoming:
+            with self.subTest(origin=origin):
+                states = registry._state_document(self.root)
+                states[skill_id]["state"] = origin
+                registry._write_json(state_path, states)
+                registry._update_registry_state(self.root, skill_id, states[skill_id])
+                report_path.unlink(missing_ok=True)
+                for reason in ("reviewed", "override: cannot skip inspection"):
+                    with self.assertRaisesRegex(ValueError, "not inspected"):
+                        registry.transition(skill_id, "testing", reason, self.root)
+                registry._write_json(report_path, dict(report, content_hash="stale"))
+                with self.assertRaisesRegex(ValueError, "not inspected"):
+                    registry.transition(skill_id, "testing", "reviewed", self.root)
+                registry._write_json(report_path, report)
+                with self.assertRaisesRegex(ValueError, "blocked findings"):
+                    registry.transition(skill_id, "testing", "reviewed", self.root)
+                self.assertEqual(states, registry._state_document(self.root))
+                result = registry.transition(skill_id, "testing", "override: human reviewed", self.root)
+                self.assertEqual("testing", result["state"])
+                self.assertEqual([f["id"] for f in report["findings"] if f["severity"] == "block"],
+                                 result["history"][-1]["finding_ids"])
+                clean = dict(report, findings=[], max_severity="info")
+                registry._write_json(report_path, clean)
+                registry._write_json(state_path, states)
+                registry._update_registry_state(self.root, skill_id, states[skill_id])
+                self.assertEqual("testing", registry.transition(skill_id, "testing", "reviewed", self.root)["state"])
+
+        # Rolling back from disabled must not provide another route around the gate.
+        registry.transition(skill_id, "disabled", "pause", self.root)
+        report_path.unlink()
+        with self.assertRaisesRegex(ValueError, "not inspected"):
+            registry.rollback(skill_id, self.root)
+        registry._write_json(report_path, report)
+        with self.assertRaisesRegex(ValueError, "blocked findings"):
+            registry.rollback(skill_id, self.root)
+        registry._write_json(report_path, clean)
+        self.assertEqual("testing", registry.rollback(skill_id, self.root)["state"])
+
     def test_quarantined_skill_never_in_candidates(self):
         (self.skill / "SKILL.md").write_text(
             (_harness.REPO / "skills" / "scout" / "trace-callers" / "SKILL.md").read_text())

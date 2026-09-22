@@ -42,7 +42,7 @@ its absolute path. No builtin metadata inference runs on external content.
 
 Checks are deterministic heuristics, not a proof of safety. Findings include IDs,
 file and line references, excerpts, severity and the inspected content hash.
-Quarantined → testing refuses missing or stale inspection. Block findings refuse
+Every external entry into testing, including rollback, refuses missing or stale inspection. Block findings refuse
 promotion unless a human supplies a reason beginning `override:`; history records
 that reason and the block IDs. Later review stages handle warning judgments.
 Builtin imports, symlinks, submodules and over-limit skills are refused.
