@@ -16,11 +16,6 @@ REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fake
 
 
 class JevRouteDispatch(unittest.TestCase):
-    def test_dispatch_records_instruction_tokens(self):
-        packet = "packet vabcdef base dead sources test\n## spec\nx"
-        prompt = "instructions\n" + packet
-        meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
-        self.assertEqual(meta["instruction_tokens"], len(prompt) // 4 - len(packet) // 4)
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="jev-route-dispatch-")
         self.addCleanup(directory.cleanup)
@@ -85,6 +80,26 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_dispatch_records_instruction_tokens(self):
+        task = bus.create_task("fresh fix telemetry", "spec", ["passes"], ["x.py"],
+                               role="execute", complexity=3)
+        packet = "packet vabcdef base dead sources test\n## spec\nx"
+        prompt = "instructions\n" + packet
+        seen = []
+
+        def start(task_id, rendered, packet_meta=None, **kwargs):
+            seen.append((task_id, rendered, packet_meta))
+            return {"status": "held"}
+
+        with mock.patch.object(spawn, "packet", return_value=packet), \
+                mock.patch.object(spawn, "render", return_value=prompt), \
+                mock.patch.object(executor, "start", side_effect=start), \
+                mock.patch.object(daemon.jev_route, "shadow_context", return_value=None):
+            daemon._dispatch_fresh_fix(task["id"], "test")
+
+        self.assertEqual(seen[0][:2], (task["id"], prompt))
+        self.assertEqual(seen[0][2]["instruction_tokens"], len(prompt) // 4 - len(packet) // 4)
+
     def dispatch_telemetry(self, slots=0):
         self.swap(daemon.schedlog, "SCHED_DIR", self.sandbox / "sched")
         self.swap(daemon, "free_slots", lambda pool: slots)

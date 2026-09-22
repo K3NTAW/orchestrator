@@ -1053,17 +1053,56 @@ class ContextTelemetry(unittest.TestCase):
         self.assertIn("spec", meta["sections"])
 
     def test_review_packet_records_candidate_tokens_before_diff_budget(self):
-        packet = spawn._role_packet("## diff\nshort", "dead", "test", candidate_tokens=99,
-                                    candidate_known=True)
+        raw_diff = "diff --git a/x.py b/x.py\n@@ -1 +1 @@\n" + "-old\n+new\n" * 3000
+        task = {"id": "T-review", "spec": "s", "acceptance": [], "scope": ["x.py"],
+                "worktree": str(TMP), "complexity": 1}
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw_diff), \
+                mock.patch.object(spawn, "_base_sha", return_value="dead"):
+            packet = spawn.review_packet(task, task)
         meta = spawn.packet_run_meta(packet)
-        self.assertEqual(meta["candidate_tokens"], 99)
+        self.assertEqual(meta["candidate_tokens"], len(raw_diff) // 4)
+        self.assertLess(meta["presented_tokens"], meta["candidate_tokens"])
         self.assertTrue(meta["candidate_known"])
 
     def test_run_worker_records_instruction_tokens(self):
+        reviewed = bus.create_task("telemetry target", "s", ["a"], ["x.py"], role="execute")
+        review = bus.create_task("telemetry review", "s", ["a"], ["x.py"], role="review",
+                                 inputs=[reviewed["id"]])
+        execute = bus.create_task("telemetry execute", "s", ["a"], ["x.py"], role="execute")
         packet = "packet vabcdef base dead sources test\n## spec\nx"
         prompt = "instructions\n" + packet
-        meta = spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet)
-        self.assertEqual(meta["instruction_tokens"], len(prompt) // 4 - len(packet) // 4)
+        seen = []
+
+        def run_claude(pool, account, task, rendered, *args, **kwargs):
+            seen.append((task["role"], task["packet_meta"], rendered))
+            result = json.dumps({"verdict": "approve", "comments": []}) if task["role"] == "review" else "ok"
+            return {"status": "done", "output": {"result": result, "usage": {}}}
+
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "review_packet", return_value=packet), \
+                mock.patch.object(spawn, "packet", return_value=packet), \
+                mock.patch.object(spawn, "render", return_value=prompt), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "run_claude", side_effect=run_claude):
+            spawn.run_worker(review["id"])
+            spawn.run_worker(execute["id"])
+
+        self.assertEqual([role for role, _, _ in seen], ["review", "execute"])
+        for _, meta, rendered in seen:
+            self.assertEqual(meta["instruction_tokens"], len(rendered) // 4 - len(packet) // 4)
+
+    def test_packet_build_meta_evicts_beyond_cap(self):
+        original = spawn._PACKET_BUILD_META.copy()
+        self.addCleanup(lambda: (spawn._PACKET_BUILD_META.clear(),
+                                 spawn._PACKET_BUILD_META.update(original)))
+        spawn._PACKET_BUILD_META.clear()
+        first = spawn._role_packet("first", "dead", "test")
+        first_version = spawn.packet_run_meta(first)["version"]
+        for index in range(spawn._PACKET_BUILD_META_MAX):
+            spawn._role_packet(f"packet {index}", "dead", "test")
+        self.assertEqual(len(spawn._PACKET_BUILD_META), spawn._PACKET_BUILD_META_MAX)
+        self.assertNotIn(first_version, spawn._PACKET_BUILD_META)
 
 
 if __name__ == "__main__":

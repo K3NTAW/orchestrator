@@ -1,12 +1,21 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
+from collections import OrderedDict
 from pathlib import Path
 from . import ROOT, STATE, attribution, bus, notify
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
-_PACKET_BUILD_META = {}
+_PACKET_BUILD_META_MAX = 512
+_PACKET_BUILD_META = OrderedDict()
+
+
+def _remember_packet_meta(version, meta):
+    _PACKET_BUILD_META[version] = meta
+    _PACKET_BUILD_META.move_to_end(version)
+    while len(_PACKET_BUILD_META) > _PACKET_BUILD_META_MAX:
+        _PACKET_BUILD_META.popitem(last=False)
 
 
 def memory_recall(query, **kwargs):
@@ -425,13 +434,14 @@ def packet(task, worktree) -> str:
                 break
             over = actual
     result = header + "\n" + body
-    _PACKET_BUILD_META[meta["hash"]] = {key: meta[key] for key in ("candidate_tokens", "candidate_known")}
+    _remember_packet_meta(meta["hash"],
+                          {key: meta[key] for key in ("candidate_tokens", "candidate_known")})
     return result
 
 
 def _role_packet(body, base, sources, **build_meta):
     version = hashlib.sha256(body.encode()).hexdigest()[:12]
-    _PACKET_BUILD_META[version] = build_meta or {"candidate_known": False}
+    _remember_packet_meta(version, build_meta or {"candidate_known": False})
     return f"packet v{version} base {base or '(unavailable)'} sources {sources}\n{body}"
 
 
