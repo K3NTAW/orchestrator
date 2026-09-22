@@ -1081,7 +1081,8 @@ def run_worker(task_id, account_id=None):
         first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)
         r = first
         tool_id = _hidden_tool_request(task_id)
-        if disclosure_mode == "active" and tool_id:
+        if (disclosure_mode == "active" and tool_id
+                and not (bus.get(task_id).get("pipeline") or {}).get("tool_escalation_used")):
             spent = float(first.get("output", {}).get("total_cost_usd", 0) or 0)
             budget_left = budget - spent
             timeout_left = timeout - (time.monotonic() - started)

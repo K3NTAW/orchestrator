@@ -1272,6 +1272,43 @@ class ContextTelemetry(unittest.TestCase):
         self.assertEqual(calls[1][5], spawn.TOOLS["review"])
         self.assertLess(calls[1][6], calls[0][6])
 
+    def test_tool_escalation_cap_persists_across_worker_invocations(self):
+        review = self._active_review()
+        reason = spawn.NEEDS_TOOL_PREFIX + "Glob"
+
+        def run(*args):
+            bus.post_result(review["id"], {"reason": reason}, "held")
+            return {"status": "held", "reason": reason,
+                    "output": {"usage": {}, "total_cost_usd": .25}}
+
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}) as reserve, \
+                mock.patch.object(P.Pool, "release") as release, \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run) as worker:
+            spawn.run_worker(review["id"])
+            self.assertEqual(worker.call_count, 2)
+            self.assertEqual(worker.call_args.args[5], spawn.TOOLS["review"])
+            self.assertTrue(bus.get(review["id"])["pipeline"]["tool_escalation_used"])
+
+            bus.update(review["id"], status="queued", result=None, assigned_to=None)
+            worker.reset_mock()
+            reserve.reset_mock()
+            release.reset_mock()
+            result = spawn.run_worker(review["id"])
+
+            worker.assert_called_once()
+            reserve.assert_called_once()
+            release.assert_called_once_with(review["id"], result)
+            expected = spawn.tool_catalog.minimal_set(review, "review")
+            self.assertEqual(worker.call_args.args[5], ",".join(expected["keep"]))
+            self.assertEqual(result["status"], "held")
+            self.assertEqual(bus.get(review["id"])["hold_reason"], reason)
+            self.assertTrue(bus.get(review["id"])["pipeline"]["tool_escalation_used"])
+
     def test_respawn_skipped_when_budget_remainder_too_small(self):
         review = self._active_review()
         calls = []
