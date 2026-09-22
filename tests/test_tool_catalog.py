@@ -18,6 +18,14 @@ class ToolCatalogTests(unittest.TestCase):
             self.assertTrue(set(result["mandatory"]) <= set(result["keep"]), role)
             self.assertFalse(set(result["mandatory"]) & set(result["drop"]), role)
 
+    def test_mandatory_never_dropped_in_active(self):
+        task = {"scope": ["docs/readme.md"], "acceptance": []}
+        for role in spawn.TOOLS:
+            result = tool_catalog.minimal_set(task, role)
+            self.assertTrue(set(result["mandatory"]) <= set(result["keep"]), role)
+        execute = tool_catalog.minimal_set(task, "execute")
+        self.assertTrue({"Edit", "Write", "Bash(.claude/hooks/tests-green.sh*)"} <= set(execute["keep"]))
+
     def test_docs_only_task_drops_test_and_shell(self):
         task = {"scope": ["x.py"], "acceptance": []}
         code = tool_catalog.minimal_set(task, "execute")

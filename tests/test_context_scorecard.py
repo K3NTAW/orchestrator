@@ -87,6 +87,19 @@ class ContextScorecard(unittest.TestCase):
         report = context_scorecard.format_report(card)
         self.assertIn("shadow routed", report)
 
+    def test_hidden_tool_recovery_rate_in_by_role_task_class(self):
+        from orchestrator import decision_log
+        root = self.root_with([])
+        (root / "tasks").mkdir()
+        (root / "tasks" / "T-1.json").write_text(json.dumps(
+            {"id": "T-1", "role": "review", "scope": ["x.py"], "constraints": {"task_class": "feature"}}))
+        for reason in ("review/feature: categories bus,git,read,search", "hidden_tool_requested"):
+            decision_log.record(kind="tool_disclosure", subject="T-1", candidates=["Read"],
+                hard_constraints=["Read"], deterministic={"role": "review"}, selected=["Read"],
+                reason=reason, mode="active", root=root)
+        row = context_scorecard.build(root)["by_role_task_class"][("review", "feature")]
+        self.assertEqual(row["hidden_tool_recovery_rate"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

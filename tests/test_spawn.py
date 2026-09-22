@@ -1230,6 +1230,90 @@ class OauthTokenInjection(unittest.TestCase):
 
 
 class ContextTelemetry(unittest.TestCase):
+    def _active_review(self):
+        reviewed = bus.create_task("active target", "s", ["a"], ["x.py"], role="execute")
+        review = bus.create_task("active review", "s", ["a"], ["x.py"], role="review", inputs=[reviewed["id"]])
+        return review
+
+    def test_active_allowlist_is_minimal_set_with_mandatory(self):
+        review = self._active_review()
+        captured = []
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=lambda *a, **k: captured.append(a[5]) or
+                                  {"status": "done", "output": {"result": '{"verdict":"approve"}', "usage": {}}}):
+            spawn.run_worker(review["id"])
+        expected = spawn.tool_catalog.minimal_set(review, "review")
+        self.assertEqual(captured, [",".join(expected["keep"])])
+        self.assertTrue(set(expected["mandatory"]) <= set(expected["keep"]))
+
+    def test_hidden_tool_request_respawns_once_with_full_allowlist(self):
+        review = self._active_review()
+        calls = []
+        def run(*args):
+            calls.append(args)
+            if len(calls) == 1:
+                bus.post_result(review["id"], {"reason": spawn.NEEDS_TOOL_PREFIX + "Glob"}, "held")
+                return {"status": "done", "output": {"usage": {}, "total_cost_usd": .25}}
+            return {"status": "done", "output": {"result": '{"verdict":"approve"}', "usage": {}}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            spawn.run_worker(review["id"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][5], spawn.TOOLS["review"])
+        self.assertLess(calls[1][6], calls[0][6])
+
+    def test_respawn_skipped_when_budget_remainder_too_small(self):
+        review = self._active_review()
+        calls = []
+        def run(*args):
+            calls.append(args)
+            bus.post_result(review["id"], {"reason": spawn.NEEDS_TOOL_PREFIX + "Glob"}, "held")
+            return {"status": "done", "output": {"usage": {}, "total_cost_usd": args[6] * .95}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            spawn.run_worker(review["id"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("no budget for respawn", bus.get(review["id"])["hold_reason"])
+
+    def test_escalation_stamps_tool_escalation_used_and_sums_usage(self):
+        review = self._active_review()
+        calls = []
+        def run(*args):
+            calls.append(args)
+            if len(calls) == 1:
+                bus.post_result(review["id"], {"reason": spawn.NEEDS_TOOL_PREFIX + "Glob"}, "held")
+                return {"status": "done", "output": {"usage": {"input_tokens": 2}, "total_cost_usd": .2}}
+            return {"status": "done", "output": {"result": '{"verdict":"approve"}',
+                                                    "usage": {"input_tokens": 3}, "total_cost_usd": .3}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(P.Pool, "release") as release, \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            spawn.run_worker(review["id"])
+        self.assertTrue(bus.get(review["id"])["pipeline"]["tool_escalation_used"])
+        released = release.call_args.args[1]
+        self.assertEqual(released["usage"]["input_tokens"], 5)
+        self.assertAlmostEqual(released["total_cost_usd"], .5)
+
     def test_worker_allowlist_unchanged_under_tool_disclosure_shadow(self):
         reviewed = bus.create_task("disclosure target", "s", ["a"], ["x.py"], role="execute")
         review = bus.create_task("disclosure review", "s", ["a"], ["x.py"], role="review",

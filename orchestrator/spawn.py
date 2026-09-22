@@ -9,8 +9,8 @@ from .pool import Pool, is_rate_limited, parse_reset_hint
 _MEMORY_RECALL = None
 _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
-_TOOL_DISCLOSURE_ACTIVE_WARNED = False
 _INSTRUCTION_RENDER_META = OrderedDict()
+NEEDS_TOOL_PREFIX = "needs_tool:"
 
 
 def _remember_packet_meta(version, meta):
@@ -287,26 +287,41 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg):
 
 
 def _shadow_tool_disclosure(task, role, cfg):
-    """Measure the hypothetical minimum while preserving the dispatched allowlist."""
-    global _TOOL_DISCLOSURE_ACTIVE_WARNED
+    """Record disclosure choice and return its telemetry and selected allowlist."""
     mode = promotion.mode("tool_disclosure", cfg)
     if mode not in ("shadow", "active"):
         return {}
-    if mode == "active" and not _TOOL_DISCLOSURE_ACTIVE_WARNED:
-        notify.notify("tool_disclosure active not implemented; running shadow")
-        _TOOL_DISCLOSURE_ACTIVE_WARNED = True
     offered = tool_catalog.disclosed(role)
     choice = tool_catalog.minimal_set(task, role)
     disclosed_tokens = tool_catalog.tokens(offered)
     minimal_tokens = tool_catalog.tokens(choice["keep"])
     decision_log.record(
         kind="tool_disclosure", subject=task.get("id", "(unknown)"), candidates=offered,
-        hard_constraints=choice["mandatory"], selected="allowlist unchanged (shadow)",
+        hard_constraints=choice["mandatory"],
+        selected=choice["keep"] if mode == "active" else "allowlist unchanged (shadow)",
         deterministic={"task_class": tool_catalog._task_class(task), "role": role,
                        "kept": choice["keep"], "dropped": choice["drop"],
                        "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens},
         reason=choice["reason"], mode=mode)
-    return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens}
+    return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens,
+            "tool_allowlist": ",".join(choice["keep"]) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
+            "tool_disclosure_mode": mode}
+
+
+def _hidden_tool_request(task_id):
+    result = bus.get(task_id).get("result") or {}
+    reason = result.get("reason", "") if isinstance(result, dict) else ""
+    return reason[len(NEEDS_TOOL_PREFIX):].strip() if reason.startswith(NEEDS_TOOL_PREFIX) else None
+
+
+def _combined_usage(first, second):
+    outputs = [r.get("output", {}) for r in (first, second) if isinstance(r, dict)]
+    usage = {}
+    for output in outputs:
+        for key, value in (output.get("usage") or {}).items():
+            if isinstance(value, (int, float)):
+                usage[key] = usage.get(key, 0) + value
+    return {"usage": usage, "total_cost_usd": sum(float(o.get("total_cost_usd", 0) or 0) for o in outputs)}
 
 
 
@@ -1035,7 +1050,8 @@ def run_worker(task_id, account_id=None):
             packet_worktree = t.get("worktree") or ROOT
             role_packet = packet(t, packet_worktree)
             prompt = render("execute", packet=role_packet, task=t) + \
-                "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
+                "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
+                "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         else:
             role_packet = scout_packet(t)
@@ -1045,6 +1061,8 @@ def run_worker(task_id, account_id=None):
         hold_render_error(task_id, exc)
         return {"status": "held", "reason": "render_error"}
     disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg)
+    allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
+    disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
     t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
@@ -1055,10 +1073,33 @@ def run_worker(task_id, account_id=None):
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
     bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = None
+    release_usage = None
     try:
-        r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
-                       lim["max_budget_usd"].get(role, 2.0),
-                       t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
+        budget = lim["max_budget_usd"].get(role, 2.0)
+        timeout = t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900))
+        started = time.monotonic()
+        first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)
+        r = first
+        tool_id = _hidden_tool_request(task_id)
+        if disclosure_mode == "active" and tool_id:
+            spent = float(first.get("output", {}).get("total_cost_usd", 0) or 0)
+            budget_left = budget - spent
+            timeout_left = timeout - (time.monotonic() - started)
+            if budget_left < budget * .1 or timeout_left < timeout * .1:
+                reason = f"{NEEDS_TOOL_PREFIX}{tool_id} (no budget for respawn)"
+                bus.update(task_id, status="held", hold_reason=reason, result={"reason": reason})
+                r = {"status": "held", "reason": reason, "output": first.get("output", {})}
+            else:
+                decision_log.record(kind="tool_disclosure", subject=task_id,
+                    candidates=tool_catalog.disclosed(role), hard_constraints=[], selected=tool_id,
+                    deterministic={"role": role, "requested_tool": tool_id},
+                    reason="hidden_tool_requested", mode="active")
+                pipeline = dict(bus.get(task_id).get("pipeline") or {})
+                pipeline["tool_escalation_used"] = True
+                bus.update(task_id, status="running", result=None, pipeline=pipeline)
+                r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
+                               budget_left, timeout_left)
+                release_usage = _combined_usage(first, r)
         if r["status"] == "done" and role == "execute":
             bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
                                       "review": "other account, different model; label PR same-family-review"}), "done")
@@ -1113,7 +1154,7 @@ def run_worker(task_id, account_id=None):
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
         bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     finally:
-        pool.release(task_id, r or {})
+        pool.release(task_id, release_usage or r or {})
     return r
 
 

@@ -121,6 +121,8 @@ def minimal_set(task, role):
         mandatory.append("Bash(git *)")
     if role == "execute" and "Bash(.claude/hooks/tests-green.sh*)" in offered:
         mandatory.append("Bash(.claude/hooks/tests-green.sh*)")
+    if role == "execute":
+        mandatory.extend(tool for tool in ("Edit", "Write") if tool in offered)
     keep = [tool for tool in offered if CATALOG[tool]["category"] in needed or tool in mandatory]
     drop = [tool for tool in offered if tool not in keep]
     reason = f"{role}/{task_class}: categories {','.join(sorted(needed))}"

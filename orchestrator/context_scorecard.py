@@ -59,6 +59,7 @@ def recovery(root=STATE):
 
 def build(root=STATE):
     entries = list(_entries(root))
+    decisions = list(decision_log.read_all(root=root))
     tasks = {}
     for path in sorted((Path(root) / "tasks").glob("*.json")):
         try:
@@ -132,16 +133,29 @@ def build(root=STATE):
                        "lineage_roots": sorted({row.get("lineage_root") for row in rows if row.get("lineage_root")}),
                        **_shadow(rows)}
     by_role_class = {}
+    disclosure = [row for row in decisions if row.get("kind") == "tool_disclosure" and row.get("mode") == "active"]
+    disclosure_keys = {(row.get("deterministic") or {}).get("role", "unknown") for row in disclosure}
     for key in sorted({(row.get("role") or "unknown",
                         attribution.task_class(tasks[row.get("task")]) if row.get("task") in tasks else "unknown")
-                       for row in entries}):
+                       for row in entries} |
+                      {(role, attribution.task_class(tasks[subject]) if subject in tasks else "unknown")
+                       for role in disclosure_keys for subject in
+                       {row.get("subject") for row in disclosure
+                        if (row.get("deterministic") or {}).get("role", "unknown") == role}}):
         selected = [row for row in entries if (row.get("role") or "unknown") == key[0] and
                     (attribution.task_class(tasks[row.get("task")]) if row.get("task") in tasks else "unknown") == key[1]]
         contexts = [row["context"] for row in selected if isinstance(row.get("context"), dict)]
         disclosed = [c["tool_tokens_disclosed"] for c in contexts if c.get("tool_tokens_disclosed") is not None]
         minimal = [c["tool_tokens_minimal"] for c in contexts if c.get("tool_tokens_minimal") is not None]
+        active = [row for row in disclosure
+                  if (row.get("deterministic") or {}).get("role", "unknown") == key[0]
+                  and (attribution.task_class(tasks[row.get("subject")])
+                       if row.get("subject") in tasks else "unknown") == key[1]]
+        spawns = sum(row.get("reason") != "hidden_tool_requested" for row in active)
+        escalations = sum(row.get("reason") == "hidden_tool_requested" for row in active)
         by_role_class[key] = {**recoveries.get(key[0], {"recovery_reads": 0, "hidden_items": 0, "recovery_rate": 0.0}),
                               "runs": len(selected), "measured": len(contexts),
+                              "hidden_tool_recovery_rate": escalations / spawns if spawns else 0.0,
                               "tool_tokens_disclosed": _avg(disclosed), "tool_tokens_minimal": _avg(minimal),
                               "tool_reduction": round(sum(minimal) / sum(disclosed), 3) if disclosed and sum(disclosed) else None,
                               **_shadow(selected)}
@@ -167,4 +181,7 @@ def format_report(card):
                                           row["shadow_hidden"], row["shadow_ambiguous_rate"],
                                           row["shadow_unmeasured"],
                                           row["amplification_by_section"], row["repeated_sections"], row["lineage_roots"]))))
+    lines += ["", "Per role/task class", "role\ttask class\truns\thidden_tool_recovery_rate"]
+    for (role, task_class), row in card["by_role_task_class"].items():
+        lines.append("\t".join(map(str, (role, task_class, row["runs"], row["hidden_tool_recovery_rate"]))))
     return "\n".join(lines)
