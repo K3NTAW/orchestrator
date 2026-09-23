@@ -1651,7 +1651,7 @@ def maybe_handover(reason, now=None):
     return True
 
 
-def _steering_decisions(pool, running, tasks, ranked, now):
+def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task):
     """Persist proposals; only active steering can affect a worker."""
     cfg = pool.cfg
     mode = steering_policy.mode(cfg)
@@ -1659,13 +1659,21 @@ def _steering_decisions(pool, running, tasks, ranked, now):
     invalid = not isinstance(section, dict) or section.get("mode", "shadow") not in ("off", "shadow", "active")
     if mode == "off" and not invalid:
         return
+    interval = section.get("min_interval_s", 1800) if isinstance(section, dict) else 1800
     if mode == "active":
-        recommendation = promotion.evaluate("steering_policy",
-            promotion.collect("steering_policy", root=bus.STATE), cfg)
+        cache = getattr(pool, "steering_promotion_cache", None)
+        if not isinstance(cache, dict) or now - cache["at"] >= interval:
+            recommendation = promotion.evaluate("steering_policy",
+                promotion.collect("steering_policy", root=bus.STATE), cfg)
+            cache = {"at": now, "recommendation": recommendation}
+            pool.steering_promotion_cache = cache
+        recommendation = cache["recommendation"]
+        reasons = tuple(sorted(recommendation["reasons"])) if recommendation["recommendation"] != "promote" else ()
         if recommendation["recommendation"] != "promote":
             mode = "shadow"
-            notify("active steering policy refused; using shadow: " + ", ".join(recommendation["reasons"]))
-    interval = section.get("min_interval_s", 1800) if isinstance(section, dict) else 1800
+            if getattr(pool, "steering_refusal_reasons", None) != reasons:
+                notify("active steering policy refused; using shadow: " + ", ".join(reasons))
+        pool.steering_refusal_reasons = reasons
     for task in running:
         doc = worker_registry.get(task["id"])
         if mode == "active" and doc and (doc.get("status") in ("steering", "cancelling") or
@@ -1682,8 +1690,7 @@ def _steering_decisions(pool, running, tasks, ranked, now):
         if invalid:
             result.update(action="continue", message=None, reasons=["invalid_config"])
         digest = steering_policy.evidence_hash(result)
-        previous = decision_log.recent(root=bus.STATE, limit=500,
-                                       kind="steering", subject=task["id"])
+        previous = recent_by_task.get(task["id"], [])
         applied = [r for r in previous if r.get("mode") == "active" and
                    (r.get("extra") or {}).get("outcome") == "applied"]
         in_interval = bool(applied and now - applied[-1]["ts"] < interval)
@@ -1736,7 +1743,9 @@ def steering_tick(pool, *, depth_tick=None):
         durations = None
     ranked = _wave_order([t["id"] for t in running + candidates], wave_tasks, durations)
     tasks = {t["id"]: t for t in bus.read()}
-    _steering_decisions(pool, running, tasks, ranked, time.time())
+    recent_by_task = decision_log.recent(root=bus.STATE, limit=2, kind="steering",
+                                         subjects=[task["id"] for task in running])
+    _steering_decisions(pool, running, tasks, ranked, time.time(), recent_by_task)
 
 
 def tick(pool=None, stop_event=None):
@@ -1817,9 +1826,17 @@ def _loop(interval, stop_event):
     """A fresh Pool() per tick: cooldowns and running counts are written by the spawned workers, so a long-lived
     Pool would dispatch against minutes-old state. stop_event.wait as the sleep so a caller can interrupt it
     instead of blocking for a full interval."""
+    steering_state = {}
     while True:
         try:
-            tick(Pool(), stop_event)
+            pool = Pool()
+            vars(pool).update(steering_state)
+            try:
+                tick(pool, stop_event)
+            finally:
+                # Preserve only policy throttles; refresh all scheduling state.
+                steering_state = {key: vars(pool)[key] for key in
+                    ("steering_promotion_cache", "steering_refusal_reasons") if key in vars(pool)}
         except Exception as e:
             print(f"[daemon] tick failed: {e}", file=sys.stderr)
         if stop_event.wait(interval):

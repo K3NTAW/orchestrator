@@ -487,8 +487,8 @@ def _collect_steering(root):
     current_tokens, baseline_tokens = tokens(active), tokens(shadow)
     candidates = [(r.get("extra") or {}).get("candidate_action", r.get("selected")) for r in rows]
     return {"n": len(rows), "steer": candidates.count("steer"), "cancel": candidates.count("cancel"),
-            "shadow_n": len({root_id(r["subject"]) for r, action in zip(rows, candidates)
-                             if r.get("mode") == "shadow" and action in ("steer", "cancel")}),
+            "shadow_n": sum(r.get("mode") == "shadow" and action in ("steer", "cancel")
+                            for r, action in zip(rows, candidates)),
             "active_n": len(active), "mean_fix_rounds_steered": current,
             "mean_fix_rounds_non_steered": mean(observed - active),
             "mean_fix_rounds_shadow": baseline,

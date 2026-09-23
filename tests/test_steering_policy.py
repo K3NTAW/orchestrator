@@ -130,3 +130,22 @@ class SteeringPolicyTests(unittest.TestCase):
             result = self.evaluate(cfg={"steering": {"out_of_scope_events": 0}})
             self.assertEqual(result["action"], "continue")
             self.assertIn("docs/newdir/page.md", policy.changed_paths(self.task))
+
+    def test_shared_read_scope_skips_outside_paths(self):
+        from orchestrator import spawn
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wt = root / "worktree"
+            wt.mkdir()
+            (root / "outside.py").write_text("value = 1\n")
+            (wt / "linked.py").symlink_to(root / "outside.py")
+            (wt / "app").mkdir()
+            (wt / "app/main.py").write_text("import linked\n")
+            task = {"scope": ["../outside.py", str(root / "outside.py"), "linked.py", "app/main.py"],
+                    "worktree": str(wt)}
+            self.assertEqual(policy.safe_scope(task), ["app/main.py"])
+            self.assertEqual(policy.read_scope(task), ["app/", "tests/"])
+            with patch.object(policy, "read_scope", side_effect=RuntimeError("shared helper reached")) as shared:
+                with self.assertRaisesRegex(RuntimeError, "shared helper reached"):
+                    spawn._packet_body(task, wt, cfg={})
+                shared.assert_called_once_with(task, wt)

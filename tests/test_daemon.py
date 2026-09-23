@@ -3901,13 +3901,45 @@ class SteeringPolicyTickTests(unittest.TestCase):
 
     def test_active_promotion_refusal_uses_shadow(self):
         self.pool.cfg["steering"]["mode"] = "active"
-        for evidence in ({"shadow_n": 19}, {"shadow_n": 20, "active_n": 1,
-                         "fix_rounds_delta": 0, "accepted_tokens_delta": 1}):
-            self.promotion_collect.return_value = evidence
+        self.promotion_collect.return_value = {"shadow_n": 19}
+        daemon.tick(self.pool)
+        for _ in range(3):
+            self.now += 10
             daemon.tick(self.pool)
-            self.assertEqual(self.rows()[-1]["mode"], "shadow")
-        self.promotion_collect.assert_called_with("steering_policy", root=self.root)
+        self.promotion_collect.assert_called_once_with("steering_policy", root=self.root)
+        self.notify.assert_called_once()
+        self.now += 1800
+        daemon.tick(self.pool)
+        self.assertEqual(self.promotion_collect.call_count, 2)
+        self.notify.assert_called_once()
+        self.promotion_collect.return_value = {"shadow_n": 20, "active_n": 1,
+            "fix_rounds_delta": 0, "accepted_tokens_delta": 1}
+        self.now += 1800
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["mode"], "shadow")
+        self.assertEqual(self.notify.call_count, 2)
         self.steer.assert_not_called()
         self.cancel.assert_not_called()
-        self.assertEqual(self.notify.call_count, 2)
         self.begin_depth.assert_not_called()
+
+    def test_steering_history_is_grouped_once_for_all_workers(self):
+        other = {**self.task, "id": "T-another"}
+        with mock.patch.object(bus, "read", return_value=[self.task, other]), \
+                mock.patch.object(daemon.decision_log, "recent", wraps=daemon.decision_log.recent) as recent:
+            daemon.steering_tick(self.pool, depth_tick=self.pool.harness_depth_tick)
+        recent.assert_called_once_with(root=self.root, limit=2, kind="steering",
+                                       subjects=[self.task["id"], other["id"]])
+
+    def test_loop_preserves_steering_throttles_across_fresh_pools(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        self.promotion_collect.return_value = {"shadow_n": 0}
+        fresh = mock.Mock(cfg=self.pool.cfg, harness_depth_tick=self.pool.harness_depth_tick)
+        stop = mock.Mock()
+        stop.wait.side_effect = [False, True]
+        with mock.patch.object(daemon, "Pool", side_effect=[self.pool, fresh]), \
+                mock.patch.object(daemon, "tick", side_effect=lambda pool, event:
+                    daemon.steering_tick(pool, depth_tick=pool.harness_depth_tick)):
+            daemon._loop(30, stop)
+        self.promotion_collect.assert_called_once()
+        self.notify.assert_called_once()
+        self.assertIs(fresh.steering_promotion_cache, self.pool.steering_promotion_cache)

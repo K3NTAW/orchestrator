@@ -26,18 +26,30 @@ def matches(path, entries):
 
 
 
-def read_scope(task):
-    """Mirror spawn._packet_body: tests, scope parents and local Python imports.
+def safe_scope(task, worktree=None):
+    """Scope entries contained in the worktree, including resolved symlinks."""
+    root = Path(worktree or task.get("worktree") or ".").resolve()
+    entries = []
+    for value in task.get("scope", []):
+        entry = str(value)
+        try:
+            (root / entry).resolve().relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if Path(entry).is_absolute() or ".." in Path(entry).parts:
+            continue
+        entries.append(entry)
+    return entries
 
-    Bus tasks store scope, not packet read_scope. Keep this derivation aligned
-    with spawn without building a packet or triggering its routing side effects.
-    """
-    scope = [str(p) for p in task.get("scope", [])]
+
+def read_scope(task, worktree=None):
+    """Shared packet/policy scope: tests, scope parents and contained imports."""
+    scope = safe_scope(task, worktree)
     paths = {"tests/"}
     paths.update(str(Path(p).parent) + ("/" if str(Path(p).parent) != "." else "")
                  for p in scope)
-    if task.get("worktree"):
-        wt = Path(task["worktree"])
+    if worktree or task.get("worktree"):
+        wt = Path(worktree or task["worktree"]).resolve()
         for entry in scope:
             path = wt / entry
             if path.suffix != ".py" or not path.is_file():
@@ -52,9 +64,14 @@ def read_scope(task):
                 for name in filter(None, names):
                     stem = Path(*name.split("."))
                     for candidate in (wt / stem.with_suffix(".py"), wt / stem / "__init__.py"):
+                        try:
+                            candidate.resolve().relative_to(wt)
+                        except (OSError, RuntimeError, ValueError):
+                            continue
                         if candidate.is_file():
                             paths.add(str(candidate.relative_to(wt)))
     return sorted(paths)
+
 
 def _git(task, *args):
     worktree = task.get("worktree")

@@ -288,7 +288,7 @@ class SteeringPromotionTests(unittest.TestCase):
                     patch.object(scorecard, "efficiency", return_value={"tasks": {
                         "active": {"tokens": 100, "calls": 1}, "shadow": {"tokens": 120, "calls": 1}}}):
                 data = promotion.collect("steering_policy", root)
-            self.assertEqual((data["n"], data["shadow_n"], data["steer"], data["cancel"]), (21, 1, 1, 20))
+            self.assertEqual((data["n"], data["shadow_n"], data["steer"], data["cancel"]), (21, 20, 1, 20))
             self.assertEqual(data["mean_fix_rounds_steered"], 0)
             self.assertEqual(data["mean_fix_rounds_non_steered"], 2)
             self.assertEqual(data["fix_rounds_delta"], -2)

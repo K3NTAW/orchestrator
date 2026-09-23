@@ -260,8 +260,15 @@ def validate_steering(row):
         raise ValueError("steering rows must omit message text")
 
 
-def recent(root=None, limit=500, *, kind=None, subject=None):
-    """Read backwards until limit matching rows, unaffected by unrelated traffic."""
+def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):
+    """Read backwards once. Grouped steering retains latest and latest applied.
+
+    subjects returns at most two rows per subject, so unrelated traffic cannot
+    evict the interval anchor. A subject without an applied row requires one
+    full scan, shared by all subjects rather than repeated per worker.
+    """
+    grouped = {subject: [] for subject in subjects} if subjects is not None else None
+    completed = set()
     if limit <= 0:
         return []
     rows = []
@@ -283,9 +290,22 @@ def recent(root=None, limit=500, *, kind=None, subject=None):
                         continue
                     if (isinstance(row, dict) and (kind is None or row.get("kind") == kind)
                             and (subject is None or row.get("subject") == subject)):
+                        if grouped is not None:
+                            tid = row.get("subject")
+                            if tid not in grouped or tid in completed:
+                                continue
+                            own = grouped[tid]
+                            applied = row.get("mode") == "active" and (row.get("extra") or {}).get("outcome") == "applied"
+                            if not own or applied:
+                                own.append(row)
+                            if applied:
+                                completed.add(tid)
+                            if len(completed) == len(grouped):
+                                return {tid: own[::-1] for tid, own in grouped.items()}
+                            continue
                         rows.append(row)
                         if len(rows) >= limit:
-                            return rows[::-1]
+                            return {tid: own[::-1] for tid, own in grouped.items()} if grouped is not None else rows[::-1]
     except FileNotFoundError:
         pass
-    return rows[::-1]
+    return {tid: own[::-1] for tid, own in grouped.items()} if grouped is not None else rows[::-1]

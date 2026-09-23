@@ -578,12 +578,13 @@ def _memory_tokens(sections):
 
 def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
+    from .steering_policy import read_scope as derive_read_scope, safe_scope
     wt = Path(worktree)
     cfg = Pool().cfg if cfg is None else cfg
-    scope = [str(p) for p in task.get("scope", [])]
+    scope = safe_scope(task, worktree)
     scope_files = [wt / p for p in scope if (wt / p).is_file()]
     py_files = [p for p in scope_files if p.suffix == ".py"]
-    symbols, symbol_names, imported_paths = [], set(), set()
+    symbols, symbol_names = [], set()
     for path in py_files:
         try:
             tree = ast.parse(path.read_text(errors="replace"))
@@ -594,18 +595,8 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 symbols.append(f"- {rel}:{node.lineno} {node.name}")
                 symbol_names.add(node.name)
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-                for name in names:
-                    if not name:
-                        continue
-                    stem = Path(*name.split("."))
-                    for candidate in (wt / stem.with_suffix(".py"), wt / stem / "__init__.py"):
-                        if candidate.is_file():
-                            imported_paths.add(str(candidate.relative_to(wt)))
 
-    read_scope = {"tests/", *imported_paths}
-    read_scope.update(str(Path(p).parent) + ("/" if str(Path(p).parent) != "." else "") for p in scope)
+    read_scope = set(derive_read_scope(task, worktree))
     # Scope-owned test files are the most useful starting point for an executor.
     # Keep them first and outside the discovery cap: a broad symbol such as
     # ``get`` must never hide a test explicitly named in a task's scope.

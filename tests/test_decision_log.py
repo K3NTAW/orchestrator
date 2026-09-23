@@ -208,3 +208,23 @@ class SteeringDecisionLogTests(unittest.TestCase):
                 decision_log.record("steering", "T-steering", root=root,
                                     extra={**extra, "nested": {"message": message}}, **fields)
             self.assertEqual(decision_log.recent(root=root), [row])
+
+
+class GroupedSteeringHistoryTests(unittest.TestCase):
+    def test_grouped_history_keeps_latest_and_applied_in_one_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "runs/sched/decisions.jsonl"
+            path.parent.mkdir(parents=True)
+            applied = {"kind": "steering", "subject": "worker", "mode": "active",
+                       "extra": {"outcome": "applied"}}
+            latest = {"kind": "steering", "subject": "worker", "mode": "shadow", "ts": 99}
+            rows = [applied] + [{"kind": "routing", "subject": "other"}] * 600
+            rows += [{"kind": "steering", "subject": "worker", "mode": "shadow"}] * 40
+            rows += [latest, {"kind": "steering", "subject": "new", "mode": "shadow"}]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            with patch.object(Path, "open", autospec=True, side_effect=Path.open) as opened:
+                grouped = decision_log.recent(root=root, kind="steering", subjects=["worker", "new"], limit=2)
+            opened.assert_called_once()
+            self.assertEqual(grouped["worker"], [applied, latest])
+            self.assertEqual(grouped["new"], [rows[-1]])

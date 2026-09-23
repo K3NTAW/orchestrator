@@ -38,10 +38,11 @@ execute tasks, with the same eligibility, dependency graph and duration estimate
 The daemon passes that ranked list into its decision loop.
 
 Scope matching uses fnmatch for globs and exact/prefix matching for literal
-entries. Read scope is derived from bus scope exactly as in spawn._packet_body:
+entries. Spawn and steering share the read_scope helper in steering_policy:
 tests/, scope parent directories, and existing local Python imports. A repository
 root parent permits reads throughout the repository; no read_scope bus field is
-required. Each evaluation runs one `git status --porcelain -z --untracked-files=all`
+required. Scope entries and imported paths resolving outside the worktree, including
+symlinks, are skipped. Each evaluation runs one `git status --porcelain -z --untracked-files=all`
 with a five-second timeout. Renames use the destination path. Paths containing
 __pycache__, .orchestrator, .venv, node_modules or .git components and files ending
 in .pyc are ignored. Missing worktrees, timeout and nonzero Git exit skip the scope
@@ -60,9 +61,12 @@ Steering reuses the harness depth result passed from dispatch; it never calls
 harness_depth.begin_tick or evaluates fast_path promotion. Off returns before
 reading tasks or touching other state.
 
-A reverse scan selects the last 500 steering rows for each task, skipping unrelated
-kinds and tasks before applying the limit. This preserves interval state across
-restarts and unrelated decision traffic. Only successful active steering starts
+One reverse scan per tick groups steering history for all running tasks. Each group
+retains at most two rows: the latest observation and latest successful active row.
+This per-tick cache is passed to the decision loop, avoiding a full scan per task.
+If no applied row exists the scan may reach the log start, once for the whole tick.
+Unrelated traffic and intervening observations cannot evict an interval anchor.
+Only successful active steering starts
 the interval. Errors and disappeared workers can retry. Shadow observations and
 continue observations with unchanged (trigger, evidence_hash) are deduplicated
 against the last row in the same mode. Active unchanged proposals are suppressed
@@ -70,11 +74,14 @@ during the interval and may act again after expiry. Changed evidence inside the
 interval may be logged but cannot steer. Active tasks already steering or cancelling,
 or with a pipeline steer epoch newer than their registry epoch, are skipped.
 
-The steering_policy promotion feature requires shadow steer/cancel proposals from at least
-20 distinct task lineages. Repeated ticks cannot inflate this count. Each active
-tick calls promotion.evaluate for steering_policy; refusal notifies and uses shadow
-without changing configuration. Initial activation requires the shadow sample
-threshold. Once successful active observations exist, mean fix rounds must be lower than the shadow baseline and
+The steering_policy promotion feature requires at least 20 shadow steer/cancel
+rows, not distinct task roots. Unchanged shadow ticks are deduplicated at emission.
+Active promotion evaluation and collection are cached on the pool for min_interval_s.
+Refusal uses shadow and notifies only when the refusal reasons change; the last
+reasons are remembered on the pool. The daemon loop carries these two caches into
+each fresh pool while refreshing all other scheduling state. Initial activation bootstraps on shadow_n alone:
+fix-round and token criteria apply only after successful active rows exist. Then
+mean fix rounds must be lower than the shadow baseline and
 mean accepted-lineage token cost must not rise. Collection uses the retained
 steering decision window, counts proposals including downgraded cancellations,
 and follows bus fix_round_for chains to count descendant rounds. A lineage counts
