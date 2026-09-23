@@ -1193,6 +1193,8 @@ def _account_from_assigned_to(assigned_to):
 def run_worker(task_id, account_id=None):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
     pool = Pool(); t = bus.get(task_id); role = t["role"]
+    if (t.get("constraints") or {}).get("goal"):
+        return {"status": "refused", "reason": "goal container"}
     avoid = None
     reviewed = None
     if role == "review" and t.get("inputs") and isinstance(t["inputs"][0], str):

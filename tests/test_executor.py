@@ -1,3 +1,4 @@
+import _harness
 """orchestrator.executor: event-stream parsing, reply round caps, fallback-to-Claude routing, run logging."""
 import json, sys, time, unittest
 from unittest.mock import patch
@@ -9,6 +10,13 @@ from orchestrator import bus, daemon, executor, pool as P, spawn
 
 class Executor(unittest.TestCase):
     LIVE = {"astra", "luna", "terra", "sol"}
+
+    def test_start_refuses_goal_container(self):
+        tid = self.exec_task(title="goal container")
+        bus.update(tid, constraints={"goal": True}, status="queued")
+        self.assertEqual(executor.start(tid, "must not run"),
+                         {"status": "refused", "reason": "goal container"})
+        self.assertEqual(bus.get(tid)["status"], "queued")
 
     def test_resume_plan_single_source_used_by_dispatch_and_reply(self):
         parent = self.exec_task(title="shared resume policy")

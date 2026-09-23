@@ -94,6 +94,15 @@ class PlannerRunsBase(unittest.TestCase):
 
 
 class DecisionPoints(PlannerRunsBase):
+    def test_closable_requires_every_execute_child_merged(self):
+        goal = bus.create_task("GOAL: all children merged", "container", ["children merge"], ["**"],
+                               role="execute", complexity=5, constraints={"goal": True})["id"]
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        unmerged = self.execute_child(goal, status="done")
+        self.assertNotIn((goal, "closable", goal), list(PR.decision_points()))
+        bus.update(unmerged, merged_into=f"goal/{goal}")
+        self.assertIn((goal, "closable", goal), list(PR.decision_points()))
+
     def test_held_decision_skipped_when_fix_round_exists(self):
         goal = self.goal()
         tid = self.execute_child(goal, status="held", hold_reason="gate_red")

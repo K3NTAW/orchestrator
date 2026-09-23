@@ -1,3 +1,4 @@
+import _harness
 """orchestrator.daemon pipeline: dependency-gated dispatch, spec review for complexity >=6, the tests-green gate,
 review routing and the serial merge — all driven by `tick()` with the four side-effecting calls (executor.start,
 spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead of act.
@@ -13,6 +14,71 @@ from orchestrator import bus, daemon, executor, merge, pool as P, spawn
 from orchestrator import jev_route
 
 REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
+
+
+class GoalContainers(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="goal-containers-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.patchers = [mock.patch.object(bus, "STATE", self.root),
+                         mock.patch.object(bus, "TASKS", self.root / "tasks"),
+                         mock.patch.object(bus, "RUNS", self.root / "runs")]
+        for patcher in self.patchers:
+            patcher.start(); self.addCleanup(patcher.stop)
+
+    def goal(self, status="queued"):
+        task = bus.create_task("GOAL", "container", ["children merge"], ["x.py"], role="execute",
+                               complexity=1, constraints={"goal": True})
+        if status != "queued":
+            bus.update(task["id"], status=status)
+        return task["id"]
+
+    def test_goal_task_is_never_dispatched(self):
+        goal = self.goal()
+        child = bus.create_task("child", "work", ["passes"], ["x.py"], role="execute",
+                                parent=goal, complexity=1)["id"]
+        pool = P.Pool()
+        pool.cfg["scheduler"] = {"mode": "off"}
+        launched = []
+        with mock.patch.object(daemon, "free_slots", return_value=1), \
+                mock.patch.object(daemon, "_fallback_mode", return_value=False), \
+                mock.patch.object(daemon, "spawn_async", side_effect=lambda fn, tid, *a: launched.append(tid)), \
+                mock.patch.object(spawn, "packet", return_value="packet"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn, "packet_run_meta", return_value={}):
+            daemon.dispatch(pool)
+        self.assertEqual(launched, [child])
+        self.assertNotIn("dispatched_at", bus.get(goal).get("pipeline") or {})
+
+    def test_goal_task_is_skipped_by_gate_and_merge(self):
+        goal = self.goal("done")
+        bus.update(goal, worktree=str(self.root))
+        with mock.patch.object(daemon.subprocess, "run") as run, \
+                mock.patch.object(daemon, "_merge_reviewed_one") as merge_one:
+            daemon.gate(P.Pool())
+            daemon.merge_reviewed(P.Pool())
+        run.assert_not_called()
+        merge_one.assert_not_called()
+        self.assertNotIn("gated_at", bus.get(goal).get("pipeline") or {})
+
+    def test_goal_child_is_gated_while_goal_is_queued(self):
+        goal = self.goal()
+        child = bus.create_task("child", "work", ["passes"], ["x.py"], role="execute", parent=goal,
+                                complexity=1)["id"]
+        bus.update(child, status="done", worktree=str(self.root))
+        merged = {"status": "merged", "target": f"goal/{goal}", "sha": "a" * 40}
+        def merge_child(task_id):
+            bus.update(task_id, merged_into=merged["target"])
+            return merged
+        with mock.patch.object(daemon, "_dirty_scope_paths", return_value=[]), \
+                mock.patch.object(daemon.acceptance, "missing_tests", return_value=[]), \
+                mock.patch.object(daemon.subprocess, "run",
+                                  return_value=mock.Mock(returncode=0, stdout="", stderr="")), \
+                mock.patch.object(daemon.merge, "merge", side_effect=merge_child):
+            daemon.gate(P.Pool())
+        self.assertTrue(bus.get(child)["pipeline"].get("gated_at"))
+        self.assertEqual(bus.get(child).get("merged_into"), f"goal/{goal}")
 
 
 class JevRouteDispatch(unittest.TestCase):

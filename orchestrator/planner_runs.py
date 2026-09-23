@@ -180,7 +180,8 @@ def decision_points():
     records = _load_records()
 
     for goal in all_tasks:
-        if goal["role"] != "triage" or goal.get("parent"):
+        goal_container = bool((goal.get("constraints") or {}).get("goal"))
+        if (goal["role"] != "triage" and not goal_container) or goal.get("parent"):
             continue
         goal_id = goal["id"]
         children = children_by_parent.get(goal_id, [])

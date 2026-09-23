@@ -66,11 +66,16 @@ SECURITY_CHECKLIST_COMPLEXITY = 7   # spawn.py's run_worker hardcodes the securi
 # through a Pool argument) always see the current policy without threading pool.cfg through every call.
 _code_review_warned = False  # notify() the first time pool.toml carries an unrecognised code_review value, not every tick
 _security_paths_empty_warned = False  # notify() the first time security_paths is empty under code_review="security_paths"
+_goal_container_notified = False
 LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
 STAGE_LEASE_S = 900
 LEASED_STAGES = {"dispatched_at", "spec_review_at", "gated_at", "merged_at"}
+
+
+def is_goal(t):
+    return bool((t.get("constraints") or {}).get("goal"))
 
 
 
@@ -141,6 +146,8 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
 def auto_fix_round(pool):
     cap = pool.cfg.get("daemon", {}).get("auto_fix_rounds", 2)
     for held in bus.read(status="held", role="execute"):
+        if is_goal(held):
+            continue
         if held.get("hold_reason", "").startswith("render_error"):
             continue
         if stale(held):
@@ -344,6 +351,8 @@ def reconcile_dead(t, pool=None):
     its base is posted as a done result so gate() re-gates it normally; a dirty one is held for the Planner.
     Everything else (scout/review/etc, or an execute task with no worktree or no commits ahead) requeues as
     before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
+    if is_goal(t):
+        return None
     tid, worktree = t["id"], t.get("worktree")
     (pool or Pool()).release(tid, t.get("result") or {})
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
@@ -385,6 +394,12 @@ def stale(t):
     """True for a task the daemon must not act on: one whose parent goal task exists and is already done (the goal
     closed and dispatching or merging into it would just redo a re-merge or a notify nobody asked for), or a
     parentless task that is not itself a queued execute task (top-level goals are containers, never work items)."""
+    global _goal_container_notified
+    if is_goal(t):
+        if (t.get("pipeline") or {}).get("dispatched_at") and not _goal_container_notified:
+            notify(f"{t['id']}: goal task is a container; leaving existing dispatch state untouched")
+            _goal_container_notified = True
+        return True
     parent = t.get("parent")
     if parent:
         try:
@@ -741,7 +756,7 @@ def dispatch(pool):
     retry_held = [t for t in bus.read(status="held", role="execute")
                   if t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")]
     # Each bus read is id-ordered; preserve queued work ahead of budget retries.
-    candidates = bus.read(status="queued", role="execute") + retry_held
+    candidates = [t for t in bus.read(status="queued", role="execute") + retry_held if not is_goal(t)]
     candidate_ids = eligible(pool, candidates)
     selected = _first_come_order(candidate_ids, slots)
     deferred = {}
@@ -1282,7 +1297,7 @@ def gate(pool):
     merge_reviewed() waits for on a task already past this stage. Filters run cheap-first, already_merged()
     (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call."""
     for t in bus.read(status="done", role="execute"):
-        if stale(t) or (t.get("pipeline") or {}).get("gated_at") or t.get("merged_into"):
+        if is_goal(t) or stale(t) or (t.get("pipeline") or {}).get("gated_at") or t.get("merged_into"):
             continue
         with bus.locked():
             t = bus.get(t["id"])
@@ -1417,6 +1432,8 @@ def merge_reviewed(pool):
     line and moves on, so one task can never stop the sweep for the others in the same tick. Filters run
     cheap-first, already_merged() (which shells out to git) last."""
     for t in bus.read(status="done", role="execute"):
+        if is_goal(t):
+            continue
         try:
             _merge_reviewed_one(t)
         except Exception as e:
