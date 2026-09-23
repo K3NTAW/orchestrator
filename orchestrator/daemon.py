@@ -147,6 +147,8 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
 def auto_fix_round(pool):
     cap = pool.cfg.get("daemon", {}).get("auto_fix_rounds", 2)
     for held in bus.read(status="held", role="execute"):
+        if held.get("hold_reason") == "cancelled":
+            continue
         if is_goal(held):
             continue
         if held.get("hold_reason", "").startswith("render_error"):
@@ -354,6 +356,9 @@ def reconcile_dead(t, pool=None):
     before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
     if is_goal(t):
         return None
+    worker = worker_registry.get(t["id"])
+    if worker and worker.get("status") in ("cancelling", "cancelled"):
+        return "cancelled"
     tid, worktree = t["id"], t.get("worktree")
     (pool or Pool()).release(tid, t.get("result") or {})
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():

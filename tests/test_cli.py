@@ -47,6 +47,18 @@ class Cli(unittest.TestCase):
                     cli.main()
                 self.assertIn("pinned", output.getvalue())
 
+
+    def test_workers_cancel_cli(self):
+        from orchestrator import worker_control
+        partial = {"files_changed": ["example.py"], "commits": []}
+        out = io.StringIO()
+        with mock.patch.object(worker_control, "cancel", return_value=partial) as cancel, \
+                mock.patch.object(sys, "argv", ["orchestrator", "workers", "cancel", "T-example", "--reason", "new plan"]), \
+                contextlib.redirect_stdout(out):
+            cli.main()
+        cancel.assert_called_once_with("T-example", "new plan")
+        self.assertEqual(json.loads(out.getvalue()), partial)
+
     def test_workers_cli_lists_active(self):
         from orchestrator import worker_registry as registry
         task = bus.create_task("cli worker", "s", ["a"], ["x.py"])

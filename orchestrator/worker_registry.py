@@ -11,10 +11,10 @@ from . import STATE, bus
 STATUSES = ("starting", "running", "waiting", "steering", "cancelling", "cancelled",
             "done", "failed", "held")
 TERMINAL = {"cancelled", "done", "failed", "held"}
-KINDS = {"spawned", "claimed", "stage", "tool", "usage", "exit", "reconciled", "held", "thread"}
+KINDS = {"spawned", "claimed", "stage", "tool", "usage", "exit", "reconciled", "held", "thread", "cancel_requested", "cancelled", "steer", "steered"}
 FIELDS = {"role", "model", "provider", "account", "pid", "thread", "worktree", "branch",
           "started_at", "last_event_at", "stage", "current_tool", "tokens", "usd",
-          "parent", "status", "status_reason"}
+          "parent", "status", "status_reason", "source", "cancel_reason"}
 NUMBERS = {"pid", "started_at", "last_event_at", "usd"}
 TOKEN_KEYS = {"input_uncached", "cache_read", "output"}
 
@@ -45,6 +45,9 @@ def _validate(fields, *, tool_event=False):
                 raise ValueError("invalid registry number")
             if key == "pid" and (type(value) is not int or value == 0):
                 raise ValueError("invalid process identifier")
+        elif key == "cancel_reason":
+            if not isinstance(value, str) or not value.strip() or len(value) > 512 or any(ord(c) < 32 for c in value):
+                raise ValueError("invalid cancellation reason")
         elif key == "worktree":
             if not isinstance(value, str) or not value or len(value) > 4096 or any(ord(c) < 32 for c in value):
                 raise ValueError("invalid worktree path")
@@ -175,6 +178,11 @@ def finish(task_id, status, reason=None):
     if status not in TERMINAL:
         raise ValueError("finish requires a terminal status")
     with bus.locked():
+        doc = _read(task_id)
+        if doc and doc["status"] in ("cancelling", "cancelled") and status != "cancelled":
+            return get(task_id)
+        if status == "cancelled":
+            event(task_id, "cancelled", status="cancelled")
         if status == "held":
             event(task_id, "held", status_reason=reason)
         return event(task_id, "exit", status=status, status_reason=reason)

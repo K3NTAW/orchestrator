@@ -125,6 +125,10 @@ def main():
     workers.add_argument("--task")
     workers.add_argument("--all", action="store_true")
     workers.add_argument("--json", action="store_true")
+    worker_sub = workers.add_subparsers(dest="workers_cmd")
+    cancel_worker = worker_sub.add_parser("cancel")
+    cancel_worker.add_argument("task")
+    cancel_worker.add_argument("--reason", required=True)
     from . import context_scanner
     scanner = sub.add_parser("scan")
     scanner.add_argument("path")
@@ -238,7 +242,10 @@ def main():
                 print(f"{finding['line']}: {finding['pattern']}: {finding['excerpt']}")
         return
     if a.cmd == "workers":
-        if a.task:
+        if a.workers_cmd == "cancel":
+            from . import worker_control
+            print(json.dumps(worker_control.cancel(a.task, a.reason), indent=2))
+        elif a.task:
             doc = worker_registry.get(a.task)
             if doc is None:
                 raise SystemExit("worker not found")

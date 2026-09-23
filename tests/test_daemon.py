@@ -3514,9 +3514,6 @@ class WorkerRegistryReconciliation(unittest.TestCase):
             daemon.tick(pool, stop)
             reconcile.assert_called_once_with(daemon.alive)
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class DirtyScopePaths(unittest.TestCase):
     def test_tracked_untracked_renamed_and_ignored_paths(self):
@@ -3667,3 +3664,34 @@ class HotMemoryTick(unittest.TestCase):
                 daemon.tick(pool, stop)
                 self.assertEqual(build.call_count, expected)
             self.assertEqual(dispatch.call_count, 3)
+
+
+class WorkerCancellation(unittest.TestCase):
+    def test_cancelled_hold_is_not_auto_fix_rounded_or_requeued(self):
+        task = {"id": "T-cancel-example", "role": "execute", "status": "held", "hold_reason": "cancelled"}
+        with mock.patch.object(bus, "read", return_value=[task]), \
+                mock.patch.object(daemon, "stale") as stale, \
+                mock.patch.object(bus, "update") as update, \
+                mock.patch.object(bus, "create_task") as create, \
+                mock.patch.object(daemon.worker_registry, "get", return_value={"status": "cancelled"}):
+            daemon.auto_fix_round(P.Pool())
+            self.assertEqual(daemon.reconcile_dead(task), "cancelled")
+        stale.assert_not_called()
+        update.assert_not_called()
+        create.assert_not_called()
+
+    def test_reconcile_dead_leaves_cancelling_registry_entries_alone(self):
+        stale_snapshot = {"id": "T-cancel-example", "role": "execute", "status": "running"}
+        with mock.patch.object(daemon.worker_registry, "get", return_value={"status": "cancelling"}) as get, \
+                mock.patch.object(bus, "update") as update, \
+                mock.patch.object(bus, "post_result") as post:
+            pool = mock.Mock()
+            self.assertEqual(daemon.reconcile_dead(stale_snapshot, pool), "cancelled")
+        get.assert_called_once_with(stale_snapshot["id"])
+        update.assert_not_called()
+        post.assert_not_called()
+        pool.release.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

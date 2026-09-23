@@ -9,6 +9,13 @@ from orchestrator import bus, worker_registry as registry
 
 
 class WorkerRegistry(unittest.TestCase):
+    def test_cancel_and_steer_event_kinds_and_source_field_whitelisted(self):
+        for kind in ("cancel_requested", "cancelled", "steer", "steered"):
+            registry.event(self.tid, kind, source="planner", cancel_reason="Plan has changed")
+        self.assertEqual([e["kind"] for e in registry.events(self.tid)],
+                         ["cancel_requested", "cancelled", "steer", "steered"])
+        self.assertEqual(registry.get(self.tid)["source"], "planner")
+
     def setUp(self):
         self.task = bus.create_task("registry", "s", ["a"], ["x.py"], role="execute")
         self.tid = self.task["id"]
