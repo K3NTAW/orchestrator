@@ -599,6 +599,26 @@ class SpecReview(unittest.TestCase):
 
 
 class Render(unittest.TestCase):
+    PRE_CHANGE_EXECUTE_PREFIX_CHARS = 0
+
+    def test_templates_with_packet_placeholder_put_rules_before_it(self):
+        roles = ("execute", "review", "scout", "spec-review")
+        for role in roles:
+            template = (spawn.STATE / "prompts" / f"{role}.md").read_text()
+            packet = "packet vabcdef base deadbeef sources fixture"
+            rendered = spawn.render(role, packet=packet)
+            prefix, suffix = rendered.split(packet, 1)
+            expected_rules = template.rsplit("\n\n", 1)[0]
+            self.assertEqual(prefix.strip(), expected_rules.strip(), role)
+            self.assertEqual(suffix.strip(), "", role)
+
+    def test_prefix_chars_grow_after_template_move(self):
+        task = self.packet_fixture()
+        packet = spawn.packet(task, TMP)
+        spawn.render("execute", packet=packet, task=task)
+        self.assertGreater(spawn.packet_run_meta(packet)["prefix_chars"],
+                           self.PRE_CHANGE_EXECUTE_PREFIX_CHARS)
+
     def active_eval(self):
         from datetime import datetime, timezone
         path = spawn.STATE / "context_eval.json"

@@ -1,7 +1,7 @@
-{{packet}}
-
 Implement this single task in the current worktree. Run `.claude/hooks/tests-green.sh .` from the worktree until it exits 0; when it is red, report only the failures-only output. Then run `git add -A && git commit` on the current branch with a message that starts with the task id. Never leave uncommitted changes and never touch files outside scope. Finish with a final message stating the gate result, the commit sha, and the failures-only output (empty when green).
 The packet above is the task contract: implement the ## objective, satisfy every line of ## acceptance, and edit only paths listed in ## write_scope.
 Tests: this repo runs unittest, not pytest. Every acceptance test id tests/test_<module>.py::test_name must be a method `def test_name(self)` inside a `unittest.TestCase` subclass in that file, named exactly as listed. Module-level `def test_*` functions and pytest fixtures (tmp_path, monkeypatch) are not collected and fail the gate; use tempfile.TemporaryDirectory and unittest.mock instead. Every tests/test_*.py begins with `import _harness` exactly like the existing tests (tests/_harness.py points ORCH_ROOT at one shared temporary root for the whole suite); never import it under another module path or create a second orchestrator state root, or unrelated hook and memory tests in the same run fail.
 No new dependencies without stating why. Finish with: summary, files changed, failures-only test output.
 Tool-call budget: read only files inside Scope first, then edit; do not re-read a file you already read; run the test script at most twice.
+
+{{packet}}

@@ -46,6 +46,17 @@ class CacheTelemetry(unittest.TestCase):
         self.assertEqual(card["by_provider"]["codex"]["reuse_rate"], .5)
         self.assertEqual(card["by_goal"]["G"]["unknown_prefix_runs"], 1)
 
+    def test_report_prefix_table_per_role_uses_existing_fields(self):
+        card = {"by_role": {
+            "execute": {"runs": 3, "input_uncached": 4, "cache_read": 5, "cache_write": 6,
+                        "hit_ratio": .5, "effective_tokens": 7, "distinct_prefix_sha": 2,
+                        "reuse_rate": 1 / 3},
+        }, "by_provider": {}, "by_goal": {}}
+        report = cache_telemetry.format_report(card)
+        table = report.split("prefix_by_role\n", 1)[1]
+        self.assertEqual(table.splitlines()[0], "role\tdistinct_prefix_sha\truns\treuse_rate")
+        self.assertEqual(table.splitlines()[1], "execute\t2\t3\t0.333")
+
     def test_annotate_reuses_existing_row_fields_and_adds_only_ratio_cost_prefix(self):
         row = {"provider": "claude", "input_uncached_tokens": 10, "cache_read_tokens": 10,
                "cache_write_tokens": 0, "output_tokens": 1,

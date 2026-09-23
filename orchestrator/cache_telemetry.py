@@ -127,4 +127,8 @@ def format_report(card):
             lines.append(f"{dimension[3:]}:{name}\t{row['runs']}\t{row['input_uncached']}\t"
                          f"{row['cache_read']}\t{row['cache_write']}\t{row['hit_ratio']:.3f}\t"
                          f"{row['effective_tokens']:.1f}\t{row['distinct_prefix_sha']}\t{reuse}")
+    lines.extend(("", "prefix_by_role", "role\tdistinct_prefix_sha\truns\treuse_rate"))
+    for role, row in card["by_role"].items():
+        reuse = "unknown" if row["reuse_rate"] is None else f"{row['reuse_rate']:.3f}"
+        lines.append(f"{role}\t{row['distinct_prefix_sha']}\t{row['runs']}\t{reuse}")
     return "\n".join(lines)
