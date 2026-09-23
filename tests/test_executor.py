@@ -428,16 +428,61 @@ class Executor(unittest.TestCase):
             self.assertEqual(worker.call_count, 1)
         self.assertEqual((result["status"], result["tier"]), ("fallback", "opus"))
 
-    def test_routed_claude_row_holds_without_headroom(self):
+    def test_routed_claude_row_requeues_without_headroom(self):
         pool = self.claude_pool()
         tid = self.exec_task(title="routed without headroom")
+        bus.update(tid, pipeline={"dispatched_at": time.time()})
         self.assertIsNotNone(pool.reserve(tid, "A", "execute", bus.get(tid)))
         with patch.object(pool, "pick", return_value=None), patch.object(spawn, "run_worker") as worker:
             result = executor.start(tid, "do it", executor_id="claude:opus")
             worker.assert_not_called()
-        self.assertEqual(result["status"], "held")
-        self.assertEqual(bus.get(tid)["hold_reason"], "no account with headroom")
+        self.assertEqual(result, {"status": "claude_capacity", "reason": "no account with headroom"})
+        task = bus.get(tid)
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(task["pipeline"]["hold_note"], "claude_capacity")
+        self.assertNotIn("dispatched_at", task["pipeline"])
+        self.assertNotIn("hold_reason", task)
         self.assertNotIn(tid, pool.reservations)
+
+    def test_claude_dispatch_requeues_at_worker_cap(self):
+        pool = self.claude_pool()
+        pool.cfg.setdefault("limits", {})["max_parallel_claude_workers"] = 1
+        tid = self.exec_task(title="fallback at worker cap")
+        bus.update(tid, pipeline={"dispatched_at": time.time()})
+        with patch.object(pool, "pick_executor", return_value=None), \
+                patch.object(daemon, "running_claude_workers", return_value=1), \
+                patch.object(spawn, "run_worker") as worker:
+            result = executor.start(tid, "do it")
+            worker.assert_not_called()
+        self.assertEqual(result, {"status": "claude_capacity", "reason": "claude workers at cap"})
+        task = bus.get(tid)
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(task["pipeline"]["hold_note"], "claude_capacity")
+        self.assertNotIn("dispatched_at", task["pipeline"])
+
+    def test_complexity_nine_fallback_still_held(self):
+        pool = self.claude_pool()
+        tid = self.exec_task(complexity=9, title="complexity nine fallback")
+        with patch.object(pool, "pick_executor", return_value=None), \
+                patch.object(spawn, "run_worker") as worker:
+            result = executor.start(tid, "do it")
+            worker.assert_not_called()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(bus.get(tid)["hold_reason"],
+                         "codex unavailable; policy=fallback_claude; no Claude fallback for complexity 9")
+
+    def test_claude_dispatch_below_cap_dispatches(self):
+        pool = self.claude_pool()
+        pool.cfg.setdefault("limits", {})["max_parallel_claude_workers"] = 2
+        tid = self.exec_task(title="fallback below worker cap")
+        account = pool.pick("execute")
+        with patch.object(pool, "pick_executor", return_value=None), \
+                patch.object(daemon, "running_claude_workers", return_value=1), \
+                patch.object(spawn, "run_worker") as worker:
+            result = executor.start(tid, "do it")
+            self.assertEqual(executor.join_fallback_threads(2), ())
+            worker.assert_called_once_with(tid, account_id=account.id)
+        self.assertEqual((result["status"], result["tier"]), ("fallback", "sonnet"))
 
     def test_unknown_executor_provider_holds_and_releases(self):
         pool = self.claude_pool()

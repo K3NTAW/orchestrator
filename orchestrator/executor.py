@@ -550,13 +550,20 @@ def _exhausted(pool, t, run=None, tier=None):
     if not routed:
         pol = pool.cfg["codex"]["on_exhausted"]
         tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
-    acct = pool.pick("execute")
-    if routed and acct is None:
-        bus.update(t["id"], status="held", hold_reason="no account with headroom")
-        return {"status": "held", "hold_reason": "no account with headroom"}
-    if tier is None or acct is None:
+    if tier is None:
         bus.update(t["id"], status="held", hold_reason=f"codex unavailable; policy={pol}; no Claude fallback for complexity {t['complexity']}")
         return {"status": "held", "policy": pol, "codex": pool.status()["codex"]}
+    acct = pool.pick("execute")
+    from . import daemon
+    running = daemon.running_claude_workers(pool)
+    cap = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
+    if acct is None or running >= cap:
+        pipeline = dict(t.get("pipeline") or {})
+        pipeline["hold_note"] = "claude_capacity"
+        pipeline.pop("dispatched_at", None)
+        bus.update(t["id"], status="queued", pipeline=pipeline)
+        return {"status": "claude_capacity",
+                "reason": "no account with headroom" if acct is None else "claude workers at cap"}
     from .spawn import run_worker
     bus.update(t["id"], tier=tier, fallback="claude", review_rule="same-family-review: other account, different model")
     worker = run or run_worker
