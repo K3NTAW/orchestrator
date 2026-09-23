@@ -151,6 +151,7 @@ def main():
     sc.add_argument("--reads", action="store_true")
     sc.add_argument("--handoffs", action="store_true")
     sc.add_argument("--economy", action="store_true")
+    sc.add_argument("--overhead", action="store_true")
     sc.add_argument("--skills", action="store_true")
     sc.add_argument("--group-by")
     sc.add_argument("--marginal")
@@ -242,7 +243,7 @@ def main():
                          else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
@@ -259,6 +260,7 @@ def main():
             "--handoffs": (),
             "--economy": (),
             "--skills": (),
+            "--overhead": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
@@ -274,10 +276,14 @@ def main():
             mode = "--economy"
         if a.skills:
             mode = "--skills"
-        if a.goal is not None and not a.parallelism:
-            ap.error("--goal requires --parallelism")
+        if a.overhead:
+            mode = "--overhead"
+        if a.goal is not None and not (a.parallelism or a.overhead):
+            ap.error("--goal requires --parallelism or --overhead")
         if a.parallelism and a.planner:
             ap.error("--parallelism conflicts with --planner")
+        if a.overhead and a.planner:
+            ap.error("--overhead conflicts with --planner")
         allowed = groupings[mode]
         if a.by is not None and a.by not in allowed:
             choices = "|".join(allowed) if allowed else "none (omit --by)"
@@ -481,7 +487,13 @@ def main():
         if not document["suite_passed"]:
             raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.skills:
+        if a.overhead:
+            from . import overhead
+            card = overhead.report(root=scorecard.STATE)
+            if a.goal:
+                card = [row for row in card if row["goal_id"] == a.goal]
+            print(json.dumps(card, indent=1) if a.json else overhead.format_report(card))
+        elif a.skills:
             from . import skill_scorecard
             card = {"by_skill": skill_scorecard.by_skill(scorecard.STATE, skill_group_by),
                     "jev_by_role": skill_scorecard.jev_metrics(scorecard.STATE),

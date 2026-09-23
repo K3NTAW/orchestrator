@@ -67,6 +67,17 @@ class Cli(unittest.TestCase):
                     cli.main()
                 self.assertEqual(error.exception.code, 2)
 
+    def test_scorecard_overhead_cli(self):
+        from orchestrator import overhead
+        rows = [{"goal_id": "T-1", "orchestration_tokens": 10, "execution_tokens": 20,
+                 "amplification": .5, "orchestration_usd": 1, "goal_usd": 3, "cost_share": 1 / 3,
+                 "orchestration_s": 2, "goal_s": 5, "latency_share": .4,
+                 "roles": {}, "unattributed_tokens": 0}]
+        with mock.patch.object(overhead, "report", return_value=rows):
+            self.assertIn("amplification", self._scorecard_output("--overhead"))
+            parsed = json.loads(self._scorecard_output("--overhead", "--goal", "T-1", "--json"))
+            self.assertEqual(parsed[0]["goal_id"], "T-1")
+
     def test_jev_diagnose_summary(self):
         from orchestrator import jev
         execute = bus.create_task("diagnose execute", "s", ["a"], ["x"], role="execute")["id"]
