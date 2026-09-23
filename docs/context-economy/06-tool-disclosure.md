@@ -32,18 +32,23 @@ Read and `bus_post_result` are mandatory for every Claude role. Git is mandatory
 for review/scout, and the tests-green gate is mandatory for execute. A docs-only
 scope drops optional test and shell tools; mandatory tools are never dropped.
 
+## Active
+
+When promotion mode is `active`, Claude workers receive the minimal kept set;
+the full legacy list remains recorded as decision candidates. A worker that
+needs a hidden tool posts a held result whose reason starts with `needs_tool:`.
+The spawner retries synchronously once with the legacy allowlist, using only the
+remaining original budget and timeout, and stamps `tool_escalation_used` in the
+task pipeline. If less than ten percent remains, it leaves the task held for the
+Planner. Revert by setting tool disclosure mode to `shadow` (measure only) or
+`off` (disable decisions); no worker or daemon migration is required.
+
 ## Shadow records and recovery
 
-In `shadow` (and currently `active`) each dispatch records a `tool_disclosure`
+In `shadow` and `active` each dispatch records a `tool_disclosure`
 decision: task class, role, offered/kept/dropped IDs, mandatory IDs, and disclosed
 versus minimal tokens. Run context copies both token counts, and the context
 scorecard reports per-role averages and minimal/disclosed ratio. `active` emits a
 one-time warning and remains shadow.
 
-`recovery_events()` scans existing run rows for permission-denial evidence. No
-structured hidden-tool request signal is recorded today, so it normally returns
-an empty event list with that limitation in its note.
-
-P11 escalation is not implemented. An active worker needing a hidden optional
-tool would post a bus event; the Planner would then re-spawn it with the wider
-set. Revert by setting tool disclosure mode to `off`; allowlists remain intact.
+`recovery_events()` also scans older run rows for permission-denial evidence.

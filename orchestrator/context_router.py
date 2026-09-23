@@ -1,6 +1,7 @@
 """Pure, deterministic routing of canonical evidence into context levels."""
 from dataclasses import dataclass
 import fnmatch
+import re
 
 from . import evidence
 from .failures import _test_ids as test_ids
@@ -40,7 +41,8 @@ def _text(ev, level):
         return f"- {ev.location} — {ev.summary_short}"
     if level == "LONG":
         return f"- {ev.location}\n  {ev.summary_long}"
-    return f"- {ev.location}\n```\n{ev.content}\n```"
+    fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", ev.content)), default=0))
+    return f"- {ev.location}\n{fence}\n{ev.content}\n{fence}"
 
 
 def _security_match(path, cfg):
@@ -59,7 +61,7 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
             and _security_match(_path(ev), cfg)):
         return "FULL", "security_path"
     if ev.source_type == "source_chunk" and in_scope and role in ("review", "security_review"):
-        return "LONG", "in_scope_file"
+        return ("FULL" if ev.relevance.get("section") == "diff" else "LONG"), "in_scope_file"
     if role == "planner" and ev.source_type == "source_chunk":
         return "SHORT", "read_scope"
     if ev.source_type == "test_result" and role in ("review", "security_review"):
@@ -130,6 +132,20 @@ def render(routed_packet, evidence_pool_or_lookup):
     return "\n".join(lines)
 
 
+
+def section_items(routed_packet, lookup, section):
+    """Render whole items belonging to one section; file bodies stay on disk."""
+    items = []
+    for item in routed_packet.items:
+        ev = _lookup(lookup, item.evidence_id)
+        if ev.relevance.get("section") != section or item.level == "HIDE":
+            continue
+        if ev.source_type == "source_chunk" and item.reason == "in_scope_file":
+            continue
+        level = "SHORT" if section == "read_scope" else item.level
+        items.append((level, _text(ev, level)))
+    return items
+
 def decision_row(task, routed_packet, *, mode):
     counts = {level: sum(item.level == level for item in routed_packet.items) for level in LEVELS}
     return {
@@ -137,7 +153,7 @@ def decision_row(task, routed_packet, *, mode):
         "subject": task["id"],
         "candidates": [f"{item.evidence_id}:{item.level}" for item in routed_packet.items],
         "hard_constraints": [item.reason for item in routed_packet.items if item.level == "FULL"],
-        "deterministic": {**counts, "candidate_tokens": routed_packet.candidate_tokens,
+        "deterministic": {"role": routed_packet.profile, **counts, "candidate_tokens": routed_packet.candidate_tokens,
                           "routed_tokens": routed_packet.routed_tokens,
                           "reduction_ratio": routed_packet.reduction_ratio,
                           "ambiguous": len(routed_packet.ambiguous_ids)},

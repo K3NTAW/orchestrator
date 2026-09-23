@@ -310,6 +310,7 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
     pool = Pool()
     result = None
     handed_off = False
+    allocation_mode = pool.cfg.get("allocation", {}).get("mode", "shadow")
     try:
         t = bus.get(task_id)
         previous = t.get("result")
@@ -334,7 +335,7 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
                     scores = jev_route.active_scores(t, pool, routing["eligible"],
                                                      routing["classification"], routing["evidence"], scores)
                 ex = pool.pick_executor("execute", t["complexity"], scores=scores, task=t)
-                mode = pool.cfg.get("allocation", {}).get("mode", "shadow")
+                mode = allocation_mode
                 if mode != "off" and ex is not None:
                     graph = {x["id"]: x for x in bus.read(role="execute", compact=False)
                              if not x.get("merged_into") and x.get("status") != "failed"}
@@ -370,22 +371,69 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
         try:
             mode = pool.cfg.get("handoff", {}).get("mode", "off")
             if mode in ("shadow", "active"):
-                from . import handoff_scorecard, notify
+                from . import handoff_scorecard
                 eligible = pool.eligible_executors("execute", t["complexity"], t)
                 candidates = [candidate.id for candidate in eligible]
                 task_class = scorecard.task_class(t)
                 costs = {candidate: handoff_scorecard.expected_route_cost(
                     task_class, candidate, cfg=pool.cfg) for candidate in candidates}
+                baseline = ex.id if ex else None
+                selected = baseline
+                gain = 0.0
+                reason = "shadow: routing unchanged"
+                stamp = None
+                if mode == "active":
+                    sufficient = all(not value.get("insufficient") for value in costs.values())
+                    if allocation_mode == "active":
+                        reason = "allocation_active"
+                    elif not sufficient or not costs:
+                        reason = "insufficient_evidence"
+                    else:
+                        cheapest = min(costs, key=lambda key: costs[key]["expected_route_cost"])
+                        baseline_cost = costs.get(baseline, {}).get("expected_route_cost", 0)
+                        cheapest_cost = costs[cheapest]["expected_route_cost"]
+                        gain = ((baseline_cost - cheapest_cost) / baseline_cost) if baseline_cost > 0 else 0.0
+                        min_gain = pool.cfg.get("handoff", {}).get("min_gain", 0.15)
+                        if cheapest == baseline or gain <= min_gain:
+                            reason = "gain_below_threshold"
+                        else:
+                            max_share = pool.cfg.get("handoff", {}).get("max_active_share", 0.5)
+                            now = time.time()
+                            today = time.localtime(now)[:3]
+                            with bus.locked():
+                                stamped = []
+                                for row in bus.read(role="execute", compact=False):
+                                    handoff = (row.get("pipeline") or {}).get("handoff") or {}
+                                    ts = handoff.get("ts")
+                                    if ts is not None and time.localtime(ts)[:3] == today:
+                                        stamped.append(handoff)
+                                if stamped and sum(bool(row.get("switched")) for row in stamped) / len(stamped) >= max_share:
+                                    reason = "cap_reached"
+                                else:
+                                    selected = cheapest
+                                    ex = pool.executors[selected]
+                                    reason = "expected_route_cost"
+                                pipeline = dict(bus.get(task_id).get("pipeline") or {})
+                                stamp = {"baseline": baseline, "selected": selected,
+                                         "switched": selected != baseline, "gain": gain,
+                                         "reason": reason, "ts": now}
+                                pipeline["handoff"] = stamp
+                                bus.update(task_id, pipeline=pipeline)
+                    if stamp is None:
+                        now = time.time()
+                        stamp = {"baseline": baseline, "selected": selected,
+                                 "switched": False, "gain": gain, "reason": reason, "ts": now}
+                        with bus.locked():
+                            pipeline = dict(bus.get(task_id).get("pipeline") or {})
+                            pipeline["handoff"] = stamp
+                            bus.update(task_id, pipeline=pipeline)
                 decision_log.record(
                     "handoff", task_id, candidates=candidates,
                     hard_constraints=["pool.eligible_executors(role=execute, complexity, task)"],
-                    deterministic={"baseline": ex.id if ex else None,
-                                   "expected_route_cost": costs, "task_class": task_class},
+                    deterministic={"baseline": baseline, "expected_route_cost": costs,
+                                   "task_class": task_class, "gain": gain},
                     historical={"n": sum(value.get("n", 0) for value in costs.values())},
-                    selected=ex.id if ex else None, reason="shadow: routing unchanged", mode=mode)
-                if mode == "active":
-                    notify.notify_once(task_id, "handoff_active_shadow",
-                                       f"{task_id}: handoff active is observation-only; routing unchanged")
+                    selected=selected, reason=reason, mode=mode, extra={"gain": gain})
         except Exception as exc:
             try:
                 from . import notify

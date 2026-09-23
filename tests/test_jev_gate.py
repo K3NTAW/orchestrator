@@ -76,6 +76,30 @@ class JevGateTests(unittest.TestCase):
                    "tool_input": {"file_path": str(target)}}
         return self._task()["id"], payload, target
 
+    def test_recovery_read_records_evidence_reuse_for_hidden_evidence(self):
+        from orchestrator import decision_log, evidence
+        task = self._task()
+        target = TMP / "recovery-source.py"
+        target.write_text("hidden source")
+        self.addCleanup(lambda: target.unlink(missing_ok=True))
+        ev = evidence.make("source_chunk", "recovery-source.py", "hidden source", commit="base",
+                           provenance="repo", task=task)
+        evidence.EvidencePool(task["id"]).add(ev)
+        jev_gate._cfg = lambda: LOG_CFG
+        payload = {"session_id": task["id"], "tool_name": "Read", "tool_input": {"file_path": str(target)}}
+        for level, mode, expected in (("HIDE", "active", 1), ("SHORT", "active", 2),
+                                      ("FULL", "active", 2), ("LONG", "active", 2), ("HIDE", "shadow", 2)):
+            decision_log.record(kind="context_selection", subject=task["id"], candidates=[ev.id + ":" + level],
+                hard_constraints=[], deterministic={"role": "execute"}, selected="routed v1", reason="test",
+                mode=mode, extra={"head_sha": "base"})
+            with patch.object(jev, "ask", side_effect=AssertionError("network forbidden")):
+                self.assertEqual(self._run(payload, task["id"]), 0)
+            rows = [row for row in decision_log.read_all() if row.get("subject") == task["id"]
+                    and row.get("kind") == "evidence_reuse"]
+            self.assertEqual(len(rows), expected)
+        self.assertEqual(rows[0]["selected"], ev.id)
+        self.assertEqual(rows[0]["reason"], "recovery_read")
+
     def test_sample_mode_is_deterministic(self):
         task, payload, _ = self._sample_fixture(0.1)
         payload["tool_name"] = "Edit"
@@ -570,6 +594,117 @@ assert attempted == []
         self.assertEqual(row["read_kind"], "repeated_read_unchanged")
         self.assertTrue(row["would_suppress"])
         self.assertFalse(row["blocked"])
+
+    def _active_fixture(self, **overrides):
+        task, payload, target = self._sample_fixture()
+        cfg = {"enabled": True, "gate_mode": "log", "read_suppression": "active",
+               "max_suppressions_per_session": 20, "max_false_suppression": .02}
+        cfg.update(overrides)
+        jev_gate._cfg = lambda: cfg
+        safety = jev_gate.STATE / "runs/jev/read_economy_safety.json"
+        safety.parent.mkdir(parents=True, exist_ok=True)
+        safety.write_text(json.dumps({"computed_at": jev_gate.time.time(), "since_s": 0,
+                                      "would_suppress": 50, "false_suppression_rate": 0, "rows": 50}))
+        return task, payload, target
+
+    def test_active_suppresses_unchanged_repeated_read_with_structured_reply(self):
+        task, payload, _ = self._active_fixture()
+        self.assertEqual(self._run(payload, task), 0)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self._run(payload, task), 2)
+        self.assertIn("already read at call 0 in this session", err.getvalue())
+        self.assertIn("file unchanged", err.getvalue())
+        self.assertEqual(self._log_lines()[-1]["selected"], "suppress")
+
+    def test_active_allows_second_identical_attempt_and_logs_override(self):
+        task, payload, _ = self._active_fixture()
+        self.assertEqual(self._run(payload, task), 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self._run(payload, task), 2)
+        self.assertEqual(self._run(payload, task), 0)
+        self.assertTrue(self._log_lines()[-1]["suppression_override"])
+
+    def test_active_never_suppresses_narrower_search_or_different_range(self):
+        task, payload, target = self._active_fixture()
+        payload["tool_input"]["limit"] = 2
+        self.assertEqual(self._run(payload, task), 0)
+        payload["tool_input"]["limit"] = 3
+        self.assertEqual(self._run(payload, task), 0)
+        payload.update(session_id="search-range", tool_name="Grep",
+                       tool_input={"path": str(target), "pattern": "a"})
+        self.assertEqual(self._run(payload, task), 0)
+        payload["tool_input"]["pattern"] = "ab"
+        self.assertEqual(self._run(payload, task), 0)
+
+    def test_active_refused_without_evidence(self):
+        task, payload, _ = self._active_fixture()
+        (jev_gate.STATE / "runs/jev/read_economy_safety.json").write_text(json.dumps(
+            {"computed_at": jev_gate.time.time(), "since_s": 0, "would_suppress": 49,
+             "false_suppression_rate": 0, "rows": 49}))
+        self.assertEqual(self._run(payload, task), 0)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self._run(payload, task), 0)
+        self.assertIn("using shadow", err.getvalue())
+
+    def test_active_suppresses_with_gate_mode_sample(self):
+        task, payload, _ = self._active_fixture(gate_mode="sample", sample_rate=0)
+        self.assertEqual(self._run(payload, task), 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self._run(payload, task), 2)
+
+    def test_safety_sidecar_refreshes_only_when_stale(self):
+        task, payload, _ = self._active_fixture()
+        sidecar = jev_gate.STATE / "runs/jev/read_economy_safety.json"
+        before = sidecar.read_text()
+        self.assertEqual(self._run(payload, task), 0)
+        self.assertEqual(sidecar.read_text(), before)
+        data = json.loads(before)
+        data["computed_at"] = 0
+        sidecar.write_text(json.dumps(data))
+        payload["session_id"] = "stale"
+        self.assertEqual(self._run(payload, task), 0)
+        self.assertGreater(json.loads(sidecar.read_text())["computed_at"], 0)
+
+    def test_session_cap_allows_after_max_suppressions(self):
+        task, payload, target = self._active_fixture(max_suppressions_per_session=1)
+        self.assertEqual(self._run(payload, task), 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self._run(payload, task), 2)
+        payload["tool_input"] = {"file_path": str(target), "offset": 1}
+        self.assertEqual(self._run(payload, task), 0)
+        self.assertEqual(self._run(payload, task), 0)
+        self.assertEqual(self._log_lines()[-1]["suppression_reason"], "session_cap")
+
+    def test_override_disables_that_signature_for_the_session(self):
+        task, payload, _ = self._active_fixture()
+        self.assertEqual(self._run(payload, task), 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self._run(payload, task), 2)
+        self.assertEqual(self._run(payload, task), 0)
+        self.assertEqual(self._run(payload, task), 0)
+        self.assertTrue(self._log_lines()[-1]["suppression_override"])
+
+    def test_different_signature_on_same_path_remains_eligible(self):
+        task, payload, target = self._active_fixture()
+        for override_first in (False, True):
+            with self.subTest(override_first=override_first), contextlib.redirect_stderr(io.StringIO()):
+                payload["session_id"] = f"different-range-{override_first}"
+                payload["tool_input"] = {"file_path": str(target), "offset": 0}
+                self.assertEqual(self._run(payload, task), 0)
+                self.assertEqual(self._run(payload, task), 2)
+                if override_first:
+                    self.assertEqual(self._run(payload, task), 0)
+                    self.assertTrue(self._log_lines()[-1]["suppression_override"])
+                payload["tool_input"] = {"file_path": str(target), "offset": 1}
+                self.assertEqual(self._run(payload, task), 0)
+                self.assertEqual(self._log_lines()[-1]["read_kind"], "same_file_different_range")
+                self.assertEqual(self._run(payload, task), 2)
+                row = self._log_lines()[-1]
+                self.assertEqual(row["selected"], "suppress")
+                self.assertFalse(row["suppression_override"])
+                self.assertEqual(self._run(payload, task), 0)
+                self.assertTrue(self._log_lines()[-1]["suppression_override"])
+                self.assertEqual(self._run(payload, task), 0)
 
 
 if __name__ == "__main__":

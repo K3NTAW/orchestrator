@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -114,6 +115,9 @@ def run(category, root):
         raise ValueError(category)
     with isolated_state(root) as state:
         wt, task = _fixture(category, root)
+        # Fixture-local certification lets the eval exercise the guarded active branch.
+        (state / "context_eval.json").write_text(json.dumps({
+            "ran_at": datetime.now(timezone.utc).isoformat(), "suite_passed": True}))
         builder = spawn.review_packet if task["role"] == "review" else spawn.packet
         if task["role"] == "review":
             original_diff = spawn.scoped_diff
@@ -124,12 +128,14 @@ def run(category, root):
                 off_text = builder(task, task, cfg=_cfg("off"))
                 off_meta = {"presented_tokens": len(off_text) // 4}
                 shadow_text = builder(task, task, cfg=_cfg("shadow"))
+                active_text = builder(task, task, cfg=_cfg("active"))
             finally:
                 spawn.scoped_diff = original_diff
         else:
             off_text = builder(task, wt, cfg=_cfg("off"))
             off_meta = spawn.packet_run_meta(off_text)
             shadow_text = builder(task, wt, cfg=_cfg("shadow"))
+            active_text = builder(task, wt, cfg=_cfg("active"))
         meta = spawn.packet_run_meta(shadow_text)
         decision = _selection(state, task["id"])
         deterministic = decision.get("deterministic") or {}
@@ -164,10 +170,19 @@ def run(category, root):
             kept = bool(full)
         if category == "localized_fix":
             kept = "in_scope_file" in full_reasons
+        protected = ("spec", "acceptance", "scope", "diff", "security", "gate") if task["role"] == "review" else (
+            "objective", "acceptance", "base", "write_scope", "constraints", "verify", "symbols")
+        def sections(text):
+            parts = re.split(r"(?m)^## ([^\n]+)\n", text)
+            return {parts[i]: parts[i + 1].rstrip("\n") for i in range(1, len(parts), 2)}
+        shadow_sections, active_sections = sections(shadow_text), sections(active_text)
+        kept = kept and "routed=active" in active_text.splitlines()[0] and all(
+            active_sections.get(name) == shadow_sections.get(name)
+            for name in protected if name in shadow_sections)
         low, high = EXPECTATIONS[category]
         instruction_modular = meta.get("instruction_tokens_modular")
         return {"category": category, "candidate_tokens": candidates,
-                "presented_tokens": off_meta["presented_tokens"], "routed_tokens": routed,
+                "presented_tokens": off_meta["presented_tokens"], "routed_tokens": routed, "active": len(active_text),
                 "reduction": reduction, "hidden": int(deterministic.get("HIDE") or meta.get("routed_hidden") or 0),
                 "instruction_delta": (instruction_modular - off_meta["presented_tokens"]
                                       if isinstance(instruction_modular, int) else 0),
@@ -191,6 +206,6 @@ def result_document(results):
 
 
 def format_report(results):
-    lines = ["category\tcandidate\tpresented\trouted\treduction\thidden\twithin\tkept"]
-    lines += [f"{r['category']}\t{r['candidate_tokens']}\t{r['presented_tokens']}\t{r['routed_tokens']}\t{r['reduction']}\t{r['hidden']}\t{r['within_expectation']}\t{r['kept']}" for r in results]
+    lines = ["category\tcandidate\tpresented\trouted\tactive\treduction\thidden\twithin\tkept"]
+    lines += [f"{r['category']}\t{r['candidate_tokens']}\t{r['presented_tokens']}\t{r['routed_tokens']}\t{r['active']}\t{r['reduction']}\t{r['hidden']}\t{r['within_expectation']}\t{r['kept']}" for r in results]
     return "\n".join(lines)

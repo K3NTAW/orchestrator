@@ -9,9 +9,8 @@ from .pool import Pool, is_rate_limited, parse_reset_hint
 _MEMORY_RECALL = None
 _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
-_CONTEXT_ROUTER_ACTIVE_WARNED = False
-_TOOL_DISCLOSURE_ACTIVE_WARNED = False
 _INSTRUCTION_RENDER_META = OrderedDict()
+NEEDS_TOOL_PREFIX = "needs_tool:"
 
 _SKILL_EVIDENCE_WINDOW_S = 7 * 24 * 60 * 60
 _SKILL_PRESENTATION_CAP = 2400
@@ -364,15 +363,28 @@ def _memory_entries(path):
             for n, (i, title) in enumerate(starts)]
 
 
-def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
-    """Persist and route evidence for telemetry without changing packet bytes."""
-    global _CONTEXT_ROUTER_ACTIVE_WARNED
+def _context_mode(cfg):
     mode = promotion.mode("context_router", cfg)
+    if mode != "active":
+        return mode
+    try:
+        from datetime import datetime, timezone
+        report = json.loads((STATE / "context_eval.json").read_text())
+        if not isinstance(report, dict):
+            raise ValueError("invalid context evaluation")
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(report["ran_at"])).total_seconds()
+        if report.get("suite_passed") is True and 0 <= age <= 7 * 86400:
+            return "active"
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    notify.notify("context_router active refused; running shadow: context_eval missing, stale, or failed")
+    return "shadow"
+
+def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
+    """Persist routing telemetry and return section items for guarded active mode."""
+    mode = _context_mode(cfg)
     if mode == "off" or not task.get("id"):
         return {}
-    if mode == "active" and not _CONTEXT_ROUTER_ACTIVE_WARNED:
-        notify.notify("context_router active not implemented; running shadow")
-        _CONTEXT_ROUTER_ACTIVE_WARNED = True
     try:
         pool = evidence.EvidencePool(task.get("parent") or task["id"])
         candidates = [pool.add(candidate) for candidate in candidates]
@@ -383,8 +395,15 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
             candidates = composition.filter_evidence(candidates)
         routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
                                       required_types=composition.context_requirements if composition else ())
-        decision_log.record(**context_router.decision_row(task, routed, mode=mode))
+        row = context_router.decision_row(task, routed, mode=mode)
+        row["extra"] = {"head_sha": head_sha}
+        decision_log.record(**row)
         return {
+            "routed_mode": mode,
+            "_routed_sections": {section: context_router.section_items(
+                routed, {ev.id: ev for ev in candidates}, section)
+                for section in ("gotchas", "decisions", "evidence", "read_scope", "routed-findings")}
+                if mode == "active" else {},
             "routed_tokens": routed.routed_tokens,
             "routed_reduction_ratio": routed.reduction_ratio,
             "routed_hidden": sum(item.level == "HIDE" for item in routed.items),
@@ -398,27 +417,54 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
 
 
 def _shadow_tool_disclosure(task, role, cfg):
-    """Measure the hypothetical minimum while preserving the dispatched allowlist."""
-    global _TOOL_DISCLOSURE_ACTIVE_WARNED
+    """Record disclosure choice and return its telemetry and selected allowlist."""
     mode = promotion.mode("tool_disclosure", cfg)
     if mode not in ("shadow", "active"):
         return {}
-    if mode == "active" and not _TOOL_DISCLOSURE_ACTIVE_WARNED:
-        notify.notify("tool_disclosure active not implemented; running shadow")
-        _TOOL_DISCLOSURE_ACTIVE_WARNED = True
     offered = tool_catalog.disclosed(role)
     choice = tool_catalog.minimal_set(task, role)
     disclosed_tokens = tool_catalog.tokens(offered)
     minimal_tokens = tool_catalog.tokens(choice["keep"])
     decision_log.record(
         kind="tool_disclosure", subject=task.get("id", "(unknown)"), candidates=offered,
-        hard_constraints=choice["mandatory"], selected="allowlist unchanged (shadow)",
+        hard_constraints=choice["mandatory"],
+        selected=choice["keep"] if mode == "active" else "allowlist unchanged (shadow)",
         deterministic={"task_class": tool_catalog._task_class(task), "role": role,
                        "kept": choice["keep"], "dropped": choice["drop"],
                        "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens},
         reason=choice["reason"], mode=mode)
-    return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens}
+    return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens,
+            "tool_allowlist": ",".join(choice["keep"]) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
+            "tool_disclosure_mode": mode}
 
+
+def _hidden_tool_request(task_id):
+    result = bus.get(task_id).get("result") or {}
+    reason = result.get("reason", "") if isinstance(result, dict) else ""
+    return reason[len(NEEDS_TOOL_PREFIX):].strip() if reason.startswith(NEEDS_TOOL_PREFIX) else None
+
+
+def _combined_usage(first, second):
+    outputs = [r.get("output", {}) for r in (first, second) if isinstance(r, dict)]
+    usage = {}
+    for output in outputs:
+        for key, value in (output.get("usage") or {}).items():
+            if isinstance(value, (int, float)):
+                usage[key] = usage.get(key, 0) + value
+    return {"usage": usage, "total_cost_usd": sum(float(o.get("total_cost_usd", 0) or 0) for o in outputs)}
+
+
+
+def _trim_routed_item(by_name, routed_sections):
+    """Drop one atomic item, lowest level first, retaining complete fences."""
+    for level in ("SHORT", "LONG", "FULL"):
+        for name, items in routed_sections.items():
+            for index in range(len(items) - 1, -1, -1):
+                if items[index][0] == level:
+                    items.pop(index)
+                    by_name[name].pop(index)
+                    return True
+    return False
 
 def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
@@ -561,19 +607,19 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
         candidates.append(evidence.make(
             "source_chunk", str(path.relative_to(wt)), path.read_text(errors="replace")[:12000],
             commit=merge_base, provenance="repo", task=task))
-    for path in sorted(read_scope):
+    for path in sorted(read_scope - set(scope)):
         path_symbols = "\n".join(line for line in symbols if line.startswith(f"- {path}"))
         candidates.append(evidence.make(
-            "source_chunk", path or ".", path_symbols, commit=merge_base, provenance="repo", task=task))
+            "source_chunk", path or ".", path_symbols, commit=merge_base, provenance="repo", task=task, section="read_scope"))
     candidates.extend(evidence.make(
         "memory_entry", f"task:{task_id}:gotcha:{index}", value,
-        provenance="memory", task=task) for index, value in enumerate(gotchas, 1))
+        provenance="memory", task=task, section="gotchas") for index, value in enumerate(gotchas, 1))
     candidates.extend(evidence.make(
         "decision", f"task:{task_id}:decision:{index}", value,
-        provenance="memory", task=task) for index, value in enumerate(decisions, 1))
+        provenance="memory", task=task, section="decisions") for index, value in enumerate(decisions, 1))
     candidates.extend(evidence.make(
         "previous_result", f"task:{task_id}:evidence:{index}", value,
-        provenance="bus", task=task) for index, value in enumerate(evidence_lines, 1))
+        provenance="bus", task=task, section="evidence") for index, value in enumerate(evidence_lines, 1))
     candidates.extend(evidence.make(
         "test_result", value, value, commit=merge_base, provenance="repo", task=task)
         for value in tests)
@@ -583,6 +629,9 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
             "test_result", f"task:{task_id}:failures", failure_match.group(1),
             commit=merge_base, provenance="repo", task=task))
     shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
+    routed_sections = shadow_meta.pop("_routed_sections", {})
+    sections = [(name, [text for _, text in routed_sections[name]] if name in routed_sections else lines)
+                for name, lines in sections]
     dependencies = []
     for dependency_id in task.get("depends_on", []):
         try:
@@ -597,27 +646,6 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
             + (f"; merged sha: {sha}" if sha else ""))
     if dependencies:
         sections.append(("dependencies", dependencies))
-    def build():
-        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections
-                         if name != "dependencies" or lines)
-    candidate_tokens = len(build()) // 4
-    # The task contract is more valuable than discovery hints.  In particular,
-    # acceptance criteria are never summarized: an over-cap packet says so in
-    # its provenance header instead.
-    trimmable = ("dependencies", "evidence", "decisions", "gotchas", "symbols", "relevant_tests")
-    by_name = {name: lines for name, lines in sections}
-    while len(build()) >= 4800:
-        changed = False
-        for name in trimmable:
-            lines = by_name.get(name, [])
-            if lines:
-                lines.pop()
-                changed = True
-                break
-        if changed:
-            continue
-        break
-    body = build()
     gotchas_sha = hashlib.sha256("\n".join(matched_gotchas).encode()).hexdigest()[:12]
     policy_version = getattr(bus, "policy_version", lambda: None)()
     if not policy_version:
@@ -628,6 +656,32 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
             policy_version = hashlib.sha256(pool_path.read_bytes()).hexdigest()[:12]
         except OSError:
             policy_version = "(unavailable)"
+    header_chars = len(f"packet v{'0' * 12} base {merge_base[:12]} sources "
+                       f"pool.toml@{policy_version} gotchas@{gotchas_sha} memory@{','.join(memory['layers_consulted'])}"
+                       " routed=active") + 1
+    def build():
+        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections
+                         if name != "dependencies" or lines)
+    candidate_tokens = len(build()) // 4
+    # The task contract is more valuable than discovery hints.  In particular,
+    # acceptance criteria are never summarized: an over-cap packet says so in
+    # its provenance header instead.
+    trimmable = ("dependencies", "evidence", "decisions", "gotchas", "symbols", "relevant_tests")
+    by_name = {name: lines for name, lines in sections}
+    while len(build()) >= (4800 - header_chars if routed_sections else 4800):
+        changed = False
+        if _trim_routed_item(by_name, routed_sections):
+            continue
+        for name in trimmable:
+            lines = [] if name in routed_sections else by_name.get(name, [])
+            if lines:
+                lines.pop()
+                changed = True
+                break
+        if changed:
+            continue
+        break
+    body = build()
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
                   "memory_layers": ",".join(memory["layers_consulted"]),
@@ -687,22 +741,24 @@ def packet(task, worktree, *, cfg=None, skills=None) -> str:
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
     if skills and skills.get("mode") == "active" and skills.get("specialist"):
         header += f" specialist: {skills['specialist']['name']}"
+    marker = " routed=" + ("active" if meta.get("routed_mode") == "active" else "shadow")
     # Account for the header itself, including a possible extra digit in n.
-    over = len(header) + 1 + len(body) - 4800
+    over = len(header) + len(marker) + 1 + len(body) - 4800
     if over > 0:
         while True:
             extended = f"{header} over cap by {over} chars: acceptance kept whole"
-            actual = len(extended) + 1 + len(body) - 4800
+            actual = len(extended) + len(marker) + 1 + len(body) - 4800
             if actual == over:
                 header = extended
                 break
             over = actual
-    result = header + "\n" + body
+    result = header + marker + "\n" + body
     _remember_packet_meta(meta["hash"],
                           {key: value for key, value in meta.items()
                            if key in ("candidate_tokens", "candidate_known", "routed_tokens",
                                       "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
-                                      "routed_rules_version", "evidence_ids", "skill_tokens_presented_l2")})
+                                      "routed_rules_version", "routed_mode", "evidence_ids",
+                                      "skill_tokens_presented_l2")})
     return result
 
 
@@ -827,16 +883,35 @@ def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
         match = re.match(r"a/(\S+) b/(\S+)", header)
         location = match.group(2) if match else header
         candidates.append(evidence.make("source_chunk", location, "diff --git " + chunk,
-                                        commit=_base_sha(src, wt), provenance="repo", task=src))
+                                        commit=_base_sha(src, wt), provenance="repo", task=src, section="diff"))
     candidates.extend(evidence.make("review_finding", f"task:{src['id']}:review:{index}",
-                                    json.dumps(value, sort_keys=True), provenance="bus", task=src)
+                                    json.dumps(value, sort_keys=True), provenance="bus", task=src, section="routed-findings")
                       for index, value in enumerate(comments, 1))
-    shadow_meta = _shadow_route(task, candidates,
+    for value in [src.get("result"), *src.get("inputs", [])]:
+        if isinstance(value, str):
+            try:
+                value = bus.get(value).get("result")
+            except KeyError:
+                continue
+        if isinstance(value, dict) and value.get("summary"):
+            candidates.append(evidence.make("previous_result", f"task:{src['id']}:result:{len(candidates)}",
+                                            value["summary"], provenance="bus", task=src,
+                                            section="routed-findings"))
+    shadow_meta = _shadow_route({**src, "id": task["id"], "parent": task.get("parent") or src.get("parent")}, candidates,
                                 role="security_review" if any(section.startswith("## security\n")
                                                                for section in sections) else "review",
                                 head_sha=_base_sha(src, wt), cfg=cfg, skills=skills)
     if skills and skills.get("mode") == "active" and skills.get("specialist"):
         role_source += f" specialist: {skills['specialist']['name']}"
+    routed_sections = shadow_meta.pop("_routed_sections", {})
+    if shadow_meta.get("routed_mode") == "active":
+        # Findings move out of the legacy fix context; diff/security bytes stay intact.
+        sections = ["## fix-round context\n" if section.startswith("## fix-round context\n") else section
+                    for section in sections]
+        sections.append("## routed-findings\n" + "\n".join(
+            text for _, text in routed_sections.get("routed-findings", [])))
+        body = "\n".join(sections)
+    role_source += " routed=" + ("active" if shadow_meta.get("routed_mode") == "active" else "shadow")
     return _role_packet(body, _base_sha(src, wt),
                         f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}",
                         candidate_tokens=len(raw_diff) // 4, candidate_known=True,
@@ -1145,7 +1220,8 @@ def run_worker(task_id, account_id=None):
             packet_worktree = t.get("worktree") or ROOT
             role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice)
             prompt = render("execute", packet=role_packet, task=t) + \
-                "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green."
+                "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
+                "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         else:
             role_packet = scout_packet(t)
@@ -1155,6 +1231,8 @@ def run_worker(task_id, account_id=None):
         hold_render_error(task_id, exc)
         return {"status": "held", "reason": "render_error"}
     disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg)
+    allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
+    disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
     t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
     try:
         exposure = _skill_exposure(t, role) if promotion.mode("skill_routing", pool.cfg) == "off" else None
@@ -1178,10 +1256,34 @@ def run_worker(task_id, account_id=None):
     bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
     bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = None
+    release_usage = None
     try:
-        r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
-                       lim["max_budget_usd"].get(role, 2.0),
-                       t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900)))
+        budget = lim["max_budget_usd"].get(role, 2.0)
+        timeout = t["constraints"].get("timeout_s", lim["timeout_s"].get(role, 900))
+        started = time.monotonic()
+        first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)
+        r = first
+        tool_id = _hidden_tool_request(task_id)
+        if (disclosure_mode == "active" and tool_id
+                and not (bus.get(task_id).get("pipeline") or {}).get("tool_escalation_used")):
+            spent = float(first.get("output", {}).get("total_cost_usd", 0) or 0)
+            budget_left = budget - spent
+            timeout_left = timeout - (time.monotonic() - started)
+            if budget_left < budget * .1 or timeout_left < timeout * .1:
+                reason = f"{NEEDS_TOOL_PREFIX}{tool_id} (no budget for respawn)"
+                bus.update(task_id, status="held", hold_reason=reason, result={"reason": reason})
+                r = {"status": "held", "reason": reason, "output": first.get("output", {})}
+            else:
+                decision_log.record(kind="tool_disclosure", subject=task_id,
+                    candidates=tool_catalog.disclosed(role), hard_constraints=[], selected=tool_id,
+                    deterministic={"role": role, "requested_tool": tool_id},
+                    reason="hidden_tool_requested", mode="active")
+                pipeline = dict(bus.get(task_id).get("pipeline") or {})
+                pipeline["tool_escalation_used"] = True
+                bus.update(task_id, status="running", result=None, pipeline=pipeline)
+                r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
+                               budget_left, timeout_left)
+                release_usage = _combined_usage(first, r)
         if r["status"] == "done" and role == "execute":
             bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
                                       "review": "other account, different model; label PR same-family-review"}), "done")
@@ -1236,7 +1338,7 @@ def run_worker(task_id, account_id=None):
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
         bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     finally:
-        pool.release(task_id, r or {})
+        pool.release(task_id, release_usage or r or {})
     return r
 
 

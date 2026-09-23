@@ -42,6 +42,9 @@ FEATURES = OrderedDict((
     ("jev_skill_routing", {"table": "skills", "key": "jev_mode",
                            "modes": ("off", "shadow", "active"),
                            "default": "shadow", "evidence": "jev_skill_routing"}),
+    ("read_suppression", {"table": "jev", "key": "read_suppression",
+                           "modes": ("off", "shadow", "active"),
+                           "default": "shadow", "evidence": "read_suppression"}),
 ))
 
 CRITERIA = {
@@ -183,6 +186,10 @@ def collect(feature, root=STATE):
                 and row.get("mode") in ("shadow", "active")
                 and row.get("reason") != "stage1 static"]
         return {"n": len(rows)}
+    if feature == "read_suppression":
+        from . import read_economy
+        total = read_economy.summary(root, since_s=__import__("time").time() - 7 * 86400)["total"]
+        return {"n": total["would_suppress"], **total}
     shadow_keys = {"context_router": "routed_tokens", "tool_disclosure": "tool_tokens_minimal",
                    "conditional_instructions": "instruction_tokens_modular"}
     if feature in {*shadow_keys, "handoff_routing"}:
@@ -213,14 +220,15 @@ def collect(feature, root=STATE):
         except (OSError, ValueError, TypeError):
             suite = None
         passed = bool(suite and suite.get("suite_passed"))
-        recovery_rows = [row for row in decision_log.read_all(root=root)
-                         if row.get("kind") == "read_economy" and
-                         (row.get("deterministic") or {}).get("read_kind") == "evidence_available"]
+        from . import context_scorecard
+        recoveries = context_scorecard.recovery(root)
+        recovery_reads = sum(row["recovery_reads"] for row in recoveries.values())
+        hidden_items = sum(row["hidden_items"] for row in recoveries.values())
         result = {"n": n, "first_pass_delta": None, "fix_rounds_delta": None,
                   "gate_success_delta": None, "review_findings_delta": None,
                   "accepted_cost_delta": None, "accepted_tokens_delta": None, "latency_delta": None,
                   "security_ok": None, "suite_present": suite is not None, "suite_passed": passed,
-                  "context_recovery_rate": len(recovery_rows) / n if n else 0, "context_recovery_n": n}
+                  "context_recovery_rate": recovery_reads / hidden_items if hidden_items else 0, "context_recovery_n": hidden_items}
         if passed and reductions:
             result["accepted_tokens_delta"] = -(sum(reductions) / len(reductions))
         return result

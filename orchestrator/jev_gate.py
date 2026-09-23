@@ -27,7 +27,7 @@ RECENT_LIMIT = 20
 NEEDED_LOW = 0.15
 REDUNDANT_HIGH = 0.85
 CONFIDENCE_MIN = 0.6
-GATED_ROLES = frozenset({"scout", "triage", "execute", "review", "challenge", "spec_review"})
+GATED_ROLES = frozenset({"scout", "triage", "execute", "review", "security_review", "challenge", "spec_review"})
 # Empty input on any tool, or a Glob containing only its pattern, needs no judgment.
 SKIP_RULES = ("empty_input", "bare_glob")
 
@@ -241,6 +241,68 @@ def _record_call(session_id, tool_name, tool_input):
     return jev._with_state_lock(op)
 
 
+def _suppression_state(session_id, update=None):
+    """Read/update the small, bounded active-suppression session sidecar."""
+    from . import jev
+    def op():
+        path = STATE / "runs" / "jev" / f"read-suppression-{session_id or 'unknown'}.json"
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            value = {"count": 0, "overrides": [], "last_signature": None}
+        if update:
+            value = update(value)
+            value["overrides"] = list(dict.fromkeys(value.get("overrides", [])))[-100:]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value, sort_keys=True))
+        return value
+    return jev._with_state_lock(op)
+
+
+def _safety_evidence(now=None):
+    """Return cached seven-day evidence; refresh without invoking the full scorecard."""
+    now = time.time() if now is None else now
+    path = STATE / "runs" / "jev" / "read_economy_safety.json"
+    try:
+        cached = json.loads(path.read_text())
+        if now - float(cached.get("computed_at", 0)) <= 600:
+            return cached
+    except (OSError, ValueError, TypeError):
+        pass
+    since = now - 7 * 86400
+    rows = []
+    try:
+        lines = GATE_LOG.read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if float(row.get("ts", 0)) < since:
+            break
+        rows.append(row)
+    rows.reverse()
+    would = sum(bool(row.get("would_suppress")) for row in rows)
+    suppressed = [i for i, row in enumerate(rows) if row.get("suppressed")]
+    overrides = sum(bool(row.get("suppression_override")) for row in rows)
+    later_edits = 0
+    for index in suppressed:
+        row = rows[index]
+        if any(candidate.get("session") == row.get("session")
+               and candidate.get("tool") in {"Edit", "Write", "NotebookEdit"}
+               and candidate.get("tool_target") == row.get("tool_target")
+               for candidate in rows[index + 1:index + 6]):
+            later_edits += 1
+    rate = (overrides + later_edits) / len(suppressed) if suppressed else 0.0
+    result = {"computed_at": now, "since_s": since, "would_suppress": would,
+              "false_suppression_rate": rate, "rows": len(rows)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, sort_keys=True))
+    return result
+
+
 def build_state(task, recent, tool_name, tool_input):
     from . import jev
     task = task or {}
@@ -311,7 +373,7 @@ def _message(reason, tool_name, tool_input):
 
 def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency_ms, startup_ms=0.0,
          tool_target="", input_hash="", repeat=False, sampled=False, economy=None,
-         transcript_path="", call_index=None, role=None, task_class=None):
+         transcript_path="", call_index=None, role=None, task_class=None, selected="allow"):
     answers = answers or {}
     _, reason = decide(answers, "block")
     rule = ("none" if reason is None else
@@ -329,10 +391,14 @@ def _log(task_id, session_id, tool_name, answers, mode, blocked, scored, latency
         "tool_target": tool_target, "input_hash": input_hash, "repeat": repeat, "sampled": sampled,
         "transcript_path": transcript_path, "call_index": call_index, "role": role,
         "task_class": task_class,
+        "selected": selected,
     }
     if economy:
         entry.update(read_kind=economy["kind"], tokens_estimate=economy["tokens_estimate"],
-                     would_suppress=economy["would_suppress"])
+                     would_suppress=economy["would_suppress"],
+                     suppressed=bool(economy.get("suppressed")),
+                     suppression_override=bool(economy.get("suppression_override")),
+                     suppression_reason=economy.get("reason"))
     GATE_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(GATE_LOG, "a") as fh:
         fh.write(json.dumps(entry) + "\n")
@@ -368,23 +434,44 @@ def run(payload):
     if tool_name in {"Read", "Grep", "Glob"}:
         from . import read_economy
         call = _call_record(tool_name, tool_input)
+        call["call_index"] = call_index
         history = _history(session_id)
-        economy = read_economy.classify(call, history)
+        from . import decision_log, evidence, spawn
+        selections = [row for row in decision_log.read_all(root=STATE)
+                      if row.get("kind") == "context_selection" and row.get("subject") == task_id]
+        selection = max(enumerate(selections), key=lambda pair: (pair[1].get("ts", 0), pair[0]))[1] if selections else {}
+        head_sha = (selection.get("extra") or {}).get("head_sha")
+        if not head_sha:
+            head_sha = spawn.git("rev-parse", "HEAD", cwd=task.get("worktree") or payload.get("cwd") or spawn.ROOT,
+                                 check=False).stdout.strip()
+        economy = read_economy.classify(call, history,
+                                       evidence=evidence.EvidencePool(task.get("parent") or task_id),
+                                       head_sha=head_sha, selection=selection)
         _history(session_id, call)
 
     constraints = task.get("constraints") or {}
     task_class = task.get("task_class") or constraints.get("task_class")
 
     def finish(answers, *, scored=False, sampled=False, latency_ms=0.0, startup_ms=0.0,
-               blocked=False):
+               blocked=False, selected="allow"):
+        if economy:
+            economy["suppressed"] = selected == "suppress"
         _log(task_id, session_id, tool_name, answers, mode, blocked=blocked, scored=scored,
              latency_ms=latency_ms, startup_ms=startup_ms, tool_target=target,
              input_hash=input_hash, repeat=repeat, sampled=sampled, economy=economy,
              transcript_path=transcript_path, call_index=call_index, role=task.get("role"),
-             task_class=task_class)
+             task_class=task_class, selected=selected)
         if economy:
             try:
                 from . import decision_log
+                if not blocked:
+                    for evidence_id in economy.get("recovery_ids", []):
+                        decision_log.record(
+                            kind="evidence_reuse", subject=task_id, candidates=[evidence_id],
+                            hard_constraints=[], selected=evidence_id, reason="recovery_read", mode="active",
+                            deterministic={"role": (selection.get("deterministic") or {}).get("role") or task.get("role"),
+                                           "evidence_id": evidence_id},
+                            extra={"session": session_id, "call_index": call_index}, root=STATE)
                 jev_data = None
                 if answers:
                     jev_data = {"needed_p": (answers.get("needed") or {}).get("p"),
@@ -395,10 +482,48 @@ def run(payload):
                     deterministic={"read_kind": economy["kind"],
                                    "tokens_estimate": economy["tokens_estimate"],
                                    "would_suppress": economy["would_suppress"]},
-                    jev=jev_data, selected="allow", reason=economy["kind"], mode=mode)
+                    jev=jev_data, selected=selected, reason=economy.get("reason", economy["kind"]), mode=mode)
             except Exception:
                 pass
-        return 0
+        return 2 if blocked else 0
+
+    # Active deterministic suppression is independent of the semantic Jev gate mode.
+    suppression_mode = cfg.get("read_suppression", "shadow")
+    safety = _safety_evidence() if suppression_mode == "active" else None
+    if economy and suppression_mode == "active" and economy["would_suppress"]:
+        if (safety["would_suppress"] < 50
+                or safety["false_suppression_rate"] > float(cfg.get("max_false_suppression", .02))):
+            print("[jev-gate] active read suppression refused; using shadow (insufficient safety evidence)",
+                  file=sys.stderr)
+        else:
+            state = _suppression_state(session_id)
+            signature = input_hash
+            if signature in state.get("overrides", []):
+                economy["suppression_override"] = True
+                economy["reason"] = "suppression_override"
+            elif int(state.get("count", 0)) >= int(cfg.get("max_suppressions_per_session", 20)):
+                economy["reason"] = "session_cap"
+            elif state.get("last_signature") == signature:
+                def override(value):
+                    value.setdefault("overrides", []).append(signature)
+                    value["last_signature"] = None
+                    return value
+                _suppression_state(session_id, override)
+                economy["suppression_override"] = True
+                economy["reason"] = "suppression_override"
+            else:
+                def suppressed(value):
+                    value["count"] = int(value.get("count", 0)) + 1
+                    value["last_signature"] = signature
+                    return value
+                _suppression_state(session_id, suppressed)
+                earlier = next((item for item in reversed(history)
+                                if read_economy.classify(call, [item])["kind"] == economy["kind"]), {})
+                finish(None, blocked=True, selected="suppress")
+                print(f"already read at call {earlier.get('call_index', 0)} in this session; "
+                      f"file unchanged ({call.get('mtime')}, {call.get('size')}); "
+                      "use your earlier result or pass a different range", file=sys.stderr)
+                return 2
 
     # P18: Jev only judges ambiguous semantic equivalence. Deterministic cases are shadow-logged and allowed.
     prior_same_path = any(item.get("path") == _target_path(tool_name, tool_input) for item in history) if economy else False
