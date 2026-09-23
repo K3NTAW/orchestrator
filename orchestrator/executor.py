@@ -7,9 +7,9 @@ Observed ``codex exec resume --help`` options (2026-09-19): ``--config``, ``--la
 Notably, resume accepts ``--json`` and the access flags, but not ``-C``; its process cwd selects the worktree.
 Usage-limit errors cool Codex down and hold the task (§4.10).
 """
-import inspect, json, re, subprocess, time
+import inspect, json, os, re, subprocess, time
 from pathlib import Path
-from . import ROOT, bus, worker_registry
+from . import ROOT, bus, worker_registry, env_policy
 import threading
 from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
@@ -156,8 +156,14 @@ def _run(pool, task, args, cwd, timeout, ex=None):
                            provider="codex", account="codex", model=ex.model if ex else cfg.get("model"),
                            worktree=str(cwd), branch=task.get("branch") or f"task/{task['id']}",
                            parent=task.get("parent"), started_at=t0)
+    from .spawn import resolve_secrets
+    extra = resolve_secrets(pool.cfg.get("secrets", {}).get("execute", {}))
+    extra.update({name: os.environ[name] for name in ("CODEX_HOME", "HOME") if name in os.environ})
+    extra["ORCH_TASK_ID"] = log_task
+    env, _ = env_policy.worker_env("execute", base=os.environ, extra=extra,
+                                   cfg=pool.cfg, task_id=log_task)
     try:
-        run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
+        run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "env": env}
         if kind == "resume":
             run_kwargs["cwd"] = cwd
         p = subprocess.Popen(cmd, **run_kwargs)

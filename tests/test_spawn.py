@@ -25,6 +25,25 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_spawn_uses_env_policy(self):
+        pl = P.Pool()
+        acct = mock.Mock(config_dir="/example", oauth_token_env="SYNTHETIC_SOURCE", id="A")
+        task = {"id": "T-env", "role": "execute", "tier": "sonnet", "complexity": 1, "worktree": str(TMP)}
+        marker = {"RESULT": "blue"}
+        with mock.patch.object(spawn.env_policy, "worker_env", return_value=(marker, [])) as policy, \
+                mock.patch.object(spawn.subprocess, "Popen", side_effect=RuntimeError("stop")) as popen, \
+                mock.patch.object(spawn, "worker_registry"), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={"SERVICE_TOKEN": "orange"}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                mock.patch.dict(os.environ, {"SYNTHETIC_SOURCE": "green"}):
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                spawn.run_claude(pl, acct, task, "p", "m", "Read", 1, 10)
+        self.assertIs(popen.call_args.kwargs["env"], marker)
+        self.assertEqual(policy.call_args.kwargs["extra"]["CLAUDE_CODE_OAUTH_TOKEN"], "green")
+        self.assertEqual(policy.call_args.kwargs["extra"]["SERVICE_TOKEN"], "orange")
+        self.assertEqual(policy.call_args.kwargs["task_id"], task["id"])
+
     def test_spawn_records_worker_registry_entry(self):
         from orchestrator import worker_registry as registry
         task = bus.create_task("registry spawn", "s", ["a"], ["x.py"], role="execute")

@@ -4,7 +4,7 @@ import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import worker_registry
+from . import worker_registry, env_policy
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -1147,12 +1147,14 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     # override (.mcp.<role>.json) wins when present; every other role gets the bus-only worker config.
     role_cfg = ROOT / f".mcp.{task['role']}.json"
     mcp_config = role_cfg if role_cfg.exists() else ROOT / ".mcp.worker.json"
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
+    extra = {"CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
            "ORCH_ROOT": str(ROOT), **secrets_for_role(task["role"])}
     # Headless hosts: `claude setup-token` issues a long-lived CLAUDE_CODE_OAUTH_TOKEN per CLAUDE_CONFIG_DIR,
     # set in this process's environment under the name pool.toml's oauth_token_env points at. Never logged.
     if acct.oauth_token_env and os.environ.get(acct.oauth_token_env):
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[acct.oauth_token_env]
+        extra["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[acct.oauth_token_env]
+    env, _ = env_policy.worker_env(task["role"], base=os.environ, extra=extra,
+                                   cfg=pool.cfg, task_id=task["id"])
     # claude 2.1.273 has no turn-cap flag; --max-budget-usd + subprocess timeout are the hard stops (§6.5)
     # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
     # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.
