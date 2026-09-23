@@ -484,10 +484,20 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
                 notify.notify(f"{task_id}: handoff shadow unavailable: {exc}")
             except Exception:
                 pass
-        if ex is None or ex.provider != "codex":
+        if ex is not None and ex.provider == "claude":
+            ex.roll_day(); ex.day_tasks += 1
+            pool.save()
+            result = _exhausted(pool, t, tier=ex.id.split(":", 1)[1])
+            handed_off = result.get("status") == "fallback"
+            return result
+        if ex is None:
             result = _exhausted(pool, t)
             handed_off = result.get("status") == "fallback"
             return result
+        if ex.provider != "codex":
+            reason = f"unknown executor provider {ex.provider}"
+            bus.update(task_id, status="held", hold_reason=reason)
+            return {"status": "held", "hold_reason": reason}
         if pool.reserve(task_id, ex.id, "execute", t) is None:
             pipeline = dict(t.get("pipeline") or {})
             pipeline["hold_note"] = "budget"
@@ -532,12 +542,18 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
             worker_control.release_if_current(task_id, epoch, pool, (result or {}).get("usage", {}))
 
 
-def _exhausted(pool, t, run=None):
+def _exhausted(pool, t, run=None, tier=None):
     """§4.10: hold by default; with on_exhausted=fallback_claude dispatch to sonnet (<=5) / opus (6-8) on an account with headroom.
-    Complexity >=9 always holds for Astra. Review of a Claude-executed task must be another model on the other account."""
-    pol = pool.cfg["codex"]["on_exhausted"]
-    tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
+    An explicit tier routes a Claude row independently of the Codex exhaustion policy.
+    Review of a Claude-executed task must be another model on the other account."""
+    routed = tier is not None
+    if not routed:
+        pol = pool.cfg["codex"]["on_exhausted"]
+        tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
     acct = pool.pick("execute")
+    if routed and acct is None:
+        bus.update(t["id"], status="held", hold_reason="no account with headroom")
+        return {"status": "held", "hold_reason": "no account with headroom"}
     if tier is None or acct is None:
         bus.update(t["id"], status="held", hold_reason=f"codex unavailable; policy={pol}; no Claude fallback for complexity {t['complexity']}")
         return {"status": "held", "policy": pol, "codex": pool.status()["codex"]}

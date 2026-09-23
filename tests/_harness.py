@@ -13,6 +13,10 @@ for f in ("pool.toml",):
     # Tests opt into autonomous planning explicitly; never inherit the live repository setting.
     sections = re.split(r"(?m)(?=^\[)", config)
     for index, section in enumerate(sections):
+        if section.startswith("[[executors]]") and re.search(r'^provider\s*=\s*"claude"\s*$', section, re.M):
+            # Live routed Claude rows are an operator setting; tests that need one build it.
+            sections[index] = ""
+            continue
         if section.splitlines()[:1] == ["[planner]"]:
             section = re.sub(r"(?m)^([ \t]*autonomous[ \t]*=[ \t]*).*$", r"\1false", section)
         if section.startswith("[[claude_accounts]]") and re.search(r'^id\s*=\s*"B"\s*$', section, re.M):

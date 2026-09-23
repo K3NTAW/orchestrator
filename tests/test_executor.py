@@ -385,6 +385,72 @@ class Executor(unittest.TestCase):
         self.assertEqual(executor.start(tid, "do it")["status"], "held")
         self.assertNotIn(tid, P.Pool().reservations)
 
+    def claude_pool(self, policy="fallback_claude"):
+        P.PERSIST.unlink(missing_ok=True)
+        self.addCleanup(P.PERSIST.unlink, True)
+        cfg = P.config()
+        cfg["codex"]["on_exhausted"] = policy
+        cfg["allocation"] = {"mode": "off"}
+        cfg["handoff"] = {"mode": "off"}
+        cfg["executors"] = [{"id": "claude:opus", "provider": "claude", "roles": ["execute"]}]
+        pool = P.Pool(cfg)
+        patcher = patch.object(executor, "Pool", return_value=pool)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return pool
+
+    def test_start_routes_claude_row_through_fallback_path(self):
+        pool = self.claude_pool()
+        tid = self.exec_task(complexity=3, title="routed opus")
+        account = pool.pick("execute")
+        self.assertIsNotNone(account)
+        self.assertIsNotNone(pool.reserve(tid, account.id, "execute", bus.get(tid)))
+        with patch.object(spawn, "run_worker") as worker, patch.object(pool, "release") as release:
+            result = executor.start(tid, "do it")
+            self.assertEqual(executor.join_fallback_threads(2), ())
+            worker.assert_called_once_with(tid, account_id=account.id)
+            release.assert_not_called()
+        self.assertEqual((result["status"], result["tier"]), ("fallback", "opus"))
+        task = bus.get(tid)
+        self.assertEqual((task["tier"], task["fallback"]), ("opus", "claude"))
+        self.assertEqual(task["review_rule"], "same-family-review: other account, different model")
+        self.assertEqual(pool.executors["claude:opus"].day_tasks, 1)
+        self.assertEqual(P.Pool(pool.cfg).executors["claude:opus"].day_tasks, 1)
+        self.assertIn(tid, pool.reservations)
+        pool.release(tid)
+
+    def test_routed_claude_row_ignores_on_exhausted_policy(self):
+        self.claude_pool(policy="hold")
+        tid = self.exec_task(complexity=9, title="routed despite hold")
+        with patch.object(spawn, "run_worker") as worker:
+            result = executor.start(tid, "do it")
+            self.assertEqual(executor.join_fallback_threads(2), ())
+            self.assertEqual(worker.call_count, 1)
+        self.assertEqual((result["status"], result["tier"]), ("fallback", "opus"))
+
+    def test_routed_claude_row_holds_without_headroom(self):
+        pool = self.claude_pool()
+        tid = self.exec_task(title="routed without headroom")
+        self.assertIsNotNone(pool.reserve(tid, "A", "execute", bus.get(tid)))
+        with patch.object(pool, "pick", return_value=None), patch.object(spawn, "run_worker") as worker:
+            result = executor.start(tid, "do it", executor_id="claude:opus")
+            worker.assert_not_called()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(bus.get(tid)["hold_reason"], "no account with headroom")
+        self.assertNotIn(tid, pool.reservations)
+
+    def test_unknown_executor_provider_holds_and_releases(self):
+        pool = self.claude_pool()
+        pool.executors["claude:opus"].provider = "unknown"
+        tid = self.exec_task(title="unknown provider")
+        self.assertIsNotNone(pool.reserve(tid, "A", "execute", bus.get(tid)))
+        with patch.object(spawn, "run_worker") as worker:
+            result = executor.start(tid, "do it", executor_id="claude:opus")
+            worker.assert_not_called()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(bus.get(tid)["hold_reason"], "unknown executor provider unknown")
+        self.assertNotIn(tid, pool.reservations)
+
     def test_fallback_handoff_keeps_reservation_until_worker_finishes(self):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
         tid = self.exec_task(complexity=5, title="fallback-keeps-reservation")

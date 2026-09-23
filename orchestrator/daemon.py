@@ -4,13 +4,14 @@ without the Planner in the loop. Timeouts are enforced by the spawner itself (su
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
+import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
 from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
                planner_runs, spawn, strategy, worker_control)
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
-from .pool import Pool, fallback_tier
+from .pool import Pool, fallback_tier, executor_identity, config as pool_config
 from . import failures, gitutil, interference, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
                        _test_ids, _path_in_scope, _rejecting_reviews, _normal_issue, failure_signature,
@@ -1067,7 +1068,7 @@ def dispatch(pool):
         review_slots -= 1
 
 
-def review_tier(t):
+def review_tier(t, cfg=None):
     """Never let a model review its own output (CLAUDE.md rule): a task the daemon fell back to a Claude tier for
     (executor.py's _exhausted(), executor field "claude:<tier>") must be reviewed by the other Claude tier, not
     the reviewer's usual sonnet default (gotchas.md 2026-09-18: T-0071 was sonnet-executed and sonnet-reviewed).
@@ -1077,11 +1078,32 @@ def review_tier(t):
         return "opus"
     if ex.startswith("claude:opus"):
         return "sonnet"
-    return "sonnet"
+    return _model_review_tier(t.get("executor"), "sonnet", cfg)
 
 
 def _other_tier(tier):
     return "sonnet" if tier == "opus" else "opus"
+
+
+_REVIEW_LOOKUP_ERRORS = (KeyError, TypeError, AttributeError, ValueError, OSError, tomllib.TOMLDecodeError)
+
+
+def _model_review_tier(field, default, cfg):
+    if field is None:
+        return default
+    other = _other_tier(default)
+    try:
+        cfg = pool_config() if cfg is None else cfg
+        if isinstance(cfg, Exception):
+            raise cfg
+        ident = executor_identity(field, cfg)
+        if (ident["provider"] == "claude" and isinstance(ident["model"], str)
+                and ident["model"] == cfg["models"].get(default)):
+            return other
+        return default
+    except _REVIEW_LOOKUP_ERRORS as exc:
+        print(f"review_tier: lookup failed ({exc}); failing closed to {other}", file=sys.stderr)
+        return other
 
 
 def reviews_expected(t):
@@ -1133,13 +1155,13 @@ def _matching_semantic_pattern(t):
     return None
 
 
-def _security_review_tier(t):
+def _security_review_tier(t, cfg=None):
     """security_review_tier, unless the executor is a Claude tier that IS security_review_tier -- then the
     other Claude tier, so a security-path review is never self-reviewed by the model that executed it."""
     tier = SECURITY_REVIEW_TIER
     if (t.get("executor") or "") == f"claude:{tier}":
         return _other_tier(tier)
-    return tier
+    return _model_review_tier(t.get("executor"), tier, cfg)
 
 
 def _review_plan(t):
@@ -1209,8 +1231,16 @@ def _dirty_scope_paths(worktree, scope):
     return sorted(dirty)
 
 
-def _open_reviews(t, n_reviews, review_reason):
+def _open_reviews(t, n_reviews, review_reason, cfg=None):
     """Create exactly the missing review children and issue their workers."""
+    lookup_error = None
+    if cfg is None:
+        try:
+            cfg = pool_config()
+        except _REVIEW_LOOKUP_ERRORS as exc:
+            lookup_error = exc
+    # Carry a failed read into tier selection without retrying configuration I/O.
+    review_cfg = lookup_error if lookup_error is not None else cfg
     t = bus.get(t["id"])
     existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
     security = (review_reason in ("diff_unavailable", "security_paths_empty") or
@@ -1232,14 +1262,15 @@ def _open_reviews(t, n_reviews, review_reason):
         if review_reason == "orphaned":
             spec = ("orphaned executor: verify the acceptance criteria are fully met, the worker may "
                     f"have died mid-task\n\n{spec}")
-            tier = review_tier(t)
+            tier = review_tier(t, review_cfg)
         elif security:
             complexity = max(complexity, SECURITY_CHECKLIST_COMPLEXITY)
-            tier = _security_review_tier(t)
+            tier = _security_review_tier(t, review_cfg)
         elif number == 0:
-            tier = review_tier(t)
-        elif (t.get("executor") or "").startswith("claude:"):
-            tier = review_tier(t)
+            tier = review_tier(t, review_cfg)
+        elif ((t.get("executor") or "").startswith("claude:") or lookup_error is not None
+              or (cfg is not None and executor_identity(t.get("executor"), cfg)["provider"] == "claude")):
+            tier = review_tier(t, review_cfg)
         else:
             tier = _other_tier(existing[0]["tier"])
         constraints = None
@@ -1429,7 +1460,7 @@ def gate(pool):
             if n_reviews == 0:
                 report_merge(t["id"], merge.merge(t["id"]))
             else:
-                _open_reviews(t, n_reviews, review_reason)
+                _open_reviews(t, n_reviews, review_reason, cfg=pool.cfg)
             complete(t["id"], "gated_at")
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
@@ -1622,7 +1653,7 @@ def sweep_leases(pool):
                             if child["status"] == "queued" and not child.get("claimed_at"):
                                 spawn_async(spawn.run_worker, child["id"])
                     else:
-                        _open_reviews(t, expected, pipeline["review_reason"])
+                        _open_reviews(t, expected, pipeline["review_reason"], cfg=pool.cfg)
                     complete(tid, stage)
                 else:  # merged_at
                     if already_merged(t):

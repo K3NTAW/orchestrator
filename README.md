@@ -280,6 +280,55 @@ Executor routing can collect Jev evidence with `[jev.routing] mode = "shadow"`. 
 `roles`, `complexity_min`/`max`, `max_parallel`, `daily_budget_tasks`, `quota_group`, `weight`, `enabled`.
 To add a model: add a row, or flip `enabled = true` on one of the disabled 6.x placeholder rows once its id appears
 in `~/.codex/models_cache.json`.
+
+### Adding or removing models
+To add a Codex model, copy its exact id from `~/.codex/models_cache.json` into a new `[[executors]]` row and set
+the routing fields explicitly. For example:
+
+```toml
+[[executors]]
+id = "my-codex-model"
+provider = "codex"
+model = "gpt-5.6-luna" # use the model id from ~/.codex/models_cache.json
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 10
+max_parallel = 1
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = true
+```
+
+To remove a model from routing, set its row's `enabled = false`. If the host should run without Codex, set
+`enabled = false` on every `provider = "codex"` row; `[codex].on_exhausted` still controls the legacy fallback.
+
+Claude models use an alias in `[models]`, followed by an executor row whose id is `claude:<alias>`:
+
+```toml
+[models]
+opus = "claude-opus-5"
+
+[[executors]]
+id = "claude:opus"
+provider = "claude"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 8
+max_parallel = 1
+daily_budget_tasks = 40
+quota_group = "claude"
+weight = 1.0
+enabled = true
+```
+
+The Claude row's `model` is optional; when present it must equal the alias value (here, `claude-opus-5`). An invalid
+Claude row loads disabled and records the reason. It is routed only while at least one `[[claude_accounts]]` account
+has headroom, so keep `max_parallel` small. `[limits].max_parallel_claude_workers` is not yet enforced for routed
+Claude executes at scheduler level (follow-up in `.orchestrator/plan.md`). Routed Claude tasks use the same path as
+the Claude fallback: an account with headroom executes them, and review uses another account and a different model.
+Reviewers never run the model that executed the task, compared by model id.
+
 `quota_group`: a usage-limit hit on one enabled member cools every other enabled row sharing the group (e.g. all
 `chatgpt` rows today). Whether the underlying limit is scoped per account or per model is unconfirmed (2026-09-17),
 so the whole group is treated as cooling either way.

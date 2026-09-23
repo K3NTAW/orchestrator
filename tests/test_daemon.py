@@ -5,6 +5,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
+import io
 import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
@@ -16,6 +17,89 @@ from orchestrator import jev_route
 REAL_GATE = daemon.gate
 REAL_WORKER = spawn.run_worker
 REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
+
+
+class ReviewModelRule(unittest.TestCase):
+    def setUp(self):
+        self.cfg = {"models": {"sonnet": "sonnet-model", "opus": "opus-model"},
+                    "executors": [
+                        {"id": "s", "provider": "claude", "model": "sonnet-model"},
+                        {"id": "o", "provider": "claude", "model": "opus-model"},
+                        {"id": "x", "provider": "codex", "model": "sonnet-model"},
+                        {"id": "empty", "provider": "claude"},
+                    ]}
+        patch = mock.patch.object(daemon, "SECURITY_REVIEW_TIER", "sonnet")
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_claude_row_on_sonnet_model_reviewed_by_opus(self):
+        self.assertEqual(daemon.review_tier({"executor": "s"}, self.cfg), "opus")
+        self.assertEqual(daemon._security_review_tier({"executor": "s"}, self.cfg), "opus")
+
+    def test_claude_row_on_opus_model_reviewed_by_sonnet(self):
+        self.assertEqual(daemon.review_tier({"executor": "o"}, self.cfg), "sonnet")
+        with mock.patch.object(daemon, "SECURITY_REVIEW_TIER", "opus"):
+            self.assertEqual(daemon._security_review_tier({"executor": "o"}, self.cfg), "sonnet")
+
+    def test_codex_none_unknown_and_modelless_keep_default(self):
+        for fn in (daemon.review_tier, daemon._security_review_tier):
+            for field in ("x", None, "unknown", "empty"):
+                self.assertEqual(fn({"executor": field}, self.cfg), "sonnet")
+            with mock.patch.object(daemon, "pool_config") as config:
+                self.assertEqual(fn({"executor": None}), "sonnet")
+                config.assert_not_called()
+            self.assertEqual(fn({"executor": "empty"}, {**self.cfg, "models": {}}), "sonnet")
+
+    def test_legacy_claude_tiers_unchanged_without_models_table(self):
+        with mock.patch.object(daemon, "pool_config") as config:
+            self.assertEqual(daemon.review_tier({"executor": "claude:sonnet-old"}, {}), "opus")
+            self.assertEqual(daemon.review_tier({"executor": "claude:opus-old"}, {}), "sonnet")
+            self.assertEqual(daemon._security_review_tier({"executor": "claude:sonnet"}, {}), "opus")
+            with mock.patch.object(daemon, "SECURITY_REVIEW_TIER", "opus"):
+                self.assertEqual(daemon._security_review_tier({"executor": "claude:opus"}, {}), "sonnet")
+            config.assert_not_called()
+
+    def test_lookup_failure_fails_closed(self):
+        for fn in (daemon.review_tier, daemon._security_review_tier):
+            for target, error, cfg, message in [
+                ("executor_identity", KeyError("broken"), self.cfg, "'broken'"),
+                ("pool_config", OSError("unreadable"), None, "unreadable"),
+            ]:
+                with mock.patch.object(daemon, target, side_effect=error), \
+                     mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+                    self.assertEqual(fn({"executor": "s"}, cfg), "opus")
+                    self.assertEqual(stderr.getvalue(),
+                                     f"review_tier: lookup failed ({message}); failing closed to opus\n")
+
+    def test_open_reviews_loads_config_at_most_once(self):
+        task = {"id": "T-test", "executor": "x", "spec": "spec", "complexity": 8,
+                "title": "test", "acceptance": ["pass"], "scope": ["x.py"]}
+        for supplied in (False, True):
+            for executor, reason, expected in [
+                ("x", "always", ["sonnet", "opus"]),
+                ("s", "always", ["opus", "opus"]),
+                ("s", "orphaned", ["opus", "opus"]),
+                ("s", "security_paths:x.py", ["opus", "opus"]),
+            ]:
+                task["executor"] = executor
+                with mock.patch.object(daemon, "pool_config", return_value=self.cfg) as config, \
+                     mock.patch.object(bus, "get", return_value=task), \
+                     mock.patch.object(bus, "read", return_value=[]), \
+                     mock.patch.object(bus, "create_task", side_effect=lambda *a, **kw: {"id": "R", **kw}), \
+                     mock.patch.object(daemon, "spawn_async"):
+                    reviews = daemon._open_reviews(task, 2, reason, **({"cfg": self.cfg} if supplied else {}))
+                    self.assertEqual([r["tier"] for r in reviews], expected)
+                    self.assertEqual(config.call_count, 0 if supplied else 1)
+        with mock.patch.object(daemon, "pool_config", side_effect=OSError("unreadable")) as config, \
+             mock.patch.object(bus, "get", return_value=task), \
+             mock.patch.object(bus, "read", return_value=[]), \
+             mock.patch.object(bus, "create_task", side_effect=lambda *a, **kw: {"id": "R", **kw}), \
+             mock.patch.object(daemon, "spawn_async"), \
+             mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+            reviews = daemon._open_reviews(task, 2, "always")
+            self.assertEqual([r["tier"] for r in reviews], ["opus", "opus"])
+            config.assert_called_once_with()
+            self.assertEqual(stderr.getvalue(), "review_tier: lookup failed (unreadable); failing closed to opus\n" * 2)
 
 
 class GoalContainers(unittest.TestCase):
@@ -1072,7 +1156,7 @@ class Daemon(unittest.TestCase):
         self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
         self.swap(daemon, "already_merged", lambda task: False)
         self.swap(daemon, "_review_plan", lambda task: (1, "always"))
-        self.swap(daemon, "_open_reviews", lambda *args: [])
+        self.swap(daemon, "_open_reviews", lambda *args, **kwargs: [])
         return tid
 
     def test_gate_sets_first_green_once_and_counts_attempts(self):
