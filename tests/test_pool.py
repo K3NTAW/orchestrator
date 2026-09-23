@@ -101,6 +101,15 @@ class PoolSel(unittest.TestCase):
         })
         self.assertEqual(cfg["promotion"], {"min_samples": 20})
 
+    def test_shipped_pool_toml_claude_opus_row_is_valid(self):
+        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        pool = P.Pool(cfg)
+        executor = pool.executors["claude:opus"]
+        self.assertEqual(executor.provider, "claude")
+        self.assertTrue(executor.enabled)
+        self.assertEqual(executor.model, cfg["models"]["opus"])
+        self.assertEqual(executor.model, "claude-opus-5-5")
+
     def test_daemon_respawn_max_documented(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
         self.assertEqual(cfg["daemon"]["respawn_max"], 3)
