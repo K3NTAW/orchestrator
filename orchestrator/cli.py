@@ -1,5 +1,5 @@
 """orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
-import argparse, json, os, random, sys
+import argparse, json, os, random, re, sys
 from collections import defaultdict
 from datetime import datetime
 from . import ROOT, bus, scorecard, worker_registry
@@ -223,6 +223,8 @@ def main():
     ms.add_argument("--since"); ms.add_argument("--tier"); ms.add_argument("--limit", type=int, default=20)
     ms.add_argument("--json", action="store_true")
     msh = memsub.add_parser("show"); msh.add_argument("id")
+    mst = memsub.add_parser("strategies"); mst.add_argument("--task-class"); mst.add_argument("--band")
+    mst.add_argument("--json", action="store_true")
     for command in ("discover", "import"):
         sksource = sksub.add_parser(command); sksource.add_argument("source")
     for command in ("inspect", "check-upstream", "quarantine"):
@@ -289,6 +291,42 @@ def main():
             if record is None:
                 raise SystemExit(1)
             print(json.dumps(record, indent=2, sort_keys=True))
+        elif a.memory_cmd == "strategies":
+            import statistics
+            rows = memory_store.search("", kind="strategy", limit=100000, root=ROOT)["records"]
+            groups = {}
+            for record in rows:
+                tags = record.get("tags", [])
+                values = {tag.split(":", 1)[0]: tag.split(":", 1)[1] for tag in tags if ":" in tag}
+                if a.task_class and values.get("task_class") != a.task_class:
+                    continue
+                if a.band and values.get("band") != a.band:
+                    continue
+                name = values.get("strategy")
+                if name:
+                    groups.setdefault(name, []).append(record)
+            result = []
+            for name, records in sorted(groups.items()):
+                def number(label):
+                    found = []
+                    for record in records:
+                        match = re.search(rf"(?m)^{label}:\s*([0-9.]+)", record.get("body", ""))
+                        if match:
+                            found.append(float(match.group(1)))
+                    return found
+                first = sum(record.get("outcome") == "first_pass" for record in records)
+                tokens, durations = number("tokens"), number("duration")
+                result.append({"strategy": name, "count": len(records),
+                               "first_pass_rate": first / len(records),
+                               "median_tokens": statistics.median(tokens) if tokens else None,
+                               "median_duration": statistics.median(durations) if durations else None})
+            if a.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print("strategy\tcount\tfirst_pass_rate\tmedian_tokens\tmedian_duration")
+                for row in result:
+                    print("\t".join(str(row[key]) for key in
+                                    ("strategy", "count", "first_pass_rate", "median_tokens", "median_duration")))
         else:
             result = memory_store.search(a.query, kind=a.kind, component=a.component, file=a.file,
                                          tag=a.tag, date_from=a.since, tier=a.tier, limit=a.limit, root=ROOT)
@@ -416,6 +454,7 @@ def main():
             elif a.skills_cmd == "learn":
                 from . import skill_learning
                 found = skill_learning.patterns(since_s=a.since, min_support=a.min_support)
+                found += skill_learning.candidates_from_memory()
                 if a.propose:
                     for pattern in found:
                         print(skill_learning.propose(pattern)["id"])

@@ -10,6 +10,9 @@ from pathlib import Path
 
 from . import STATE, attribution, skill_scorecard
 from . import skills_registry as registry
+from . import memory_store
+
+PROCEDURAL = re.compile(r"\b(?:run|check|set|use|never|always|before|after)\b", re.I)
 
 
 def _rows(path):
@@ -193,6 +196,40 @@ def patterns(root=STATE, since_s=None, min_support=3):
                   key=lambda item: (-item["evidence_strength"], item["procedure_signature"]))
 
 
+def candidates_from_memory(root=STATE):
+    """Return recurring procedural WARM records in the normal proposal shape."""
+    root = Path(root)
+    # memory_store takes the repository root; learning takes the state directory.
+    records = memory_store.search("", kind=None, limit=100000, root=root.parent)["records"]
+    groups = defaultdict(dict)
+    for record in records:
+        if record.get("kind") not in ("gotcha", "decision") or not PROCEDURAL.search(record.get("body", "")):
+            continue
+        for component in record.get("components", []):
+            groups[str(component)][record["id"]] = record
+    tasks = _tasks(root)
+    result = []
+    for component, keyed in groups.items():
+        rows = list(keyed.values())
+        dates = {row.get("date") for row in rows if row.get("date")}
+        if len(rows) < 3 or len(dates) < 2:
+            continue
+        source_tasks = sorted({task for row in rows for task in row.get("source_tasks", [])})
+        roles = sorted({str(tasks[task].get("role")) for task in source_tasks
+                        if task in tasks and tasks[task].get("role")}) or ["execute"]
+        confidence = min(1.0, len(rows) / 5) * min(1.0, len(dates) / 3)
+        result.append({
+            "source": "memory", "procedure_signature": f"memory:{component}",
+            "support_tasks": source_tasks, "support": len(rows), "successes": len(rows),
+            "failures": [], "roles": roles,
+            "task_classes": sorted({attribution.task_class(tasks[t]) for t in source_tasks if t in tasks}),
+            "confidence": round(confidence, 3), "evidence_strength": len(rows), "min_support": 3,
+            "memory_record_ids": sorted(keyed),
+            "evidence": [{"record_id": row["id"], "sentence": row.get("body", "")} for row in rows],
+        })
+    return sorted(result, key=lambda item: item["procedure_signature"])
+
+
 def _slug(pattern):
     words = re.findall(r"[a-z0-9]+", pattern["procedure_signature"].lower())[:6]
     base = "-".join(words)[:48].strip("-") or "procedure"
@@ -267,6 +304,8 @@ def propose(pattern, root=STATE):
             "failures": failures, "procedure_signature": pattern["procedure_signature"],
             "confidence": confidence, "evidence_strength": pattern.get("evidence_strength", min(1, support / 10)),
             "synthesised_at": now}
+    if pattern.get("source") == "memory":
+        info.update(source="memory", memory_record_ids=pattern.get("memory_record_ids", []))
     body = "\n".join([
         "---", f"name: {slug}", "description: Learned procedure from repeated successful tasks.",
         "provenance: learned", f"roles: {json.dumps(pattern.get('roles') or [])}",

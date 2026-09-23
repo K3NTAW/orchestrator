@@ -2715,6 +2715,14 @@ class Daemon(unittest.TestCase):
         self.assertNotIn("hold_reason", merged)
         self.assertTrue(merged["pipeline"].get("merged_at"))
 
+    def test_merge_path_records_strategy_outcome(self):
+        task_id = self.task("strategy outcome", complexity=2)
+        with mock.patch.object(daemon.strategy, "record_outcome") as record:
+            daemon.report_merge(task_id, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[0]["id"], task_id)
+        self.assertEqual(record.call_args.kwargs["root"], daemon.STATE)
+
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")
         r_ok = self.task("review ok", complexity=5, role="review", inputs=[ok])

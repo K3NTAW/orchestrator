@@ -346,3 +346,12 @@ def get(record_id, root=ROOT):
         return _decode(row) if row else None
     finally:
         db.close()
+
+
+def add_tag(record_id, tag, root=ROOT):
+    """Add one tag to an existing record, preserving every other field."""
+    record = get(record_id, root)
+    if record is None:
+        return None
+    record["tags"] = _unique([*record.get("tags", []), tag])
+    return add(record, root)

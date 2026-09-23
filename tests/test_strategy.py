@@ -1,3 +1,5 @@
+import _harness
+
 import json
 import sys
 import tempfile
@@ -6,7 +8,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _harness  # noqa: F401 - share the suite's single isolated ORCH_ROOT
 from orchestrator import strategy
 
 
@@ -111,6 +112,35 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(got["strategy"], "direct_execute")
         self.assertNotIn("scout_execute", got["evidence"])
         self.assertNotIn("parallel_wave", got["evidence"])
+
+    def test_merge_writes_strategy_record_with_outcome_and_tags(self):
+        task = {"id": "T-record", "role": "execute", "parent": "G", "complexity": 2,
+                "constraints": {"task_class": "feature"}, "executor": "codex", "created_at": 1,
+                "merged_into": "goal/G", "pipeline": {"merged_at": 3}}
+        self.write(task)
+        metrics = {"tasks": {"T-record": {"tokens": 20, "usd": 1, "first_pass": True,
+                                              "fix_rounds": 0, "goal_id": "G"}}}
+        with patch.object(strategy.scorecard_api, "efficiency", return_value=metrics):
+            record = strategy.record_outcome(task, self.root)
+        self.assertEqual("strategy-T-record", record.id)
+        self.assertEqual("first_pass", record.outcome)
+        self.assertEqual(["task_class:feature", "band:1-3", "strategy:direct_execute"], record.tags)
+
+    def test_record_outcome_uses_lineage_root_and_unique_id(self):
+        root = {"id": "T-root", "role": "execute", "parent": "G", "complexity": 4,
+                "executor": "codex", "created_at": 1, "merged_into": "goal/G",
+                "pipeline": {"merged_at": 4}}
+        fix = {"id": "T-fix", "role": "execute", "constraints": {"fix_round_for": "T-root"}}
+        other = {**root, "id": "T-other"}
+        for task in (root, fix, other): self.write(task)
+        metrics = {"tasks": {task_id: {"tokens": 10, "usd": 1, "first_pass": task_id == "T-other",
+                                        "fix_rounds": 0 if task_id == "T-other" else 1, "goal_id": "G"}
+                             for task_id in ("T-root", "T-other")}}
+        with patch.object(strategy.scorecard_api, "efficiency", return_value=metrics):
+            first = strategy.record_outcome(fix, self.root)
+            second = strategy.record_outcome(other, self.root)
+        self.assertEqual((first.id, first.outcome), ("strategy-T-root", "fix_rounds:1"))
+        self.assertEqual(second.id, "strategy-T-other")
 
 
 if __name__ == "__main__":

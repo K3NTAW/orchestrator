@@ -6,7 +6,7 @@ stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot
-from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
+from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn, strategy
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier
@@ -1432,6 +1432,7 @@ def report_merge(task_id, r):
                 bus.update(task_id, status="done", merged_into=r["target"],
                            merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
         notify(f"{task_id} merged into {r['target']} ({r['sha'][:8]})")
+        strategy.record_outcome(bus.get(task_id), root=STATE)
     else:                                  # merge.merge already set the task failed with a resume_hint
         notify(f"{task_id} merge failed: {r.get('status')} {r.get('reason', '')}".strip())
     return r

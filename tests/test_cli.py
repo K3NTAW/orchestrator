@@ -71,6 +71,23 @@ class Cli(unittest.TestCase):
                     cli.main()
                 self.assertIn("pinned", output.getvalue())
 
+    def test_memory_strategies_aggregates(self):
+        from orchestrator import memory_store
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, outcome in enumerate(("first_pass", "fix_rounds:1")):
+                memory_store.add(memory_store.Record(
+                    id=f"strategy-{index}", kind="strategy", title="feature 1-3 direct_execute",
+                    date="2026-09-23", tags=["task_class:feature", "band:1-3", "strategy:direct_execute"],
+                    outcome=outcome, body=f"tokens: {10 + index * 10}\nduration: {2 + index * 2}"), root)
+            with mock.patch.object(cli, "ROOT", root), mock.patch.object(
+                    sys, "argv", ["orchestrator", "memory", "strategies", "--task-class", "feature", "--json"]
+            ), contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+        row, = json.loads(output.getvalue())
+        self.assertEqual((row["count"], row["first_pass_rate"]), (2, .5))
+        self.assertEqual((row["median_tokens"], row["median_duration"]), (15, 3))
+
 
     def test_workers_cancel_cli(self):
         from orchestrator import worker_control

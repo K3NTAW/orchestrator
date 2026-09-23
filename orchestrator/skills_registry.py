@@ -398,6 +398,14 @@ def transition(skill_id: str, new_state: str, reason: str, root: Path = STATE) -
     entry.update({"state": new_state, "since": now, "reason": reason})
     _write_json(_paths(root)[1], states)
     _update_registry_state(root, skill_id, entry)
+    if new_state == "active":
+        record = load(root).get("skills", {}).get(skill_id, {})
+        source_ids = (record.get("provenance_info") or {}).get("memory_record_ids", [])
+        if source_ids:
+            from . import memory_store
+            # memory_store takes the repository root; the registry takes the state directory.
+            for record_id in source_ids:
+                memory_store.add_tag(record_id, f"skill:{skill_id}", root.parent)
     return entry
 
 

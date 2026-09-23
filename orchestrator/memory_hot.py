@@ -89,6 +89,10 @@ def _score(record, recent_days, open_tasks):
 
 def _line(record):
     line = f"- {record['date']} | {record['kind']} | {record['title']}"
+    skill = next((tag.split(":", 1)[1] for tag in record.get("tags", [])
+                  if tag.startswith("skill:")), None)
+    if skill:
+        return line + f" | learned skill: {skill}"
     if record["kind"] == "gotcha" and record.get("body"):
         sentence = re.split(r"(?<=[.!?])(?:\s+|$)", record["body"].strip(), maxsplit=1)[0]
         line += f" | {sentence}"

@@ -10,6 +10,7 @@ from unittest import mock
 
 from orchestrator import skills_registry
 from orchestrator import skill_discovery
+from orchestrator import memory_store
 
 
 class SkillsRegistryTests(unittest.TestCase):
@@ -303,6 +304,17 @@ class SkillsRegistryTests(unittest.TestCase):
             ["uv", "run", "orchestrator", "skills", "transition", "executor/implement-spec", "testing",
              "--reason", "invalid from active"], cwd=_harness.REPO, env=env, capture_output=True, text=True)
         self.assertNotEqual(0, invalid.returncode)
+
+    def test_transition_to_active_tags_source_memory_records(self):
+        memory_store.add(memory_store.Record(id="source-memory", kind="gotcha", title="Source",
+                                             date="2026-09-23", body="Always check it."), self.root.parent)
+        self.make_skill()
+        record = skills_registry.sync(self.root, self.skills)["skills"]["scout/finder"]
+        skills_registry._update_record(record["id"], {
+            "provenance_info": {"memory_record_ids": ["source-memory"]}}, self.root)
+        skills_registry.transition(record["id"], "shadow", "observe", self.root)
+        skills_registry.transition(record["id"], "active", "promote", self.root)
+        self.assertIn("skill:scout/finder", memory_store.get("source-memory", self.root.parent)["tags"])
 
 
 if __name__ == "__main__":
