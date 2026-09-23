@@ -9,7 +9,7 @@ Usage-limit errors cool Codex down and hold the task (§4.10).
 """
 import inspect, json, os, re, subprocess, time
 from pathlib import Path
-from . import ROOT, bus, worker_registry, env_policy
+from . import ROOT, bus, contracts, worker_registry, env_policy
 import threading
 from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
@@ -317,6 +317,7 @@ def post_tool_result(task_id, result, replace_result=False):
     }
     if replace_result and previous:
         posted["previous_commits"] = [*previous.get("previous_commits", []), previous.get("commit")]
+    posted = contracts.process(task_id, "execute", posted, cfg=Pool().cfg)
     with bus.locked():
         if replace_result:
             pipeline = dict(bus.get(task_id).get("pipeline") or {})

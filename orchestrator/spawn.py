@@ -4,7 +4,7 @@ import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import worker_registry, env_policy
+from . import contracts, worker_registry, env_policy
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -1139,7 +1139,8 @@ def trust_workspace(config_dir, wt):
         cfg.parent.mkdir(parents=True, exist_ok=True); cfg.write_text(json.dumps(data, indent=2))
 
 
-def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
+def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, *, resume_session=None):
+    log_run = (lambda **fields: None) if resume_session else bus.log_run
     wt = Path(task.get("worktree") or ensure_worktree(task["id"]))
     trust_workspace(acct.config_dir, wt)
     # Explicit --mcp-config + --strict-mcp-config means workers never auto-load the project/user configs
@@ -1161,6 +1162,9 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
            "--dangerously-skip-permissions", "--allowedTools", tools,
            "--strict-mcp-config", "--mcp-config", str(mcp_config)]
+    if resume_session:
+        cmd += ["--resume", resume_session, "--tools", ""]
+        cmd[cmd.index("--mcp-config") + 1] = '{"mcpServers": {}}'
     if (task.get("packet_meta") or {}).get("skill_routing_mode") == "active":
         cmd.append("--disable-slash-commands")
     if task["role"] != "execute":
@@ -1177,7 +1181,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
                            parent=task.get("parent"), started_at=t0)
     if shutil.which("claude") is None:
         worker_registry.finish(task["id"], "held", "no_cli")
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
+        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
     try:
         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -1194,7 +1198,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         worker_registry.finish(task["id"], "held", "no_cli")
         # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never
         # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
+        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
     except OSError:
         worker_registry.finish(task["id"], "failed", "launch_error")
@@ -1203,7 +1207,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     if p.returncode != 0 and is_rate_limited(text):
         secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
         pool.cooldown(acct, secs)
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
+        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
                     cooldown_s=secs, **log)
         worker_registry.finish(task["id"], "held", "rate_limit")
         return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
@@ -1243,7 +1247,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         facts = attribution.review_facts({**task, "result": parsed})
         review_log = {key: facts[key] for key in ("verdict", "findings_count", "findings_by_severity",
                       "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
-    bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
+    log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
                 outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
                 provider="claude", usage=used, session_id=session_id, **log, **review_log, **used)
     if not out.get("is_error") and p.returncode == 0:
@@ -1450,9 +1454,31 @@ def run_worker(task_id, account_id=None):
                 r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                                budget_left, timeout_left)
                 release_usage = _combined_usage(first, r)
+        session_id = r.get("output", {}).get("session_id")
+        def resume_output(prompt, repair_budget):
+            nonlocal release_usage
+            reply = {}
+            began = time.monotonic()
+            try:
+                reply = run_claude(pool, acct, t, prompt, model, "", repair_budget,
+                                   min(timeout, 120), resume_session=session_id)
+            finally:
+                output = reply.get("output") or {}
+                usage = output.get("usage") or {}
+                release_usage = _combined_usage(release_usage or r, reply)
+                bus.log_run(task=task_id, role="output_repair", provider="claude",
+                            account=acct.id, tier=t["tier"], session_id=session_id,
+                            outcome="done" if reply.get("status") == "done" else "failed",
+                            usage=usage, usd=output.get("total_cost_usd"), budget_usd=repair_budget,
+                            duration_s=round(time.monotonic() - began, 1), **usage)
+            return {"result": extract_json(output.get("result", "")) if reply["status"] == "done" else {},
+                    "tokens": usage, "usd": output.get("total_cost_usd", 0)}
+        repair_session = resume_output if session_id else None
         if r["status"] == "done" and role == "execute":
-            bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
-                                      "review": "other account, different model; label PR same-family-review"}), "done")
+            posted = fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
+                                 "review": "other account, different model; label PR same-family-review"})
+            posted = contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session)
+            bus.post_result(task_id, posted, "done")
         elif r["status"] == "done":
             text = r["output"].get("result", "")
             result = extract_json(text)

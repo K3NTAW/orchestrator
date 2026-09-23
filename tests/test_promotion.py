@@ -226,3 +226,29 @@ class MemoryTierPromotion(unittest.TestCase):
             self.assertAlmostEqual(result["fix_rounds_delta"], .2)
             read.return_value = rows[:-1] + [rows[0]] * 10
             self.assertIsNone(promotion.collect("memory_tiers")["fix_rounds_delta"])
+
+
+class ContractPromotion(unittest.TestCase):
+    def test_contracts_feature_registered(self):
+        self.assertEqual(promotion.mode("contracts", {}), "shadow")
+        self.assertEqual(promotion.FEATURES["contracts"]["criteria"]["min_shadow_samples"], 30)
+        self.assertEqual(promotion.evaluate("contracts", {"n": 29})["recommendation"], "stay")
+        good = {"n": 30, "repair_success_rate": 1, "failed_results_delta": 0}
+        self.assertEqual(promotion.evaluate("contracts", good)["recommendation"], "promote")
+        self.assertEqual(promotion.evaluate("contracts", {**good, "failed_results_delta": .1},
+            {"contracts": {"mode": "active"}})["recommendation"], "demote")
+
+    def test_contracts_collect_reads_output_contract_rows(self):
+        rows = [dict(kind="output_contract", mode="shadow", subject="example", selected="accept",
+                     deterministic={"ok": True}, extra={"raw_ok": True}),
+                dict(kind="output_contract", mode="shadow", subject="example", selected="repair",
+                     deterministic={"ok": True}, extra={"raw_ok": False}),
+                dict(kind="unrelated")]
+        with mock.patch.object(decision_log, "read_all", return_value=rows):
+            result = promotion.collect("contracts", root="/missing")
+        self.assertEqual(result["n"], 2)
+        self.assertEqual(result["shadow_n"], 2)
+        self.assertEqual(result["ok_rate"], .5)
+        self.assertEqual(result["repair_rate"], .5)
+        self.assertEqual(result["repair_success_rate"], 1)
+        self.assertIsNone(result["failed_results_delta"])

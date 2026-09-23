@@ -754,3 +754,22 @@ class JevExecutorSkillRoutingTests(unittest.TestCase):
             result = executor._route_skills({"id": "T-jev"}, {}, {}, choice)
         self.assertEqual(result["skills_selected"], ["executor/implement-spec"])
         self.assertIs(record.call_args.kwargs["jev"], choice["jev"])
+
+
+class ExecuteOutputContracts(unittest.TestCase):
+    def test_post_tool_result_validates_execute_contract_in_shadow(self):
+        task = bus.create_task("execute contract", "spec", ["valid"], ["a.py"], role="execute")
+        tid = task["id"]
+        bus.claim(tid, "codex", str(TMP))
+        bus.update(tid, executor="example")
+        incoming = {"status": "done", "message": "commit abcdef1", "thread": "example-thread", "usage": None}
+        pool = mock.Mock(cfg={"contracts": {"mode": "shadow"}})
+        with patch.object(executor, "Pool", return_value=pool):
+            self.assertTrue(executor.post_tool_result(tid, incoming)[0])
+        self.assertEqual(bus.get(tid)["result"], {"summary": "commit abcdef1", "commit": "abcdef1",
+            "executed_by": "codex:example", "provenance": ["repo"], "usage": None,
+            "thread": "example-thread", "rounds": 1, "confidence": 0.0})
+        row = executor.decision_log.explain(tid, kinds=["output_contract"])[0]
+        self.assertEqual(row["role"], "execute")
+        self.assertEqual(row["mode"], "shadow")
+        self.assertTrue(row["deterministic"]["ok"])

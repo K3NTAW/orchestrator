@@ -32,6 +32,7 @@ CONTEXT_KINDS = (
 )
 
 KINDS = (
+    "output_contract",
     "harness_depth",
     "routing",
     "wave",

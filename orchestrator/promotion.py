@@ -12,6 +12,10 @@ FEATURES = OrderedDict((
     ("memory_tiers", {"table": "memory", "key": "mode",
                       "modes": ("off", "shadow", "active"),
                       "default": "shadow", "evidence": "retrieval"}),
+    ("contracts", {"table": "contracts", "key": "mode", "modes": ("off", "shadow", "active"),
+                   "default": "shadow", "evidence": "contracts",
+                   "criteria": {"min_shadow_samples": 30, "repair_success_rate": .9,
+                                "failed_results_delta": 0}}),
     ("fast_path", {"table": "harness", "key": "depth_mode",
                    "modes": ("off", "shadow", "active"),
                    "default": "shadow", "evidence": "fast_path"}),
@@ -108,6 +112,19 @@ def evaluate(feature, evidence, cfg=None):
     criteria = _criteria(cfg)
     n = evidence.get("n", 0) or 0
     reasons = list(mode_flags)
+    if feature == "contracts":
+        contract_criteria = FEATURES[feature]["criteria"]
+        if evidence.get("shadow_n", n) < contract_criteria["min_shadow_samples"]:
+            reasons.append("insufficient_evidence")
+        if evidence.get("repair_success_rate") is None or evidence["repair_success_rate"] < .9:
+            reasons.append("repair_success_unmeasured_or_low")
+        delta = evidence.get("failed_results_delta")
+        if delta is None or delta > 0:
+            reasons.append("failed_results_unmeasured_or_increased")
+        return {"feature": feature, "mode": mode, "n": n,
+                "recommendation": "demote" if mode == "active" and delta is not None and delta > 0
+                                  else "stay" if reasons else "promote",
+                "reasons": reasons, "criteria": contract_criteria, "evidence": evidence}
     if feature == "fast_path":
         if evidence.get("two_fix_rounds"):
             reasons.append("fast_path_two_fix_rounds")
@@ -230,6 +247,34 @@ def collect(feature, root=STATE):
         return {"n": len(rows), "tokens_legacy": legacy, "tokens_tiered": tiered,
                 "accepted_tokens_delta": (tiered - legacy) / legacy if legacy else None,
                 "fix_rounds_delta": delta}
+    if feature == "contracts":
+        rows = [row for row in decision_log.read_all(root=root)
+                if row.get("kind") == "output_contract"]
+        n = len(rows)
+        repairs = [row for row in rows if not (row.get("extra") or {}).get("raw_ok", True)]
+        # Compare actual task outcomes across recorded modes, never schema failures.
+        rates = {}
+        for mode_name in ("shadow", "active"):
+            ids = {row.get("subject") for row in rows if row.get("mode") == mode_name}
+            statuses = []
+            for tid in ids:
+                if not isinstance(tid, str) or Path(tid).name != tid:
+                    continue
+                try:
+                    task = json.loads((root / "tasks" / (tid + ".json")).read_text())
+                except (OSError, ValueError):
+                    continue
+                if task.get("status") in ("done", "failed"):
+                    statuses.append(task["status"])
+            rates[mode_name] = statuses.count("failed") / len(statuses) if statuses else None
+        return {"n": n, "shadow_n": sum(row.get("mode") == "shadow" for row in rows),
+                "ok_rate": sum(bool((row.get("extra") or {}).get("raw_ok")) for row in rows) / n if n else None,
+                "repair_rate": sum(row.get("selected") == "repair" for row in rows) / n if n else None,
+                "repair_success_rate": sum(bool((row.get("deterministic") or {}).get("ok")) or
+                    (row.get("extra") or {}).get("repaired_by") == "model" for row in repairs) / len(repairs)
+                    if repairs else None,
+                "failed_results_delta": rates["active"] - rates["shadow"]
+                    if all(value is not None for value in rates.values()) else None}
     if feature == "fast_path":
         from . import harness_depth
         return harness_depth.promotion_evidence(root)
