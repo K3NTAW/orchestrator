@@ -151,6 +151,10 @@ def main():
     sc.add_argument("--reads", action="store_true")
     sc.add_argument("--handoffs", action="store_true")
     sc.add_argument("--economy", action="store_true")
+    sc.add_argument("--skills", action="store_true")
+    sc.add_argument("--group-by")
+    sc.add_argument("--marginal")
+    sc.add_argument("--redundancy", action="store_true")
     ce = sub.add_parser("context-eval"); ce.add_argument("--json", action="store_true"); ce.add_argument("--root")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
@@ -178,11 +182,38 @@ def main():
     rs = sub.add_parser("roadmap-status")
     rs.add_argument("--json", action="store_true")
     rs.add_argument("--write", action="store_true")
+    sub.add_parser("skill-eval")
+    sk = sub.add_parser("skills"); sksub = sk.add_subparsers(dest="skills_cmd", required=True)
+    skpromote = sksub.add_parser("promote"); skpromote.add_argument("--dry-run", action="store_true")
+    skvalidate = sksub.add_parser("revalidate"); skvalidate.add_argument("id")
+    sksync = sksub.add_parser("sync"); sksync.add_argument("--json", action="store_true")
+    sklist = sksub.add_parser("list"); sklist.add_argument("--json", action="store_true")
+    skshow = sksub.add_parser("show"); skshow.add_argument("id"); skshow.add_argument("--json", action="store_true")
+    sklearn = sksub.add_parser("learn"); sklearn.add_argument("--since")
+    sklearn.add_argument("--min-support", type=int, default=3); sklearn.add_argument("--propose", action="store_true")
+    sktransition = sksub.add_parser("transition"); sktransition.add_argument("id"); sktransition.add_argument("state")
+    sktransition.add_argument("--reason", required=True)
+    skrollback = sksub.add_parser("rollback"); skrollback.add_argument("id")
+    for command in ("discover", "import"):
+        sksource = sksub.add_parser(command); sksource.add_argument("source")
+    for command in ("inspect", "check-upstream", "quarantine"):
+        skaction = sksub.add_parser(command); skaction.add_argument("id")
+        if command == "quarantine":
+            skaction.add_argument("--reason", default="external skill quarantine")
     a = ap.parse_args()
     if a.cmd == "scorecard":
+        if (a.group_by is not None or a.marginal is not None or a.redundancy) and not a.skills:
+            ap.error("--group-by, --marginal and --redundancy require --skills")
+        skill_group_by = ("role", "task_class")
+        if a.group_by is not None:
+            skill_group_by = tuple(part.strip() for part in a.group_by.split(",") if part.strip())
+            invalid = set(skill_group_by) - {"role", "task_class", "band", "model", "strategy", "repo"}
+            if not skill_group_by or invalid:
+                ap.error(("unknown --group-by dimension: " + ",".join(sorted(invalid))) if invalid
+                         else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
@@ -198,6 +229,7 @@ def main():
             "--reads": (),
             "--handoffs": (),
             "--economy": (),
+            "--skills": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
@@ -211,6 +243,8 @@ def main():
             mode = "--handoffs"
         if a.economy:
             mode = "--economy"
+        if a.skills:
+            mode = "--skills"
         if a.goal is not None and not a.parallelism:
             ap.error("--goal requires --parallelism")
         if a.parallelism and a.planner:
@@ -221,7 +255,72 @@ def main():
             ap.error(f"--by {a.by} is not supported by {mode}; {mode} supports --by {choices}")
         if mode == "default":
             a.by = a.by or "executor"
-    if a.cmd == "roadmap-status":
+    if a.cmd == "skill-eval":
+        from . import skill_eval
+        result = skill_eval.run_all()
+        print(skill_eval.format_report(result))
+        if not result["suite_passed"]:
+            raise SystemExit(1)
+    elif a.cmd == "skills":
+        from . import skills_registry
+        try:
+            if a.skills_cmd in ("discover", "import", "inspect", "check-upstream", "quarantine"):
+                from . import skill_discovery
+                if a.skills_cmd in ("discover", "import"):
+                    result = skill_discovery.discover(a.source)
+                elif a.skills_cmd == "quarantine":
+                    result = skills_registry.transition(a.id, "quarantined", a.reason)
+                elif a.skills_cmd == "inspect":
+                    result = skill_discovery.inspect(a.id)
+                else:
+                    result = skill_discovery.check_upstream(a.id)
+                print(json.dumps(result, indent=2))
+            elif a.skills_cmd == "promote":
+                from . import skill_promotion
+                for recommendation in skill_promotion.recommendations(cfg=Pool().cfg):
+                    print(json.dumps(recommendation, sort_keys=True))
+                    if recommendation["to"] and not a.dry_run:
+                        skills_registry.transition(recommendation["id"], recommendation["to"], recommendation["reason"])
+            elif a.skills_cmd == "revalidate":
+                result = skills_registry.revalidate(a.id)
+                print(json.dumps(result, indent=2))
+                if result["status"] != "tested":
+                    raise SystemExit(1)
+            elif a.skills_cmd == "sync":
+                document = skills_registry.sync()
+                print(json.dumps(document, indent=2) if a.json else f"synced {len(document['skills'])} skills")
+            elif a.skills_cmd == "list":
+                document = skills_registry.load()
+                rows = document["skills"]
+                if a.json:
+                    print(json.dumps(rows, indent=2))
+                else:
+                    print("id\tstate\ttrust\troles\tl0/l2\tversion\tstale")
+                    for skill_id, record in sorted(rows.items()):
+                        print(f"{skill_id}\t{record['state']}\t{record['trust']}\t{','.join(record['roles'])}\t"
+                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}\t{record.get('stale', False)}")
+            elif a.skills_cmd == "show":
+                record = skills_registry.load()["skills"].get(a.id)
+                if record is None:
+                    raise KeyError(a.id)
+                print(json.dumps(record, indent=2) if a.json else "\n".join(f"{key}: {value}" for key, value in record.items()))
+            elif a.skills_cmd == "learn":
+                from . import skill_learning
+                found = skill_learning.patterns(since_s=a.since, min_support=a.min_support)
+                if a.propose:
+                    for pattern in found:
+                        print(skill_learning.propose(pattern)["id"])
+                else:
+                    for pattern in found:
+                        print(f"{pattern['source']}\t{pattern['support']}\t{pattern['confidence']:.3f}\t{pattern['procedure_signature']}")
+            elif a.skills_cmd == "transition":
+                print(json.dumps(skills_registry.transition(a.id, a.state, a.reason), indent=2))
+            else:
+                print(json.dumps(skills_registry.rollback(a.id), indent=2))
+        except (KeyError, ValueError, OSError) as error:
+            print(f"skills: {error}", file=sys.stderr)
+            raise SystemExit(2)
+    elif a.cmd == "roadmap-status":
         from . import roadmap
         output = ROOT / ".orchestrator" / "roadmap-status.json"
         report = roadmap.write(output) if a.write else roadmap.build(ROOT)
@@ -353,8 +452,21 @@ def main():
         if not document["suite_passed"]:
             raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.economy:
-            from . import context_scorecard, handoff_scorecard, promotion, read_economy
+        if a.skills:
+            from . import skill_scorecard
+            card = {"by_skill": skill_scorecard.by_skill(scorecard.STATE, skill_group_by),
+                    "jev_by_role": skill_scorecard.jev_metrics(scorecard.STATE),
+                    "economy": skill_scorecard.build(scorecard.STATE)}
+            if a.marginal:
+                card["marginal"] = skill_scorecard.marginal(
+                    scorecard.STATE, a.marginal, skill_group_by,
+                    Pool().cfg.get("promotion", {}).get("min_samples", 20))
+            if a.redundancy:
+                card["redundancy"] = skill_scorecard.redundancy(scorecard.STATE)
+            print(json.dumps(card, indent=1) if a.json else
+                  skill_scorecard.format_skill_analysis(card, skill_group_by))
+        elif a.economy:
+            from . import context_scorecard, handoff_scorecard, promotion, read_economy, skill_scorecard
             context = context_scorecard.build(scorecard.STATE)
             handoffs = handoff_scorecard.by_start(scorecard.STATE)
             reads = read_economy.summary(scorecard.STATE)
@@ -369,10 +481,20 @@ def main():
             except (OSError, ValueError):
                 last_eval = None
             features = ("context_router", "tool_disclosure", "conditional_instructions", "handoff_routing")
-            card = {"by_role_task_class": joined,
+            card = {"by_role_task_class": joined, "skills": skill_scorecard.build(scorecard.STATE),
                     "handoffs_by_executor_task_class": handoffs_by_executor,
                     "promotion": [promotion.evaluate(name, promotion.collect(name, scorecard.STATE), Pool().cfg)
                                   for name in features], "last_context_eval": last_eval}
+            warnings = []
+            skill_ids = sorted({row["skill"] for row in skill_scorecard.by_skill(scorecard.STATE)})
+            for skill_id in skill_ids:
+                for row in skill_scorecard.marginal(
+                        scorecard.STATE, skill_id,
+                        min_samples=Pool().cfg.get("promotion", {}).get("min_samples", 20)):
+                    if not row.get("insufficient") and row.get("verdict") in ("costly", "harmful"):
+                        warnings.append({"skill": skill_id, **row})
+            card["skills"]["costly_or_harmful"] = sorted(
+                warnings, key=lambda row: (row["verdict"] != "harmful", row["skill"]))[:3]
             if a.json:
                 print(json.dumps(card, indent=1))
             else:
@@ -383,6 +505,7 @@ def main():
                 print("executor/class\thandoffs")
                 for key, value in handoffs_by_executor.items(): print(f"{key}\t{value}")
                 print(promotion.format_report(card["promotion"]))
+                print(skill_scorecard.format_report(card["skills"]))
         elif a.handoffs:
             from . import handoff_scorecard
             card = handoff_scorecard.build(root=scorecard.STATE, cfg=Pool().cfg)

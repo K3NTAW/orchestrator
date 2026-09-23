@@ -3,7 +3,7 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, tool_catalog
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -11,6 +11,131 @@ _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
 _INSTRUCTION_RENDER_META = OrderedDict()
 NEEDS_TOOL_PREFIX = "needs_tool:"
+
+_SKILL_EVIDENCE_WINDOW_S = 7 * 24 * 60 * 60
+_SKILL_PRESENTATION_CAP = 2400
+
+
+def _skill_records():
+    return skills_registry.load().get("skills", {})
+
+
+def _skill_exposure(task, role):
+    """Stage-1 exposure mirrors the shared Claude skills directory; it does not route skills."""
+    records = _skill_records()
+    exposed = sorted(skill_id for skill_id, record in records.items()
+                     if record.get("state") == "active" and record.get("provenance") == "builtin")
+    tokens = sum(int(records[skill_id].get("est_tokens_l0") or 0) for skill_id in exposed)
+    decision_log.record("skill_selection", task["id"], role=role, candidates=sorted(records),
+                        hard_constraints=["static exposure (stage 1)"],
+                        deterministic={"role": role, "task_class": attribution.task_class(task),
+                                       "exposed": exposed, "skill_tokens_l0": tokens},
+                        selected=exposed, reason="stage1 static", mode="shadow")
+    return {"skills_exposed": exposed, "skill_tokens_l0": tokens}
+
+
+def _prepare_skills(task, role, cfg):
+    """Select once, apply the active safety gate, and prepare bounded rendering."""
+    mode = promotion.mode("skill_routing", cfg)
+    if mode not in ("shadow", "active"):
+        return None
+    composition = specialist.compose(task, role, cfg=cfg)
+    choice = composition.decision
+    choice["_specialist"] = composition
+    choice["mode"] = mode
+    if role not in ("execute", "review", "security_review", "codex_execute"):
+        choice["mode"] = "shadow"
+    if choice["mode"] == "active":
+        rows = skill_scorecard.selection_rows(STATE, role, _SKILL_EVIDENCE_WINDOW_S)
+        recovery = skill_scorecard.recovery_rate(STATE, role, _SKILL_EVIDENCE_WINDOW_S)
+        maximum = float((cfg.get("skills") or {}).get("max_recovery", .10))
+        if rows < 30 or recovery > maximum:
+            choice["mode"] = "shadow"
+            notify.notify(f"{task['id']}: active skill routing refused; using shadow "
+                          f"(role={role}, rows={rows}, recovery={recovery:.3f})")
+    choice.update(_skills_section(choice) if choice["mode"] == "active"
+                  else {"section": "", "presented": [], "demoted": [], "skill_tokens_presented_l2": 0})
+    return choice
+
+
+def _skills_section(choice):
+    selected = list(choice["selected"])
+    mandatory = set(choice.get("mandatory") or [])
+    levels = {skill_id: 2 for skill_id in selected}
+    dropped, demoted = [], []
+    def l2_chars():
+        return sum(len(skills_registry.render(skill_id, 2)) for skill_id in selected
+                   if levels.get(skill_id) == 2)
+    for skill_id in reversed(selected):
+        if l2_chars() <= _SKILL_PRESENTATION_CAP:
+            break
+        if skill_id in mandatory:
+            continue
+        levels[skill_id] = 1
+        demoted.append(skill_id)
+    while l2_chars() > _SKILL_PRESENTATION_CAP:
+        candidate = next((item for item in reversed(selected) if item not in mandatory), None)
+        if candidate is None:
+            break
+        selected.remove(candidate); levels.pop(candidate, None); dropped.append(candidate)
+    parts = []
+    for skill_id in selected:
+        version = _skill_records().get(skill_id, {}).get("version", "unknown")
+        parts.append(f"### {skill_id} (v{version})\n{skills_registry.render(skill_id, levels[skill_id])}")
+    ambiguous = [item for item in choice.get("ambiguous", []) if item not in selected]
+    if ambiguous:
+        parts.append("### available on request\n" + "\n".join(skills_registry.render(item, 0) for item in ambiguous))
+    return {"section": "## skills\n" + "\n\n".join(parts), "presented": selected,
+            "demoted": demoted, "dropped": dropped,
+            "skill_tokens_presented_l2": sum(len(skills_registry.render(item, 2)) // 4
+                                               for item in selected if levels[item] == 2)}
+
+
+def _skill_routing(task, role, cfg, exposure, choice=None):
+    choice = choice or _prepare_skills(task, role, cfg)
+    if choice is None:
+        return {}
+    presented = choice["presented"] if choice["mode"] == "active" else choice["selected"]
+    decision_log.record("skill_selection", task["id"], role=role, candidates=choice["candidates"],
+                        hard_constraints=choice["mandatory"],
+                        deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
+                                       "mandatory": choice["mandatory"]},
+                        selected=presented, rejected=choice["rejected"],
+                        reason=choice["reason"], mode=choice["mode"],
+                        jev=choice.get("jev"),
+                        extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
+                                                            "tokens_selected_l2", "ambiguous")}
+                              | {"role": role, "demoted": choice["demoted"],
+                                 "specialist": choice.get("specialist")})
+    return {"skills_selected": presented,
+            "skill_tokens_selected_l0": choice["tokens_selected_l0"],
+            "skill_tokens_selected_l2": choice["tokens_selected_l2"],
+            "skill_tokens_presented_l2": choice["skill_tokens_presented_l2"],
+            "skill_routing_mode": choice["mode"]}
+
+
+def _skills_from_gate(task_id, session_id=None):
+    used = set()
+    path = STATE / "runs" / "jev" / "gate.jsonl"
+    records = _skill_records()
+    if not path.exists():
+        return [], 0
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if row.get("task") != task_id and not (session_id and row.get("session") == session_id):
+            continue
+        raw = row.get("tool_target") or ""
+        for skill_id, record in records.items():
+            role, name = skill_id.split("/", 1)
+            base = f"skills/{role}/{name}/"
+            if (row.get("tool") == "Read" and base + "SKILL.md" in raw) or \
+                    (row.get("tool") == "Bash" and base + "scripts/" in raw):
+                used.add(skill_id)
+    ordered = sorted(used)
+    return ordered, sum(int(records[item].get("est_tokens_l2") or 0) for item in ordered)
 
 
 def _remember_packet_meta(version, meta):
@@ -238,7 +363,6 @@ def _memory_entries(path):
             for n, (i, title) in enumerate(starts)]
 
 
-
 def _context_mode(cfg):
     mode = promotion.mode("context_router", cfg)
     if mode != "active":
@@ -256,7 +380,7 @@ def _context_mode(cfg):
     notify.notify("context_router active refused; running shadow: context_eval missing, stale, or failed")
     return "shadow"
 
-def _shadow_route(task, candidates, *, role, head_sha, cfg):
+def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
     """Persist routing telemetry and return section items for guarded active mode."""
     mode = _context_mode(cfg)
     if mode == "off" or not task.get("id"):
@@ -264,7 +388,13 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg):
     try:
         pool = evidence.EvidencePool(task.get("parent") or task["id"])
         candidates = [pool.add(candidate) for candidate in candidates]
-        routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg)
+        composition = (skills or {}).get("_specialist")
+        if composition:
+            candidates = list({item.id: item for item in
+                               [*candidates, *composition.shared_evidence(task)]}.values())
+            candidates = composition.filter_evidence(candidates)
+        routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
+                                      required_types=composition.context_requirements if composition else ())
         row = context_router.decision_row(task, routed, mode=mode)
         row["extra"] = {"head_sha": head_sha}
         decision_log.record(**row)
@@ -336,7 +466,7 @@ def _trim_routed_item(by_name, routed_sections):
                     return True
     return False
 
-def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
+def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
     scope = [str(p) for p in task.get("scope", [])]
@@ -439,6 +569,10 @@ def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
         summary = value.get("summary", value) if isinstance(value, dict) else value
         evidence_lines.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
 
+    composition = (skills or {}).get("_specialist")
+    if composition and skills.get("mode") == "active":
+        evidence_lines.extend(f"- {item.id} {item.location}: {item.summary_short}"
+                              for item in composition.shared_evidence(task))
     objective = [str(task.get("title", ""))]
     if task.get("spec"):
         objective.append(f"- discovery: {task['spec']}")
@@ -457,6 +591,8 @@ def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
         ("evidence", evidence_lines or ["- (none)"]),
     ]
+    if skills and skills.get("section"):
+        sections.insert(0, ("skills", skills["section"].removeprefix("## skills\n").splitlines()))
     cfg = Pool().cfg if cfg is None else cfg
     candidates = []
     task_id = task.get("id", "(none)")
@@ -492,7 +628,7 @@ def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
         candidates.append(evidence.make(
             "test_result", f"task:{task_id}:failures", failure_match.group(1),
             commit=merge_base, provenance="repo", task=task))
-    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg)
+    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
     routed_sections = shadow_meta.pop("_routed_sections", {})
     sections = [(name, [text for _, text in routed_sections[name]] if name in routed_sections else lines)
                 for name, lines in sections]
@@ -549,7 +685,9 @@ def _packet_body(task, worktree, *, cfg=None) -> tuple[str, dict]:
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
                   "memory_layers": ",".join(memory["layers_consulted"]),
-                  "candidate_tokens": candidate_tokens, "candidate_known": True, **shadow_meta}
+                  "candidate_tokens": candidate_tokens, "candidate_known": True,
+                  "skill_tokens_presented_l2": (skills or {}).get("skill_tokens_presented_l2", 0),
+                  **shadow_meta}
 
 
 def packet_meta(task, worktree) -> dict:
@@ -596,11 +734,13 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
     return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree, *, cfg=None) -> str:
+def packet(task, worktree, *, cfg=None, skills=None) -> str:
     """Build a bounded executor briefing with a verifiable provenance header."""
-    body, meta = _packet_body(task, worktree, cfg=cfg)
+    body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
+    if skills and skills.get("mode") == "active" and skills.get("specialist"):
+        header += f" specialist: {skills['specialist']['name']}"
     marker = " routed=" + ("active" if meta.get("routed_mode") == "active" else "shadow")
     # Account for the header itself, including a possible extra digit in n.
     over = len(header) + len(marker) + 1 + len(body) - 4800
@@ -617,7 +757,8 @@ def packet(task, worktree, *, cfg=None) -> str:
                           {key: value for key, value in meta.items()
                            if key in ("candidate_tokens", "candidate_known", "routed_tokens",
                                       "routed_reduction_ratio", "routed_hidden", "routed_ambiguous",
-                                      "routed_rules_version", "routed_mode", "evidence_ids")})
+                                      "routed_rules_version", "routed_mode", "evidence_ids",
+                                      "skill_tokens_presented_l2")})
     return result
 
 
@@ -643,7 +784,7 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed, *, cfg=None) -> str:
+def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
     src = reviewed or task
@@ -666,7 +807,8 @@ def review_packet(task, reviewed, *, cfg=None) -> str:
     if pipeline.get("gate_reds"):
         failure = pipeline.get("last_failure_text") or pipeline.get("gate_failure") or src.get("reason") or "(unavailable)"
         gate_lines.append("last_failure_head: " + str(failure).splitlines()[0][:500])
-    sections = [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
+    sections = ([_section("skills", skills["section"].removeprefix("## skills\n"))]
+                if skills and skills.get("section") else []) + [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
                 _section("scope", src.get("scope", [])), None,
                 _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines)]
     reviewer_role = (task.get("constraints") or {}).get("reviewer_role")
@@ -717,11 +859,16 @@ def review_packet(task, reviewed, *, cfg=None) -> str:
         sections.append(_section("fix-round context", [json.dumps(x, sort_keys=True) for x in comments] or ["(none)"]))
     else:
         comments = []
+    composition = (skills or {}).get("_specialist")
+    if composition and skills.get("mode") == "active":
+        shared = composition.shared_evidence(task)
+        sections.append(_section("evidence", [f"{item.id} {item.location}: {item.summary_short}"
+                                              for item in shared]))
     other_chars = len("\n".join(section for section in sections if section is not None)) + 1
     diff_heading_chars = len("## diff\n")
     configured_cap = cfg.get("limits", {}).get("review_diff_chars", 12000)
     diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
-    sections[3] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
+    sections[sections.index(None)] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
     candidates = []
@@ -753,7 +900,9 @@ def review_packet(task, reviewed, *, cfg=None) -> str:
     shadow_meta = _shadow_route({**src, "id": task["id"], "parent": task.get("parent") or src.get("parent")}, candidates,
                                 role="security_review" if any(section.startswith("## security\n")
                                                                for section in sections) else "review",
-                                head_sha=_base_sha(src, wt), cfg=cfg)
+                                head_sha=_base_sha(src, wt), cfg=cfg, skills=skills)
+    if skills and skills.get("mode") == "active" and skills.get("specialist"):
+        role_source += f" specialist: {skills['specialist']['name']}"
     routed_sections = shadow_meta.pop("_routed_sections", {})
     if shadow_meta.get("routed_mode") == "active":
         # Findings move out of the legacy fix context; diff/security bytes stay intact.
@@ -765,7 +914,9 @@ def review_packet(task, reviewed, *, cfg=None) -> str:
     role_source += " routed=" + ("active" if shadow_meta.get("routed_mode") == "active" else "shadow")
     return _role_packet(body, _base_sha(src, wt),
                         f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}",
-                        candidate_tokens=len(raw_diff) // 4, candidate_known=True, **shadow_meta)
+                        candidate_tokens=len(raw_diff) // 4, candidate_known=True,
+                        skill_tokens_presented_l2=(skills or {}).get("skill_tokens_presented_l2", 0),
+                        **shadow_meta)
 
 
 def spec_review_packet(task) -> str:
@@ -865,6 +1016,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
            "--dangerously-skip-permissions", "--allowedTools", tools,
            "--strict-mcp-config", "--mcp-config", str(mcp_config)]
+    if (task.get("packet_meta") or {}).get("skill_routing_mode") == "active":
+        cmd.append("--disable-slash-commands")
     if task["role"] != "execute":
         cmd += ["--disallowedTools", "Edit,Write,NotebookEdit"]
     log = {"executor": task.get("executor") or f"claude:{task['tier']}", "complexity": task["complexity"]}
@@ -899,6 +1052,22 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         out = json.loads(stdout)
     except json.JSONDecodeError:
         return {"status": "failed", "reason": f"non-JSON output (rc={p.returncode}): {text[-500:]}"}
+    session_id = out.get("session_id")
+    if session_id is not None:
+        task.setdefault("packet_meta", {})["session_id"] = session_id
+        bus.update(task["id"], packet_meta=task["packet_meta"])
+    try:
+        skills_used, skill_tokens_l2 = _skills_from_gate(task["id"], session_id)
+        task.setdefault("packet_meta", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)
+        pipeline = dict(bus.get(task["id"]).get("pipeline") or {})
+        pipeline["skills_used"] = skills_used
+        bus.update(task["id"], packet_meta=task["packet_meta"], pipeline=pipeline)
+        decision_log.outcome(task["id"], "skill_selection", skills_used=skills_used,
+                             skill_tokens_l2=skill_tokens_l2,
+                             skill_recovery=sorted(set(skills_used) - set(task["packet_meta"].get("skills_selected") or [])))
+        log["packet_meta"] = task["packet_meta"]
+    except Exception as exc:
+        notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
     used = out.get("usage", {})
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
@@ -913,7 +1082,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
                       "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
     bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
                 outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
-                provider="claude", usage=used, **log, **review_log, **used)
+                provider="claude", usage=used, session_id=session_id, **log, **review_log, **used)
     if not out.get("is_error") and p.returncode == 0:
         return {"status": "done", "output": out}
     reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
@@ -1030,9 +1199,10 @@ def run_worker(task_id, account_id=None):
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
     try:
+        skill_choice = _prepare_skills(t, role, pool.cfg)
         if role == "review":
             src = reviewed if reviewed is not None else t
-            role_packet = review_packet(t, src)
+            role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice)
             security_signals = {"security": "## security\n" in role_packet}
             prompt = render("review", packet=role_packet, task=t, signals=security_signals)
             t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
@@ -1048,7 +1218,7 @@ def run_worker(task_id, account_id=None):
             t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
             bus.update(task_id, executor=t["executor"])
             packet_worktree = t.get("worktree") or ROOT
-            role_packet = packet(t, packet_worktree)
+            role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice)
             prompt = render("execute", packet=role_packet, task=t) + \
                 "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
                 "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
@@ -1064,6 +1234,19 @@ def run_worker(task_id, account_id=None):
     allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
     disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
     t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
+    try:
+        exposure = _skill_exposure(t, role) if promotion.mode("skill_routing", pool.cfg) == "off" else None
+        if exposure is None:
+            records = _skill_records()
+            exposed = sorted(skill_id for skill_id, record in records.items()
+                             if record.get("state") == "active" and record.get("provenance") == "builtin")
+            exposure = {"skills_exposed": exposed,
+                        "skill_tokens_l0": sum(int(records[item].get("est_tokens_l0") or 0) for item in exposed)}
+        t["packet_meta"].update(exposure)
+        t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure, skill_choice))
+        bus.update(task_id, packet_meta=t["packet_meta"])
+    except Exception as exc:
+        notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")
     if pool.reserve(task_id, acct.id, role, t) is None:
         pipeline = dict(t.get("pipeline") or {})
         pipeline["hold_note"] = "budget"

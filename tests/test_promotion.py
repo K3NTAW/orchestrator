@@ -16,6 +16,15 @@ def evidence(**overrides):
 
 
 class TestPromotion(unittest.TestCase):
+    def test_jev_skill_routing_feature_counts_verdict_rows(self):
+        self.assertEqual(promotion.FEATURES["jev_skill_routing"]["default"], "shadow")
+        with tempfile.TemporaryDirectory() as root:
+            common = dict(candidates=["x"], hard_constraints=[], deterministic={}, selected=[],
+                          rejected=["x"], reason="ambiguous", mode="shadow")
+            decision_log.record("skill_selection", "T-1", jev={"decisions": {}}, root=root, **common)
+            decision_log.record("skill_selection", "T-2", jev=None, root=root, **common)
+            self.assertEqual(promotion.collect("jev_skill_routing", root), {"n": 1})
+
     def test_context_features_default_shadow(self):
         features = ("context_router", "tool_disclosure", "conditional_instructions")
         for feature in features:
@@ -81,6 +90,14 @@ class TestPromotion(unittest.TestCase):
             decision_log.record("jev_sched", "G-2", selected=[], rejected=[], root=root, **common)
             self.assertEqual(promotion.collect("jev_sched", root=root),
                              {"n": 2, "jev_disagreement_rate": .5, "applied": 0})
+
+    def test_skill_routing_evidence_excludes_static_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            common = dict(candidates=["executor/implement-spec"], hard_constraints=[],
+                          deterministic={}, selected=["executor/implement-spec"], rejected=[], mode="shadow")
+            decision_log.record("skill_selection", "T-static", reason="stage1 static", root=root, **common)
+            decision_log.record("skill_selection", "T-routed", reason="mandatory skills", root=root, **common)
+            self.assertEqual(promotion.collect("skill_routing", root=root), {"n": 1})
 
     def test_insufficient_evidence_stays_shadow(self):
         result = promotion.evaluate("scheduler", evidence(

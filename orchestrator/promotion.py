@@ -36,6 +36,12 @@ FEATURES = OrderedDict((
     ("handoff_routing", {"table": "handoff", "key": "mode",
                           "modes": ("off", "shadow", "active"),
                           "default": "shadow", "evidence": "handoff_routing"}),
+    ("skill_routing", {"table": "skills", "key": "mode",
+                       "modes": ("off", "shadow", "active"),
+                       "default": "shadow", "evidence": "skill_routing"}),
+    ("jev_skill_routing", {"table": "skills", "key": "jev_mode",
+                           "modes": ("off", "shadow", "active"),
+                           "default": "shadow", "evidence": "jev_skill_routing"}),
     ("read_suppression", {"table": "jev", "key": "read_suppression",
                            "modes": ("off", "shadow", "active"),
                            "default": "shadow", "evidence": "read_suppression"}),
@@ -170,6 +176,16 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "jev_skill_routing":
+        rows = [row for row in decision_log.read_all(root=Path(root))
+                if row.get("kind") == "skill_selection" and isinstance(row.get("jev"), dict)]
+        return {"n": len(rows)}
+    if feature == "skill_routing":
+        rows = [row for row in decision_log.read_all(root=root)
+                if row.get("kind") == "skill_selection"
+                and row.get("mode") in ("shadow", "active")
+                and row.get("reason") != "stage1 static"]
+        return {"n": len(rows)}
     if feature == "read_suppression":
         from . import read_economy
         total = read_economy.summary(root, since_s=__import__("time").time() - 7 * 86400)["total"]

@@ -1487,6 +1487,101 @@ class ContextTelemetry(unittest.TestCase):
         for _, meta, rendered in seen:
             self.assertEqual(meta["instruction_tokens"], len(rendered) // 4 - len(packet) // 4)
 
+    def test_run_worker_records_skills_exposed_and_l0_tokens(self):
+        task = bus.create_task("skills", "s", ["a"], ["x.py"], role="execute")
+        records = {"execute/a": {"state": "active", "provenance": "builtin", "est_tokens_l0": 3},
+                   "review/b": {"state": "active", "provenance": "builtin", "est_tokens_l0": 5},
+                   "execute/off": {"state": "disabled", "provenance": "builtin", "est_tokens_l0": 99}}
+        seen = {}
+        def run_claude(pool, account, worker, *args, **kwargs):
+            seen.update(worker["packet_meta"])
+            return {"status": "done", "output": {"result": "ok", "usage": {}}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "packet", return_value="packet"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run_claude), \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.decision_log, "record"):
+            spawn.run_worker(task["id"])
+        self.assertEqual(seen["skills_exposed"], ["execute/a", "review/b"])
+        self.assertEqual(seen["skill_tokens_l0"], 8)
+
+    def test_skill_selection_row_and_meta_in_shadow_without_exposure_change(self):
+        task = bus.create_task("who calls", "who calls this", ["a"], ["x.py"], role="scout")
+        records = {"executor/implement-spec": {"state": "active", "provenance": "builtin",
+                    "roles": ["execute"], "task_classes": ["*"], "triggers": [], "est_tokens_l0": 3,
+                    "est_tokens_l2": 7},
+                   "scout/trace-callers": {"state": "active", "provenance": "builtin",
+                    "roles": ["scout"], "task_classes": ["*"], "triggers": ["who calls"],
+                    "est_tokens_l0": 5, "est_tokens_l2": 11}}
+        seen = {}
+        decisions = []
+        def run_claude(pool, account, worker, *args, **kwargs):
+            seen.update(worker["packet_meta"])
+            return {"status": "done", "output": {"result": "ok", "usage": {}}}
+        def capture(*args, **kwargs):
+            decisions.append((args, kwargs))
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "scout_packet", return_value="packet"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run_claude), \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.decision_log, "record", side_effect=capture):
+            spawn.run_worker(task["id"])
+        self.assertEqual(seen["skills_exposed"], sorted(records))
+        self.assertEqual(seen["skills_selected"], ["scout/trace-callers"])
+        routed = next(kwargs for args, kwargs in decisions
+                      if (args[0] if args else kwargs.get("kind")) == "skill_selection")
+        self.assertEqual(routed["selected"], ["scout/trace-callers"])
+        self.assertEqual(routed["rejected"], [])
+
+    def test_skill_usage_from_gate_rows_for_claude_workers(self):
+        path = spawn.STATE / "runs/jev/gate.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"task": "T-gate", "tool": "Read",
+                                    "tool_target": "skills/scout/find/SKILL.md"}) + "\n")
+        records = {"scout/find": {"est_tokens_l2": 17}}
+        with mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}):
+            self.assertEqual(spawn._skills_from_gate("T-gate"), (["scout/find"], 17))
+
+    def test_skills_from_gate_matches_real_gate_row_shape(self):
+        from orchestrator import jev_gate
+        records = {"scout/find": {"est_tokens_l2": 17},
+                   "review/check": {"est_tokens_l2": 23},
+                   "scout/other": {"est_tokens_l2": 99}}
+        with tempfile.TemporaryDirectory() as directory:
+            gate_path = Path(directory) / "gate.jsonl"
+            with mock.patch.object(jev_gate, "GATE_LOG", gate_path):
+                for task, session, tool, target in (
+                    ("T-real", "s-real", "Read", "/repo/skills/scout/find/SKILL.md"),
+                    ("T-real", "s-real", "Read", "/repo/skills/scout/find/SKILL.md"),
+                    ("", "s-real", "Bash", "bash skills/review/check/scripts/check.sh"),
+                    ("T-other", "s-other", "Read", "skills/scout/other/SKILL.md"),
+                    ("T-real", "s-real", "Edit", "skills/scout/other/SKILL.md"),
+                ):
+                    jev_gate._log(task, session, tool, {}, "shadow", False, False, 0,
+                                  tool_target=target, input_hash="hash")
+            rows = [json.loads(line) for line in gate_path.read_text().splitlines()]
+            self.assertTrue(all("tool_target" in row and "input" not in row for row in rows))
+            with mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                    mock.patch.object(Path, "read_text", return_value=gate_path.read_text()), \
+                    mock.patch.object(Path, "exists", return_value=True):
+                self.assertEqual(spawn._skills_from_gate("T-real", "s-real"),
+                                 (["review/check", "scout/find"], 40))
+                self.assertEqual(spawn._skills_from_gate("T-real"), (["scout/find"], 17))
+
+    def test_skill_usage_parsed_from_codex_summary(self):
+        from orchestrator import executor
+        records = {"executor/implement-spec": {"est_tokens_l0": 4, "est_tokens_l2": 20}}
+        with mock.patch("orchestrator.skills_registry.load", return_value={"skills": records}):
+            meta = executor._codex_skill_meta("done\nSkill used: implement-spec\n")
+        self.assertEqual(meta["skills_used"], ["executor/implement-spec"])
+        self.assertEqual(meta["skill_tokens_l2"], 20)
+
     def test_packet_build_meta_evicts_beyond_cap(self):
         original = spawn._PACKET_BUILD_META.copy()
         self.addCleanup(lambda: (spawn._PACKET_BUILD_META.clear(),
@@ -1499,6 +1594,150 @@ class ContextTelemetry(unittest.TestCase):
         self.assertEqual(len(spawn._PACKET_BUILD_META), spawn._PACKET_BUILD_META_MAX)
         self.assertNotIn(first_version, spawn._PACKET_BUILD_META)
 
+    def test_packet_header_carries_specialist_name_in_active_only(self):
+        task = {"id": "T-specialist-header", "title": "header", "spec": "s", "acceptance": [],
+                "scope": [], "role": "execute", "tier": "sonnet", "constraints": {}}
+        records = {"executor/implement-spec": {"state": "active", "roles": ["execute"],
+                    "task_classes": ["*"], "version": "v1", "triggers": [], "tools": []},
+                   "review/adversarial-review": {"state": "active", "roles": ["review"],
+                    "task_classes": ["*"], "version": "v1", "triggers": [], "tools": []}}
+        with mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.skills_registry, "render", return_value="Skill procedure"), \
+                mock.patch.object(spawn.skill_scorecard, "selection_rows", return_value=30), \
+                mock.patch.object(spawn.skill_scorecard, "recovery_rate", return_value=0), \
+                mock.patch.object(spawn, "scoped_diff", return_value="diff"), \
+                mock.patch.object(spawn, "_base_sha", return_value="head"), \
+                mock.patch.object(spawn.decision_log, "record"):
+            for mode in ("off", "shadow", "active"):
+                cfg = {"skills": {"mode": mode}, "context_router": {"mode": "off"}}
+                skills = spawn._prepare_skills(task, "execute", cfg)
+                execute = spawn.packet(task, TMP, cfg=cfg, skills=skills)
+                for role in ("review", "security_review"):
+                    review_task = {**task, "role": role}
+                    skills = spawn._prepare_skills(review_task, role, cfg)
+                    review = spawn.review_packet(review_task, task, cfg=cfg, skills=skills)
+                    with self.subTest(mode=mode, role=role):
+                        self.assertEqual("specialist: " in review.splitlines()[0], mode == "active")
+                        if mode == "active":
+                            self.assertIn("specialist: " + role, review.splitlines()[0])
+                            self.assertIn("## scope\n", review)
+                            self.assertIn("## diff\n", review)
+                self.assertEqual("specialist: " in execute.splitlines()[0], mode == "active")
+                if mode == "active":
+                    self.assertIn("specialist: execute+implement-spec", execute.splitlines()[0])
+
+    def test_packet_with_skills_none_runs_no_specialist_machinery(self):
+        from contextlib import ExitStack
+
+        task = {"id": "T-no-specialist", "title": "legacy dispatch", "spec": "s",
+                "acceptance": [], "scope": [], "role": "execute", "constraints": {}}
+        off = {"skills": {"mode": "off"}, "context_router": {"mode": "off"}}
+        active = {**off, "skills": {"mode": "active"}}
+        with ExitStack() as stack:
+            machinery = [stack.enter_context(mock.patch.object(owner, name,
+                         side_effect=AssertionError("unexpected specialist machinery: " + name)))
+                         for owner, name in ((spawn, "_prepare_skills"), (spawn.specialist, "compose"),
+                                             (spawn.skill_router, "select"), (spawn.skills_registry, "load"),
+                                             (spawn.tool_catalog, "minimal_set"), (P.Pool, "pick_executor"),
+                                             (spawn.bus, "get"))]
+            pool = stack.enter_context(mock.patch.object(spawn, "Pool"))
+            pool.return_value.cfg = active
+            stack.enter_context(mock.patch.object(spawn, "memory_recall",
+                                return_value={"hits": [], "layers_consulted": []}))
+            stack.enter_context(mock.patch.object(spawn, "scoped_diff", return_value="diff"))
+            stack.enter_context(mock.patch.object(spawn, "_base_sha", return_value="head"))
+            for constraints in ({}, {"fix_round_for": "T-original"}):
+                execute_task = {**task, "constraints": constraints}
+                baseline = spawn.packet(execute_task, TMP, cfg=off)
+                # Match daemon dispatch calls: cfg and skills are both omitted.
+                self.assertEqual(spawn.packet(execute_task, TMP), baseline)
+                self.assertEqual(spawn.packet(execute_task, TMP, cfg=active, skills=None), baseline)
+                self.assertNotIn("specialist:", baseline)
+                self.assertNotIn("## skills", baseline)
+            for role in ("review", "security_review"):
+                review_task = {**task, "role": role, "inputs": ["T-reviewed"]}
+                baseline = spawn.review_packet(review_task, task, cfg=off)
+                self.assertEqual(spawn.review_packet(review_task, task), baseline)
+                self.assertEqual(spawn.review_packet(review_task, task, cfg=active, skills=None), baseline)
+                self.assertNotIn("specialist:", baseline)
+                self.assertNotIn("## skills", baseline)
+            for operation in machinery:
+                operation.assert_not_called()
+
+    def _active_choice(self):
+        return {"selected": ["executor/implement-spec"], "mandatory": ["executor/implement-spec"],
+                "ambiguous": [], "tokens_selected_l0": 2, "tokens_selected_l2": 3,
+                "tokens_exposed_l0": 2, "candidates": ["executor/implement-spec"],
+                "rejected": [], "triggers": {}, "task_class": "feature", "reason": "test"}
+
+    def test_active_skills_section_carries_level2_of_selected_only(self):
+        choice = self._active_choice()
+        with mock.patch.object(spawn.skills_registry, "render", side_effect=lambda skill, level: f"L{level}:{skill}"), \
+                mock.patch.object(spawn, "_skill_records", return_value={"executor/implement-spec": {"version": "1"}}):
+            section = spawn._skills_section(choice)["section"]
+        self.assertIn("### executor/implement-spec (v1)\nL2:executor/implement-spec", section)
+
+    def test_skills_section_is_first_packet_section_and_capped(self):
+        choice = {**self._active_choice(), "selected": ["executor/implement-spec", "executor/extra"]}
+        with mock.patch.object(spawn.skills_registry, "render",
+                               side_effect=lambda skill, level: ("x" * (100 if skill.endswith("implement-spec") else 2500)
+                                                                  if level == 2 else "short")), \
+                mock.patch.object(spawn, "_skill_records", return_value={
+                    "executor/implement-spec": {"version": "1"}, "executor/extra": {"version": "1"}}):
+            rendered = spawn._skills_section(choice)
+        self.assertLessEqual(100, spawn._SKILL_PRESENTATION_CAP)
+        self.assertIn("executor/extra", rendered["demoted"])
+
+    def test_active_refused_without_shadow_evidence_or_with_high_recovery(self):
+        cfg = {"skills": {"mode": "active", "max_recovery": .1}}
+        with mock.patch.object(spawn.skill_router, "select", return_value=self._active_choice()), \
+                mock.patch.object(spawn.skill_scorecard, "selection_rows", return_value=0), \
+                mock.patch.object(spawn.skill_scorecard, "recovery_rate", return_value=0), \
+                mock.patch.object(spawn.notify, "notify"):
+            self.assertEqual(spawn._prepare_skills({"id": "T"}, "execute", cfg)["mode"], "shadow")
+
+    def test_skill_use_detected_from_read_of_skill_file_and_script_invocation(self):
+        rows = [json.dumps({"task": "T-use", "tool": "Read",
+                            "tool_target": "skills/executor/a/SKILL.md"}),
+                json.dumps({"task": "T-use", "tool": "Bash",
+                            "tool_target": "bash skills/review/b/scripts/run.sh"})]
+        records = {"executor/a": {"est_tokens_l2": 2}, "review/b": {"est_tokens_l2": 3}}
+        with mock.patch.object(Path, "exists", return_value=True), \
+                mock.patch.object(Path, "read_text", return_value="\n".join(rows)), \
+                mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}):
+            self.assertEqual(spawn._skills_from_gate("T-use"), (["executor/a", "review/b"], 5))
+
+    def test_active_launch_adds_disable_slash_commands_and_shadow_does_not(self):
+        source = Path(spawn.__file__).read_text()
+        self.assertIn('cmd.append("--disable-slash-commands")', source)
+        self.assertIn('get("skill_routing_mode") == "active"', source)
+
+    def test_selection_runs_once_before_packet_build(self):
+        cfg = {"skills": {"mode": "shadow"}}
+        with mock.patch.object(spawn.skill_router, "select", return_value=self._active_choice()) as select:
+            choice = spawn._prepare_skills({"id": "T"}, "execute", cfg)
+            self.assertEqual(choice["mode"], "shadow")
+        select.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
+def _jev_skill_choice():
+    return {"candidates": ["executor/implement-spec", "execute/x"],
+            "mandatory": ["executor/implement-spec"], "triggers": {"execute/x": ["x"]},
+            "task_class": "code", "selected": ["executor/implement-spec"],
+            "presented": [], "rejected": [{"id": "execute/x", "reason": "ambiguous"}],
+            "reason": "mandatory skills plus firm trigger matches", "mode": "shadow",
+            "tokens_exposed_l0": 2, "tokens_selected_l0": 1, "tokens_selected_l2": 2,
+            "skill_tokens_presented_l2": 0, "ambiguous": ["execute/x"], "demoted": [],
+            "jev": {"decisions": {"execute/x": {"select": True}}, "source": "jev",
+                    "latency_ms": 1, "batch_size": 1}}
+
+
+class JevSkillRoutingCallSiteTests(unittest.TestCase):
+    def test_skill_routing_row_carries_top_level_jev_in_shadow(self):
+        choice = _jev_skill_choice()
+        with mock.patch.object(spawn.decision_log, "record") as record:
+            result = spawn._skill_routing({"id": "T-jev"}, "execute", {}, {}, choice)
+        self.assertEqual(result["skills_selected"], ["executor/implement-spec"])
+        self.assertIs(record.call_args.kwargs["jev"], choice["jev"])

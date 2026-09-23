@@ -586,7 +586,6 @@ class RoutingIntegration(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["selected"], baseline)
         self.assertEqual(rows[0]["deterministic"]["baseline"], baseline)
-
     def test_active_handoff_switches_executor_when_gain_exceeds_threshold(self):
         task_id = self.task("handoff active")
         self.pool.cfg["handoff"] = {"mode": "active", "min_gain": .15}
@@ -665,3 +664,25 @@ class RoutingIntegration(unittest.TestCase):
         task = bus.get(task_id)
         self.assertEqual(task["executor"], "terra")
         self.assertEqual(task["pipeline"]["handoff"]["reason"], "allocation_active")
+
+
+def _jev_executor_choice():
+    return {"candidates": ["executor/implement-spec", "execute/x"],
+            "mandatory": ["executor/implement-spec"], "triggers": {"execute/x": ["x"]},
+            "task_class": "code", "selected": ["executor/implement-spec"],
+            "presented": [], "rejected": [{"id": "execute/x", "reason": "ambiguous"}],
+            "reason": "mandatory skills plus firm trigger matches", "mode": "shadow",
+            "tokens_exposed_l0": 2, "tokens_selected_l0": 1, "tokens_selected_l2": 2,
+            "skill_tokens_presented_l2": 0, "ambiguous": ["execute/x"], "demoted": [],
+            "jev": {"decisions": {"execute/x": {"select": True}}, "source": "jev",
+                    "latency_ms": 1, "batch_size": 1}}
+
+
+class JevExecutorSkillRoutingTests(unittest.TestCase):
+    def test_route_skills_row_carries_top_level_jev_in_shadow(self):
+        choice = _jev_executor_choice()
+        with patch.object(executor.promotion, "mode", return_value="shadow"), \
+                patch.object(executor.decision_log, "record") as record:
+            result = executor._route_skills({"id": "T-jev"}, {}, {}, choice)
+        self.assertEqual(result["skills_selected"], ["executor/implement-spec"])
+        self.assertIs(record.call_args.kwargs["jev"], choice["jev"])

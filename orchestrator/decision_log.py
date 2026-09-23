@@ -2,7 +2,8 @@
 
 Generic mappings: model_routing~routing, scheduling~wave/jev_sched,
 workflow_strategy~strategy, and planner_routing~planner_route. Legacy call sites
-keep their kinds; new context-program code uses the generic kinds.
+keep their kinds; new context-program code uses the generic kinds. skill_selection
+has no legacy synonym.
 """
 
 import time
@@ -26,6 +27,7 @@ CONTEXT_KINDS = (
     "action_gate",
     "workflow_strategy",
     "handoff",
+    "skill_selection",
 )
 
 KINDS = (
@@ -117,6 +119,7 @@ def record(
     confidence=None,
     n=None,
     mode=None,
+    role=None,
     extra=None,
     root=None,
 ):
@@ -144,6 +147,8 @@ def record(
         "mode": mode,
         "extra": extra,
     }
+    if role is not None:
+        row["role"] = role
     return _append(_bounded(row), root=root)
 
 

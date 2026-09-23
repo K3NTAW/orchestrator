@@ -368,3 +368,69 @@ type: decision · goal: T-0755 · provenance: repo
 - headless launches skip while an interactive session is attached (planner_runs._session_attached) and while no planner-affinity account has headroom; account A was at 67.1M of 30M, so B got planner affinity at 18:40
 - planner_skips.jsonl already records six closable skips per tick for long-closed goals (decision_points ignores the goal task status), backlog
 outcome: rollback: git revert the commit, or set autonomous = false and remove planner from account B role_affinity in .orchestrator/pool.toml
+
+## 2026-09-21 GOAL T-0755 R22 closed: render errors hold visibly, review respawns retry and cap; first goal run under [planner].autonomous = true
+type: decision · goal: T-0755 · tasks: T-0756,T-0757,T-0758,T-0759 · provenance: repo
+- T-0756 (c5, Codex sol, 77fb206): spawn.render validates placeholders against the template token set with single-pass substitution; dispatch, _dispatch_fresh_fix and run_worker hold with hold_reason render_error and notify; auto_fix_round skips render_error holds. Gate green first attempt, security review T-0758 approve (review_reason security_paths:orchestrator/*.py)
+- T-0757 (c3, Codex terra, 160f28c): review respawn retries every [daemon].respawn_after_s (120) while queued and unassigned, counts pipeline.respawn_count, holds with respawn_exhausted at [daemon].respawn_max (3); both keys added to pool.toml. Gate green, 0 reds, security review T-0759 approve (255 daemon+pool tests)
+- incident 18:14: the Planner session restart killed the MCP server and its codex exec child while T-0757 was running; the task sat running with pid null and a clean worktree, and reconcile_dead skipped it because Codex-dispatched tasks record no pid (gotcha 2026-09-19). Remedy 18:17: daemon.reconcile_dead(T-0757) by hand, requeued, redispatched to terra, merged 18:35. Backlog c3: reconcile_dead treats pid-null running tasks with claimed_at older than the daemon start as dead; codex tools record the pid
+- autonomous = true produced only skip rows while this interactive session was attached (planner_session_attached); decision_points also yields closable for six long-closed goals each tick (noise, routed away). Headless launches only start once the session ends and a standalone daemon runs
+outcome: PR goal/T-0755 into main opened for the human; revert path: git revert the merge commit on main. pool.toml respawn_after_s and respawn_max are additive defaults
+
+## 2026-09-21 Release 2026-09-21 19:50: PR 18 (R22) merged into orchestrator main e8c4687; kgpt-ios PR 17 merged 0d8b192; kgpt PR 38 merged 8433149 and deployed on Hetzner with make up
+type: decision · goal: T-0755 · provenance: repo
+- all three merged with merge commits on user instruction (do the merge and the redeploy on hetzner); orchestrator 18 and kgpt-ios 17 were CLEAN; kgpt 38 was UNSTABLE only on the CI dependency-audit step: httpx2 2.10.0 has PYSEC-2026-3846/3848/3849 (fixes 2.11.0, 2.12.0), unrelated to the diff and newer than main's last CI run of 2026-08-25
+- Hetzner deploy: ssh kgpt@46.62.167.12, /home/kgpt/kgpt git pull --ff-only (behind 7) then make up (build, migrate, up -d); every mcp-*, gateway and scheduler container recreated at 19:47; the running gateway's kgpt_kernel.proposals.list_pending source contains the LEFT JOIN
+- local checkouts: kgpt main fast-forwarded to 8433149; kgpt-ios local main keeps the goal start scaffold commit 0321e34 plus the retrospective 65e4e49 ahead of origin/main (goal/T-0006 was cut from origin/main, not from it) and cannot fast-forward; orchestrator local main holds Planner checkpoints ahead of origin, the human pulls
+outcome: rollback: git revert e8c4687 (orchestrator), 0d8b192 (kgpt-ios), 8433149 (kgpt) then make up on Hetzner again; the iOS build on the phone is unchanged until the user is home; backlog: bump httpx2 to 2.12.0 in kgpt
+
+## 2026-09-22 16:15 — program brief committed onto goal/T-0760 (3acdc87)
+- What: .orchestrator/roadmap-context.md (user's verbatim Jev Context Intelligence & Harness Economy brief, P0–P31) added to the goal branch through a temporary detached worktree and a guarded update-ref (only when the branch still pointed at the base sha).
+- Why: it was committed on local main only (aedab27); spec reviews T-0784/T-0788 could not find it from goal-branch worktrees.
+- Revert path: `git revert 3acdc87` on goal/T-0760.
+
+## 2026-09-22 17:50 — Jev context program checkpoint 1 opened as PR 19 (goal/T-0760 → main)
+type: decision · goal: T-0760 · tasks: T-0765,T-0769,T-0785,T-0771,T-0775,T-0772,T-0774,T-0794,T-0797,T-0799,T-0801,T-0806 · provenance: repo
+- Shipped: P0 audit doc, P1 context telemetry + context scorecard, P23-26 modes and decision kinds, P19/20 Jev boundary, P2/3/4/6 evidence + context router library (unwired), execute-prompt dedup, two harness fixes (test harness isolates live pool.toml; dispatch holds render errors and handles every start status).
+- Process: 12 commits on the goal branch, every task gated green in its worktree and security-reviewed on sonnet; three spec-review rounds on the router library, fourth waived; two reviews were wrong for mechanical reasons (empty scoped diff of a fix round; a root checkout behind origin), both handled without a fix round.
+- Open: T-0800 router shadow wiring (running), T-0802 tool disclosure shadow, T-0803 conditional instructions shadow (spec review first). Then P14-16 handoff economics, P17/18 gating and read suppression, P27-29 scorecards, P30 promotion, P31 evals.
+outcome: revert path: git revert the PR 19 merge commit; modes to off in pool.toml stop every shadow computation without a revert.
+
+## 2026-09-22 20:30 — PR 19 merged into main (32343f7): Jev context program checkpoints 1+2, every feature in shadow
+type: decision · goal: T-0760 · provenance: repo
+- User approved ("you can merge pr 19"). Correction 20:45: the merge took only the 12 commits pushed at 17:50 (checkpoint 1); the checkpoint-2 commits were local to goal/T-0760 and unpushed. PR 19's body was briefly rewritten to claim them, then restored. Checkpoint 2 pushed and opened as PR 20 (9 commits) for the human. GitGuardian flagged fake fixture strings in tests/test_jev_boundary.py and tests/test_evidence.py; verified not credentials.
+- After merge: root main replayed onto origin/main (Planner commits on top), standalone daemon restarted on the new code.
+outcome: revert path: git revert 32343f7 -m 1; or per feature, mode = "off" in pool.toml.
+
+## 2026-09-22 T-0839 spec-review hold closed by respec T-0841, not a fix round; plan commit c6cf5a1
+type: decision · goal: T-0760 · tasks: T-0839,T-0840,T-0841 · provenance: repo
+- .orchestrator/tasks/T-0839.json — held spec_review request_changes with worktree null and no codex thread; a fix round with depends_on=[T-0839] can never dispatch (T-0839 failed 21:00, superseded by T-0841)
+- .orchestrator/tasks/T-0841.json — v3 spec running on codex in wt/T-0841, spec_review_verdict approve by Planner waiver; constraints.respec_for=T-0839 added 21:10 so planner_runs._observed_outcome scores the decision as respec
+- orchestrator/evidence.py:108, orchestrator/promotion.py:153/243, orchestrator/spawn.py:497/533 — the three T-0840 risks verified by grep on main and each bound by a v3 item
+outcome: plan.md committed c6cf5a1; revert path: git revert c6cf5a1 and drop constraints.respec_for from T-0841.json. Rule for packets: a held task with worktree null is respec territory, never fix_round
+
+## 2026-09-22 21:40 — Jev context program complete in shadow; checkpoint 3 appended to PR 20
+type: decision · goal: T-0760 · tasks: T-0800,T-0802,T-0809,T-0814,T-0831,T-0841,T-0843 · provenance: repo
+- T-0841 (+ fix round T-0843: handoff evidence counts kind=handoff rows; --economy joins role-keyed sources and lists handoffs by executor) merged into goal/T-0760: seven-category context-eval suite (all within expectation on first run; localized_fix reduction 0.69), promotion evidence loaders capped at stay without quality evidence, `scorecard --economy`, cfg overrides for packet builders.
+- PR 20 was still open, so the two commits were pushed onto it and its body extended (checkpoints 2 + 3, 11 commits) instead of opening a third PR against the same branch.
+- Program status: P0–P4, P6, P8 (pool), P10–P31 delivered in shadow; P5 and P7 deferred until shadow data shows the ambiguous bucket matters. Every mode stays shadow; promotion needs an active A/B first.
+outcome: revert path: git revert the PR 20 merge commit, or per feature mode = "off" in pool.toml.
+
+## 2026-09-22 22:05 — three merges on the user's word ("do the merges") and the kgpt deploy
+type: decision · goal: T-0760 (orchestrator), T-0109 (kgpt), T-0010 (kgpt-ios) · provenance: repo
+- orchestrator PR 20 → main 41be3d8 (checkpoints 2+3, shadow). Root main replayed onto origin/main (6020e26), daemon restarted (pid 42349) on the merged code; all program modules import in the root.
+- kgpt PR 44 → main 071601c (harness checkpoint 4, migration 0029); deployed on Hetzner with make up (deploy_main.py); health verified separately below.
+- kgpt-ios PR 18 → main c99047c (voice modality). Phone build waits for the phone (user not home).
+outcome: revert paths: git revert 41be3d8 -m 1 (orchestrator); kgpt: git revert 071601c -m 1 + make restart at the previous sha (rollback.py) if the gateway misbehaves, migration 0029 downgrades; kgpt-ios: git revert c99047c -m 1.
+
+## 2026-09-22 22:25 — user: "do that" (flip every existing active path; build the missing ones)
+type: decision · goal: T-0760 / kgpt T-0109 · provenance: repo, hetzner
+- kgpt Hetzner .env: KGPT_HARNESS_MODEL_ROUTING, JEV_ROUTING, JEV_TOOL_GATE, VOICE_ROUTING, DYNAMIC_TOOLS = active (were shadow/unset); .env backed up as .env.bak-<stamp> on the server; make restart; gateway healthy, flags visible in the container, no tracebacks. Revert: set the lines back to shadow (or remove) and make restart.
+- orchestrator pool.toml [instructions] mode = active (was shadow); daemon restarted (pid 44865). Revert: mode back to shadow.
+- Four active-path tasks filed under the reopened goal T-0760: context_router active packet (c7), tool_disclosure active allowlist + escalation (c6, depends on the first), handoff-aware routing (c6), read suppression (c6). Each keeps a safety refusal (falls back to shadow without a passing eval / enough evidence).
+outcome: watch the kgpt harness scorecards (GET /harness/scorecard, /harness/tool-economy, /harness/voice) tomorrow; demote any feature whose success or latency regresses (env line + make restart).
+
+## 2026-09-22 T-0847 handoff-routing spec-review hold resolved by the v2 respec T-0858, not a fix round
+type: decision · goal: T-0760 · tasks: T-0847,T-0858,T-0859 · provenance: repo
+- A fix round with depends_on on a never-executed held task never dispatches (bus.ready needs merged); the respec T-0858 binds all five T-0851 risks; T-0847 failed as superseded; constraints.respec_for=T-0847 set on T-0858
+outcome: watch T-0859 spec review once an account has headroom; revert path: git revert the plan commit "T-0847 spec-review hold resolved by the existing v2 respec T-0858", bus.update T-0858 constraints without respec_for

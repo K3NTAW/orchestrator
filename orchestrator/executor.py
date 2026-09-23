@@ -11,13 +11,37 @@ import inspect, json, re, subprocess, time
 from pathlib import Path
 from . import ROOT, bus
 import threading
-from . import scorecard, allocation, critical_path, duration, jev_route, decision_log
+from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
 FALLBACK_JOIN_TIMEOUT_S = 5
 _fallback_threads = []
 _fallback_threads_lock = threading.Lock()
+
+
+def _route_skills(task, cfg, exposure, choice=None):
+    mode = promotion.mode("skill_routing", cfg)
+    if mode not in ("shadow", "active"):
+        return {}
+    if choice is None:
+        from .spawn import _prepare_skills
+        choice = _prepare_skills(task, "codex_execute", cfg)
+    presented = choice["presented"] if choice["mode"] == "active" else choice["selected"]
+    decision_log.record("skill_selection", _state_target(task), role="codex_execute", candidates=choice["candidates"],
+                        hard_constraints=choice["mandatory"],
+                        deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
+                                       "mandatory": choice["mandatory"]}, selected=presented,
+                        rejected=choice["rejected"], reason=choice["reason"], mode=choice["mode"],
+                        jev=choice.get("jev"),
+                        extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
+                                                            "tokens_selected_l2", "ambiguous")}
+                              | {"role": "codex_execute", "demoted": choice["demoted"]})
+    return {"skills_selected": presented,
+            "skill_tokens_selected_l0": choice["tokens_selected_l0"],
+            "skill_tokens_selected_l2": choice["tokens_selected_l2"],
+            "skill_tokens_presented_l2": choice["skill_tokens_presented_l2"],
+            "skill_routing_mode": choice["mode"]}
 
 
 def _prune_fallback_threads():
@@ -99,6 +123,19 @@ def _state_target(task):
     return task.get("_run_task_id", task["id"])
 
 
+def _codex_skill_meta(message=""):
+    from . import skills_registry
+    records = skills_registry.load().get("skills", {})
+    skill_id = "executor/implement-spec"
+    record = records.get(skill_id, {})
+    names = re.findall(r"(?im)^Skill used:\s*([^\s]+)\s*$", message)
+    used = sorted({name if "/" in name else f"executor/{name}" for name in names
+                   if (name if "/" in name else f"executor/{name}") in records})
+    return {"skills_exposed": [skill_id], "skill_tokens_l0": int(record.get("est_tokens_l0") or 0),
+            "skills_used": used,
+            "skill_tokens_l2": sum(int(records[item].get("est_tokens_l2") or 0) for item in used)}
+
+
 def _run(pool, task, args, cwd, timeout, ex=None):
     cfg = pool.cfg["codex"]
     # dangerous_full_access (pool.toml): user decision 2026-09-16; otherwise workspace-write sandbox (container-safe default)
@@ -148,6 +185,18 @@ def _run(pool, task, args, cwd, timeout, ex=None):
                     cooldown_s=secs, **log)
         return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
     u = ev["usage"]
+    try:
+        skill_meta = _codex_skill_meta(ev["message"])
+        log["packet_meta"].update(skill_meta)
+        pipeline = dict(bus.get(log_task).get("pipeline") or {})
+        pipeline["skills_used"] = skill_meta["skills_used"]
+        bus.update(log_task, packet_meta=log["packet_meta"], pipeline=pipeline)
+        decision_log.outcome(log_task, "skill_selection", skills_used=skill_meta["skills_used"],
+                             skill_tokens_l2=skill_meta["skill_tokens_l2"],
+                             skill_recovery=sorted(set(skill_meta["skills_used"]) -
+                                                   set(log["packet_meta"].get("skills_selected") or [])))
+    except Exception:
+        pass
     bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
                 outcome="error" if ev["error"] else "done", usage=u, **log, **(_tokens(u) if u else {}))
     if ev["error"] or r.returncode:
@@ -403,8 +452,28 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
             return {"status": "budget", "reason": "budget reservation refused"}
         from .spawn import ensure_worktree
         wt = Path(t.get("worktree") or ensure_worktree(task_id))
-        from .spawn import packet_run_meta
+        from .spawn import _prepare_skills, packet, packet_run_meta
+        skill_choice = _prepare_skills(t, "codex_execute", pool.cfg)
+        if skill_choice and skill_choice["mode"] == "active":
+            briefing = packet(t, wt, cfg=pool.cfg, skills=skill_choice)
+            old_packet = packet_span(prompt)
+            prompt = prompt.replace(old_packet, briefing, 1) if old_packet else briefing + "\n" + prompt
         t = {**t, "packet_meta": packet_meta if packet_meta is not None else packet_run_meta(packet_span(prompt))}
+        try:
+            skill_meta = _codex_skill_meta()
+            t["packet_meta"].update(skills_exposed=skill_meta["skills_exposed"],
+                                    skill_tokens_l0=skill_meta["skill_tokens_l0"])
+            if promotion.mode("skill_routing", pool.cfg) in ("shadow", "active"):
+                t["packet_meta"].update(_route_skills(t, pool.cfg, skill_meta, skill_choice))
+            else:
+                decision_log.record("skill_selection", task_id, role="codex_execute", candidates=skill_meta["skills_exposed"],
+                                hard_constraints=["static exposure (stage 1)"],
+                                deterministic={"role": "codex_execute", "task_class": scorecard.task_class(t),
+                                               "exposed": skill_meta["skills_exposed"],
+                                               "skill_tokens_l0": skill_meta["skill_tokens_l0"]},
+                                    selected=skill_meta["skills_exposed"], reason="stage1 static", mode="shadow")
+        except Exception:
+            pass
         bus.update(task_id, packet_meta=t["packet_meta"])
         bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
         ex.roll_day(); ex.day_tasks += 1

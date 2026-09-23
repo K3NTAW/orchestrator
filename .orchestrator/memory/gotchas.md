@@ -270,6 +270,7 @@ type: gotcha · goal: T-0445 · provenance: repo
 - external tests-green on goal/T-0445 head d7b942a: FAIL test_run_claims_before_launch_so_concurrent_callers_launch_once and test_tick_autonomous_launches_at_most_one_decision_per_tick; the two alone, the module alone and a second full run were all green; the merge queue's gate on the same sha was green
 - treat as flaky under full-suite timing (thread or shared-state leak from an earlier module, same family as the tests.test_cli autostart leak); rerun once before writing any fix round; candidate for the H7 flaky rerun list
 outcome: no fix round; if it recurs twice more, spec an isolation fix in tests/test_planner_runs.py setUp
+- recurrence 1 of 2 (2026-09-22 15:03): external gate on wt/T-0771 4ba6bb0 failed test_run_claims_before_launch_so_concurrent_callers_launch_once and test_run_launches_once_per_key while a Codex run and a review ran on the machine; module alone green twice, second full run green (1027, 118s). One more recurrence triggers the isolation fix.
 
 ## 2026-09-20 Fix rounds on the Phase F daemon can land on different branches: one fix round commits on its own task branch, the next may commit on the parent branch
 type: gotcha · goal: T-0445 · tasks: T-0463,T-0473,T-0475,T-0476 · provenance: repo
@@ -367,3 +368,91 @@ type: gotcha · goal: T-0674 · tasks: T-0751,T-0753,T-0754 · provenance: repo
 - B2 v3 approved at d05749e; B3 landed planner_runs.py changes; rebase onto goal/T-0674 changed the diff hash; merge returned rebase_changed_diff and the daemon held the task with hold_reason merge rebase_changed_diff
 - recovery: create a review task (inputs [task]) and spawn_review it on the already-rebased worktree head, then merge(task) after approve; merge compares before/after diff hashes on the (now no-op) rebase and proceeds
 outcome: backlog c3: daemon respawns a review automatically on rebase_changed_diff instead of holding
+
+## 2026-09-21 daemon --once cannot dispatch: the executor thread dies with the process and the dispatched_at stamp then blocks every retry
+type: gotcha · goal: T-0755 · tasks: T-0015 · provenance: repo
+- kgpt T-0015 2026-09-21 18:51: a loop of orchestrator daemon --once stamped pipeline.dispatched_at, spawned the Codex thread, and exited; the task stayed queued with no worker and later passes no-oped on the stamp. Gate and merge stages are synchronous and work under --once.
+outcome: remedy: daemon.clear_stage(tid, 'dispatched_at', status='queued', pid=None) then a long-lived orchestrator daemon (background Bash, 10 min cap, re-arm) or the MCP-hosted daemon
+
+## 2026-09-21 orchestrator goal start: headless Planners on account B died with 'You are out of usage credits'; the goal record stays running=exited with no PR and the daemon that hosted their worktrees dies with them
+type: gotcha · goal: T-0755 · provenance: repo
+- 2026-09-21 18:43 both kgpt T-0014 and kgpt-ios T-0006 Planners exited within 5 minutes (kgpt after 17 turns, no child task; kgpt-ios after filing two tasks, one merged). planner log is one JSON line with is_error true. Codex executors are unaffected.
+- kgpt worktree gate gaps found while taking over: .env.test is untracked so database tests skip (419 skips) in wt/, clients/web/node_modules is absent so npm run typecheck fails; fixed in kgpt .orchestrator/tests.sh e200247 (sources the main checkout .env.test, symlinks node_modules)
+outcome: when a headless Planner dies, the interactive Planner can finish from the orchestrator repo: ORCH_ROOT=<repo> uv run --project orchestrator python -c 'from orchestrator import bus, daemon' for bus edits, daemon --once for gate/merge, a long-lived daemon for dispatch; bus.update refuses spec changes, so a round-2 delta is a new task with worktree preset to the old one
+
+## 2026-09-21 three spawn.run_worker launches started in the same second race on .git/config: two worktree adds fail with 'could not lock config file .git/config: File exists' and the tasks stay queued
+type: gotcha · goal: T-0024 · tasks: T-0025,T-0027 · provenance: repo
+- kgpt 2026-09-21 20:48: nohup'd run_worker for T-0025/26/27 in one shell loop; only T-0026 got its worktree, the other two died in ensure_worktree (git worktree add -b task/T-xxxx origin/main writes the upstream config); the daemon serialises dispatch so it never hits this
+outcome: launch by-hand workers one at a time (wait until the task shows running before starting the next), or through the daemon; candidate fix c2: retry the worktree add once on the config-lock error in spawn.git/ensure_worktree
+
+## 2026-09-21 a Planner commit on the goal branch made while a task merge was in flight was dropped by merge(); and every spec_review request_changes spawns an automatic re-spec round that duplicates the Planner's own v2/v3 spec
+type: gotcha · goal: T-0024 · tasks: T-0028,T-0031,T-0033,T-0034,T-0036 · provenance: repo
+- kgpt 2026-09-21 20:57: tests.sh commit ce10e73 landed on goal/T-0024 via a temp worktree while T-0028 was between gate and merge; after merge() goal/T-0024 pointed at e0dee35 whose parent was the pre-commit head, so ce10e73 was gone (re-applied as a4e8d26 once the branch was quiet)
+- the daemon created T-0033 (fix round 1) and T-0036 (fix round 2) after spec reviews T-0030 and T-0032 asked for changes, although the Planner had already filed T-0031 and T-0035 with the changes folded in; each had to be marked failed before dispatch
+outcome: commit to a goal branch only when no child is in gate or merge (pipeline.gated_at_done set and merged_at_done unset means in flight); after filing a v2 spec by hand, immediately fail the auto re-spec round (title fix round N, fix_round_for may be null); backlog c3: daemon skips the auto re-spec when a newer sibling task with the same title prefix exists
+
+## 2026-09-21 acceptance parser _TEST_ID matches tests/x.py::name inside kernel/tests/x.py::name and holds the task with a false gate_red; the headless planner-decision re-spec writes exactly such ids, so every kgpt fix round it authors is held
+type: gotcha · goal: T-0024 · tasks: T-0017,T-0052,T-0053 · provenance: repo
+- orchestrator/acceptance.py:8 _TEST_ID requires the path to start at tests/; kgpt keeps tests under kernel/tests and gateway/tests, so missing_tests looks for wt/tests/x.py and reports 'test not defined'; seen on T-0017 (2026-09-21 19:20) and again on T-0052 (22:20, acceptance written by the daemon's planner-decision run)
+- workaround used twice: re-file the round with acceptance phrased without path::name ids (name the test function and module in words) and, when the work is already committed, post the result directly so the daemon gates, reviews and merges
+outcome: fix (c2, orchestrator): let _TEST_ID accept a directory prefix and resolve the path relative to the worktree, falling back to a glob for **/tests/x.py; until merged, Planner and headless specs for kgpt must avoid path::name test ids
+
+## 2026-09-21 merge rebase_changed_diff holds a reviewed task forever: the daemon has no re-review path after the rebase changes the diff
+type: gotcha · goal: T-0024 · tasks: T-0057 · provenance: repo
+- kgpt 2026-09-21 22:47: P20 fix round T-0057 (review T-0059 approve on be82d26) rebased onto goal/T-0024, which had taken P1a/P1b/P1c since the worktree was cut; the diff hash changed (generated packages/api-types and migration neighbours), merge.py returned rebase_changed_diff, the daemon set hold_reason 'merge rebase_changed_diff' and nothing re-reviews
+outcome: manual remedy: daemon.clear_stage(tid, 'gated_at', clear_pipeline_keys=('first_green_at','reviewed_sha','reviews_expected','review_reason','merged_at','merged_at_lease','merged_at_done','stale_check','failure_kind','auto_fix_skipped'), status='done', hold_reason=None) so the daemon re-gates the rebased worktree, spawns a fresh review on the new head and merges; backlog c3: daemon does this itself on rebase_changed_diff (already listed)
+
+## 2026-09-22 acceptance phrased without path::name ids (the kgpt parser workaround) disables the H6 named-test check: Codex shipped P3a with none of the required test files and the gate reported green; only the code review caught it
+type: gotcha · goal: T-0073 · tasks: T-0085,T-0087 · provenance: repo
+- kgpt 2026-09-22 01:03: T-0085 committed a34d2a1 with jev.py, jev_classify.py, chat.py wiring, docs, but no kernel/tests/test_harness_jev.py and no jev cases in gateway/tests/test_routing_modes.py; gate_reds 0 because tests.sh only runs the suite that exists; review T-0087 request_changes listed the missing tests
+outcome: until acceptance.py honours directory prefixes, kgpt specs must keep naming test modules and functions in words AND the Planner must check the diff stat for the named test files before trusting a green gate (as CLAUDE.md said pre-H6); fix c2 in orchestrator/acceptance.py stays top of the backlog
+
+## 2026-09-22 two fix rounds resuming the same Codex thread: the second dies at once with 'thread-store conflict: already has an active writer'; clear the root's codex_thread to force a fresh session in the same worktree
+type: gotcha · goal: T-0073 · tasks: T-0050,T-0094,T-0095,T-0096 · provenance: repo
+- kgpt 2026-09-22 01:52: the daemon's automatic fix round T-0094 and the Planner's T-0095 both resumed root T-0093's thread within seconds; T-0095 failed before starting (same as T-0050 on 2026-09-21). resume_plan() picks resume whenever the root has a codex_thread and a compatible worktree
+outcome: when the daemon has already opened an auto fix round, do not file a second one for the same root (retire one first); if a resume dies with the thread-store conflict, bus.update(root, codex_thread=None) and file the next round, which then runs fresh in the same worktree
+
+## 2026-09-22 a green gate in the dev venv does not prove the production image can import the code: kgpt PR 42 shipped jev.py importing httpx, a root-workspace-only dependency, and the gateway crash-looped after deploy
+type: gotcha · goal: T-0073 · tasks: T-0085,T-0106,T-0107 · provenance: repo
+- 2026-09-22 10:56: after make up on main 9161840 the gateway restarted in a loop (ModuleNotFoundError: No module named 'httpx'); the kernel package depends on httpx2 (push.py uses it), httpx exists only in the workspace root pyproject so the worktree gate and reviews passed; the Planner's spec had asserted httpx was already a dependency without checking kernel/pyproject.toml
+- detection: the post-deploy health wait reported healthz 000 and docker logs showed the traceback within two minutes; remedy: rollback.py checked out 57932e5 and rebuilt; hotfix goal T-0106/T-0107 switches jev.py to httpx2 and adds an AST guard test against top-level httpx imports in kgpt_kernel
+outcome: rule: a spec that adds an import names the package's own pyproject dependency line; the post-deploy check must include container restart status and a log grep for Traceback, not only healthz; backlog: a CI step that imports every kgpt_kernel module inside the built image
+
+## 2026-09-22 rolling kgpt back with make up fails once the database is ahead of the checkout (alembic cannot locate the newer revision); make restart rebuilds the gateway without migrating and restores service
+type: gotcha · goal: T-0106 · provenance: repo
+- 2026-09-22 11:08: rollback.py checked out 57932e5 and ran make up; make migrate exited 255 because the DB was at 0028 and the checkout only knows 0027, so compose up never ran and the crash-looping gateway stayed up; make restart (compose up -d --build --force-recreate gateway) at 57932e5 brought healthz 200 within 30 s; the extra nullable column context_layers is ignored by the old code
+outcome: rollback recipe: git checkout the good sha, make restart, verify healthz and docker logs; only downgrade the database when a migration is not backward-compatible
+
+## 2026-09-22 an executor that stops to ask a question posts it as its result; the daemon gates the untouched worktree green and merges an empty diff, marking the task done
+type: gotcha · goal: T-0109 · tasks: T-0011 · provenance: repo
+- kgpt-ios 2026-09-22 12:18: Codex astra answered 'Blocked: the voice sender is in Sources/Core/VoiceConversation.swift, excluded by your final strict scope. May I include that helper?' with no commit; the daemon gated wt (build green, nothing changed) and merged T-0011 into goal/T-0010 with zero files; the task shows done/merged
+outcome: always check git diff --stat of the merge before trusting done; backlog c2 (orchestrator): the gate or merge refuses a result whose worktree has no commits ahead of the base, holding the task with hold_reason no_diff instead; spec rule: scope every file the acceptance implies (the sender helper here) and say 'do not ask, implement'
+
+## 2026-09-22 two tasks becoming ready in the same daemon tick race on .git/config during worktree creation; the loser fails at once with 'dispatch error: None'
+type: gotcha · goal: T-0109 · tasks: T-0119,T-0125 · provenance: repo
+- kgpt 2026-09-22 13:53: T-0119 and T-0125 both became ready when T-0118 merged; the daemon dispatched both in one tick, T-0119 got its worktree, T-0125 failed with result reason 'dispatch error: None' (pipeline.dispatch_error None, no worktree). Same root cause as the by-hand run_worker race recorded 2026-09-21
+outcome: when two tasks would become ready together, chain them with depends_on (T-0137 now depends on T-0126 as well); fix c2 in orchestrator: serialize worktree creation behind a lock or retry once on the config-lock error, and record the real error text in pipeline.dispatch_error
+
+## 2026-09-22 15:20 — tests/_harness.py copies the live pool.toml: any config flip turns the base suite red for every task (T-0760; T-0771, T-0775)
+- Symptom: tests/test_daemon.py auto_fix_round tests errored `KeyError: 'T-0043'` (autonomous branch calls planner_runs.build_ctx -> bus.get(fake parent)) after autonomous=true (2026-09-21 18:30); tests/test_pool.py::test_affinity_reserve_cooldown_budget failed `'B' != 'A'` after planner was added to B's role_affinity (18:40). Neither task under test touched those areas; T-0765 (markdown only) held gate_red.
+- Fix (T-0771 + fix round T-0775, merged into goal/T-0760): the harness rewrites the copied pool.toml (autonomous=false, planner stripped from B's role_affinity); auto_fix_round falls back to the routine path with a notify warning when build_ctx raises. Tests that need a live setting opt in explicitly.
+- Rule: after any pool.toml flip, run the suite once before dispatching. A gate_red whose failures name modules outside the task's scope is a base-suite problem: hold the task (hold_reason awaiting_base_fix) instead of spending a fix round on it; when a fix round resumes a Codex thread, the delta carries only failures + acceptance, not the Planner's fix spec (T-0775 edited _harness.py, outside the spec's scope, and that was the better fix).
+- Revert path: git revert the T-0771 merge commit on goal/T-0760.
+
+## 2026-09-22 16:35 — a spec that quotes a double-brace placeholder wedges dispatch silently on the main execute path (T-0773; recurrence of the 2026-09-21 render gotchas)
+- Symptom: task stays queued with pipeline.dispatched_at stamped and re-stamped every lease, no event, no hold, no execute run row (only memory-recall rows). Diagnosed by rendering the prompt by hand: spawn.render raised `unfilled_placeholder: spec` because the spec text contained the literal token.
+- Cause: daemon.dispatch main loop (daemon.py ~853) renders outside any try/except; R22 covered _dispatch_fresh_fix and run_worker only. _dispatch_worker also ignores executor.start statuses other than done/failed (held/budget/refused/fallback leave the task queued).
+- Rule: never quote double-brace tokens in specs, acceptance or review comments (describe them in words). A queued task with dispatched_at stamped and no execute run row after one lease: render the prompt by hand first (spawn.packet + spawn.render) before suspecting Codex.
+- Fix task filed (daemon holds render errors visibly + handles every start status); until merged, re-file the task with the tokens described in words.
+
+## 2026-09-22 19:25 — workers held on "no account with headroom" during a quota cooldown stay held after the cooldown ends (T-0760; T-0817–T-0820)
+- Symptom: account B hit a quota cooldown (17:48–18:06); every review and spec review spawned in that window went held with hold_reason "no account with headroom" and their roots went "reviews failed: T-08xx" or "spec_review request_changes"-like holds. After B freed up nothing moved for 20 minutes.
+- Cause: the daemon's respawn logic covers dead/unclaimed workers, not workers that were held by the account picker; a held review is never re-picked.
+- Remedy used: `bus.update(tid, status="queued", hold_reason=None)` then `spawn.run_worker(tid)` one at a time (python, ORCH_ROOT set) once `pool.pick("review")` returns an account; then clear the root's "reviews failed" hold. Note: account A counts this session's Planner tokens (planner_day_tokens) toward its utilization, so a long interactive session pushes every worker onto B.
+- Backlog: c3 daemon task: re-queue "no account with headroom" holds automatically when pick() succeeds again (bounded retries), and let review respawn count them.
+
+## 2026-09-22 review of a fix round whose root merged first sees an empty scoped diff and rejects
+type: gotcha · goal: T-0760 · tasks: T-0809,T-0827,T-0833,T-0837 · provenance: repo
+- orchestrator/spawn.py:887 scoped_diff diffs goal/<parent>...HEAD; once merge() rebases the task branch onto the goal head the diff is empty, so T-0833 rejected round 2 of T-0809 as a no-op although 049cb87 held the fix
+- daemon accepted/merged T-0809 at 18:46 before the fix round's review T-0833 finished (accepted_at == T-0833 created_at), so the security review of the round-2 diff never had a diff
+outcome: remedy: supersede the fix round, file a review task whose spec names the explicit range (T-0837). backlog c4: daemon must not merge a root while a fix-round review is pending, and reviews should diff base_sha..HEAD not goal...HEAD

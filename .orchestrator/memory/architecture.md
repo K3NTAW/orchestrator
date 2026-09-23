@@ -1,4 +1,4 @@
-repo map 0f7856d 2026-09-21
+repo map 0f550d7 2026-09-22
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
@@ -22,6 +22,10 @@ repo map 0f7856d 2026-09-21
 
 ## concurrency.py — Pure adaptive-concurrency selection for scheduler-ready tasks.
 
+## context_router.py — Pure, deterministic routing of canonical evidence into context levels.
+
+## context_scorecard.py — Context-economy reporting from run-log packet telemetry.
+
 ## critical_path.py — Deterministic critical-path priority for ready execute tasks.
 
 ## daemon.py — Heartbeat and pipeline driver: requeue running tasks whose process died, notify…
@@ -32,6 +36,8 @@ repo map 0f7856d 2026-09-21
 
 ## duration.py — Empirical execution-duration estimates for scheduler task ranking.
 
+## evidence.py — Canonical, content-addressed evidence for deterministic context selection.
+
 ## executor.py — Executor: GPT-6 Astra via ``codex exec``.
 
 ## failures.py — Validated failure evidence and conservative change-risk classification.
@@ -40,9 +46,13 @@ repo map 0f7856d 2026-09-21
 
 ## goals.py — Goal lifecycle: launch a headless Planner session against any target repo, track…
 
+## handoff_scorecard.py — Read-only economics for executor and Planner handoffs.
+
 ## handover.py — Auto-handover: refreshes a resumable snapshot at the end of plan.md so a fresh P…
 
 ## install.py — Scaffold the §9 orchestrator layout into another repo, so `ORCH_ROOT=<target>` a…
+
+## instructions.py — Deterministic conditional instruction selection and composition.
 
 ## interference.py — Deterministic, side-effect-free interference checks for orchestrator tasks.
 
@@ -80,14 +90,4 @@ repo map 0f7856d 2026-09-21
 
 ## planner_taxonomy.py — Purpose-first taxonomy for Planner decisions.
 
-## planner_telemetry.py — Per-invocation Planner telemetry and goal-level usage attribution.
-
-## pool.py — Account pool: per-account 5h window / daily budget / cooldown, least-loaded-with…
-
-## promotion.py — Evidence-based, shadow-first feature promotion recommendations.
-
-## repomap.py — A compact, static map of the orchestrator package for worker context.
-
-## roadmap.py — Machine-readable implementation status for the orchestrator roadmaps.
-
-## sched_scorecard.py — Join scheduler predictions to
+## planner_telemetry.py — Per-invocation Planner telemetry 
