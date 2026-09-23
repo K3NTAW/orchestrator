@@ -16,6 +16,15 @@ def evidence(**overrides):
 
 
 class TestPromotion(unittest.TestCase):
+    def test_jev_skill_routing_feature_counts_verdict_rows(self):
+        self.assertEqual(promotion.FEATURES["jev_skill_routing"]["default"], "shadow")
+        with tempfile.TemporaryDirectory() as root:
+            common = dict(candidates=["x"], hard_constraints=[], deterministic={}, selected=[],
+                          rejected=["x"], reason="ambiguous", mode="shadow")
+            decision_log.record("skill_selection", "T-1", jev={"decisions": {}}, root=root, **common)
+            decision_log.record("skill_selection", "T-2", jev=None, root=root, **common)
+            self.assertEqual(promotion.collect("jev_skill_routing", root), {"n": 1})
+
     def test_context_features_default_shadow(self):
         features = ("context_router", "tool_disclosure", "conditional_instructions")
         for feature in features:

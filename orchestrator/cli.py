@@ -434,7 +434,8 @@ def main():
     elif a.cmd == "scorecard":
         if a.skills:
             from . import skill_scorecard
-            card = {"by_skill": skill_scorecard.by_skill(scorecard.STATE, skill_group_by)}
+            card = {"by_skill": skill_scorecard.by_skill(scorecard.STATE, skill_group_by),
+                    "jev_by_role": skill_scorecard.jev_metrics(scorecard.STATE)}
             if a.marginal:
                 card["marginal"] = skill_scorecard.marginal(
                     scorecard.STATE, a.marginal, skill_group_by,

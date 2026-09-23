@@ -39,6 +39,9 @@ FEATURES = OrderedDict((
     ("skill_routing", {"table": "skills", "key": "mode",
                        "modes": ("off", "shadow", "active"),
                        "default": "shadow", "evidence": "skill_routing"}),
+    ("jev_skill_routing", {"table": "skills", "key": "jev_mode",
+                           "modes": ("off", "shadow", "active"),
+                           "default": "shadow", "evidence": "jev_skill_routing"}),
 ))
 
 CRITERIA = {
@@ -170,6 +173,10 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "jev_skill_routing":
+        rows = [row for row in decision_log.read_all(root=Path(root))
+                if row.get("kind") == "skill_selection" and isinstance(row.get("jev"), dict)]
+        return {"n": len(rows)}
     if feature == "skill_routing":
         rows = [row for row in decision_log.read_all(root=root)
                 if row.get("kind") == "skill_selection"

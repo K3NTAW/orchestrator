@@ -324,6 +324,34 @@ def recovery_rate(root, role, since_s):
     return round(len(recovered) / len(selections), 3)
 
 
+def jev_metrics(root=STATE):
+    """Return Jev selection/use agreement and actual calls per routed spawn by role."""
+    rows = decision_log.read_all(root=Path(root))
+    outcomes = {(row.get("subject"), row.get("decision_kind")): row for row in rows
+                if row.get("kind") == "outcome"}
+    buckets = defaultdict(lambda: {"spawns": 0, "calls": 0, "selected": 0, "used": 0})
+    for row in rows:
+        if row.get("kind") != "skill_selection" or row.get("reason") == "stage1 static":
+            continue
+        role = row.get("role") or (row.get("extra") or {}).get("role") or "unknown"
+        bucket = buckets[role]
+        bucket["spawns"] += 1
+        verdict = row.get("jev")
+        if not isinstance(verdict, dict):
+            continue
+        bucket["calls"] += verdict.get("source") == "jev"
+        chosen = {skill_id for skill_id, decision in (verdict.get("decisions") or {}).items()
+                  if isinstance(decision, dict) and decision.get("select")}
+        used = set((outcomes.get((row.get("subject"), "skill_selection")) or {}).get("skills_used") or [])
+        bucket["selected"] += len(chosen)
+        bucket["used"] += len(chosen & used)
+    return {role: {"jev_agreement_rate": round(value["used"] / value["selected"], 3)
+                   if value["selected"] else 0.0,
+                   "jev_calls_per_spawn": round(value["calls"] / value["spawns"], 3)
+                   if value["spawns"] else 0.0}
+            for role, value in sorted(buckets.items())}
+
+
 def build(root=STATE):
     root = Path(root)
     rows = []
@@ -413,4 +441,8 @@ def format_skill_analysis(card, group_by=("role", "task_class")):
         for row in card["redundancy"]:
             lines.append(f"{row['skill_a']}\t{row['skill_b']}\t{row['n']}\t{row['overlap']}\t"
                          f"{','.join(row['duplicated_script_invocations']) or '-'}\t{row['note']}")
+    if "jev_by_role" in card:
+        lines += ["", "role\tjev agreement rate\tjev calls per spawn"]
+        for role, row in card["jev_by_role"].items():
+            lines.append(f"{role}\t{row['jev_agreement_rate']}\t{row['jev_calls_per_spawn']}")
     return "\n".join(lines)

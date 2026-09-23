@@ -8,7 +8,7 @@ from orchestrator import skill_router, skills_registry
 def record(roles, triggers=(), l0=1, l2=2):
     return {"state": "active", "provenance": "builtin", "roles": roles,
             "task_classes": ["*"], "triggers": list(triggers),
-            "est_tokens_l0": l0, "est_tokens_l2": l2}
+            "est_tokens_l0": l0, "est_tokens_l2": l2, "version": "1"}
 
 
 class SkillRouterTests(unittest.TestCase):
@@ -65,6 +65,37 @@ class SkillRouterTests(unittest.TestCase):
                     self.assertEqual(result[f"tokens_selected_l{level}"], expected)
                 # Reading the real mandatory skill must not produce a recovery.
                 self.assertEqual(set(mandatory) - set(result["selected"]), set())
+
+    def test_jev_shadow_records_without_changing_selection(self):
+        records = {"scout/a": record(["scout"], ["impact"])}
+        verdict = {"decisions": {"scout/a": {"select": True}}, "source": "jev"}
+        with mock.patch("orchestrator.skills_registry.load", return_value={"skills": records}), \
+                mock.patch("orchestrator.jev_skills.classify", return_value=verdict):
+            result = skill_router.select({"title": "impact"}, "scout",
+                                         {"skills": {"jev_mode": "shadow"}})
+        self.assertEqual(result["selected"], [])
+        self.assertIs(result["jev"], verdict)
+
+    def test_jev_active_adds_selected_ambiguous_under_caps(self):
+        records = {"scout/a": record(["scout"], ["impact"])}
+        verdict = {"decisions": {"scout/a": {"select": True}}, "source": "jev"}
+        with mock.patch("orchestrator.skills_registry.load", return_value={"skills": records}), \
+                mock.patch("orchestrator.jev_skills.classify", return_value=verdict):
+            result = skill_router.select({"title": "impact"}, "scout",
+                                         {"skills": {"jev_mode": "active", "max_selected": 1}})
+        self.assertEqual(result["selected"], ["scout/a"])
+
+    def test_jev_active_respects_max_selected_headroom(self):
+        records = {"scout/a": record(["scout"], ["impact"]),
+                   "scout/b": record(["scout"], ["impact"])}
+        verdict = {"decisions": {item: {"select": True} for item in records}, "source": "jev"}
+        with mock.patch("orchestrator.skills_registry.load", return_value={"skills": records}), \
+                mock.patch("orchestrator.jev_skills.classify", return_value=verdict):
+            result = skill_router.select({"title": "impact"}, "scout",
+                                         {"skills": {"jev_mode": "active", "max_selected": 1}})
+        self.assertEqual(result["selected"], ["scout/a"])
+        self.assertEqual(result["jev"]["decisions"]["scout/b"]["status"],
+                         "jev_selected_not_added")
 
 
 if __name__ == "__main__":

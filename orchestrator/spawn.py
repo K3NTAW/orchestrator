@@ -103,6 +103,7 @@ def _skill_routing(task, role, cfg, exposure, choice=None):
                                        "mandatory": choice["mandatory"]},
                         selected=presented, rejected=choice["rejected"],
                         reason=choice["reason"], mode=choice["mode"],
+                        jev=choice.get("jev"),
                         extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
                                                             "tokens_selected_l2", "ambiguous")}
                               | {"role": role, "demoted": choice["demoted"],

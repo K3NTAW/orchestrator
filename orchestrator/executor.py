@@ -33,6 +33,7 @@ def _route_skills(task, cfg, exposure, choice=None):
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
                                        "mandatory": choice["mandatory"]}, selected=presented,
                         rejected=choice["rejected"], reason=choice["reason"], mode=choice["mode"],
+                        jev=choice.get("jev"),
                         extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
                                                             "tokens_selected_l2", "ambiguous")}
                               | {"role": "codex_execute", "demoted": choice["demoted"]})
