@@ -50,6 +50,7 @@ class WorkerControl(unittest.TestCase):
         self.assertEqual(task['result']['partial'], partial)
         self.assertEqual(task['result']['provenance'], ['worker_partial'])
         self.assertEqual(registry.get(self.tid)['status'], 'cancelled')
+        self.assertEqual(registry.events(self.tid)[0]['data']['cancel_reason'], 'Planner changed direction')
         registry.finish(self.tid, 'failed', 'process_error')
         self.assertEqual(registry.get(self.tid)['status'], 'cancelled')
 

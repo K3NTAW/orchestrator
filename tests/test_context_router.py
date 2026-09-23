@@ -13,6 +13,29 @@ def ev(kind, location, content, task=None, commit=""):
 
 
 class ContextRouterTests(unittest.TestCase):
+    def test_stale_source_preserves_scope_and_security_precedence(self):
+        item = ev("source_chunk", "orchestrator/auth.py:1-4", "code", commit="old")
+        for role, scope, cfg, expected in (
+                ("execute", ["orchestrator/auth.py"], {}, ("FULL", "in_scope_file")),
+                ("scout", ["orchestrator/auth.py"], {}, ("FULL", "in_scope_file")),
+                ("security_review", [], {"review": {"security_paths": ["orchestrator/*.py"]}},
+                 ("FULL", "security_path")),
+                ("execute", [], {}, ("HIDE", "stale"))):
+            with self.subTest(role=role, scope=scope):
+                routed = context_router.route({"id": "T", "scope": scope}, [item],
+                                              role=role, cfg=cfg, head_sha="new").items[0]
+                self.assertEqual((routed.level, routed.reason), expected)
+
+    def test_stale_test_result_preserves_failure_precedence(self):
+        for role, content, expected in (("review", "OK", "FULL"),
+                                        ("execute", "FAIL test_example", "FULL"),
+                                        ("execute", "OK", "HIDE")):
+            with self.subTest(role=role, content=content):
+                item = ev("test_result", "test_example", content, commit="old")
+                routed = context_router.route({"id": "T"}, [item], role=role,
+                                              head_sha="new").items[0]
+                self.assertEqual(routed.level, expected)
+
     def test_worker_partial_fresh_overlap_never_hidden_and_stale_hidden(self):
         item = evidence.make("worker_partial", "T-old:abc", "file: router.py", commit="abc",
                              provenance="worker_partial", scope=["router.py"])
