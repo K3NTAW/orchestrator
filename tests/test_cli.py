@@ -11,6 +11,24 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_memory_search_cli(self):
+        import shutil
+        source = Path(__file__).resolve().parents[1] / ".orchestrator" / "memory"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / ".orchestrator" / "memory"
+            target.mkdir(parents=True)
+            for name in ("decisions.md", "gotchas.md", "architecture.md", "model-notes.md"):
+                shutil.copy2(source / name, target / name)
+            with mock.patch.object(cli, "ROOT", root), mock.patch.object(sys, "argv", [
+                    "orchestrator", "memory", "migrate"]), contextlib.redirect_stdout(io.StringIO()):
+                cli.main()
+            output = io.StringIO()
+            with mock.patch.object(cli, "ROOT", root), mock.patch.object(sys, "argv", [
+                    "orchestrator", "memory", "search", "daemon", "--json"]), contextlib.redirect_stdout(output):
+                cli.main()
+            self.assertTrue(json.loads(output.getvalue()))
+
     def test_cli_roadmap_status_writes_json(self):
         with tempfile.TemporaryDirectory(dir=TMP) as directory:
             root = Path(directory)

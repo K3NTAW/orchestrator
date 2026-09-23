@@ -194,6 +194,14 @@ def main():
     sktransition = sksub.add_parser("transition"); sktransition.add_argument("id"); sktransition.add_argument("state")
     sktransition.add_argument("--reason", required=True)
     skrollback = sksub.add_parser("rollback"); skrollback.add_argument("id")
+    mem = sub.add_parser("memory"); memsub = mem.add_subparsers(dest="memory_cmd", required=True)
+    memsub.add_parser("migrate")
+    memsub.add_parser("rebuild")
+    ms = memsub.add_parser("search"); ms.add_argument("query", nargs="?", default="")
+    ms.add_argument("--kind"); ms.add_argument("--component"); ms.add_argument("--file"); ms.add_argument("--tag")
+    ms.add_argument("--since"); ms.add_argument("--tier"); ms.add_argument("--limit", type=int, default=20)
+    ms.add_argument("--json", action="store_true")
+    msh = memsub.add_parser("show"); msh.add_argument("id")
     for command in ("discover", "import"):
         sksource = sksub.add_parser(command); sksource.add_argument("source")
     for command in ("inspect", "check-upstream", "quarantine"):
@@ -201,7 +209,28 @@ def main():
         if command == "quarantine":
             skaction.add_argument("--reason", default="external skill quarantine")
     a = ap.parse_args()
-    if a.cmd == "scorecard":
+    if a.cmd == "memory":
+        from . import memory_store
+        if a.memory_cmd == "migrate":
+            print(json.dumps(memory_store.migrate(ROOT), sort_keys=True))
+        elif a.memory_cmd == "rebuild":
+            print(json.dumps(memory_store.rebuild(ROOT), sort_keys=True))
+        elif a.memory_cmd == "show":
+            record = memory_store.get(a.id, ROOT)
+            if record is None:
+                raise SystemExit(1)
+            print(json.dumps(record, indent=2, sort_keys=True))
+        else:
+            result = memory_store.search(a.query, kind=a.kind, component=a.component, file=a.file,
+                                         tag=a.tag, date_from=a.since, tier=a.tier, limit=a.limit, root=ROOT)
+            if a.json:
+                print(json.dumps(result["records"], indent=2, sort_keys=True))
+            else:
+                for record in result["records"]:
+                    print(f"{record['id']}\t{record['date']}\t{record['kind']}\t{record['title']}")
+                for warning in result["metadata"]["warnings"]:
+                    print(f"warning: {warning}", file=sys.stderr)
+    elif a.cmd == "scorecard":
         if (a.group_by is not None or a.marginal is not None or a.redundancy) and not a.skills:
             ap.error("--group-by, --marginal and --redundancy require --skills")
         skill_group_by = ("role", "task_class")

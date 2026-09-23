@@ -8,6 +8,14 @@ from orchestrator import cli, install
 
 
 class Install(unittest.TestCase):
+    def test_memory_index_is_ignored(self):
+        self.assertIn(".orchestrator/memory/index.sqlite*", install.IGNORE_LINES)
+        ignore = (Path(__file__).resolve().parents[1] / ".gitignore").read_text().splitlines()
+        self.assertIn(".orchestrator/memory/index.sqlite*", ignore)
+        for suffix in ("", "-wal", "-shm"):
+            self.assertTrue(Path(f".orchestrator/memory/index.sqlite{suffix}").match(
+                ".orchestrator/memory/index.sqlite*"))
+
     def test_creates_scaffold_and_rewrites_mcp(self):
         target = scratch_repo(TMP / "install-target").resolve()
         report = install.install(target, orch_repo=REPO)

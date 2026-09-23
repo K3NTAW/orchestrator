@@ -8,6 +8,7 @@ PACKAGE_REPO = Path(__file__).resolve().parents[1]  # this repo, regardless of O
 
 IGNORE_LINES = [
     "wt/", ".orchestrator/bus.sqlite*", ".orchestrator/runs/", ".orchestrator/pool_state.json",
+    ".orchestrator/memory/index.sqlite*",
     ".orchestrator/merge.lock", ".orchestrator/bus.lock", ".orchestrator/daemon.lock",
     "graphify-out/", ".mcp.json",
 ]
