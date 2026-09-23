@@ -207,6 +207,8 @@ def main():
     mem = sub.add_parser("memory"); memsub = mem.add_subparsers(dest="memory_cmd", required=True)
     memsub.add_parser("migrate")
     memsub.add_parser("rebuild")
+    mh = memsub.add_parser("hot"); mh.add_argument("--json", action="store_true")
+    memsub.add_parser("compact")
     ms = memsub.add_parser("search"); ms.add_argument("query", nargs="?", default="")
     ms.add_argument("--kind"); ms.add_argument("--component"); ms.add_argument("--file"); ms.add_argument("--tag")
     ms.add_argument("--since"); ms.add_argument("--tier"); ms.add_argument("--limit", type=int, default=20)
@@ -254,7 +256,22 @@ def main():
         if a.memory_cmd == "migrate":
             print(json.dumps(memory_store.migrate(ROOT), sort_keys=True))
         elif a.memory_cmd == "rebuild":
-            print(json.dumps(memory_store.rebuild(ROOT), sort_keys=True))
+            result = memory_store.rebuild(ROOT)
+            result["next"] = "run orchestrator memory compact to restore hot tier marks"
+            print(json.dumps(result, sort_keys=True))
+        elif a.memory_cmd in ("hot", "compact"):
+            from . import memory_hot
+            result = memory_hot.compact(ROOT)
+            if a.memory_cmd == "hot":
+                if a.json:
+                    print(json.dumps({key: value for key, value in result.items() if key != "view"},
+                                     indent=2, sort_keys=True))
+                else:
+                    print(result["view"], end="")
+                    print(f"tokens={result['tokens']} pinned={len(result['pinned'])} "
+                          f"dropped={len(result['dropped'])} over_budget={str(result['over_budget']).lower()}")
+            else:
+                print(f"pinned={len(result['pinned'])} dropped={len(result['dropped'])}")
         elif a.memory_cmd == "show":
             record = memory_store.get(a.id, ROOT)
             if record is None:

@@ -11,6 +11,23 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_memory_hot_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".orchestrator/memory").mkdir(parents=True)
+            (root / ".orchestrator/pool.toml").write_text(
+                '[memory]\nhot_budget_tokens=100\nhot_recent_days=14\nhot_never_compact=[]\n')
+            from orchestrator import memory_store
+            memory_store.add(memory_store.Record(id="cli-hot", kind="reference", title="CLI hot",
+                                                 date="2026-09-23", body="body"), root)
+            for args in (("hot", "--json"), ("compact",)):
+                output = io.StringIO()
+                with mock.patch.object(cli, "ROOT", root), mock.patch.object(
+                    sys, "argv", ["orchestrator", "memory", *args]
+                ), contextlib.redirect_stdout(output):
+                    cli.main()
+                self.assertIn("pinned", output.getvalue())
+
     def test_workers_cli_lists_active(self):
         from orchestrator import worker_registry as registry
         task = bus.create_task("cli worker", "s", ["a"], ["x.py"])

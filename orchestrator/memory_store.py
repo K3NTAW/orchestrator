@@ -311,6 +311,32 @@ def search(query, *, kind=None, component=None, file=None, task_class=None, mode
     return {"records": rows, "metadata": {"fts5": fts, "warnings": warnings}}
 
 
+def all_records(root=ROOT, tier=None):
+    """Return the complete deterministic record set, optionally restricted by tier."""
+    db, _ = _open(Path(root))
+    try:
+        if tier is None:
+            rows = db.execute("SELECT * FROM records ORDER BY date DESC, id").fetchall()
+        else:
+            rows = db.execute(
+                "SELECT * FROM records WHERE tier = ? ORDER BY date DESC, id", (tier,)
+            ).fetchall()
+        return [_decode(row) for row in rows]
+    finally:
+        db.close()
+
+
+def set_tiers(mapping, root=ROOT):
+    """Set record tiers in one transaction; unknown record ids are ignored."""
+    db, _ = _open(Path(root))
+    try:
+        db.executemany("UPDATE records SET tier = ? WHERE id = ?",
+                       [(tier, record_id) for record_id, tier in mapping.items()])
+        db.commit()
+    finally:
+        db.close()
+
+
 def get(record_id, root=ROOT):
     db, _ = _open(Path(root))
     try:
