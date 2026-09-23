@@ -1988,3 +1988,122 @@ class PacketMemoryTiers(unittest.TestCase):
             self.assertFalse(meta["hot_fresh"])
             self.assertFalse(self.record.call_args.kwargs["extra"]["hot_fresh"])
         self.build.assert_not_called()
+
+
+class OutputContracts(unittest.TestCase):
+    def worker(self, mode, output, *, role="review", repaired=None, posted=None):
+        from orchestrator import contracts
+        source = bus.create_task("contract source", "spec", ["valid"], ["a.py"], role="execute")
+        task = bus.create_task("contract review", "spec", ["valid"], ["a.py"], role=role,
+                               inputs=[source["id"]])
+        task_id = task["id"]
+        pool = P.Pool()
+        pool.cfg["contracts"] = {"mode": mode, "repair_budget_usd": .2}
+        original_run = spawn.run_claude
+        calls = []
+        def run(*args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                if posted is not None:
+                    bus.post_result(task_id, dict(posted))
+                return {"status": "done", "output": {"result": output if isinstance(output, str) else json.dumps(output),
+                                                      "session_id": "contract-session"}}
+            return original_run(*args, **kwargs)
+        process = mock.Mock(pid=4242, returncode=0)
+        process.communicate.return_value = (json.dumps({"result": json.dumps(repaired if repaired is not None else {"verdict": "approve", "comments": []}),
+            "usage": {"input_tokens": 3, "output_tokens": 4}, "total_cost_usd": .01}), "")
+        with mock.patch.object(spawn, "Pool", return_value=pool), \
+                mock.patch.object(pool, "pick", return_value=pool.get("A")), \
+                mock.patch.object(pool, "reserve", return_value={}), \
+                mock.patch.object(pool, "release"), mock.patch.object(pool, "record"), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "spec_review_packet", return_value="packet"), \
+                mock.patch.object(spawn, "review_packet", return_value="packet"), \
+                mock.patch.object(spawn, "packet", return_value="packet"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                mock.patch.object(spawn.subprocess, "Popen", return_value=process) as popen:
+            spawn.run_worker(task_id)
+        return bus.get(task_id), calls, popen
+
+    def test_output_contract_shadow_logs_row_and_keeps_legacy_behaviour(self):
+        task, calls, popen = self.worker("shadow", {"verdict": "LGTM", "comments": []})
+        self.assertEqual(task["result"]["verdict"], "LGTM")
+        self.assertEqual(len(calls), 1)
+        popen.assert_not_called()
+        row = spawn.decision_log.explain(task["id"], kinds=["output_contract"])[0]
+        self.assertEqual(row["selected"], "repair")
+        self.assertEqual(row["deterministic"]["repaired_keys"], ["verdict"])
+        self.assertEqual(row["mode"], "shadow")
+        task, _, _ = self.worker("shadow", {"summary": "no verdict"})
+        self.assertEqual(task["status"], "failed")
+
+    def test_output_contract_active_repair_resume_once_within_budget(self):
+        task, calls, popen = self.worker("active", {"summary": "no verdict"})
+        self.assertEqual(task["result"]["verdict"], "approve")
+        self.assertEqual(len(calls), 2)
+        cmd = popen.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--resume") + 1], "contract-session")
+        self.assertEqual(float(cmd[cmd.index("--max-budget-usd") + 1]), .2)
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "")
+        rows = [json.loads(line) for path in bus.RUNS.glob("*.jsonl") for line in path.read_text().splitlines()]
+        row = next(row for row in rows if row.get("task") == task["id"] and row.get("role") == "output_repair")
+        self.assertEqual(row["usage"]["output_tokens"], 4)
+
+    def test_contract_fallback_execute_shadow_preserves_envelope(self):
+        task, calls, popen = self.worker("shadow", {"summary": "done"}, role="execute")
+        self.assertEqual(task["status"], "done")
+        self.assertEqual(task["result"]["summary"], json.dumps({"summary": "done"}))
+        self.assertNotIn("commit", task["result"])
+        row = spawn.decision_log.explain(task["id"], kinds=["output_contract"])[0]
+        self.assertFalse(row["deterministic"]["ok"])
+        self.assertEqual(len(calls), 1)
+        popen.assert_not_called()
+
+    def test_active_contract_invalid_repair_falls_through_once(self):
+        task, calls, _ = self.worker("active", {"summary": "no verdict"}, repaired={"summary": "still invalid"})
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(len(calls), 2)
+        row = spawn.decision_log.explain(task["id"], kinds=["output_contract"])[0]
+        self.assertEqual(row["selected"], "rerun")
+
+    def test_active_contract_deterministic_repair_does_not_resume(self):
+        task, calls, popen = self.worker("active", {"verdict": "approved", "comments": []})
+        self.assertEqual(task["result"]["verdict"], "approve")
+        self.assertEqual(len(calls), 1)
+        popen.assert_not_called()
+
+    def test_active_contract_preserves_mid_run_verdict_without_recovery(self):
+        for role in ("review", "spec_review"):
+            posted = ({"verdict": "approve", "comments": []} if role == "review" else
+                      {"verdict": "approve", "risks": [], "suggested_spec_changes": []})
+            for final in ({"summary": "finished"}, "Finished; see the posted verdict.",
+                          {"verdict": "request_changes"}):
+                with self.subTest(role=role, final=final):
+                    with mock.patch.object(spawn.contracts, "recover") as recover:
+                        task, calls, popen = self.worker("active", final, role=role, posted=posted,
+                            repaired={**posted, "verdict": "request_changes"})
+                    recover.assert_not_called()
+                    self.assertEqual(task["status"], "done")
+                    expected = {**posted, "confidence": 0.0, "provenance": ["repo"]}
+                    actual = dict(task["result"])
+                    actual.pop("packet_version", None)
+                    self.assertEqual(actual, expected)
+                    field = "review_verdict" if role == "review" else "spec_review_verdict"
+                    self.assertEqual(task[field], "approve")
+                    self.assertEqual(bus.get(task["inputs"][0])[field], "approve")
+                    self.assertEqual(len(calls), 1)
+                    popen.assert_not_called()
+                    rows = spawn.decision_log.explain(task["id"], kinds=["output_contract"])
+                    self.assertEqual(len(rows), 1)
+                    self.assertTrue(rows[0]["deterministic"]["ok"])
+
+    def test_active_contract_does_not_resume_when_final_verdict_exists(self):
+        for role in ("review", "spec_review"):
+            with self.subTest(role=role):
+                task, calls, popen = self.worker("active", {"verdict": "approve"}, role=role)
+                self.assertEqual(task["result"]["verdict"], "approve")
+                self.assertEqual(len(calls), 1)
+                popen.assert_not_called()

@@ -1464,18 +1464,28 @@ def run_worker(task_id, account_id=None):
             # treat it as a failed parse for review roles so we never silently drop an already-posted verdict
             # (T-0139: an approve sat unmerged after a second, verdict-less post overwrote the first).
             parse_failed = bool(result.get("parse_error")) or (review_role and not result.get("verdict"))
-            existing_result = (bus.get(task_id).get("result") or {}) if parse_failed else {}
-            if parse_failed and existing_result.get("verdict"):
-                result = existing_result  # keep the worker's own posted result; do not overwrite it
+            existing_result = (bus.get(task_id).get("result") or {}) if parse_failed or review_role else {}
+            if existing_result.get("verdict"):
+                # Validate the authoritative posted result without offering a repair session
+                # or replacing it with a deterministic candidate.
+                contracts.process(task_id, role, existing_result, cfg=pool.cfg, preserve=True)
+                result = existing_result
                 if role == "review":
                     result["packet_version"] = (t.get("packet_meta") or {}).get("version")
                     bus.post_result(task_id, fit_result(result), "done")
-            elif parse_failed and review_role:
-                bus.update(task_id, status="failed", reason="review returned no parseable verdict",
-                          resume_hint={"raw": text[-2000:]})
-                result = None
             else:
-                bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+                # A model repair may supply a verdict only when neither output has one.
+                session = repair_session if not review_role or not result.get("verdict") else None
+                result = contracts.process(task_id, role, result, cfg=pool.cfg, session=session)
+                if role == "review":
+                    result["packet_version"] = (t.get("packet_meta") or {}).get("version")
+                parse_failed = bool(result.get("parse_error")) or (review_role and not result.get("verdict"))
+                if parse_failed and review_role:
+                    bus.update(task_id, status="failed", reason="review returned no parseable verdict",
+                              resume_hint={"raw": text[-2000:]})
+                    result = None
+                else:
+                    bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
             if result and review_role and result.get("verdict"):
                 verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
                     if role == "spec_review" else {"review_verdict": result["verdict"]}
