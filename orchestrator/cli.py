@@ -640,7 +640,7 @@ def main():
                 print(skill_scorecard.format_report(card["skills"]))
         elif a.handoffs:
             from . import handoff_scorecard
-            card = handoff_scorecard.build(root=scorecard.STATE, cfg=Pool().cfg)
+            card = handoff_scorecard.build(root=a.root or scorecard.STATE, cfg=Pool().cfg)
             print(json.dumps(card, indent=1) if a.json else handoff_scorecard.format_report(card))
         elif a.reads:
             from . import read_economy

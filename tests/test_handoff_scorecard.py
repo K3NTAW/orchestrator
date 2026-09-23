@@ -46,7 +46,7 @@ class TestHandoffScorecard(unittest.TestCase):
             self.add_run(root, task="T-one", executor="cheap", input_tokens=10)
             self.assertEqual(handoff_scorecard.expected_route_cost(
                 "unfamiliar", "cheap", root, {"promotion": {"min_samples": 2}}),
-                {"insufficient": True, "n": 1})
+                {"insufficient": True, "n": 1, "effective_handoff_cost": "unmeasured"})
 
     def test_start_strong_flag_when_cheap_first_costs_more_overall(self):
         with tempfile.TemporaryDirectory() as root:
@@ -106,3 +106,30 @@ class TestHandoffScorecard(unittest.TestCase):
             self.assertEqual(row["avg_rounds"], 1)
             self.assertEqual(row["avg_accepted_tokens"], 5)
             self.assertEqual(row["avg_accepted_usd"], .2)
+
+    def test_handoff_cache_fields_and_effective_cost_from_synthetic_runs(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.task(root, "T-base", executor="cheap")
+            self.task(root, "T-fix", executor="strong", constraints={"fix_round_for": "T-base"})
+            self.add_run(root, task="T-base", executor="cheap", provider="codex", ts=10,
+                         cache_read_tokens=100, packet_meta={"chars": 40})
+            self.add_run(root, task="T-fix", executor="strong", provider="codex", ts=20,
+                         input_uncached_tokens=30, cache_read_tokens=40, packet_meta={"chars": 80})
+            row = handoff_scorecard.handoff_rows(root, {"cache": {"codex_read_ratio": .25}})[0]
+            self.assertEqual(row["cached_context_retained"], 40)
+            self.assertEqual(row["cache_lost"], 60)
+            self.assertEqual(row["uncached_reconstruction"], 30)
+            self.assertEqual(row["handoff_packet_tokens"], 20)
+            self.assertEqual(row["effective_handoff_cost"], 65)
+
+    def test_duplicated_evidence_and_latency(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.task(root, "T-base", executor="cheap")
+            self.task(root, "T-fix", executor="strong", constraints={"fix_round_for": "T-base"})
+            self.add_run(root, task="T-base", executor="cheap", ts=10,
+                         packet_meta={"chars": 40, "evidence_ids": ["a", "b"]})
+            self.add_run(root, task="T-fix", executor="strong", started_at=14, ts=20,
+                         packet_meta={"chars": 40, "evidence_ids": ["b", "c"]})
+            row = handoff_scorecard.handoff_rows(root)[0]
+            self.assertEqual(row["duplicated_evidence"], ["b"])
+            self.assertEqual(row["latency_s"], 4)

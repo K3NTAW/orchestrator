@@ -122,6 +122,14 @@ class Cli(unittest.TestCase):
                     self.assertIn("choose one of", err.getvalue())
             report.assert_not_called()
 
+    def test_scorecard_handoffs_shows_cache_columns(self):
+        card = {"handoffs": {"rows": [], "medians_by_kind": {}, "n": 0}}
+        from orchestrator import handoff_scorecard
+        with mock.patch.object(handoff_scorecard, "build", return_value=card):
+            output = self._scorecard_output("--handoffs")
+        self.assertIn("cached_context_retained", output)
+        self.assertIn("effective_handoff_cost", output)
+
     def test_memory_search_cli(self):
         import shutil
         source = Path(__file__).resolve().parents[1] / ".orchestrator" / "memory"
