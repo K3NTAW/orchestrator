@@ -697,7 +697,7 @@ def main():
             print(json.dumps(card, indent=1) if a.json else read_economy.format_summary(card))
         elif a.context:
             from . import context_scorecard
-            card = context_scorecard.build(root=scorecard.STATE)
+            card = context_scorecard.build(root=a.root or scorecard.STATE)
             if a.cache_shadow:
                 from . import decision_log
                 rows = [row for row in decision_log.read_all(root=a.root or scorecard.STATE)
@@ -706,19 +706,21 @@ def main():
                 for row in rows:
                     deterministic = row.get("deterministic") or {}
                     adjusted = deterministic.get("cache_adjusted_level") or {}
-                    presented = dict(part.rsplit(":", 1) for part in row.get("candidates", []) if ":" in part)
-                    total += len(adjusted)
-                    changed += sum(presented.get(key) != value for key, value in adjusted.items())
+                    presented = deterministic.get("presented_level") or {}
+                    comparable = adjusted.keys() & presented.keys()
+                    total += len(comparable)
+                    changed += sum(presented[key] != adjusted[key] for key in comparable)
                 dates = sorted(datetime.fromtimestamp(value).date().isoformat() if isinstance(value, (int, float))
                                else str(value)[:10]
                                for row in rows if (value := row.get("ts")) is not None)
                 summary = {"rows": len(rows), "date_from": dates[0] if dates else None,
                            "date_to": dates[-1] if dates else None,
                            "changed_share": changed / total if total else None}
+                share = f"{summary['changed_share']:.3f}" if total else "unknown"
                 print(json.dumps(summary, indent=1) if a.json else
                       ("no context_selection rows" if not rows else
                        f"rows={summary['rows']} date_range={summary['date_from']}..{summary['date_to']} "
-                       f"changed_share={summary['changed_share']:.3f}"))
+                       f"changed_share={share}"))
             else:
                 print(json.dumps(card, indent=1) if a.json else context_scorecard.format_report(card))
         elif a.planner_routing:

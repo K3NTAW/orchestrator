@@ -8,6 +8,7 @@ from .failures import _test_ids as test_ids
 
 
 LEVELS = ("HIDE", "SHORT", "LONG", "FULL")
+FALLBACK_REASONS = frozenset(("test_result", "worker_partial"))
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class Routed:
     cacheability: str = None
     cache_cost: float = None
     cache_adjusted_level: str = None
+    presented_level: str = None
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,7 @@ def cache_mode(cfg):
 
 
 def _cacheability(ev, head_sha):
-    if ev.provenance == "worker_partial" or ev.source_type == "worker_partial":
+    if ev.provenance == "worker_partial":
         return "dynamic"
     if ev.source_type == "test_result":
         return "dynamic"
@@ -118,6 +120,8 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
     if ev.source_type in ("previous_result", "scout_finding", "decision", "memory_entry") \
             and (relevance["scope_match"] or relevance["title_terms"]):
         return "LONG", "dependency"
+    if ev.source_type in FALLBACK_REASONS:
+        return "LONG", ev.source_type
     return "LONG", "ambiguous"
 
 
@@ -139,7 +143,7 @@ def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=(),
         cost = cache_telemetry.dynamic_cost(len(_text(ev, presented_level)), provider, cfg)
         adjusted = presented_level
         threshold = ((cfg or {}).get("context_router") or {}).get("cache_downgrade_tokens", 600)
-        if (presented_level == "LONG" and cacheability == "dynamic" and reason == "ambiguous"
+        if (presented_level == "LONG" and cacheability == "dynamic" and reason in FALLBACK_REASONS
                 and cost is not None and cost > threshold):
             adjusted = "SHORT"
         if configured_cache_mode == "active" and effective_mode == "active":
@@ -147,14 +151,14 @@ def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=(),
         full_tokens = len(_text(ev, "FULL")) // 4
         routed_tokens = len(_text(ev, level)) // 4
         items.append(Routed(ev.id, level, reason, full_tokens, routed_tokens,
-                            cacheability, cost, adjusted))
+                            cacheability, cost, adjusted, presented_level))
         if reason == "ambiguous":
             ambiguous.append(ev.id)
     candidate_tokens = sum(item.tokens_full for item in items)
     routed_tokens = sum(item.tokens_at_level for item in items)
     return RoutedPacket(items, candidate_tokens, routed_tokens,
                         routed_tokens / candidate_tokens if candidate_tokens else 1.0,
-                        ambiguous, profile, cache_data=("missing" if provider is None else
+                        ambiguous, profile, cache_data=("missing" if provider not in ("codex", "claude") else
                                                        "config" if (cfg or {}).get("cache") is not None else "defaults"),
                         invalid_config=invalid_config)
 
@@ -209,6 +213,8 @@ def decision_row(task, routed_packet, *, mode):
                           "cache_adjusted_level": {item.evidence_id: item.cache_adjusted_level
                                                    for item in routed_packet.items},
                           "cache_data": routed_packet.cache_data,
+                          "presented_level": {item.evidence_id: item.presented_level or item.level
+                                              for item in routed_packet.items},
                           "invalid_config": routed_packet.invalid_config},
         "selected": "routed v1",
         "reason": f"{routed_packet.profile} profile rules v1",

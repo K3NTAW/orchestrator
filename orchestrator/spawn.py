@@ -393,6 +393,11 @@ def _memory_entries(path):
 
 
 def _context_mode(cfg):
+    try:
+        context_router.cache_mode(cfg)
+        cfg.pop("_context_cache_invalid", None)
+    except ValueError:
+        cfg["_context_cache_invalid"] = True
     mode = promotion.mode("context_router", cfg)
     if mode != "active":
         return mode
@@ -409,7 +414,7 @@ def _context_mode(cfg):
     notify.notify("context_router active refused; running shadow: context_eval missing, stale, or failed")
     return "shadow"
 
-def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
+def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None, provider=None):
     """Persist routing telemetry and return section items for guarded active mode."""
     mode = _context_mode(cfg)
     if mode == "off" or not task.get("id"):
@@ -424,7 +429,9 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
                                [*candidates, *composition.shared_evidence(task)]}.values())
             candidates = composition.filter_evidence(candidates)
         routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
-                                      required_types=composition.context_requirements if composition else ())
+                                      required_types=composition.context_requirements if composition else (),
+                                      provider=provider, effective_mode=mode,
+                                      invalid_config=bool(cfg.get("_context_cache_invalid")))
         row = context_router.decision_row(task, routed, mode=mode)
         partial_items = context_router.section_items(
             routed, {ev.id: ev for ev in candidates}, "prior_worker")
@@ -561,7 +568,7 @@ def _memory_tokens(sections):
                 for line in sections.get(name, []) if line != "- (none)") + 3) // 4
 
 
-def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
+def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
     cfg = Pool().cfg if cfg is None else cfg
@@ -740,7 +747,8 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
             "test_result", f"task:{task_id}:failures", failure_match.group(1),
             commit=merge_base, provenance="repo", task=task))
     routing_task = {**task, "packet_read_scope": sorted(read_scope)}
-    shadow_meta = _shadow_route(routing_task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
+    shadow_meta = _shadow_route(routing_task, candidates, role="execute", head_sha=merge_base, cfg=cfg,
+                                skills=skills, provider=provider)
     routed_sections = shadow_meta.pop("_routed_sections", {})
     if memory_mode == "active" and retrieval is not None:
         routed_sections = {name: items for name, items in routed_sections.items()
@@ -890,9 +898,9 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
     return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree, *, cfg=None, skills=None) -> str:
-    """Build a bounded executor briefing with a verifiable provenance header."""
-    body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills)
+def packet(task, worktree, *, cfg=None, skills=None, provider="codex") -> str:
+    """Build the Codex dispatch briefing; Claude fallback supplies its provider explicitly."""
+    body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills, provider=provider)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
     if skills and skills.get("mode") == "active" and skills.get("specialist"):
@@ -940,7 +948,7 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
+def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude") -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
     src = reviewed or task
@@ -1056,7 +1064,7 @@ def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
     shadow_meta = _shadow_route({**src, "id": task["id"], "parent": task.get("parent") or src.get("parent")}, candidates,
                                 role="security_review" if any(section.startswith("## security\n")
                                                                for section in sections) else "review",
-                                head_sha=_base_sha(src, wt), cfg=cfg, skills=skills)
+                                head_sha=_base_sha(src, wt), cfg=cfg, skills=skills, provider=provider)
     if skills and skills.get("mode") == "active" and skills.get("specialist"):
         role_source += f" specialist: {skills['specialist']['name']}"
     routed_sections = shadow_meta.pop("_routed_sections", {})
@@ -1094,7 +1102,7 @@ def spec_review_packet(task) -> str:
     return _role_packet(body, _base_sha(task, wt), f"task@{task.get('id', '(none)')} tree@HEAD")
 
 
-def scout_packet(task) -> str:
+def scout_packet(task, *, cfg=None, provider="claude") -> str:
     wt = Path(task.get("worktree") or ROOT)
     tree = []
     for item in task.get("scope", []):
@@ -1112,8 +1120,15 @@ def scout_packet(task) -> str:
                        _section("scope tree", tree), _section("memory titles", titles),
                        _section("result contract", ["bus_post_result fields: findings, open_questions, suggested_next, blocked",
                                                     "result limit: 1,500 tokens"])])
-    return _role_packet(body, _base_sha(task, wt),
-                        f"task@{task.get('id', '(none)')} tree@HEAD memory@{','.join(memory['layers_consulted'])}")
+    head_sha = _base_sha(task, wt)
+    candidates = [evidence.make("architecture_note", f"task:{task.get('id')}:spec",
+                                task.get("spec") or "", provenance="repo", task=task)]
+    meta = _shadow_route(task, candidates, role="scout", head_sha=head_sha,
+                         cfg=Pool().cfg if cfg is None else cfg, provider=provider)
+    meta.pop("_routed_sections", None)
+    return _role_packet(body, head_sha,
+                        f"task@{task.get('id', '(none)')} tree@HEAD memory@{','.join(memory['layers_consulted'])}",
+                        **meta)
 
 
 def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:
@@ -1428,7 +1443,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
                     "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
             else:
-                role_packet = scout_packet(t)
+                role_packet = scout_packet(t, cfg=pool.cfg, provider="claude")
                 prompt = render("scout", packet=role_packet, task=t)
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         except Exception as exc:

@@ -1,6 +1,7 @@
 import _harness
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from orchestrator import context_router, decision_log, evidence
@@ -38,6 +39,21 @@ class ContextRouterTests(unittest.TestCase):
         self.assertEqual([item.cache_adjusted_level for item in packet.items],
                          ["SHORT", "LONG", "HIDE"])
         self.assertIsNone(context_router.route(task, [dynamic], role="execute").items[0].cache_cost)
+        ambiguous = evidence.make("external_doc", "uncertain", "x" * 4000,
+                                  provenance="worker_partial", commit="head")
+        required = evidence.make("source_chunk", "other.py", "x" * 4000,
+                                 provenance="worker_partial", commit="head")
+        active = context_router.route(task, [dynamic, named, hidden, ambiguous, required],
+                                      role="execute", head_sha="head", provider="codex",
+                                      effective_mode="active", required_types=("source_chunk",),
+                                      cfg={"context_router": {"cache_mode": "active",
+                                                               "cache_downgrade_tokens": 100}})
+        self.assertEqual([item.reason for item in active.items],
+                         ["test_result", "prior_worker_overlap", "stale", "ambiguous", "skill_required_context"])
+        self.assertEqual([item.level for item in active.items], ["SHORT", "LONG", "HIDE", "LONG", "LONG"])
+        unknown = context_router.route(task, [dynamic], role="execute", provider="unknown")
+        self.assertIsNone(unknown.items[0].cache_cost)
+        self.assertEqual(unknown.cache_data, "missing")
 
     def test_active_cache_mode_applies_adjusted_levels_only_when_mode_not_off(self):
         item = ev("test_result", "test_ok", "x" * 4000)
@@ -48,6 +64,13 @@ class ContextRouterTests(unittest.TestCase):
                                       cfg=cfg, effective_mode="active")
         self.assertEqual((shadow.items[0].level, active.items[0].level), ("LONG", "SHORT"))
         self.assertLess(active.items[0].tokens_at_level, shadow.items[0].tokens_at_level)
+        row = context_router.decision_row({"id": "T"}, active, mode="active")
+        self.assertEqual(row["deterministic"]["presented_level"][item.id], "LONG")
+        self.assertEqual(row["deterministic"]["cache_adjusted_level"][item.id], "SHORT")
+        self.assertEqual(row["candidates"], [f"{item.id}:SHORT"])
+        off = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
+                                   cfg=cfg, effective_mode="off")
+        self.assertEqual(off.items[0].level, "LONG")
 
     def test_cache_mode_helper_validates_and_shadow_keeps_candidates_byte_identical(self):
         self.assertEqual(context_router.cache_mode({}), "off")
@@ -60,7 +83,7 @@ class ContextRouterTests(unittest.TestCase):
         shadow = context_router.decision_row({"id": "T"}, context_router.route(
             {"id": "T"}, [item], role="execute", provider="codex",
             cfg={"context_router": {"cache_mode": "shadow"}}), mode="shadow")
-        self.assertEqual(off["candidates"], shadow["candidates"])
+        self.assertEqual(json.dumps(off["candidates"]).encode(), json.dumps(shadow["candidates"]).encode())
 
     def test_invalid_cache_mode_falls_back_to_off_with_flag(self):
         item = ev("test_result", "test_ok", "x" * 4000)

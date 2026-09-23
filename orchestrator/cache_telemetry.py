@@ -34,7 +34,7 @@ def _cache_cfg(cfg):
 
 def dynamic_cost(chars, provider, cfg=None):
     """Return cache-write token equivalents for dynamically supplied text."""
-    if provider is None:
+    if provider not in ("codex", "claude"):
         return None
     ratios = _cache_cfg(cfg)
     return (chars / 4) * (1 + ratios[f"{provider}_write_ratio"])

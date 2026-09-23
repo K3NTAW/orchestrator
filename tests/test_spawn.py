@@ -1373,6 +1373,15 @@ class ContextTelemetry(unittest.TestCase):
             spawn._shadow_route(task, [item], role="execute", head_sha="head", cfg={}, provider="codex")
         self.assertEqual(route.call_args.kwargs["effective_mode"], "active")
         self.assertEqual(route.call_args.kwargs["provider"], "codex")
+        with mock.patch.object(spawn, "_packet_body", side_effect=RuntimeError("stop after provider")) as body:
+            with self.assertRaisesRegex(RuntimeError, "stop after provider"):
+                spawn.packet(task, TMP)
+        self.assertEqual(body.call_args.kwargs["provider"], "codex")
+        with mock.patch.object(spawn, "_shadow_route", return_value={}) as shadow, \
+                mock.patch.object(spawn, "_base_sha", return_value="head"), \
+                mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}):
+            spawn.scout_packet(task, cfg={})
+        self.assertEqual(shadow.call_args.kwargs["provider"], "claude")
 
     def _active_review(self):
         reviewed = bus.create_task("active target", "s", ["a"], ["x.py"], role="execute")
