@@ -232,8 +232,10 @@ def steer(task_id, message, *, reason, source="planner", grace_s=20,
     worker_registry._validate({"cancel_reason": reason, "source": source})
     if source is None or not isinstance(grace_s, (int, float)) or not math.isfinite(grace_s) or grace_s < 0:
         raise ValueError("invalid steering source or grace")
+    alive = alive or _alive
     with bus.locked():
         task = bus.get(task_id)
+        previous_status = task["status"]
         worker = worker_registry.get(task_id)
         if not worker or worker["status"] not in ("running", "waiting"):
             raise ValueError("worker is not running")
@@ -249,8 +251,12 @@ def steer(task_id, message, *, reason, source="planner", grace_s=20,
         if provider == "claude" and (worker.get("tools") is None or not worker.get("account")):
             raise ValueError("cannot steer: no recorded Claude tools or account")
         pid = worker.get("pid")
-        if pid is not None and (pid <= 1 or pid == os.getpid()):
+        if pid is None:
+            raise ValueError("cannot steer: no recorded worker pid")
+        if pid <= 1 or pid == os.getpid():
             raise ValueError("refusing unsafe worker pid")
+        if not alive(pid):
+            raise ValueError("cannot steer: recorded worker pid is not alive")
         path = worker_registry._path(task_id).with_suffix(".steering.jsonl")
         row = {"ts": time.time(), "task": task_id, "reason": reason, "message": message, "source": source}
         with path.open("a") as stream:
@@ -266,16 +272,22 @@ def steer(task_id, message, *, reason, source="planner", grace_s=20,
         pipeline["steer_epoch"] = epoch
         # bus.update appends its own event, including these payload-free counters.
         task = bus.update(task_id, packet_meta=meta, pipeline=pipeline)
-    _terminate(pid, grace_s=grace_s, sleep=sleep, alive=alive or _alive, signal_fn=signal_fn)
+    _terminate(pid, grace_s=grace_s, sleep=sleep, alive=alive, signal_fn=signal_fn)
     prompt = f"Steering from {source} ({reason}):\n{message}\nThe original task contract is unchanged."
     task = {**task, "_launch_epoch": epoch, "_steering": True,
             "worktree": task.get("worktree") or worker.get("worktree")}
-    if provider == "codex":
-        result = executor.steer_resume(task, thread, prompt)
-    else:
-        result = spawn.resume_worker(task, prompt, session)
-    with bus.locked():
-        current = worker_registry.get(task_id)
-        if current["epoch"] == epoch and current["status"] not in worker_registry.TERMINAL:
-            worker_registry.event(task_id, "steered", status="running")
+    try:
+        if provider == "codex":
+            result = executor.steer_resume(task, thread, prompt)
+        else:
+            result = spawn.resume_worker(task, prompt, session)
+    except Exception as exc:
+        with bus.locked():
+            if launch_epoch(task_id) == epoch and is_current(task_id, epoch):
+                worker_registry.finish(task_id, "failed", "steer_failed", epoch=epoch)
+                pipeline = dict(bus.get(task_id).get("pipeline") or {})
+                pipeline["steer_failed"] = redact(f"{type(exc).__name__}: {exc}")[:512]
+                bus.update(task_id, status=previous_status, pid=None, pipeline=pipeline)
+            release_if_current(task_id, epoch, pool.Pool())
+        raise
     return {"status": "steered", "task": task_id, "epoch": epoch, "delivery": result}

@@ -73,7 +73,8 @@ The registry enters `steering`, advances its integer epoch (initially 1), and
 stamps `pipeline.steer_epoch` before interrupting the PID. The same bounded
 SIGTERM/grace/SIGKILL routine as cancellation runs, without holding the task or
 releasing its reservation. Missing thread/session identifiers refuse before any
-signal or steering write. Unsafe PIDs also refuse. Signal failures leave the
+signal or steering write. Missing, dead, and unsafe PIDs also refuse before the
+epoch changes; a worker must have a recorded live process. Signal failures leave the
 recorded steering state and reservation available for operator recovery.
 
 Delivery is framed as `Steering from <source> (<reason>):`, the message, then
@@ -90,3 +91,11 @@ normal completion then records its terminal status. Launch bookkeeping preserves
 the advanced epoch. Old finish calls, late bus result/status writes, and capacity
 releases are guarded by their captured launch epoch. The resumed run owns the
 existing reservation and releases it when it finishes.
+
+
+If resume delivery raises, the current epoch records a terminal `failed` registry
+state with reason `steer_failed`. The bus returns to its pre-steering status with
+pid cleared and a redacted `pipeline.steer_failed` diagnostic. The reservation is
+released through `release_if_current`, then the original exception is re-raised.
+A newer steering epoch is never overwritten by this recovery. The durable message
+and steering counters remain available for diagnosis.

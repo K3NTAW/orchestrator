@@ -138,10 +138,11 @@ class Steering(unittest.TestCase):
             self.assertNotIn(row["message"], registry._path(self.tid, events=True).read_text())
             self.assertEqual(task["packet_meta"]["steering_count"], 1)
             self.assertEqual(task["pipeline"]["steer_epoch"], 2)
+            registry.event(self.tid, "steered", status="running")
             return {"status": "running"}
         with mock.patch.object(executor, "steer_resume", side_effect=deliver), \
                 mock.patch.object(control, "_terminate") as terminate:
-            control.steer(self.tid, "Inspect the failing check", reason="new evidence")
+            control.steer(self.tid, "Inspect the failing check", reason="new evidence", alive=lambda pid: True)
         terminate.assert_called_once()
         after = bus.get(self.tid)
         self.assertEqual(before, json.dumps({k: after[k] for k in ("spec", "acceptance", "scope")}).encode())
@@ -153,7 +154,7 @@ class Steering(unittest.TestCase):
     def test_steer_codex_resumes_thread_with_message(self):
         from orchestrator import executor
         with mock.patch.object(executor, "steer_resume", return_value={}) as resume:
-            control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: False)
+            control.steer(self.tid, "Check evidence", reason="new evidence", alive=mock.Mock(side_effect=[True, False]))
         task, thread, prompt = resume.call_args.args
         self.assertEqual(thread, "thread-example")
         self.assertEqual(prompt, "Steering from planner (new evidence):\nCheck evidence\nThe original task contract is unchanged.")
@@ -173,7 +174,7 @@ class Steering(unittest.TestCase):
                 mock.patch.object(spawn, "trust_workspace"), \
                 mock.patch.object(spawn, "secrets_for_role", return_value={}), \
                 mock.patch.object(spawn.shutil, "which", return_value="claude"):
-            control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: False)
+            control.steer(self.tid, "Check evidence", reason="new evidence", alive=mock.Mock(side_effect=[True, False]))
         argv = popen.call_args.args[0]
         self.assertEqual(argv[argv.index("--resume") + 1], "session-example")
         self.assertEqual(argv[argv.index("--allowedTools") + 1], "Read,Bash(rg *)")
@@ -193,11 +194,15 @@ class Steering(unittest.TestCase):
         from orchestrator import executor
         bus.update(self.tid, rounds=3)
         process = mock.Mock(pid=43211, returncode=0)
-        process.communicate.return_value = ('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}', '')
+        def communicate(timeout):
+            self.assertEqual(registry.get(self.tid)["status"], "running")
+            self.assertEqual(registry.events(self.tid)[-1]["kind"], "steered")
+            return '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}', ''
+        process.communicate.side_effect = communicate
         with mock.patch.object(executor, "reply") as reply, \
                 mock.patch.object(executor, "resume_plan") as plan, \
                 mock.patch.object(executor.subprocess, "Popen", return_value=process) as popen:
-            control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: False)
+            control.steer(self.tid, "Check evidence", reason="new evidence", alive=mock.Mock(side_effect=[True, False]))
         reply.assert_not_called()
         plan.assert_not_called()
         argv = popen.call_args.args[0]
@@ -247,3 +252,73 @@ class Steering(unittest.TestCase):
         self.assertFalse(posted)
         self.assertIn("superseded", reason)
         post.assert_not_called()
+
+
+    def test_steer_delivery_failure_recovers_and_releases(self):
+        from orchestrator import executor, spawn
+        for provider, module, method in (("codex", executor, "steer_resume"),
+                                         ("claude", spawn, "resume_worker")):
+            with self.subTest(provider=provider):
+                registry.upsert(self.tid, status="running", provider=provider, account="A",
+                                tools=["Read"], pid=43210)
+                bus.update(self.tid, status="held", packet_meta={"session_id": "session-example"},
+                           pipeline={"existing": "keep"})
+                epoch = registry.get(self.tid)["epoch"]
+                error = RuntimeError("resume unavailable")
+                def fail(*args):
+                    self.assertEqual(registry.get(self.tid)["status"], "steering")
+                    raise error
+                with mock.patch.object(module, method, side_effect=fail), \
+                        mock.patch.object(control, "_terminate") as terminate, \
+                        mock.patch.object(control.pool, "Pool") as pool, \
+                        mock.patch.object(control, "release_if_current", wraps=control.release_if_current) as release:
+                    with self.assertRaises(RuntimeError) as caught:
+                        control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: True)
+                self.assertIs(caught.exception, error)
+                terminate.assert_called_once()
+                release.assert_called_once_with(self.tid, epoch + 1, pool.return_value)
+                pool.return_value.release.assert_called_once_with(self.tid, {})
+                worker = registry.get(self.tid)
+                self.assertEqual((worker["status"], worker["status_reason"]), ("failed", "steer_failed"))
+                task = bus.get(self.tid)
+                self.assertEqual(task["status"], "held")
+                self.assertIsNone(task["pid"])
+                self.assertEqual(task["pipeline"]["existing"], "keep")
+                self.assertIn("resume unavailable", task["pipeline"]["steer_failed"])
+                self.assertEqual(worker["epoch"], epoch + 1)
+                registry.finish(self.tid, "done", epoch=epoch)
+                self.assertEqual(registry.get(self.tid)["status"], "failed")
+
+    def test_steer_refuses_missing_or_dead_pid_before_recording(self):
+        from orchestrator import executor
+        for pid in (None, 43210):
+            with self.subTest(pid=pid):
+                registry.upsert(self.tid, pid=pid)
+                before = registry._path(self.tid).read_bytes()
+                task = bus.get(self.tid)
+                with mock.patch.object(control, "_terminate") as terminate, \
+                        mock.patch.object(executor, "steer_resume") as resume, \
+                        self.assertRaisesRegex(ValueError, "worker pid"):
+                    control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: False)
+                terminate.assert_not_called()
+                resume.assert_not_called()
+                self.assertEqual(registry._path(self.tid).read_bytes(), before)
+                self.assertEqual(bus.get(self.tid), task)
+                self.assertFalse(self.path.exists())
+
+
+    def test_steer_delivery_failure_preserves_newer_epoch(self):
+        from orchestrator import executor
+        def fail(*args):
+            registry.event(self.tid, "steer", epoch=3, status="running")
+            bus.update(self.tid, pipeline={"steer_epoch": 3}, pid=43212)
+            raise RuntimeError("older delivery failed")
+        with mock.patch.object(executor, "steer_resume", side_effect=fail), \
+                mock.patch.object(control, "_terminate"), \
+                mock.patch.object(control.pool, "Pool") as pool, \
+                self.assertRaises(RuntimeError):
+            control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: True)
+        pool.return_value.release.assert_not_called()
+        self.assertEqual(registry.get(self.tid)["status"], "running")
+        self.assertEqual(bus.get(self.tid)["pipeline"], {"steer_epoch": 3})
+        self.assertEqual(bus.get(self.tid)["pid"], 43212)
