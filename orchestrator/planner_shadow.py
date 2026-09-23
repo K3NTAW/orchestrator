@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 
-from . import ROOT, STATE, bus, goals, jev, spawn
+from . import ROOT, STATE, bus, goals, jev, spawn, env_policy
 
 _ACTIONS = frozenset(("fix_round", "respec", "escalate", "noop", "synthesize_now",
                       "wait_for_more", "drop_low_confidence", "write_specs", "close", "other"))
@@ -38,19 +38,20 @@ def argv(prompt, *, model, budget_usd, system_prompt_path):
             "--dangerously-skip-permissions"]
 
 
-def launch(prompt, *, model, account, budget_usd, log, root=ROOT, popen=None):
+def launch(prompt, *, model, account, budget_usd, log, root=ROOT, popen=None, task_id=None):
     """Launch independently of production; never resolve Planner service secrets."""
     try:
         root, log = Path(root), Path(log)
         command = argv(spawn.render("planner-shadow", packet=prompt), model=model,
                        budget_usd=budget_usd,
                        system_prompt_path=root / ".orchestrator/prompts/planner.md")
-        env = os.environ.copy()
-        env.update(CLAUDE_CONFIG_DIR=os.path.expanduser(account["config_dir"]),
+        extra = dict(CLAUDE_CONFIG_DIR=os.path.expanduser(account["config_dir"]),
                    ORCH_ROOT=str(root), ORCH_SHADOW="1")
         token = os.environ.get(account.get("oauth_token_env") or "")
         if token:
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+            extra["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        env, _ = env_policy.worker_env("planner_shadow", base=os.environ, extra=extra,
+                                       cfg=spawn.Pool().cfg, task_id=task_id or log.stem, root=root)
         log.parent.mkdir(parents=True, exist_ok=True)
         stderr_log = str(log) + ".stderr"
         with log.open("w", encoding="utf-8") as stdout, open(stderr_log, "w", encoding="utf-8") as stderr:

@@ -1,16 +1,17 @@
 """Goal lifecycle: launch a headless Planner session against any target repo, track it, reconcile status, stop it.
 
 Import boundary (T-0115): this module may import only install.install, spawn.trust_workspace and
-spawn.resolve_secrets from the rest of the package. It never calls Pool(), never calls any
+spawn.resolve_secrets and env_policy from the rest of the package. It never calls Pool(), never calls any
 other bus.*/spawn.* function, and never references orchestrator.ROOT/STATE. Every path it touches derives from
 the realpath'd repo_path argument, so the same code works against this repo or any target repo scaffolded by
-install.install.
+install.install. Environment policy telemetry is explicitly directed to that target root.
 """
 import fcntl, json, os, re, signal, subprocess, sys, time, tomllib, uuid
 from pathlib import Path
 from subprocess import Popen  # distinct from subprocess.run: tests fake this call without disturbing
                                # subprocess.run itself, which internally resolves Popen dynamically too
 
+from . import env_policy
 from .install import install
 from .spawn import trust_workspace, resolve_secrets
 
@@ -112,7 +113,11 @@ def _scaffold_commit(repo_path, install_report):
 
 
 def _create_goal_task(repo_path, goal_text):
-    env = {**os.environ, "ORCH_ROOT": str(repo_path), "ORCH_GOAL_TEXT": goal_text}
+    cfg = tomllib.loads((Path(repo_path) / ".orchestrator" / "pool.toml").read_text())
+    env, _ = env_policy.worker_env(
+        "planner", base=os.environ,
+        extra={"ORCH_ROOT": str(repo_path), "ORCH_GOAL_TEXT": goal_text},
+        cfg=cfg, task_id="goal-create-" + uuid.uuid4().hex, root=repo_path)
     try:
         r = subprocess.run(["uv", "run", "--project", str(PACKAGE_REPO), "python", "-"],
                            input=SCRIPT, capture_output=True, text=True, env=env)
@@ -319,7 +324,7 @@ def _release_running_slot(repo_path, reservation_id):
     _with_goals_lock(repo_path, fn)
 
 
-def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None, model=None):
+def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None, model=None, task_id=None):
     """Start one headless Planner subprocess against repo_path. Reads the target's own pool.toml fresh on every
     call -- so an account's oauth_token_env or secrets.planner section added since a previous launch takes effect
     immediately, and this never risks disagreeing with a caller's own (possibly stale) cfg about which pool.toml
@@ -331,13 +336,15 @@ def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extr
     account = accounts[account_id]
     trust_workspace(account["config_dir"], repo_path)
 
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(account["config_dir"]), "ORCH_ROOT": str(repo_path)}
+    extra = {"CLAUDE_CONFIG_DIR": os.path.expanduser(account["config_dir"]), "ORCH_ROOT": str(repo_path)}
     oauth_var = account.get("oauth_token_env")
     if oauth_var and os.environ.get(oauth_var):
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[oauth_var]
-    env.update(resolve_secrets(_filter_target_secrets(cfg.get("secrets", {}).get("planner", {}))))
+        extra["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[oauth_var]
+    extra.update(resolve_secrets(_filter_target_secrets(cfg.get("secrets", {}).get("planner", {}))))
     if extra_env:
-        env.update(extra_env)
+        extra.update(extra_env)
+    env, _ = env_policy.worker_env("planner", base=os.environ, extra=extra, cfg=cfg,
+                                   task_id=task_id or "planner-" + uuid.uuid4().hex, root=repo_path)
 
     system_prompt = (repo_path / ".orchestrator" / "prompts" / "planner.md").read_text()
     argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"] if model is None else model, "--output-format", "json",
