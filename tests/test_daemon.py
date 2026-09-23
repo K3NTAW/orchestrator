@@ -3446,6 +3446,25 @@ class Background(unittest.TestCase):
         self.assertIsNotNone(t3)                                   # lock released, a fresh start_background works
 
 
+class WorkerRegistryReconciliation(unittest.TestCase):
+    def test_tick_reconciles_registry_once_per_tick(self):
+        stop = threading.Event()
+        tasks = [{"id": "T-registry-dead-1", "pid": 4231, "claimed_at": 0},
+                 {"id": "T-registry-dead-2", "pid": 4232, "claimed_at": 0}]
+        pool = mock.Mock()
+        def reconciled(alive_fn):
+            self.assertIs(alive_fn, daemon.alive)
+            self.assertEqual(dead.call_args_list, [mock.call(task, pool) for task in tasks])
+            stop.set()
+        with mock.patch.object(daemon, "_load_review_cfg"), \
+                mock.patch.object(daemon, "sweep_leases"), \
+                mock.patch.object(daemon.bus, "read", return_value=tasks), \
+                mock.patch.object(daemon, "alive", return_value=False), \
+                mock.patch.object(daemon, "reconcile_dead") as dead, \
+                mock.patch.object(daemon.worker_registry, "reconcile", side_effect=reconciled) as reconcile:
+            daemon.tick(pool, stop)
+            reconcile.assert_called_once_with(daemon.alive)
+
 if __name__ == "__main__":
     unittest.main()
 
