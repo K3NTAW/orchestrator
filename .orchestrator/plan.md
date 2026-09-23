@@ -169,7 +169,7 @@ Complexity 6 (content + inline SVG diagrams + tests; no security paths). Route: 
 ## Prior art (ids for recall)
 - Hosts: Hetzner `ssh kgpt@46.62.167.12` dir /home/kgpt/kgpt, home `ssh k3ntaw@192.168.1.167` (fish), kgpt home side /opt/kgpt-home. docs.kentawaibel.com: repo /Users/k3ntaw/code/docs-kentawaibel, Vercel project docs-kentawaibel.
 
-## Auto-handover 2026-09-23T20:07:22+02:00 — daemon tick
+## Auto-handover 2026-09-23T20:22:32+02:00 — daemon tick
 
 [planner].handover_context_tokens is the configured handover threshold.
 Open goals: none
@@ -177,12 +177,13 @@ Open goals: none
 Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 584 more
 
 Last events:
-- 2026-09-23T20:04:51+02:00 T-1326 update {"pipeline": {"first_ready_at": 1790185908.542434, "dispatched_at": 1790185908.5
 - 2026-09-23T20:07:02+02:00 T-1326 update {"status": "done", "merged_into": "goal/T-0991", "sha": "ccf4b88afa2dbc9fd0e217b
 - 2026-09-23T20:07:03+02:00 T-0991 update {"pipeline": {"notification_transition": "infra:B:quota", "last_merge": {"status
 - 2026-09-23T20:07:03+02:00 T-1326 update {"pipeline": {"first_ready_at": 1790185908.542434, "dispatched_at": 1790185908.5
 - 2026-09-23T20:07:22+02:00 T-1326 update {"pipeline": {"first_ready_at": 1790185908.542434, "dispatched_at": 1790185908.5
+- 2026-09-23T20:12:59+02:00 T-0991 update {"status": "done", "reason": "Planner 2026-09-24: all 26 execute tasks merged in
 
 Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
-- (2026-09-24 ~22:40 CEST) GOAL COMPLETE: T-1326 docs index merged (ccf4b88); 26/26 execute tasks merged; goal T-0991 closed on the bus; PR 26 opened (stage 3, 5 commits, 25 files, +1781); retrospective recorded.
-- (2026-09-24 ~23:05 CEST) PR 26 merged (737c7a5); local main resynced (147cbb2 on the merge); daemon restarted pid 75847; hermes-eval 21/21 PASS persisted to .orchestrator/hermes_eval.json; scorecard --hermes baseline recorded in decisions.md. Open follow-ups: revert B review affinity and window cap when B stops rate-limiting; watch promotion report for the shadow features.
+
+## Cross-repo goal (docs-kentawaibel T-0019, user 2026-09-24 'update the docs'): the single-artifact /orchestrator page gains the Hermes-inspired program
+Complexity 6, route: one execute task T-0020 with spec review, gate (vitest, tsc, eslint), one review, human PR from goal/T-0019. Facts digest committed at .orchestrator/notes/orchestrator-facts-2026-09-24-hermes.md in the docs repo (built from main after PR 26: 15 new modules, 86 modules, 1,494 tests, 28 kinds, 22 features, 22 hermes-eval cases, modes as of 2026-09-24, scorecard --hermes baseline). Docs daemon supervisor pid 83512 dispatches.
