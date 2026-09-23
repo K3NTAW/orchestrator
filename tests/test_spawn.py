@@ -602,14 +602,19 @@ class Render(unittest.TestCase):
     PRE_CHANGE_EXECUTE_PREFIX_CHARS = 0
 
     def test_templates_with_packet_placeholder_put_rules_before_it(self):
-        roles = ("execute", "review", "scout", "spec-review")
-        for role in roles:
-            template = (spawn.STATE / "prompts" / f"{role}.md").read_text()
+        import hashlib
+        # SHA-256 of the full rule text, stripped, before T-1172's template move.
+        original_rules = {
+            "execute": "29766ef48a700fd953e5e478f3c100c717ede45fe7c48f59be11d0647d143b3a",
+            "review": "70478706c75c8f28ba934828b48fda936c1e50106b2e930fc4f43fffa7c8c441",
+            "scout": "9b100cc1172ed403faf0ef156df48993238f1dbf4e2c8294b604ec7120cc75cc",
+            "spec-review": "2315aa294cf56a5601c21c8905f3ba9c97c575beafc24b01fa8c3086c2e122b6",
+        }
+        for role, original_digest in original_rules.items():
             packet = "packet vabcdef base deadbeef sources fixture"
             rendered = spawn.render(role, packet=packet)
             prefix, suffix = rendered.split(packet, 1)
-            expected_rules = template.rsplit("\n\n", 1)[0]
-            self.assertEqual(prefix.strip(), expected_rules.strip(), role)
+            self.assertEqual(hashlib.sha256(prefix.strip().encode()).hexdigest(), original_digest, role)
             self.assertEqual(suffix.strip(), "", role)
 
     def test_prefix_chars_grow_after_template_move(self):
@@ -998,7 +1003,8 @@ class Render(unittest.TestCase):
     def test_execute_prompt_contains_packet(self):
         p = spawn.packet(self.packet_fixture(), TMP)
         text = spawn.render("execute", packet=p)
-        self.assertTrue(text.startswith("packet v"))
+        self.assertIn("\n" + p, text)
+        self.assertTrue(text.rstrip().endswith(p.rstrip()))
         self.assertIn("Build widget", text)
 
     def test_execute_prompt_names_gate_and_commit(self):
@@ -1199,7 +1205,9 @@ class SpawnBase(unittest.TestCase):
         packet = spawn.scout_packet(task)
         prompt = spawn.render("scout", packet=packet, id="T-1", title="scout", turns="20",
                               base_branch="goal/G", base_sha="abc123")
-        self.assertEqual(prompt.splitlines()[0], packet.splitlines()[0])
+        headers = [line for line in prompt.splitlines() if line.startswith("packet v")]
+        self.assertEqual(headers, [packet.splitlines()[0]])
+        self.assertTrue(prompt.rstrip().endswith(packet.rstrip()))
 
     def test_base_for_prefers_fix_round_parent(self):
         """A fix-round execute task (constraints.fix_round_for names the task it's fixing) must cut its worktree
