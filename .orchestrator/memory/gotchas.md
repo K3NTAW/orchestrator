@@ -505,3 +505,14 @@ outcome: revert path: restore the scratchpad backup of evidence/T-0991.jsonl
 type: gotcha · goal: T-0991 · provenance: repo
 - Real 22:15: T-1274 alone added 3,034 rows in a few dispatches. Workaround: [skills].mode shadow until the fix reaches main, pool pruned to one row per task. Bugfix task on the goal branch.
 outcome: revert path: [skills] mode = active
+
+## 2026-09-23 Acceptance test ids must be tests/x.py::test_name; tests/x.py::Class::test is read as a function named after the class and the gate holds gate_red "test not defined"
+type: gotcha · goal: T-1334 · provenance: repo
+- acceptance._TEST_ID (acceptance.py:8) matches path::name and a following ::short only when not preceded by a word char, so Class::test yields (path, Class); missing_tests then greps for def Class( and fails.
+- T-1347 was green locally (tests-green OK 1504 at 3925705) but held; the daemon's auto fix round chased tests that already existed. Fix: respec with path::test_name ids and cherry-pick the green commit (T-1352).
+outcome: write acceptance as tests/test_<module>.py::test_name (write-spec already says so); describe behaviour in the spec, not after the id
+
+## 2026-09-23 A fix round resumes the parent's Codex thread with the parent's write_scope; widening scope in the fix-round spec does not reach Codex
+type: gotcha · goal: T-1334 · provenance: repo
+- T-1370 needed tests/_harness.py; fix rounds T-1371 and T-1372 (scope + explicit "extension granted" text) both came back with Codex asking for the scope and no change.
+outcome: when a fix needs files outside the parent scope, respec as a fresh task (cherry-pick the parent commit) instead of a fix round
