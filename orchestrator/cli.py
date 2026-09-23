@@ -157,6 +157,7 @@ def main():
     sc.add_argument("--scheduling", action="store_true")
     sc.add_argument("--strategies", action="store_true")
     sc.add_argument("--cache", action="store_true")
+    sc.add_argument("--memory", action="store_true")
     sc.add_argument("--days", type=int, default=7)
     sc.add_argument("--root")
     sc.add_argument("--goal")
@@ -173,6 +174,7 @@ def main():
     sc.add_argument("--marginal")
     sc.add_argument("--redundancy", action="store_true")
     ce = sub.add_parser("context-eval"); ce.add_argument("--json", action="store_true"); ce.add_argument("--root")
+    me = sub.add_parser("memory-eval"); me.add_argument("--json", action="store_true")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -309,8 +311,8 @@ def main():
                          else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache)) > 1:
-            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
+        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache, a.memory)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing, --cache, --memory")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
             "--efficiency": ("goal", "executor", "band", "class", "role"),
@@ -327,6 +329,7 @@ def main():
             "--economy": (),
             "--skills": (),
             "--overhead": (),
+            "--memory": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
@@ -344,6 +347,8 @@ def main():
             mode = "--skills"
         if a.overhead:
             mode = "--overhead"
+        if a.memory:
+            mode = "--memory"
         if a.goal is not None and not (a.parallelism or a.overhead):
             ap.error("--goal requires --parallelism or --overhead")
         if a.parallelism and a.planner:
@@ -555,8 +560,21 @@ def main():
         print(json.dumps(document, indent=1) if a.json else context_eval.format_report(results))
         if not document["suite_passed"]:
             raise SystemExit(1)
+    elif a.cmd == "memory-eval":
+        from . import memory_eval
+        document = memory_eval.run()
+        real_state = ROOT / ".orchestrator"
+        real_state.mkdir(parents=True, exist_ok=True)
+        (real_state / "memory_eval.json").write_text(json.dumps(document, indent=2) + "\n")
+        print(json.dumps(document, indent=1) if a.json else memory_eval.format_report(document))
+        if document["passed"] != document["total"]:
+            raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.cache:
+        if a.memory:
+            from . import memory_scorecard
+            card = memory_scorecard.build(a.root or scorecard.STATE, a.days)
+            print(json.dumps(card, indent=1) if a.json else memory_scorecard.format_report(card))
+        elif a.cache:
             from . import cache_telemetry
             card = cache_telemetry.report(a.root or scorecard.STATE, a.days)
             print(json.dumps(card, indent=1) if a.json else cache_telemetry.format_report(card))

@@ -11,6 +11,30 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_scorecard_memory_and_memory_eval_cli(self):
+        from orchestrator import memory_eval, memory_scorecard
+        card = {"days": 7, "rows": [], "by_mode": {},
+                "first_pass": {"with_memory": {"tasks": 0, "rate": None},
+                               "without_memory": {"tasks": 0, "rate": None}}}
+        evaluation = {"cases": [{"name": "fixture", "passed": True, "detail": "ok"}],
+                      "passed": 1, "total": 1}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(cli, "ROOT", root), \
+                    mock.patch.object(memory_scorecard, "build", return_value=card) as build, \
+                    mock.patch.object(sys, "argv", ["orchestrator", "scorecard", "--memory", "--days", "3", "--json"]), \
+                    contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+            self.assertEqual(json.loads(output.getvalue()), card)
+            self.assertEqual(build.call_args.args[1], 3)
+            with mock.patch.object(cli, "ROOT", root), \
+                    mock.patch.object(memory_eval, "run", return_value=evaluation), \
+                    mock.patch.object(sys, "argv", ["orchestrator", "memory-eval", "--json"]), \
+                    contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+            self.assertEqual(json.loads(output.getvalue()), evaluation)
+            self.assertEqual(json.loads((root / ".orchestrator/memory_eval.json").read_text()), evaluation)
+
     def test_skills_inspect_prints_risk_level(self):
         report = {"risk": {"level": "medium"}}
         with mock.patch("orchestrator.skill_discovery.inspect", return_value=report), \
