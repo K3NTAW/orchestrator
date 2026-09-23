@@ -607,7 +607,12 @@ def _cohort_metrics(rows, root, *, economics=True):
 def _collect_hermes(feature, root):
     kind = FEATURES[feature]["evidence"]
     rows = []
-    for row in decision_log.read_all(root=root):
+    observed_rows = decision_log.read_all(root=root)
+    gated = {r.get("subject") for r in observed_rows
+             if r.get("kind") == kind and r.get("reason") == "cache_promotion_gate"}
+    for row in observed_rows:
+        if feature != "stale_steering" and row.get("subject") in gated and row.get("reason") != "cache_promotion_gate":
+            continue
         if row.get("kind") != kind:
             continue
         extra, deterministic = row.get("extra") or {}, row.get("deterministic") or {}

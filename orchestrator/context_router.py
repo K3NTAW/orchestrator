@@ -38,23 +38,43 @@ class RoutedPacket:
     cache_mode: str = "off"
 
 
-def cache_mode(cfg, section="context_router", *, root=None, now=None, notify=None):
+CACHE_FEATURES = {"context_router": "context_cache", "tool_disclosure": "tool_cache",
+                  "skills": "skill_cache"}
+
+
+def cache_mode(cfg, section="context_router"):
+    """Read and validate configuration without evaluating or notifying."""
+    if section not in CACHE_FEATURES:
+        raise ValueError(f"unknown cache section: {section}")
     mode = ((cfg or {}).get(section) or {}).get("cache_mode", "off")
     if mode not in ("off", "shadow", "active"):
         raise ValueError(f"unknown {section}.cache_mode: {mode}")
+    return mode
+
+
+def effective_cache_mode(cfg, section="context_router", *, root, now=None, remembered=None):
+    """Resolve one packet's mode; optional pool-owned memory deduplicates notices."""
+    from . import promotion
+    mode = cache_mode(cfg, section)
+    reason = None
     if mode == "active":
-        from . import STATE, promotion
-        if notify is None:
-            from .notify import notify
-        root = STATE if root is None else root
-        feature = {"context_router": "context_cache", "tool_disclosure": "tool_cache",
-                   "skills": "skill_cache"}[section]
-        verdict = promotion.evaluate(feature, promotion.collect(feature, root=root), cfg,
+        feature = CACHE_FEATURES[section]
+        verdict = promotion.evaluate(feature, promotion.collect(feature, root), cfg,
                                      root=root, now=now)
         if verdict["recommendation"] != "promote":
-            notify(f"active {feature} refused; using shadow: " + ", ".join(verdict["reasons"]))
-            return "shadow"
-    return mode
+            mode = "shadow"
+            reason = ", ".join(verdict["reasons"]) or verdict["recommendation"]
+    if remembered is not None:
+        changed = remembered.get(section) != reason
+        remembered[section] = reason
+        if reason is not None and changed:
+            try:
+                from .notify import notify
+                notify(f"active {CACHE_FEATURES[section]} refused; using shadow: {reason}")
+            except Exception:
+                # Notification delivery must never interrupt packet construction.
+                pass
+    return mode, reason
 
 
 def _cacheability(ev, head_sha):

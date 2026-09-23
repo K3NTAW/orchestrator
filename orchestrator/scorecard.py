@@ -1716,6 +1716,16 @@ def hermes(root=STATE, days=7):
     except OSError:
         hot_tokens = None
     compactions = [r for r in rows if r.get("kind") == "memory_compaction"]
+    refusals = {}
+    for row in rows:
+        data = row.get("deterministic") or {}
+        if row.get("reason") != "cache_promotion_gate" or not data.get("refused_reason"):
+            continue
+        key = (row.get("kind"), data.get("configured_cache_mode"), data.get("cache_mode"), data["refused_reason"])
+        refusals[key] = refusals.get(key, 0) + 1
+    refusal_rows = [{"kind": kind, "configured_cache_mode": configured, "cache_mode": mode,
+                     "refused_reason": reason, "count": count}
+                    for (kind, configured, mode, reason), count in sorted(refusals.items())]
     metrics = {
         "accepted_goal_success": ratio(len(accepted), len(goals)),
         "first_pass_rate": efficiency_card["first_pass_rate"],
@@ -1744,9 +1754,12 @@ def hermes(root=STATE, days=7):
         "orchestration_cost_share": overhead_total["cost_share"],
         "orchestration_latency_share": overhead_total["latency_share"],
     }
-    return {"metrics": metrics, "accepted_goals": len(accepted), "days": days}
+    return {"metrics": metrics, "accepted_goals": len(accepted), "days": days, "cache_refusals": refusal_rows}
 
 
 def format_hermes(card):
-    return "metric\tvalue\n" + "\n".join(
-        f"{key}\t{'unknown' if value is None else value}" for key, value in card["metrics"].items())
+    lines = ["metric\tvalue", *(f"{key}\t{'unknown' if value is None else value}"
+                               for key, value in card["metrics"].items())]
+    lines.extend(f"cache_refusal:{row['kind']}:{row['configured_cache_mode']}->{row['cache_mode']}:"
+                 f"{row['refused_reason']}\t{row['count']}" for row in card.get("cache_refusals", []))
+    return "\n".join(lines)

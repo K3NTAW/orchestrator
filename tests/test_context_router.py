@@ -241,15 +241,92 @@ class CachePromotionRefusal(unittest.TestCase):
             for section, feature in (("context_router", "context_cache"), ("tool_disclosure", "tool_cache"),
                                      ("skills", "skill_cache")):
                 cfg = {section: {"cache_mode": "active"}}
-                notify = mock.Mock()
-                self.assertEqual(context_router.cache_mode(cfg, section, root=directory, notify=notify), "shadow")
-                notify.assert_called_once()
+                mode, reason = context_router.effective_cache_mode(cfg, section, root=directory)
+                self.assertEqual(mode, "shadow")
+                self.assertIn("hermes_eval_missing_or_stale", reason)
+                self.assertEqual(context_router.cache_mode(cfg, section), "active")
                 self.assertEqual(cfg[section]["cache_mode"], "active")
                 with mock.patch.object(promotion, "collect", return_value={"n": 30, "shadow_n": 30,
                         "first_pass_delta": 0, "fix_rounds_delta": 0, "accepted_tokens_delta": -1}), \
                         mock.patch.object(hermes_eval, "fresh", return_value=True):
-                    self.assertEqual(context_router.cache_mode(cfg, section, root=directory, notify=notify), "active")
+                    self.assertEqual(context_router.effective_cache_mode(cfg, section, root=directory), ("active", None))
                 with mock.patch.object(promotion, "evaluate") as evaluate:
                     cfg[section]["cache_mode"] = "shadow"
-                    self.assertEqual(context_router.cache_mode(cfg, section, root=directory), "shadow")
+                    self.assertEqual(context_router.effective_cache_mode(cfg, section, root=directory), ("shadow", None))
                     evaluate.assert_not_called()
+
+
+    def test_effective_cache_mode_notifies_only_changed_reasons_and_is_failure_safe(self):
+        from orchestrator import promotion, notify
+        remembered = {}
+        cfg = {"skills": {"cache_mode": "active"}}
+        with mock.patch.object(promotion, "collect", return_value={}), \
+                mock.patch.object(promotion, "evaluate", return_value={"recommendation": "stay", "reasons": ["missing"]}) as evaluate, \
+                mock.patch.object(notify, "notify", side_effect=RuntimeError("fixture notification failure")) as send:
+            for _ in range(2):
+                self.assertEqual(context_router.effective_cache_mode(cfg, "skills", root="fixture", remembered=remembered),
+                                 ("shadow", "missing"))
+            self.assertEqual(send.call_count, 1)
+            evaluate.return_value = {"recommendation": "stay", "reasons": ["quality"]}
+            context_router.effective_cache_mode(cfg, "skills", root="fixture", remembered=remembered)
+            self.assertEqual(send.call_count, 2)
+            cfg["skills"]["cache_mode"] = "shadow"
+            context_router.effective_cache_mode(cfg, "skills", root="fixture", remembered=remembered)
+            self.assertIsNone(remembered["skills"])
+        for reader in (context_router.cache_mode, context_router.effective_cache_mode):
+            with self.assertRaises(ValueError):
+                reader({}, "unknown", **({"root": "fixture"} if reader == context_router.effective_cache_mode else {}))
+
+    def test_packet_boundary_resolves_each_cache_once_and_records_effective_modes(self):
+        from types import SimpleNamespace
+        from orchestrator import promotion
+        cfg = {key: {"cache_mode": "active"} for key in context_router.CACHE_FEATURES}
+        task = {"id": "T-cache-boundary", "role": "execute"}
+        skills = {"section": "## skills\ncatalog\n\nbody", "_uncached_section": "body", "_cache_catalog": "catalog"}
+        pool = SimpleNamespace(cfg=cfg)
+        with mock.patch.object(context_router, "effective_cache_mode", return_value=("shadow", "fixture")) as gate, \
+                mock.patch.object(spawn.decision_log, "record") as record, \
+                mock.patch.object(spawn, "_packet_body", return_value=("## objective\nfixture", {
+                    "hash": "abcd", "base": "fixture", "policy_version": "fixture", "gotchas": "fixture",
+                    "memory_layers": "fixture"})) as body:
+            spawn.packet(task, "fixture", cfg=cfg, skills=skills, pool=pool)
+        self.assertEqual(gate.call_count, 3)
+        self.assertEqual({call.args[1] for call in gate.call_args_list}, set(context_router.CACHE_FEATURES))
+        self.assertTrue(all(call.kwargs["root"] == spawn.STATE for call in gate.call_args_list))
+        self.assertEqual(skills["section"], "body")
+        self.assertEqual(cfg["skills"]["cache_mode"], "active")
+        self.assertEqual(body.call_args.kwargs["cfg"]["skills"]["cache_mode"], "shadow")
+        self.assertEqual(record.call_count, 3)
+        for call in record.call_args_list:
+            data = call.kwargs["deterministic"]
+            self.assertEqual((data["configured_cache_mode"], data["cache_mode"], data["refused_reason"]),
+                             ("active", "shadow", "fixture"))
+
+    def test_refused_packet_keeps_shadow_context_and_removes_active_catalog(self):
+        from types import SimpleNamespace
+        from orchestrator import promotion
+        cfg = {"context_router": {"mode": "off", "cache_mode": "active"},
+               "tool_disclosure": {"mode": "shadow", "cache_mode": "active"},
+               "skills": {"mode": "shadow", "cache_mode": "active"}, "memory": {"mode": "off"}}
+        task = {"id": "T-cache-render", "title": "Fixture", "role": "execute", "scope": [], "acceptance": []}
+        skills = {"section": "## skills\nfixture catalog\n\nfixture body",
+                  "_uncached_section": "## skills\nfixture body", "_cache_catalog": "fixture catalog", "mode": "shadow"}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}), \
+                mock.patch.object(spawn, "git", return_value=SimpleNamespace(stdout="fixture")), \
+                mock.patch.object(spawn, "_shadow_route", return_value={}), \
+                mock.patch.object(spawn.decision_log, "record"), \
+                mock.patch.object(promotion, "collect", return_value={}), \
+                mock.patch.object(promotion, "evaluate", return_value={"recommendation": "stay", "reasons": ["missing"]}) as evaluate, \
+                mock.patch("orchestrator.notify.notify"):
+            pool = SimpleNamespace(cfg=cfg)
+            refused = spawn.packet(task, directory, cfg=cfg, skills=skills, pool=pool)
+            self.assertNotIn("## tools\n", refused)
+            self.assertNotIn("fixture catalog", refused)
+            self.assertIn("fixture body", refused)
+            self.assertEqual(evaluate.call_count, 3)
+            evaluate.return_value = {"recommendation": "promote", "reasons": []}
+            accepted = spawn.packet(task, directory, cfg=cfg, skills=skills, pool=pool)
+            self.assertIn("## tools\n", accepted)
+            self.assertIn("fixture catalog", accepted)
+            self.assertEqual(evaluate.call_count, 6)

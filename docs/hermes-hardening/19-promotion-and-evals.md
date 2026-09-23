@@ -40,11 +40,29 @@ existing 20-row and economics rules. Neither receives the new freshness gate.
 `promotion.evaluate(feature, evidence, cfg, root=..., now=...)` refuses with
 `hermes_eval_missing_or_stale` for a missing, malformed, failed, future-dated,
 or expired report. Omitting root skips only this freshness check and records
-`eval_root_missing`; it does not substitute production state. The cache-mode
-reader supplies the runtime state root by default, accepts an explicit fixture
-root and clock, and returns shadow with a notification unless promotion passes.
-Shadow observation preserves worker-visible context. Runtime refusal does not
-change the user's configured active value.
+`eval_root_missing`; it does not substitute production state.
+`context_router.cache_mode(cfg, section)` is a pure validated configuration
+accessor. Unknown sections and invalid values raise ValueError.
+`effective_cache_mode(cfg, section, root=..., now=None, remembered=None)` returns
+an effective mode and refusal reason, evaluating only configured active modes.
+
+The public execute and review packet builders resolve context, tool, and skill
+cache controls once per packet with root=STATE. Lower-level rendering helpers
+consume that snapshot; preparing a skill selection alone does not activate the
+cache gate. Prepared skill text retains its pre-catalog section so a refused
+active catalog is removed before rendering. Configuration is never rewritten.
+Pool-owned remembered reasons deduplicate notifications, including reset after
+recovery, and notification failures cannot break spawning.
+
+Gate observations record configured_cache_mode, effective cache_mode, and
+refused_reason. Context, tool, and skill decisions carry the same values when
+available. Collection prefers packet gate observations over auxiliary rows for
+the same feature/task, so later provider usage cannot relabel refused shadow as
+active or double-count the packet. The Hermes scorecard prints refusal counts
+and reasons in its table and exposes them as cache_refusals in JSON.
+
+To revert, use git revert on this task's commits, including its fix-round
+commits. Reverting all of them restores ungated active cache behavior.
 
 ## Deterministic evaluations (P34)
 

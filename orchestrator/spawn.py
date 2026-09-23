@@ -19,6 +19,57 @@ _SKILL_EVIDENCE_WINDOW_S = 7 * 24 * 60 * 60
 _SKILL_PRESENTATION_CAP = 2400
 
 
+_CACHE_NOTIFICATION_POOL = None
+
+
+def _packet_cache_config(task, cfg, skills=None, pool=None):
+    """Resolve all cache controls once at the public packet-build boundary.
+
+    Low-level render helpers consume this snapshot and retain their pure config
+    behavior when exercised independently.
+    """
+    global _CACHE_NOTIFICATION_POOL
+    configured = (pool or Pool()).cfg if cfg is None else cfg
+    if pool is None:
+        if _CACHE_NOTIFICATION_POOL is None:
+            _CACHE_NOTIFICATION_POOL = Pool()
+        pool = _CACHE_NOTIFICATION_POOL
+    if not isinstance(getattr(pool, "cache_refusal_reasons", None), dict):
+        pool.cache_refusal_reasons = {}
+    effective = dict(configured)
+    decisions = {}
+    for section in context_router.CACHE_FEATURES:
+        try:
+            mode, reason = context_router.effective_cache_mode(
+                configured, section, root=STATE, remembered=pool.cache_refusal_reasons)
+            invalid = False
+        except ValueError:
+            mode, reason, invalid = "off", "invalid_config", True
+        value = (configured.get(section) or {}).get("cache_mode", "off")
+        decisions[section] = {"configured_cache_mode": value, "cache_mode": mode,
+                              "refused_reason": reason, "invalid_config": invalid}
+        effective[section] = {**(configured.get(section) or {}), "cache_mode": mode}
+    effective["_cache_decisions"] = decisions
+    task["_cache_decisions"] = decisions
+    if skills is not None:
+        skills.update(decisions["skills"])
+        if "_uncached_section" in skills:
+            skills["section"] = skills["_uncached_section"]
+            catalog = skills.get("_cache_catalog", "")
+            if skills["cache_mode"] == "active" and catalog:
+                skills["section"] = "## skills\n" + catalog + "\n\n" + skills["section"].removeprefix("## skills\n")
+    # These observations also cover Codex, whose usage writer runs separately.
+    for section, kind in (("context_router", "context_selection"),
+                          ("tool_disclosure", "tool_disclosure"), ("skills", "skill_selection")):
+        data = decisions[section]
+        if data["configured_cache_mode"] == "off":
+            continue
+        decision_log.record(kind, task.get("id", "(unknown)"), candidates=[], hard_constraints=[],
+                            deterministic=data, selected=[], reason="cache_promotion_gate",
+                            mode=data["cache_mode"])
+    return effective
+
+
 def _skill_records():
     return skills_registry.load().get("skills", {})
 
@@ -75,6 +126,8 @@ def _prepare_skills(task, role, cfg):
     except ValueError:
         cache_mode, choice["invalid_config"] = "off", True
     choice["cache_mode"] = cache_mode
+    choice["_uncached_section"] = choice["section"]
+    choice["_cache_catalog"] = catalog
     if cache_mode == "active" and catalog:
         choice["section"] = "## skills\n" + catalog + "\n\n" + choice["section"].removeprefix("## skills\n")
     return choice
@@ -125,7 +178,7 @@ def _skill_routing(task, role, cfg, exposure, choice=None):
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
                                        "mandatory": choice["mandatory"], "role": role,
                                        **{key: choice[key] for key in ("catalog_chars", "selected_chars",
-                                                                      "cache_mode", "invalid_config") if key in choice}},
+                                                                      "cache_mode", "configured_cache_mode", "refused_reason", "invalid_config") if key in choice}},
                         selected=presented, rejected=choice["rejected"],
                         reason=choice["reason"], mode=choice["mode"],
                         jev=choice.get("jev"),
@@ -460,6 +513,7 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None, provide
                                       provider=provider, effective_mode=mode,
                                       cache_mode=cache_mode, invalid_config=invalid_config)
         row = context_router.decision_row(task, routed, mode=mode)
+        row["deterministic"].update((cfg.get("_cache_decisions") or {}).get("context_router", {}))
         partial_items = context_router.section_items(
             routed, {ev.id: ev for ev in candidates}, "prior_worker")
         row["extra"] = {"head_sha": head_sha,
@@ -515,7 +569,8 @@ def _shadow_tool_disclosure(task, role, cfg, skills=None):
         deterministic={"task_class": tool_catalog._task_class(task), "role": role,
                        "kept": selected, "dropped": [tool for tool in offered if tool not in selected],
                        "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens,
-                       **tool_catalog.cache_fields(task, role, selected, cfg)},
+                       **tool_catalog.cache_fields(task, role, selected, cfg),
+                       **(task.get("_cache_decisions") or {}).get("tool_disclosure", {})},
         reason=reason, mode=mode, extra=extra)
     return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens,
             "tool_allowlist": ",".join(selected) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
@@ -956,8 +1011,9 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
     return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree, *, cfg=None, skills=None, provider="codex") -> str:
+def packet(task, worktree, *, cfg=None, skills=None, provider="codex", pool=None) -> str:
     """Build the Codex dispatch briefing; Claude fallback supplies its provider explicitly."""
+    cfg = _packet_cache_config(task, cfg, skills, pool)
     body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills, provider=provider)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
@@ -1006,9 +1062,10 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude") -> str:
+def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", pool=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
+    cfg = _packet_cache_config(task, cfg, skills, pool)
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
     raw_diff = scoped_diff(src)
@@ -1044,7 +1101,6 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude") -
     }
     if reviewer_role in role_focus:
         sections.append(_section("role", role_focus[reviewer_role]))
-    cfg = Pool().cfg if cfg is None else cfg
     security_globs = cfg.get("review", {}).get("security_paths", [])
     matched = sorted({glob for glob in security_globs for path in src.get("scope", []) if Path(path).match(glob)})
     semantic = re.search(r"\b(auth|credential|secret|token|permission|crypt|security)\b",
@@ -1472,7 +1528,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
             skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, pool.cfg)
             if role == "review":
                 src = reviewed if reviewed is not None else t
-                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice, provider="claude")
+                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice, provider="claude", pool=pool)
                 security_signals = {"security": "## security\n" in role_packet}
                 prompt = render("review", packet=role_packet, task=t, signals=security_signals)
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
@@ -1488,7 +1544,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
                 t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
                 worker_control.write_if_current(task_id, epoch, bus.update, task_id, executor=t["executor"])
                 packet_worktree = t.get("worktree") or ROOT
-                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice, provider="claude")
+                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice, provider="claude", pool=pool)
                 prompt = render("execute", packet=role_packet, task=t) + \
                     "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
                     "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."

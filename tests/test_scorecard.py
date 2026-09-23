@@ -1191,3 +1191,17 @@ class HermesScorecard(unittest.TestCase):
             self.assertEqual(values["false_positive_rate"], 1)
             self.assertEqual(values["suspicious_context_detected"], 1)
             self.assertEqual(values["blocked_imports"], 0)
+
+    def test_hermes_scorecard_exposes_cache_refusal_reasons(self):
+        from orchestrator import decision_log
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            decision_log.record("tool_disclosure", "T-refused", candidates=[], hard_constraints=[],
+                deterministic={"configured_cache_mode": "active", "cache_mode": "shadow",
+                               "refused_reason": "hermes_eval_missing_or_stale"},
+                selected="shadow", reason="cache_promotion_gate", mode="shadow", root=root)
+            card = scorecard.hermes(root)
+            self.assertEqual(card["cache_refusals"][0]["count"], 1)
+            self.assertIn("active->shadow:hermes_eval_missing_or_stale", scorecard.format_hermes(card))

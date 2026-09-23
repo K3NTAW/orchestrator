@@ -449,3 +449,17 @@ class HermesPromotion(unittest.TestCase):
             cfg = {"memory": {"mode": "active"}}
             for metrics, expected in ((regressed, "demote"), (recovered, "stay")):
                 self.assertEqual(promotion.evaluate("memory_tiers", {"n": 30, **metrics}, cfg)["recommendation"], expected)
+
+    def test_packet_cache_gate_cohort_overrides_auxiliary_configured_active_rows(self):
+        import json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tasks").mkdir()
+            (root / "tasks/T-refused.json").write_text(json.dumps({"id": "T-refused"}))
+            for reason, mode in (("cache_promotion_gate", "shadow"), ("usage", "active")):
+                decision_log.record("tool_disclosure", "T-refused", candidates=[], hard_constraints=[],
+                    deterministic={"cache_mode": mode, "configured_cache_mode": "active"},
+                    selected=[], reason=reason, mode=mode, root=root)
+            values = promotion.collect("tool_cache", root)
+            self.assertEqual((values["n"], values["shadow_n"], values["active_n"]), (1, 1, 0))
