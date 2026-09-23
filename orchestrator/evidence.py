@@ -84,6 +84,10 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
         raise ValueError(f"invalid provenance: {provenance}")
     content = str(content)
     content_hash = hashlib.sha256(content.encode()).hexdigest()
+    if source_type == "previous_result":
+        match = re.match(r"^task:([^:]+)(?::|$)", str(location))
+        if match:
+            location = f"task:{match.group(1)}:evidence:{content_hash}"
     evidence_id = hashlib.sha256(
         f"{source_type}|{location}|{content_hash}".encode()
     ).hexdigest()[:12]
@@ -128,6 +132,7 @@ class EvidencePool:
         self._items = {}
         compacted = False
         previous_by_task = {}
+        superseded = {}
         if self.path.exists():
             for line in self.path.read_text().splitlines():
                 if line.strip():
@@ -139,6 +144,25 @@ class EvidencePool:
                            if key in {field.name for field in fields(Evidence)}}
                     item = Evidence(**row)
                     task_id = self._previous_result_task(item)
+                    if task_id is not None:
+                        if task_id not in superseded:
+                            from . import bus
+                            try:
+                                task = bus.get(task_id)
+                            except KeyError:
+                                task = {}
+                            superseded[task_id] = (task.get("status") == "superseded"
+                                                   or bool(task.get("superseded_by")))
+                        if superseded[task_id]:
+                            compacted = True
+                            continue
+                        location = f"task:{task_id}:evidence:{item.content_hash}"
+                        evidence_id = hashlib.sha256(
+                            f"previous_result|{location}|{item.content_hash}".encode()
+                        ).hexdigest()[:12]
+                        if (item.location, item.id) != (location, evidence_id):
+                            item = replace(item, location=location, id=evidence_id)
+                            compacted = True
                     if task_id is not None and task_id in previous_by_task:
                         self._items.pop(previous_by_task[task_id], None)
                         compacted = True
@@ -152,7 +176,7 @@ class EvidencePool:
     def _previous_result_task(ev):
         if ev.source_type != "previous_result":
             return None
-        match = re.match(r"^task:([^:]+):evidence(?::|$)", ev.location)
+        match = re.match(r"^task:([^:]+)(?::|$)", ev.location)
         return match.group(1) if match else None
 
     def _write(self):

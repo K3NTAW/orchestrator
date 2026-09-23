@@ -2,6 +2,7 @@ import _harness
 from dataclasses import asdict
 import json
 import unittest
+from unittest import mock
 
 from orchestrator import evidence
 from _fixtures import fake_secret
@@ -79,6 +80,10 @@ class EvidenceTests(unittest.TestCase):
         self.addCleanup(pool.path.unlink, missing_ok=True)
         first = evidence.make("previous_result", "task:T-one:evidence:first", "old",
                               provenance="bus")
+        repeated = evidence.make("previous_result", "task:T-one:evidence:999", "old",
+                                 provenance="bus")
+        self.assertEqual(first.id, repeated.id)
+        self.assertEqual(first.location, "task:T-one:evidence:" + first.content_hash)
         latest = evidence.make("previous_result", "task:T-one:evidence:latest", "new",
                                provenance="bus")
         other = evidence.make("previous_result", "task:T-two:evidence:other", "other",
@@ -95,6 +100,14 @@ class EvidenceTests(unittest.TestCase):
         loaded.add(replacement)
         self.assertEqual({replacement.id, other.id}, set(loaded._items))
         self.assertEqual(2, len(pool.path.read_text().splitlines()))
+        legacy = asdict(replacement)
+        legacy.update(id="legacy-indexed-id", location="task:T-one:evidence:42")
+        pool.path.write_text(json.dumps(legacy) + "\n" + json.dumps(asdict(other)) + "\n")
+        with mock.patch("orchestrator.bus.get", side_effect=lambda task_id: {
+                "status": "superseded" if task_id == "T-two" else "done"}):
+            loaded = evidence.EvidencePool("previous-results")
+        self.assertEqual([replacement], loaded.by_type("previous_result"))
+        self.assertEqual(1, len(pool.path.read_text().splitlines()))
 
 
 if __name__ == "__main__":

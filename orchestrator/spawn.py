@@ -422,11 +422,19 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None, provide
     try:
         pool = evidence.EvidencePool(task.get("parent") or task["id"])
         candidates = [pool.add(candidate) for candidate in candidates]
-        candidates = list({item.id: item for item in [*candidates, *pool.by_type("worker_partial")]}.values())
+        # Input occurrences describe the packet's uncompressed baseline. Stable
+        # storage identities must not erase occurrences from routing telemetry.
+        seen = {item.id for item in candidates}
+        for item in pool.by_type("worker_partial"):
+            if item.id not in seen:
+                candidates.append(item)
+                seen.add(item.id)
         composition = (skills or {}).get("_specialist")
         if composition:
-            candidates = list({item.id: item for item in
-                               [*candidates, *composition.shared_evidence(task)]}.values())
+            for item in composition.shared_evidence(task):
+                if item.id not in seen:
+                    candidates.append(item)
+                    seen.add(item.id)
             candidates = composition.filter_evidence(candidates)
         routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
                                       required_types=composition.context_requirements if composition else (),
@@ -727,7 +735,7 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
         ("gotchas", gotchas or ["- (none)"]),
         ("decisions", decisions or ["- (none)"]),
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
-        ("evidence", evidence_lines or ["- (none)"]),
+        ("evidence", evidence_lines or capped_lines(["- (none)"], legacy_evidence_chars)),
     ]
     if skills and skills.get("section"):
         sections.insert(0, ("skills", skills["section"].removeprefix("## skills\n").splitlines()))
@@ -771,6 +779,13 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
     shadow_meta = _shadow_route(routing_task, candidates, role="execute", head_sha=merge_base, cfg=cfg,
                                 skills=skills, provider=provider)
     routed_sections = shadow_meta.pop("_routed_sections", {})
+    if "evidence" in routed_sections:
+        # Keep routed items whole (including fences) under the same cap.
+        items = routed_sections["evidence"]
+        size = sum(len(text) + 1 for _, text in items)
+        while items and size > legacy_evidence_chars:
+            _, text = items.pop()
+            size -= len(text) + 1
     if memory_mode == "active" and retrieval is not None:
         routed_sections = {name: items for name, items in routed_sections.items()
                            if name not in tiered_sections}

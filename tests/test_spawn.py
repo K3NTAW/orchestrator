@@ -814,21 +814,27 @@ class Render(unittest.TestCase):
         for index in range(5000):
             pool.add(evidence.make("external_doc", f"legacy:{index}", "x" * 80,
                                    provenance="external"))
-        composition = mock.Mock()
-        composition.shared_evidence.side_effect = lambda unused: evidence.EvidencePool(
-            "G-bounded").by_type("external_doc")
-        composition.filter_evidence.side_effect = lambda rows: rows
-        composition.context_requirements = []
+        composition = spawn.specialist.Specialist(
+            "execute", [], [], [], None, "execute", [], {})
         skills = {"mode": "active", "_specialist": composition}
-        cfg = {"context_router": {"mode": "off", "legacy_evidence_chars": 6000}}
-        before = len(pool.path.read_text().splitlines())
-
-        packets = [spawn.packet(task, TMP, cfg=cfg, skills=skills) for _ in range(3)]
-
-        self.assertEqual(before, len(pool.path.read_text().splitlines()))
-        for packet in packets:
-            section = packet.split("## evidence\n", 1)[1].split("\n## ", 1)[0]
-            self.assertLessEqual(len(section), 6000)
+        self.active_eval()
+        with mock.patch.object(spawn, "memory_recall", return_value={
+                "hits": [], "layers_consulted": []}):
+            cfg = {"context_router": {"mode": "shadow", "legacy_evidence_chars": 512}}
+            spawn.packet(task, TMP, cfg=cfg, skills=skills)
+            before = pool.path.read_bytes()
+            for mode in ("off", "shadow", "active"):
+                cfg["context_router"]["mode"] = mode
+                for _ in range(3):
+                    packet = spawn.packet(task, TMP, cfg=cfg, skills=skills)
+                    section = packet.split("## evidence\n", 1)[1].split("\n## ", 1)[0]
+                    self.assertLessEqual(len(section), 512)
+                    self.assertEqual(before, pool.path.read_bytes())
+            previous = evidence.EvidencePool("G-bounded").by_type("previous_result")
+            self.assertEqual(len(previous), 1)
+            self.assertEqual(previous[0].content, "- input: task result")
+            self.assertEqual(previous[0].location,
+                             "task:T-bounded:evidence:" + previous[0].content_hash)
 
     def test_prior_worker_section_inert_in_shadow_mode(self):
         task = self.packet_fixture()
