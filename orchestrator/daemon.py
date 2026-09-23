@@ -1314,6 +1314,33 @@ def _stale_rebase(task, evidence):
     return True
 
 
+def _stale_high_flag(task, evidence, *, active, now, hold=False):
+    """Only effective active steering creates flags; gates consume existing flags."""
+    pipeline = dict(task.get("pipeline") or {})
+    flag = pipeline.get("stale_high")
+    known = evidence.get("risk") != "unknown" and evidence.get("severity") != "unknown"
+    if flag and known and not set(flag["paths"]).intersection(evidence.get("stale_paths", [])):
+        pipeline.pop("stale_high")
+        bus.update(task["id"], pipeline=pipeline)
+        flag = None
+    if active and hold:
+        flag = {"ts": now, "paths": evidence["stale_paths"], "goal_head": evidence.get("goal_head")}
+        pipeline["stale_high"] = flag
+        bus.update(task["id"], pipeline=pipeline)
+    return bool(flag)
+
+
+def _hold_stale_high(task):
+    if not (task.get("pipeline") or {}).get("stale_high"):
+        return False
+    evidence = stale_check(task)
+    if not _stale_high_flag(task, evidence, active=False, now=time.time()):
+        return False
+    stamp(task["id"], "gated_at", status="held", hold_reason="stale_high")
+    bus.update(task["id"], status="held", hold_reason="stale_high")
+    return True
+
+
 def gate(pool):
     """done execute tasks that have not been gated: run tests-green on the worktree, then merge directly or open
     the number of review tasks _review_plan() says (see its docstring for the never/security_paths/always
@@ -1357,6 +1384,8 @@ def gate(pool):
                 continue
             missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
             if missing:
+                if _hold_stale_high(t):
+                    continue
                 failures = [
                     f"FAILED {path}::{name} (missing: "
                     f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
@@ -1369,6 +1398,8 @@ def gate(pool):
                     print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
                 continue
         tg = subprocess.run([str(merge.TESTS_GREEN), worktree], capture_output=True, text=True, input="{}")
+        if _hold_stale_high(t):
+            continue
         if tg.returncode:
             gate_reds = pipeline.get("gate_reds", 0) + 1
             if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
@@ -1651,7 +1682,7 @@ def maybe_handover(reason, now=None):
     return True
 
 
-def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task):
+def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task, critical_ids=None):
     """Persist proposals; only active steering can affect a worker."""
     cfg = pool.cfg
     mode = steering_policy.mode(cfg)
@@ -1676,21 +1707,29 @@ def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task):
             if getattr(pool, "steering_refusal_reasons", None) != reasons:
                 notify("active steering policy refused; using shadow: " + ", ".join(reasons))
         pool.steering_refusal_reasons = reasons
-    for task in running:
+    order = {tid: index for index, tid in enumerate(ranked)}
+    for task in sorted(running, key=lambda t: order.get(t["id"], len(order))):
         doc = worker_registry.get(task["id"])
         if mode == "active" and doc and (doc.get("status") in ("steering", "cancelling") or
                 (task.get("pipeline") or {}).get("steer_epoch", 1) > doc.get("epoch", 1)):
             continue
-        critical = bool(ranked and ranked[0] == task["id"])
+        critical = task["id"] in critical_ids if critical_ids is not None else bool(ranked and ranked[0] == task["id"])
+        evidence = None
         try:
+            evidence = stale_check(task)
             result = steering_policy.evaluate(task, tasks=tasks, registry_doc=doc,
-                stale_evidence=stale_check(task), gate_history=steering_policy.gate_history(task, tasks),
+                stale_evidence=evidence, gate_history=steering_policy.gate_history(task, tasks),
                 cfg=cfg, critical=critical, now=now)
         except Exception:
             result = {"action": "continue", "trigger": None, "reasons": ["evaluation_error"],
                       "message": None, "evidence": {}, "severity": "none"}
         if invalid:
             result.update(action="continue", message=None, reasons=["invalid_config"])
+        if mode == "active" and not invalid and evidence is not None and (result.get("hold_after_gate") or
+                (task.get("pipeline") or {}).get("stale_high")):
+            with bus.locked():
+                _stale_high_flag(bus.get(task["id"]), evidence, active=True, now=now,
+                                 hold=result.get("hold_after_gate", False))
         digest = steering_policy.evidence_hash(result)
         previous = recent_by_task.get(task["id"], [])
         applied = [r for r in previous if r.get("mode") == "active" and
@@ -1716,13 +1755,21 @@ def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task):
                 gone = isinstance(exc, (ProcessLookupError, KeyError)) or any(text in str(exc) for text in
                     ("worker is not running", "worker not found", "not alive", "already finished"))
                 outcome = "worker_gone" if gone else "error"
+        tokens = (doc or {}).get("tokens")
+        token_keys = ("input_uncached", "cache_read", "output")
+        tokens_so_far = (sum(tokens.get(k, 0) for k in token_keys) if isinstance(tokens, dict) and
+                         any(k in tokens for k in token_keys) and
+                         all(isinstance(tokens.get(k, 0), (int, float)) for k in token_keys) else None)
+        started = (doc or {}).get("started_at", task.get("claimed_at"))
+        elapsed = max(0, now - started) if isinstance(started, (int, float)) else None
         decision_log.record("steering", task["id"], candidates=["continue", "steer", "cancel"],
             hard_constraints={"critical": critical, "cancel_shadow_only": True,
                               "min_interval_s": interval, "in_interval": in_interval},
             deterministic=result["evidence"], selected=action, reason=result["reasons"], mode=mode,
             extra={"trigger": result["trigger"], "severity": result["severity"], "critical": critical,
                    "action": action, "candidate_action": result["action"], "evidence_hash": digest,
-                   "message_chars": len(result["message"] or ""), "outcome": outcome}, root=bus.STATE)
+                   "message_chars": len(result["message"] or ""), "outcome": outcome,
+                   "tokens_so_far": tokens_so_far, "elapsed": elapsed}, root=bus.STATE)
 
 
 def steering_tick(pool, *, depth_tick=None):
@@ -1745,11 +1792,31 @@ def steering_tick(pool, *, depth_tick=None):
         durations = duration.durations_for(list(wave_tasks.values()))
     except Exception:
         durations = None
-    ranked = _wave_order([t["id"] for t in running + candidates], wave_tasks, durations)
+    try:
+        ranked = _wave_order([t["id"] for t in running + candidates], wave_tasks, durations)
+    except Exception:
+        ranked = [t["id"] for t in running + candidates]
+        durations = None
     tasks = {t["id"]: t for t in bus.read()}
     recent_by_task = decision_log.recent(root=bus.STATE, limit=2, kind="steering",
                                          subjects=[task["id"] for task in running])
-    _steering_decisions(pool, running, tasks, ranked, time.time(), recent_by_task)
+    critical_ids = set(t["id"] for t in running)
+    if durations is not None:
+        try:
+            critical_ids = set()
+            current = ranked[0] if ranked else None
+            while current and current not in critical_ids:
+                critical_ids.add(current)
+                info = critical_path.explain(current, wave_tasks, durations)
+                children = [tid for tid, t in wave_tasks.items()
+                            if current in (t.get("depends_on") or []) and
+                            not t.get("merged_into") and t.get("status") != "failed" and tid not in critical_ids]
+                tail = info["critical_path_s"] - info["est_duration_s"]
+                current = next((tid for tid in sorted(children) if
+                    critical_path.explain(tid, wave_tasks, durations)["critical_path_s"] == tail), None)
+        except Exception:
+            critical_ids = set(t["id"] for t in running)
+    _steering_decisions(pool, running, tasks, ranked, time.time(), recent_by_task, critical_ids)
 
 
 def tick(pool=None, stop_event=None):

@@ -17,10 +17,10 @@ class SteeringPolicyTests(unittest.TestCase):
     def setUp(self):
         self.task = {"id": "T-policy", "parent": "T-goal", "status": "running",
                      "scope": ["orchestrator/work.py", "lib/work.py", "app/main.py"],
-                     "pipeline": {}, "constraints": {}}
+                     "pipeline": {}, "constraints": {}, "read_scope": ["lib/"]}
         self.inputs = dict(tasks={self.task["id"]: self.task},
                            registry_doc={"last_event_at": 950}, stale_evidence=stale_fixture(),
-                           gate_history=[], cfg={}, critical=False, now=1000)
+                           gate_history=[], cfg={"steering": {"noncritical_medium_continue": False}}, critical=False, now=1000)
 
     def evaluate(self, **overrides):
         return policy.evaluate(self.task, **{**self.inputs, **overrides})
@@ -34,7 +34,7 @@ class SteeringPolicyTests(unittest.TestCase):
                  "security_concern", "cancel", "orchestrator/auth.py"),
                 ({"stale_evidence": stale_fixture(["lib/api.py"], "medium"),
                   "registry_doc": {"last_event_at": 0}},
-                 "dependency_changed", "steer", "lib/api.py"),
+                 "stale_severity", "steer", "lib/api.py"),
                 ({"registry_doc": {"last_event_at": 0}}, "stuck", "steer", "no registry event"),
                 ({"gate_history": ["same", "same"]}, "out_of_scope", "steer", "a, b, c, d"),
             ]
@@ -110,6 +110,7 @@ class SteeringPolicyTests(unittest.TestCase):
         self.assertEqual(policy.gate_history(leaf, {"root": root, "middle": middle}), ["first", "last"])
 
     def test_real_bus_shape_derives_packet_read_scope(self):
+        self.task.pop("read_scope", None)
         self.assertNotIn("read_scope", self.task)
         with tempfile.TemporaryDirectory() as directory:
             wt = Path(directory)
@@ -117,11 +118,11 @@ class SteeringPolicyTests(unittest.TestCase):
             (wt / "shared").mkdir()
             (wt / "shared/api.py").write_text("value = 1\n")
             (wt / "app/main.py").write_text("from shared.api import value\n")
-            self.task.update(worktree=directory, scope=["app/main.py"])
+            self.task.update(worktree=directory, scope=["app/main.py"], read_scope=[])
             self.assertEqual(policy.read_scope(self.task), ["app/", "shared/api.py", "tests/"])
             with patch.object(policy, "changed_paths", return_value=[]):
                 result = self.evaluate(stale_evidence=stale_fixture(["shared/api.py"], "high"))
-                self.assertEqual(result["trigger"], "dependency_changed")
+                self.assertEqual(result["trigger"], "stale_severity")
                 self.assertEqual(self.evaluate(registry_doc={"last_event_at": 0})["trigger"], "stuck")
             subprocess.run(["git", "init", "-q", directory], check=True, capture_output=True)
             (wt / "docs/newdir").mkdir(parents=True)
@@ -155,3 +156,28 @@ class SteeringPolicyTests(unittest.TestCase):
         with patch.object(Path, "resolve", side_effect=AssertionError("must not resolve against cwd")):
             self.assertEqual(policy.safe_scope({"scope": entries}), entries)
             self.assertEqual(policy.safe_scope({"scope": entries, "worktree": None}), entries)
+
+    def test_stale_severity_actions_and_hold_after_gate(self):
+        with patch.object(policy, "changed_paths", return_value=[]), \
+                patch.object(policy, "no_commits", return_value=True) as commits:
+            for severity, action in [("none", "continue"), ("unknown", "continue"),
+                                     ("low", "continue"), ("medium", "steer"), ("high", "cancel")]:
+                evidence = {**stale_fixture(["lib/api.py"]), "severity": severity, "goal_head": "goal-sha"}
+                result = self.evaluate(stale_evidence=evidence, critical=True)
+                self.assertEqual(result["action"], action)
+                self.assertEqual(bool(result.get("hold_after_gate")), severity == "high")
+                if severity in ("medium", "high"):
+                    self.assertIn("goal-sha", result["message"])
+                    self.assertIn("lib/api.py", result["message"])
+            commits.return_value = False
+            result = self.evaluate(stale_evidence=evidence)
+            self.assertEqual(result["action"], "steer")
+            self.assertTrue(result["hold_after_gate"])
+
+    def test_noncritical_medium_continues_and_critical_first(self):
+        with patch.object(policy, "changed_paths", return_value=[]):
+            evidence = {**stale_fixture(["lib/api.py"]), "severity": "medium"}
+            result = self.evaluate(stale_evidence=evidence, cfg={})
+            self.assertEqual(result["action"], "continue")
+            self.assertIn("noncritical", result["reasons"])
+            self.assertEqual(self.evaluate(stale_evidence=evidence, cfg={}, critical=True)["action"], "steer")

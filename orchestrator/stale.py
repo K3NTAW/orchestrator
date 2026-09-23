@@ -11,7 +11,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from . import gitutil, interference
+from . import gitutil, interference, scopes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,10 +97,44 @@ def _unknown(task, goal_ref):
             "dependency_changed": [],
             "overlapping_merge": [],
         },
+        "severity": "unknown",
+        "severity_reasons": ["git_failed"],
         "risk": "unknown",
         "risk_reasons": ["git_failed"],
         "graph": "absent",
     }
+
+
+def severity(task, evidence):
+    """Derive the optional severity without changing the legacy risk contract."""
+    if "severity" in evidence:
+        return evidence["severity"], evidence.get("severity_reasons", [])
+    if evidence.get("risk") == "unknown":
+        return "unknown", ["git_failed"]
+    moved = evidence.get("stale_paths") or []
+    if not moved:
+        return "none", []
+    write = task.get("write_scope", task.get("scope", [])) or []
+    reasons = []
+    if any(scopes.matches(p, write) for p in moved):
+        reasons.append("write_scope")
+    if set(moved) & set(scopes.acceptance_paths(task)):
+        reasons.append("acceptance_test")
+    if reasons:
+        return "high", reasons
+    read = scopes.read_scope(task)
+    if any(scopes.matches(p, read) for p in moved):
+        reasons.append("read_scope")
+    imports = set(scopes.imported_paths(task))
+    for link in (evidence.get("signals") or {}).get("graph_relationships", []):
+        a, b = link["source_file"], link["target_file"]
+        if scopes.matches(b, write):
+            imports.add(a)
+        if scopes.matches(a, write):
+            imports.add(b)
+    if imports.intersection(moved):
+        reasons.append("imported_by_write_scope")
+    return ("medium", reasons) if reasons else ("low", ["outside_scopes"])
 
 
 def evidence(
@@ -231,7 +265,7 @@ def evidence(
             risk = "low"
         else:
             risk = "none"
-        return {
+        result = {
             "base": task_ref,
             "goal_head": goal_ref,
             "moved_count": len(moved),
@@ -241,6 +275,11 @@ def evidence(
             "risk_reasons": reasons,
             "graph": graph_state,
         }
+        result["severity"], result["severity_reasons"] = severity(task, result)
+        head = git("rev-parse", goal_ref, cwd=worktree)
+        if head.returncode == 0 and head.stdout.strip():
+            result["goal_head"] = head.stdout.strip()
+        return result
     except (gitutil.GitError, OSError, subprocess.SubprocessError):
         return _unknown(task, goal_ref)
 

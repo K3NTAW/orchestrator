@@ -1,3 +1,4 @@
+import _harness
 import json
 import subprocess
 import tempfile
@@ -101,6 +102,25 @@ class StaleTest(unittest.TestCase):
         logged = stale.row(self.task(), absent, "recorded")
         for key in ("base", "goal_head", "changed_relevant_paths", "risk", "risk_reasons", "action"):
             self.assertIn(key, logged)
+
+    def test_severity_from_write_read_scope_and_acceptance_tests(self):
+        task = self.task()
+        task.update(read_scope=["lib/"], acceptance=["tests/test_named.py::test_case"])
+        for moved, expected in [([], "none"), (["other.py"], "low"),
+                                (["lib/api.py"], "medium"),
+                                (["tests/test_named.py"], "high"),
+                                (["orchestrator/foo.py", "lib/api.py"], "high")]:
+            with self.subTest(moved=moved), \
+                    mock.patch.object(stale.gitutil, "moved_paths", return_value=moved), \
+                    mock.patch.object(stale.gitutil, "changed_paths", return_value=[]):
+                result = stale.evidence(task, git=self.git)
+                self.assertEqual(result["severity"], expected)
+        with mock.patch.object(stale.gitutil, "moved_paths", side_effect=gitutil.GitError("failed")):
+            self.assertEqual(stale.evidence(task)["severity"], "unknown")
+        links = {"files": {"a": "api.py", "b": "orchestrator/foo.py"},
+                 "links": [{"source": "b", "target": "a", "relation": "imports"}]}
+        with mock.patch.object(stale.interference, "graph_fresh_for", return_value=True):
+            self.assertEqual(self.run_evidence(["api.py"], graph_links=links, graph={})["severity"], "medium")
 
     def test_load_links(self):
         with tempfile.TemporaryDirectory() as directory:

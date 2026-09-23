@@ -13,6 +13,7 @@ from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
 from orchestrator import bus, daemon, executor, merge, pool as P, spawn
 from orchestrator import jev_route
 
+REAL_GATE = daemon.gate
 REAL_WORKER = spawn.run_worker
 REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
 
@@ -3751,12 +3752,12 @@ class SteeringPolicyTickTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.task = {"id": "T-steering", "parent": "T-goal", "role": "execute", "status": "running",
-                     "scope": ["app/main.py", "lib/work.py", "orchestrator/work.py"],
+                     "scope": ["app/main.py", "lib/work.py", "orchestrator/work.py"], "read_scope": ["lib/"],
                      "pipeline": {}, "constraints": {}, "complexity": 1}
         self.ready = {"id": "T-ready", "role": "execute", "status": "queued", "complexity": 1}
         self.doc = {"last_event_at": 990, "epoch": 1, "status": "running"}
         self.now = 1000
-        self.pool = mock.Mock(cfg={"steering": {"mode": "shadow"}, "memory": {"mode": "off"}}, accounts=[])
+        self.pool = mock.Mock(cfg={"steering": {"mode": "shadow", "noncritical_medium_continue": False}, "memory": {"mode": "off"}}, accounts=[])
         self.pool.both_cooling_minutes.return_value = 0
         self.pool.notification_transition.return_value = False
         self.pool.codex_available.return_value = True
@@ -3808,8 +3809,8 @@ class SteeringPolicyTickTests(unittest.TestCase):
     def test_active_steering_calls_once_respects_interval_and_logs_errors(self):
         self.pool.cfg["steering"]["mode"] = "active"
         daemon.tick(self.pool)
-        self.steer.assert_called_once_with(self.task["id"], "dependency_changed: lib/api.py",
-                                           reason="dependency_changed", source="steering_policy")
+        self.steer.assert_called_once_with(self.task["id"], "stale_severity: lib/api.py; goal head unknown",
+                                           reason="stale_severity", source="steering_policy")
         self.now += 10
         daemon.tick(self.pool)
         self.assertEqual(len(self.rows()), 1)
@@ -3957,3 +3958,84 @@ class SteeringPolicyTickTests(unittest.TestCase):
             daemon.tick(self.pool)
             self.assertEqual(self.notify.call_count, index)
         self.promotion_collect.assert_called_once()
+
+    def test_stale_high_holds_after_gate_in_active_and_only_logs_in_shadow(self):
+        self.stale.return_value.update(severity="high", goal_head="goal-sha")
+        self.doc.update(tokens={"input_uncached": 4, "cache_read": 5, "output": 6}, started_at=900)
+        with mock.patch.object(bus, "get", return_value=self.task), \
+                mock.patch.object(bus, "update", side_effect=lambda tid, **kw: self.task.update(kw)) as update:
+            daemon.steering_tick(self.pool)
+            update.assert_not_called()
+            row = self.rows()[-1]
+            self.assertEqual(row["extra"]["tokens_so_far"], 15)
+            self.assertEqual(row["extra"]["elapsed"], 100)
+            self.assertNotIn("tokens_so_far", row["deterministic"])
+            self.assertEqual(row["extra"]["candidate_action"], "cancel")
+            self.pool.cfg["steering"]["mode"] = "active"
+            daemon.steering_tick(self.pool)
+            self.assertEqual(self.task["pipeline"]["stale_high"]["goal_head"], "goal-sha")
+            self.assertTrue(daemon._hold_stale_high(self.task))
+            self.assertEqual(self.task["hold_reason"], "stale_high")
+            self.cancel.assert_not_called()
+            self.stale.return_value.update(stale_paths=[], severity="none")
+            self.assertFalse(daemon._hold_stale_high(self.task))
+            self.assertNotIn("stale_high", self.task["pipeline"])
+
+    def test_stale_high_flag_written_only_in_effective_active_and_gate_skips_rebase(self):
+        self.stale.return_value.update(severity="high", goal_head="goal-sha")
+        self.pool.cfg["steering"]["mode"] = "active"
+        self.promotion_collect.return_value = {"shadow_n": 0}
+        with mock.patch.object(bus, "update") as update:
+            daemon.steering_tick(self.pool)
+            update.assert_not_called()
+        # Invoke the real gate, whose tick mock is installed by the common fixture.
+        self.task.update(status="done", worktree=str(self.root))
+        self.task["pipeline"]["stale_high"] = {"ts": 1, "paths": ["lib/api.py"], "goal_head": "goal-sha"}
+        with mock.patch.object(bus, "get", return_value=self.task), \
+                mock.patch.object(bus, "update", side_effect=lambda tid, **kw: self.task.update(kw)), \
+                mock.patch.object(daemon, "stale", return_value=False), \
+                mock.patch.object(daemon, "already_merged", return_value=False), \
+                mock.patch.object(daemon, "_dirty_scope_paths", return_value=[]), \
+                mock.patch.object(daemon.acceptance, "missing_tests", return_value=[]), \
+                mock.patch.object(daemon.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                mock.patch.object(daemon, "_load_scheduler_cfg", return_value={"stale_rebase": True}), \
+                mock.patch.object(daemon, "_stale_rebase") as rebase, \
+                mock.patch.object(daemon, "_open_reviews") as reviews:
+            for code in (0, 1):
+                self.task["status"] = "done"
+                self.task["pipeline"].pop("gated_at", None)
+                daemon.subprocess.run.return_value.returncode = code
+                REAL_GATE(self.pool)
+                self.assertEqual(self.task["hold_reason"], "stale_high")
+                rebase.assert_not_called()
+                reviews.assert_not_called()
+
+    def test_running_workers_follow_rank_and_critical_chain(self):
+        other = {**self.task, "id": "T-other", "depends_on": [self.task["id"]]}
+        self.rank.return_value = [other["id"], self.task["id"]]
+        with mock.patch.object(bus, "read", return_value=[self.task, other]), \
+                mock.patch.object(daemon, "_wave_tasks", return_value={t["id"]: t for t in [self.task, other]}), \
+                mock.patch.object(daemon.steering_policy, "evaluate", wraps=daemon.steering_policy.evaluate) as evaluate:
+            daemon.steering_tick(self.pool)
+            self.assertEqual([c.args[0]["id"] for c in evaluate.call_args_list], [other["id"], self.task["id"]])
+        self.rank.return_value = [self.task["id"], other["id"]]
+        with mock.patch.object(bus, "read", return_value=[self.task, other]), \
+                mock.patch.object(daemon, "_wave_tasks", return_value={t["id"]: t for t in [self.task, other]}), \
+                mock.patch.object(daemon.steering_policy, "evaluate", wraps=daemon.steering_policy.evaluate) as evaluate:
+            daemon.steering_tick(self.pool)
+            self.assertTrue(all(c.kwargs["critical"] for c in evaluate.call_args_list))
+
+    def test_rank_failure_treats_every_running_worker_as_critical(self):
+        self.rank.side_effect = ValueError("duration unavailable")
+        with mock.patch.object(daemon.steering_policy, "evaluate", wraps=daemon.steering_policy.evaluate) as evaluate:
+            daemon.steering_tick(self.pool)
+            self.assertTrue(evaluate.call_args.kwargs["critical"])
+
+    def test_economics_do_not_change_evidence_hash(self):
+        daemon.steering_tick(self.pool)
+        first = self.rows()[-1]["extra"]["evidence_hash"]
+        self.doc.update(tokens={"output": 12}, started_at=500)
+        self.now += 10
+        daemon.steering_tick(self.pool)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(first, self.rows()[-1]["extra"]["evidence_hash"])
