@@ -185,3 +185,44 @@ class TestPromotion(unittest.TestCase):
             (path / "context_eval.json").write_text('{"suite_passed":true}')
             passed = promotion.collect("context_router", root)
             self.assertEqual(passed["accepted_tokens_delta"], -.5)
+
+
+class MemoryTierPromotion(unittest.TestCase):
+    def test_memory_tiers_feature_registered_with_criteria(self):
+        self.assertEqual(promotion.FEATURES["memory_tiers"], {
+            "table": "memory", "key": "mode", "modes": ("off", "shadow", "active"),
+            "default": "shadow", "evidence": "retrieval"})
+        for values, expected in (({"n": 1}, "stay"),
+                                 ({"accepted_tokens_delta": -0.2}, "promote"),
+                                 ({"accepted_tokens_delta": -0.2, "fix_rounds_delta": None}, "stay"),
+                                 ({"accepted_tokens_delta": -0.2, "fix_rounds_delta": 1}, "stay")):
+            row = promotion.evaluate("memory_tiers", evidence(**values))
+            self.assertEqual(row["recommendation"], expected)
+            self.assertEqual(row["criteria"], promotion.CRITERIA)
+
+    def test_memory_tiers_collect_counts_retrieval_rows(self):
+        rows = [{"kind": "retrieval", "subject": "T-one", "mode": "shadow",
+                 "extra": {"tokens_legacy": 50, "tokens_tiered": 30}},
+                {"kind": "retrieval", "subject": "T-two", "mode": "active",
+                 "extra": {"tokens_legacy": 100, "tokens_tiered": 70}},
+                {"kind": "routing", "extra": {"tokens_legacy": 1000}}]
+        with mock.patch.object(decision_log, "read_all", return_value=rows):
+            result = promotion.collect("memory_tiers")
+        self.assertEqual(result["n"], 2)
+        self.assertEqual((result["tokens_legacy"], result["tokens_tiered"]), (150, 100))
+        self.assertAlmostEqual(result["accepted_tokens_delta"], -1 / 3)
+        self.assertIsNone(result["fix_rounds_delta"])
+
+    def test_memory_tiers_fix_rounds_delta_needs_five_tasks_per_side(self):
+        from pathlib import Path
+        rows = [{"kind": "retrieval", "subject": f"T-{mode}-{i}", "mode": mode}
+                for mode in ("active", "shadow") for i in range(5)]
+        paths = [mock.Mock(), mock.Mock(), mock.Mock()]
+        for path, parent in zip(paths, ["T-active-0", "T-active-0", "T-shadow-0"]):
+            path.read_text.return_value = __import__("json").dumps({"constraints": {"fix_round_for": parent}})
+        with mock.patch.object(decision_log, "read_all", return_value=rows) as read, \
+                mock.patch.object(Path, "glob", return_value=paths):
+            result = promotion.collect("memory_tiers")
+            self.assertAlmostEqual(result["fix_rounds_delta"], .2)
+            read.return_value = rows[:-1] + [rows[0]] * 10
+            self.assertIsNone(promotion.collect("memory_tiers")["fix_rounds_delta"])

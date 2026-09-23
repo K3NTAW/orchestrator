@@ -1,10 +1,11 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
+import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
 from . import worker_registry
-from . import harness_depth
+from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
@@ -507,9 +508,55 @@ def _trim_routed_item(by_name, routed_sections):
                     return True
     return False
 
+
+def _tiered_memory(task, cfg):
+    """Read the existing HOT projection; packet builders never refresh it."""
+    fresh = memory_hot.fresh(ROOT)
+    hot_path = ROOT / ".orchestrator" / "memory" / "HOT.md"
+    hot_lines = hot_path.read_text().splitlines() if hot_path.exists() else []
+    indexed = {memory_hot._line(record): record for record in memory_store.all_records(ROOT)}
+    candidates = []
+    records = {}
+    for line in hot_lines:
+        record = indexed.get(line)
+        if (record and record["id"] not in records
+                and record["kind"] in ("gotcha", "decision", "architecture")):
+            records[record["id"]] = record
+            candidates.append({"id": record["id"], "tier": "hot", "score": 1.0})
+    # Quote individual words for FTS syntax; punctuation in titles is data.
+    words = re.findall(r"\w+", " ".join([task.get("title", ""),
+                       *(Path(path).stem for path in task.get("scope", []))]))
+    query = " OR ".join('"' + word + '"' for word in dict.fromkeys(words))
+    for kind in ("gotcha", "decision", "architecture"):
+        result = memory_store.search(query, kind=kind, tier="warm", limit=8, root=ROOT)
+        for rank, record in enumerate(result["records"], 1):
+            if record["id"] not in records:
+                records[record["id"]] = record
+                candidates.append({"id": record["id"], "tier": "warm", "score": 1.0 / rank})
+    sections = {"gotchas": [], "decisions": []}
+    selected = {}
+    remaining = max(0, int(cfg.get("memory", {}).get("packet_hot_tokens", 1200))) * 4
+    for record in records.values():
+        line = " ".join(memory_hot._line(record).splitlines())
+        cost = len(line) + 1
+        if cost > remaining:
+            continue
+        remaining -= cost
+        section = "gotchas" if record["kind"] == "gotcha" else "decisions"
+        sections[section].append(line)
+        selected[record["id"]] = (section, line)
+    return sections, {"candidates": candidates, "selected_lines": selected, "hot_fresh": fresh}
+
+
+def _memory_tokens(sections):
+    return (sum(len(line) + 1 for name in ("gotchas", "decisions")
+                for line in sections.get(name, []) if line != "- (none)") + 3) // 4
+
+
 def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
     wt = Path(worktree)
+    cfg = Pool().cfg if cfg is None else cfg
     scope = [str(p) for p in task.get("scope", [])]
     scope_files = [wt / p for p in scope if (wt / p).is_file()]
     py_files = [p for p in scope_files if p.suffix == ".py"]
@@ -594,11 +641,27 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
                if hit["id"].startswith("mem:gotchas.md:")]
     matched_gotchas = list(gotchas)
     decisions = []
+    legacy_ids = [hit["id"] for hit in memory["hits"]
+                  if hit["id"].startswith("mem:gotchas.md:")]
     for candidate in (wt / ".orchestrator/memory/decisions.md", wt / "decisions.md"):
-        decisions = [f"- {title}" for _, title, body in _memory_entries(candidate)
-                     if parent != "(none)" and parent.lower() in f"{title}\n{body}".lower()][:3]
+        entries = [(line, title) for line, title, body in _memory_entries(candidate)
+                   if parent != "(none)" and parent.lower() in f"{title}\n{body}".lower()][:3]
+        decisions = [f"- {title}" for _, title in entries]
+        legacy_ids.extend(f"mem:{candidate.name}:{line}" for line, _ in entries)
         if candidate.exists():
             break
+    memory_mode = promotion.mode("memory_tiers", cfg)
+    legacy_sections = {"gotchas": gotchas[:5], "decisions": decisions}
+    legacy_lines = dict(zip(legacy_ids, [(name, line) for name, lines in legacy_sections.items()
+                                       for line in lines]))
+    tiered_sections, retrieval = None, None
+    if memory_mode != "off":
+        try:
+            tiered_sections, retrieval = _tiered_memory(task, cfg)
+        except Exception:
+            logging.getLogger(__name__).warning("packet memory retrieval failed")
+        if memory_mode == "active" and tiered_sections is not None:
+            gotchas, decisions = tiered_sections["gotchas"], tiered_sections["decisions"]
     evidence_lines = []
     for item in task.get("inputs", []):
         value = item
@@ -627,14 +690,13 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
                          for key, value in sorted((task.get("constraints") or {}).items())] or ["- (none)"]),
         ("relevant_tests", [f"- {p}" for p in tests] or ["- (none found)"]),
         ("symbols", symbols[:40] or ["- (none)"]),
-        ("gotchas", gotchas[:5] or ["- (none)"]),
+        ("gotchas", gotchas or ["- (none)"]),
         ("decisions", decisions or ["- (none)"]),
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
         ("evidence", evidence_lines or ["- (none)"]),
     ]
     if skills and skills.get("section"):
         sections.insert(0, ("skills", skills["section"].removeprefix("## skills\n").splitlines()))
-    cfg = Pool().cfg if cfg is None else cfg
     candidates = []
     task_id = task.get("id", "(none)")
     if task.get("spec"):
@@ -671,6 +733,9 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
             commit=merge_base, provenance="repo", task=task))
     shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
     routed_sections = shadow_meta.pop("_routed_sections", {})
+    if memory_mode == "active" and retrieval is not None:
+        routed_sections = {name: items for name, items in routed_sections.items()
+                           if name not in tiered_sections}
     sections = [(name, [text for _, text in routed_sections[name]] if name in routed_sections else lines)
                 for name, lines in sections]
     dependencies = []
@@ -700,32 +765,69 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
     header_chars = len(f"packet v{'0' * 12} base {merge_base[:12]} sources "
                        f"pool.toml@{policy_version} gotchas@{gotchas_sha} memory@{','.join(memory['layers_consulted'])}"
                        " routed=active") + 1
-    def build():
-        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections
+    def build(values):
+        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in values
                          if name != "dependencies" or lines)
-    candidate_tokens = len(build()) // 4
-    # The task contract is more valuable than discovery hints.  In particular,
-    # acceptance criteria are never summarized: an over-cap packet says so in
-    # its provenance header instead.
+    candidate_tokens = len(build(sections)) // 4
+    # Memory remains in the existing body trim order; acceptance stays whole.
     trimmable = ("dependencies", "evidence", "decisions", "gotchas", "symbols", "relevant_tests")
-    by_name = {name: lines for name, lines in sections}
-    while len(build()) >= (4800 - header_chars if routed_sections else 4800):
-        changed = False
-        if _trim_routed_item(by_name, routed_sections):
-            continue
-        for name in trimmable:
-            lines = [] if name in routed_sections else by_name.get(name, [])
-            if lines:
-                lines.pop()
-                changed = True
+    def trim(values, routed):
+        by_name = dict(values)
+        while len(build(values)) >= (4800 - header_chars if routed else 4800):
+            if _trim_routed_item(by_name, routed):
+                continue
+            for name in trimmable:
+                lines = [] if name in routed else by_name.get(name, [])
+                if lines:
+                    lines.pop()
+                    break
+            else:
                 break
-        if changed:
-            continue
-        break
-    body = build()
+        return by_name
+
+    hot_fresh = memory_hot.fresh(ROOT)
+    if retrieval is not None:
+        import copy
+        comparisons = []
+        for alternative in (legacy_sections, tiered_sections):
+            values = [(name, list(alternative[name]) if name in alternative else list(lines))
+                      for name, lines in sections]
+            routed = copy.deepcopy({name: items for name, items in routed_sections.items()
+                                    if name not in alternative})
+            comparisons.append(trim(values, routed))
+        legacy_view, tiered_view = comparisons
+        presented = trim(sections, routed_sections)
+        if memory_mode == "active":
+            tiered_view = presented
+        else:
+            legacy_view = presented
+        legacy_ids = [record_id for record_id, (section, line) in legacy_lines.items()
+                      if line in legacy_view[section]]
+        selected = [record_id for record_id, (section, line) in retrieval["selected_lines"].items()
+                    if line in tiered_view[section]]
+        hot_fresh = retrieval["hot_fresh"]
+        try:
+            decision_log.record(
+                kind="retrieval", subject=task.get("id", "(none)"), candidates=retrieval["candidates"],
+                hard_constraints={"packet_hot_tokens": cfg.get("memory", {}).get("packet_hot_tokens", 1200)},
+                deterministic={"query_source": "title and scope basenames"}, selected=selected,
+                mode=memory_mode, reason="HOT plus WARM packet comparison",
+                extra={"legacy_ids": legacy_ids, "tokens_legacy": _memory_tokens(legacy_view),
+                       "tokens_tiered": _memory_tokens(tiered_view), "hot_fresh": hot_fresh})
+        except Exception:
+            logging.getLogger(__name__).warning("packet memory retrieval logging failed")
+    if retrieval is None:
+        presented = trim(sections, routed_sections)
+    memory_ids = [record_id for record_id, (section, line) in legacy_lines.items()
+                  if line in presented[section]]
+    if memory_mode == "active" and retrieval is not None:
+        memory_ids = [record_id for record_id, (section, line) in retrieval["selected_lines"].items()
+                      if line in presented[section]]
+    body = build(sections)
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
                   "memory_layers": ",".join(memory["layers_consulted"]),
+                  "memory_mode": memory_mode, "memory_ids": memory_ids, "hot_fresh": hot_fresh,
                   "candidate_tokens": candidate_tokens, "candidate_known": True,
                   "skill_tokens_presented_l2": (skills or {}).get("skill_tokens_presented_l2", 0),
                   **shadow_meta}

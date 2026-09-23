@@ -3,7 +3,8 @@
 Generic mappings: model_routing~routing, scheduling~wave/jev_sched,
 workflow_strategy~strategy, and planner_routing~planner_route. Legacy call sites
 keep their kinds; new context-program code uses the generic kinds. skill_selection
-has no legacy synonym.
+has no legacy synonym. retrieval rows are memory retrievals: candidates carry ids,
+tiers and scores; extra carries legacy_ids, tokens_legacy, tokens_tiered and hot_fresh.
 """
 
 import time

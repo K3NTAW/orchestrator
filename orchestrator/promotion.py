@@ -9,6 +9,9 @@ from . import STATE, decision_log
 
 
 FEATURES = OrderedDict((
+    ("memory_tiers", {"table": "memory", "key": "mode",
+                      "modes": ("off", "shadow", "active"),
+                      "default": "shadow", "evidence": "retrieval"}),
     ("fast_path", {"table": "harness", "key": "depth_mode",
                    "modes": ("off", "shadow", "active"),
                    "default": "shadow", "evidence": "fast_path"}),
@@ -125,6 +128,10 @@ def evaluate(feature, evidence, cfg=None):
         reasons.append("insufficient_evidence")
         return {"feature": feature, "mode": mode, "n": n, "recommendation": "stay",
                 "reasons": reasons, "criteria": criteria}
+    if feature == "memory_tiers" and evidence.get("fix_rounds_delta") is None:
+        reasons.append("shadow_quality_unmeasured")
+        return {"feature": feature, "mode": mode, "n": n, "recommendation": "stay",
+                "reasons": reasons, "criteria": criteria}
     if feature in shadow_features:
         if evidence.get("suite_present") is False:
             reasons.append("context_eval_missing")
@@ -194,6 +201,35 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "memory_tiers":
+        rows = [row for row in decision_log.read_all(root=root)
+                if row.get("kind") == "retrieval"]
+        legacy = sum((row.get("extra") or {}).get("tokens_legacy", 0) for row in rows)
+        tiered = sum((row.get("extra") or {}).get("tokens_tiered", 0) for row in rows)
+        # A task contributes once, in its most recently observed mode.
+        modes = {row["subject"]: row.get("mode") for row in rows if row.get("subject")}
+        tasks = []
+        for path in (root / "tasks").glob("*.json"):
+            try:
+                task = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(task, dict):
+                tasks.append(task)
+        fixes = {}
+        for task in tasks:
+            parent = (task.get("constraints") or {}).get("fix_round_for")
+            if parent:
+                fixes[parent] = fixes.get(parent, 0) + 1
+        cohorts = {mode: [fixes.get(task_id, 0) for task_id, observed in modes.items()
+                          if observed == mode] for mode in ("active", "shadow")}
+        delta = None
+        if all(len(values) >= 5 for values in cohorts.values()):
+            delta = (sum(cohorts["active"]) / len(cohorts["active"])
+                     - sum(cohorts["shadow"]) / len(cohorts["shadow"]))
+        return {"n": len(rows), "tokens_legacy": legacy, "tokens_tiered": tiered,
+                "accepted_tokens_delta": (tiered - legacy) / legacy if legacy else None,
+                "fix_rounds_delta": delta}
     if feature == "fast_path":
         from . import harness_depth
         return harness_depth.promotion_evidence(root)

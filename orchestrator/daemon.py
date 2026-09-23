@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import harness_depth, worker_registry
+from . import harness_depth, worker_registry, memory_hot
 from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
@@ -1657,6 +1657,11 @@ def tick(pool=None, stop_event=None):
                 print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
                 continue
     worker_registry.reconcile(alive)
+    try:
+        if pool.cfg.get("memory", {}).get("mode", "shadow") != "off" and not memory_hot.fresh(STATE.parent):
+            memory_hot.build(STATE.parent)
+    except Exception:
+        print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
     for stage in (dispatch, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return

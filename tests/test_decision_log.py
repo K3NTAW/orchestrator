@@ -174,3 +174,14 @@ class DecisionLogTests(unittest.TestCase):
         self.assertIn("rejected: careful: Higher latency, local: Unavailable", lines)
         self.assertIn("confidence/n: 0.9/10", lines)
         self.assertIn("outcome: merged=True", lines)
+
+
+class MemoryRetrievalDocumentation(unittest.TestCase):
+    def test_retrieval_kind_documented_for_memory_rows(self):
+        self.assertIn("retrieval rows are memory retrievals", decision_log.__doc__)
+        self.assertIn("retrieval", decision_log.CONTEXT_KINDS)
+        with patch.object(decision_log, "_append", side_effect=lambda row, **kw: row):
+            row = decision_log.record("retrieval", "T-memory", candidates=[], selected=[],
+                                      hard_constraints={}, deterministic={}, reason="memory", mode="shadow",
+                                      extra={"tokens_legacy": 10, "tokens_tiered": 5})
+        self.assertEqual(row["extra"]["tokens_tiered"], 5)

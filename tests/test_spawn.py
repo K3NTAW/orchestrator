@@ -1522,7 +1522,8 @@ class ContextTelemetry(unittest.TestCase):
         with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
                 mock.patch.object(spawn.decision_log, "record") as record:
             spawn.packet(task, TMP)
-        row = record.call_args.kwargs
+        row = next(call.kwargs for call in record.call_args_list
+                   if call.kwargs.get("kind") == "context_selection")
         self.assertEqual((row["kind"], row["subject"]), ("context_selection", task["id"]))
         self.assertNotIn("content", row)
 
@@ -1858,3 +1859,113 @@ class JevSkillRoutingCallSiteTests(unittest.TestCase):
             result = spawn._skill_routing({"id": "T-jev"}, "execute", {}, {}, choice)
         self.assertEqual(result["skills_selected"], ["executor/implement-spec"])
         self.assertIs(record.call_args.kwargs["jev"], choice["jev"])
+
+
+class PacketMemoryTiers(unittest.TestCase):
+    def setUp(self):
+        from orchestrator import memory_hot
+        self.task = {"id": "T-memory", "title": "Packet wiring", "scope": ["src/spawn.py"],
+                     "parent": "T-goal", "acceptance": ["works"]}
+        self.hot = {"id": "hot-one", "kind": "gotcha", "title": "HOT packet hint",
+                    "date": "2026-09-23", "body": "Keep it bounded."}
+        self.warm = {"id": "warm-one", "kind": "decision", "title": "Warm packet decision",
+                     "date": "2026-09-23"}
+        directory = TMP / ".orchestrator" / "memory"
+        directory.mkdir(parents=True, exist_ok=True)
+        self.hot_path = directory / "HOT.md"
+        previous = self.hot_path.read_bytes() if self.hot_path.exists() else None
+        self.addCleanup(lambda: self.hot_path.write_bytes(previous) if previous is not None
+                        else self.hot_path.unlink(missing_ok=True))
+        self.hot_path.write_text(memory_hot.HEADER + "\n" + memory_hot._line(self.hot) + "\n")
+        for target, name, kwargs in (
+            (spawn, "ROOT", {"new": TMP}),
+            (spawn, "git", {"return_value": mock.Mock(stdout="base\n")}),
+            (spawn, "_shadow_route", {"return_value": {}}),
+            (spawn, "memory_recall", {"return_value": {"hits": [
+                {"id": "mem:gotchas.md:1", "title": "Legacy hint"}], "layers_consulted": ["notes"]}}),
+            (spawn, "_memory_entries", {"return_value": [(1, "Legacy decision", "T-goal")]}),
+            (spawn.memory_store, "all_records", {"return_value": [self.hot]}),
+            (spawn.memory_store, "search", {"side_effect": lambda query, **kw: {
+                "records": [self.warm] if kw["kind"] == "decision" else []}}),
+            (spawn.memory_hot, "build", {}),
+            (spawn.decision_log, "record", {}),
+        ):
+            patcher = mock.patch.object(target, name, **kwargs)
+            value = patcher.start()
+            self.addCleanup(patcher.stop)
+            if name in ("search", "build", "record"):
+                setattr(self, name, value)
+
+    def packet(self, mode, budget=1200):
+        return spawn._packet_body(self.task, TMP, cfg={"memory": {
+            "mode": mode, "packet_hot_tokens": budget}})
+
+    def test_packet_memory_shadow_keeps_legacy_sections_and_logs_row(self):
+        legacy, _ = self.packet("off")
+        self.record.assert_not_called()
+        self.search.assert_not_called()
+        shadow, meta = self.packet("shadow")
+        self.assertEqual(shadow, legacy)
+        row = self.record.call_args
+        self.assertEqual((row.kwargs["kind"], row.kwargs["subject"]), ("retrieval", "T-memory"))
+        self.assertEqual(row.kwargs["mode"], "shadow")
+        self.assertEqual(row.kwargs["selected"], ["hot-one", "warm-one"])
+        self.assertIn("mem:gotchas.md:1", row.kwargs["extra"]["legacy_ids"])
+        self.assertGreater(row.kwargs["extra"]["tokens_legacy"], 0)
+        self.assertGreater(row.kwargs["extra"]["tokens_tiered"], 0)
+        self.assertEqual(meta["memory_mode"], "shadow")
+        self.assertEqual(self.search.call_count, 3)
+        self.assertEqual([c.kwargs["kind"] for c in self.search.call_args_list],
+                         ["gotcha", "decision", "architecture"])
+        for call in self.search.call_args_list:
+            self.assertNotIn("file", call.kwargs)
+            self.assertIn('"spawn"', call.args[0])
+            self.assertEqual(call.kwargs["limit"], 8)
+        self.build.assert_not_called()
+        self.record.side_effect = RuntimeError("unavailable")
+        with self.assertLogs(spawn.__name__, level="WARNING"):
+            self.assertEqual(self.packet("shadow")[0], legacy)
+
+    def test_packet_memory_active_presents_tiered_sections(self):
+        body, meta = self.packet("active")
+        self.assertIn("HOT packet hint", body)
+        self.assertIn("Warm packet decision", body)
+        self.assertNotIn("Legacy hint", body)
+        self.assertEqual(meta["memory_ids"], ["hot-one", "warm-one"])
+        body, meta = self.packet("active", budget=20)
+        self.assertLessEqual(self.record.call_args.kwargs["extra"]["tokens_tiered"], 20)
+        self.assertNotIn("Warm packet decision", body)
+        self.assertEqual(meta["memory_ids"], ["hot-one"])
+        self.build.assert_not_called()
+        self.search.side_effect = lambda query, **kw: {"records": [self.hot, self.warm]}
+        body, meta = self.packet("active")
+        self.assertEqual(meta["memory_ids"], ["hot-one", "warm-one"])
+        self.assertEqual(len(self.record.call_args.kwargs["candidates"]), 2)
+        self.task["spec"] = "required contract " * 400
+        body, meta = self.packet("active")
+        self.assertEqual(meta["memory_ids"], [])
+        self.assertEqual(self.record.call_args.kwargs["selected"], [])
+        self.assertEqual(self.record.call_args.kwargs["extra"]["tokens_tiered"], 0)
+
+    def test_hot_freshness_uses_index_and_hot_mtimes(self):
+        index = self.hot_path.with_name("index.sqlite")
+        # Patch stat rather than changing the suite's shared database.
+        original = Path.stat
+        def stat(path, *args, **kwargs):
+            if path == index:
+                return mock.Mock(st_mtime_ns=200)
+            if path == self.hot_path:
+                return mock.Mock(st_mtime_ns=hot_time[0])
+            return original(path, *args, **kwargs)
+        hot_time = [200]
+        with mock.patch.object(Path, "stat", stat):
+            self.assertTrue(spawn.memory_hot.fresh(TMP))
+            hot_time[0] = 199
+            self.assertFalse(spawn.memory_hot.fresh(TMP))
+            hot_time[0] = 201
+            self.assertTrue(spawn.memory_hot.fresh(TMP))
+        with mock.patch.object(spawn.memory_hot, "fresh", return_value=False):
+            _, meta = self.packet("shadow")
+            self.assertFalse(meta["hot_fresh"])
+            self.assertFalse(self.record.call_args.kwargs["extra"]["hot_fresh"])
+        self.build.assert_not_called()

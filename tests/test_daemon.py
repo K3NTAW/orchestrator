@@ -3649,3 +3649,21 @@ class MergeDecisionEvidence(unittest.TestCase):
             daemon.report_merge("T", {"status": "tests_red"})
         evidence = state["G"]["pipeline"]["last_merge"]
         self.assertEqual((evidence["status"], evidence["head_sha"]), ("tests_red", "head"))
+
+
+class HotMemoryTick(unittest.TestCase):
+    def test_tick_rebuilds_hot_at_most_once_when_stale(self):
+        stop = threading.Event()
+        pool = mock.Mock(cfg={"memory": {"mode": "shadow"}})
+        with mock.patch.object(daemon, "_load_review_cfg"), \
+                mock.patch.object(daemon, "sweep_leases"), \
+                mock.patch.object(daemon.bus, "read", return_value=[]), \
+                mock.patch.object(daemon.worker_registry, "reconcile"), \
+                mock.patch.object(daemon.memory_hot, "fresh", side_effect=[False, False, True]), \
+                mock.patch.object(daemon.memory_hot, "build") as build, \
+                mock.patch.object(daemon, "dispatch", side_effect=lambda pool: stop.set()) as dispatch:
+            for expected in (1, 2, 2):
+                stop.clear()
+                daemon.tick(pool, stop)
+                self.assertEqual(build.call_count, expected)
+            self.assertEqual(dispatch.call_count, 3)

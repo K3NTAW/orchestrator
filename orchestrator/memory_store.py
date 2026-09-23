@@ -94,6 +94,8 @@ def _open(root: Path):
     path = _db_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
+    db.execute("PRAGMA busy_timeout = 5000")
+    db.execute("PRAGMA journal_mode = WAL")
     db.row_factory = sqlite3.Row
     fts = _fts5_available(db)
     _schema(db, fts)
