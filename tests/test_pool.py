@@ -355,7 +355,7 @@ class Executors(unittest.TestCase):
         self.addCleanup(lambda: setattr(self.p.executors["terra"], "provider", old_provider))
         routed = self.p.pick_executor("execute", task["complexity"], task=task)
         self.assertEqual(routed.id, "terra")
-        self.assertEqual(self.p.codex_available(task["complexity"], task=task), routed.provider == "codex")
+        self.assertTrue(self.p.codex_available(task["complexity"], task=task))
 
     def test_running_counts_come_from_bus_not_state_file(self):
         P.PERSIST.write_text(json.dumps({"executors": {"astra": {"running": 7}}}))
@@ -375,6 +375,76 @@ class Executors(unittest.TestCase):
         # enabling a disabled placeholder later must not silently drop it out of its cooldown group (review T-0030)
         for row in P.config()["executors"]:
             self.assertTrue(row.get("quota_group"), row["id"])
+
+
+class ExecutorIdentity(unittest.TestCase):
+    def setUp(self):
+        self.cfg = {
+            "models": {"sonnet": "claude-sonnet", "opus": "claude-opus", "success_floor": 0.6},
+            "claude_accounts": [{"id": "A", "config_dir": "/unused", "role_affinity": ["execute"]}],
+            "executors": [
+                {"id": "c", "provider": "claude", "model": "claude-sonnet", "roles": ["execute"], "weight": 10},
+                {"id": "x", "provider": "codex", "model": "codex-model", "roles": ["execute"]},
+            ],
+        }
+        with mock.patch.object(P.Pool, "_load"):
+            self.p = P.Pool(self.cfg)
+
+    def test_identity_row_legacy_unknown(self):
+        for field, expected in [
+            ("c", {"provider": "claude", "model": "claude-sonnet"}),
+            ("x", {"provider": "codex", "model": "codex-model"}),
+            ("claude:opus", {"provider": "claude", "model": "claude-opus"}),
+            ("claude:success_floor", {"provider": "claude", "model": None}),
+            ("unknown", {"provider": None, "model": None}),
+            (None, {"provider": None, "model": None}),
+        ]:
+            with self.subTest(field=field):
+                self.assertEqual(P.executor_identity(field, self.cfg), expected)
+                self.assertEqual(self.p.executor_identity(field), expected)
+                self.assertEqual(self.p.is_claude_executor(field), expected["provider"] == "claude")
+        for rows in ({}, {"executors": []}):
+            self.assertEqual(P.executor_identity("astra", rows), {"provider": "codex", "model": "gpt-6-astra"})
+        self.cfg["executors"].append({**self.cfg["executors"][0], "model": "last"})
+        self.assertEqual(P.executor_identity("c", self.cfg), {"provider": "claude", "model": "last"})
+        self.assertEqual(self.p._read_executors()["c"].model, "last")
+
+    def test_claude_row_needs_account_headroom(self):
+        self.cfg["executors"].append({**self.cfg["executors"][0], "id": "c2"})
+        self.p.executors = self.p._read_executors()
+        with mock.patch.object(self.p, "pick", wraps=self.p.pick) as pick:
+            self.p.accounts[0].cooldown_until = time.time() + 600
+            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["x"])
+            pick.assert_called_once_with("execute")
+            pick.reset_mock()
+            self.p.accounts[0].cooldown_until = 0
+            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["c", "x", "c2"])
+            pick.assert_called_once_with("execute")
+            pick.reset_mock()
+            for eid in ("c", "c2"):
+                self.p.executors[eid].running = 1
+            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["x"])
+            pick.assert_not_called()
+
+    def test_codex_only_never_calls_pick(self):
+        self.p.executors.pop("c")
+        self.cfg["executors"] = self.cfg["executors"][1:]
+        with mock.patch.object(self.p, "pick", side_effect=AssertionError("unexpected account pick")), \
+             mock.patch("orchestrator.scorecard.expected_cost", return_value=None):
+            for task in (None, {"title": "small", "complexity": 3}):
+                self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3, task)], ["x"])
+                self.assertEqual(self.p.pick_executor("execute", 3, task=task).id, "x")
+                self.assertTrue(self.p.codex_available(3, task))
+            self.p.executors["x"].running = 1
+            self.assertEqual(self.p.eligible_executors("execute", 3), [])
+            self.assertIsNone(self.p.pick_executor("execute", 3))
+            self.assertFalse(self.p.codex_available(3))
+
+    def test_codex_available_true_beside_heavier_claude_row(self):
+        self.assertEqual(self.p.pick_executor("execute", 3).id, "c")
+        self.assertTrue(self.p.codex_available(3))
+        self.p.executors["x"].running = 1
+        self.assertFalse(self.p.codex_available(3))
 
 
 class PlannerTally(unittest.TestCase):

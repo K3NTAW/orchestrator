@@ -142,6 +142,33 @@ EXEC_STATE_FIELDS = {"cooldown_until", "day_tasks", "day", "hold_reason"}
 LEGACY_EXECUTOR_ID = "astra"
 
 
+def executor_rows(cfg) -> list[dict]:
+    """Return configured rows, or the legacy Codex row when the table is empty."""
+    rows = cfg.get("executors")
+    if not rows:
+        c = cfg.get("codex", {})
+        rows = [{"id": LEGACY_EXECUTOR_ID, "provider": "codex", "model": c.get("model", "gpt-6-astra"),
+                 "roles": ["execute"], "max_parallel": c.get("max_parallel", 1),
+                 "daily_budget_tasks": c.get("daily_budget_tasks", 0), "quota_group": "chatgpt"}]
+    return rows
+
+
+def executor_identity(field, cfg):
+    """Resolve persisted executor fields without reading disk or runtime pool state."""
+    if field is None:
+        return {"provider": None, "model": None}
+    for row in reversed(executor_rows(cfg)):
+        if row["id"] == field:
+            provider, model = row.get("provider"), row.get("model")
+            return {"provider": provider if provider in ("codex", "claude") else None,
+                    "model": model if isinstance(model, str) else None}
+    if isinstance(field, str) and field.startswith("claude:"):
+        tier = field.split(":", 1)[1]
+        model = cfg.get("models", {}).get(tier) if tier in ("haiku", "sonnet", "opus") else None
+        return {"provider": "claude", "model": model if isinstance(model, str) else None}
+    return {"provider": None, "model": None}
+
+
 class Pool:
     def __init__(self, cfg=None):
         self.cfg = cfg or config()
@@ -156,17 +183,17 @@ class Pool:
 
     def _read_executors(self):
         """[[executors]] rows -> {id: Executor}. No table (old config) -> one row synthesized from [codex]."""
-        rows = self.cfg.get("executors")
-        if not rows:
-            c = self.cfg.get("codex", {})
-            rows = [{"id": LEGACY_EXECUTOR_ID, "provider": "codex", "model": c.get("model", "gpt-6-astra"),
-                     "roles": ["execute"], "max_parallel": c.get("max_parallel", 1),
-                     "daily_budget_tasks": c.get("daily_budget_tasks", 0), "quota_group": "chatgpt"}]
         out = {}
-        for r in rows:
+        for r in executor_rows(self.cfg):
             ex = Executor(**{k: v for k, v in r.items() if k in EXEC_FIELDS})
             out[ex.id] = ex
         return out
+
+    def executor_identity(self, field):
+        return executor_identity(field, self.cfg)
+
+    def is_claude_executor(self, field):
+        return self.executor_identity(field)["provider"] == "claude"
 
     # persistence -------------------------------------------------------------------------------
     def _load(self):
@@ -522,6 +549,7 @@ class Pool:
     def eligible_executors(self, role, complexity, task=None):
         """Return executors satisfying every hard routing constraint, without ranking them."""
         ok = []
+        claude_headroom = None
         for ex in self.executors.values():
             if not ex.enabled or role not in ex.roles or ex.cooling():
                 continue
@@ -532,6 +560,11 @@ class Pool:
                 continue
             if ex.daily_budget_tasks and ex.day_tasks >= ex.daily_budget_tasks:
                 continue
+            if ex.provider == "claude":
+                if claude_headroom is None:
+                    claude_headroom = self.pick("execute") is not None
+                if not claude_headroom:
+                    continue
             ok.append(ex)
         return ok
 
@@ -588,15 +621,14 @@ class Pool:
             ex.roll_day(); ex.day_tasks = max(ex.day_tasks, self.codex.day_tasks)
 
     def codex_available(self, complexity: int = 1, task=None) -> bool:
-        """True iff some enabled executor can take an "execute" task at this complexity right now. Default
+        """True iff some eligible Codex executor can take an "execute" task at this complexity right now. Default
         complexity=1 keeps pre-B2 callers (mcp.status, cli, executor.start) working; B2 must pass the task's
         real complexity so a busy/exhausted high-complexity executor doesn't get masked by idle low-band ones."""
         c = self.codex
         if c.day != date.today().isoformat():
             c.day_tasks, c.day = 0, date.today().isoformat()
         self._sync_legacy_codex()
-        ex = self.pick_executor("execute", complexity, task=task)
-        return bool(ex and ex.provider == "codex")
+        return any(ex.provider == "codex" for ex in self.eligible_executors("execute", complexity, task))
 
     def both_cooling_minutes(self):
         """Minutes both Claude accounts have been simultaneously cooling; 0 if not."""
