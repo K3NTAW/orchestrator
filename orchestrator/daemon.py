@@ -5,6 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
+from . import worker_registry
 from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
@@ -1628,13 +1629,14 @@ def tick(pool=None, stop_event=None):
         print(f"[daemon] sweep_leases failed: {e}", file=sys.stderr)
     for t in bus.read(status="running"):
         if stop_event and stop_event.is_set():
-            return
+            break
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:
                 reconcile_dead(t, pool)
             except Exception as e:
                 print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
                 continue
+    worker_registry.reconcile(alive)
     for stage in (dispatch, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return

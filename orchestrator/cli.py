@@ -2,7 +2,7 @@
 import argparse, json, os, random, sys
 from collections import defaultdict
 from datetime import datetime
-from . import ROOT, bus, scorecard
+from . import ROOT, bus, scorecard, worker_registry
 from .bus import RUNS
 from .pool import Pool
 
@@ -121,6 +121,10 @@ def _scorecard_measurement_totals(card, by):
 
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator"); sub = ap.add_subparsers(dest="cmd", required=True)
+    workers = sub.add_parser("workers")
+    workers.add_argument("--task")
+    workers.add_argument("--all", action="store_true")
+    workers.add_argument("--json", action="store_true")
     st = sub.add_parser("status"); st.add_argument("--plain", action="store_true")
     c = sub.add_parser("cost"); c.add_argument("--by", default="role", choices=["role", "tier", "account", "task"])
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
@@ -210,7 +214,24 @@ def main():
         if command == "quarantine":
             skaction.add_argument("--reason", default="external skill quarantine")
     a = ap.parse_args()
-    if a.cmd == "memory":
+    if a.cmd == "workers":
+        if a.task:
+            doc = worker_registry.get(a.task)
+            if doc is None:
+                raise SystemExit("worker not found")
+            print(json.dumps({**doc, "events": worker_registry.events(a.task)}, indent=2))
+        else:
+            rows = worker_registry.listing(include_finished=a.all)
+            if a.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print("task\trole\tmodel\tprovider\tstatus\tstage\telapsed\ttokens\tworktree")
+                for row in rows:
+                    values = [row.get(key) for key in ("task", "role", "model", "provider", "status", "stage")]
+                    values += [f"{row['elapsed_s']:.0f}s", sum(row["tokens"].values()) if row["tokens"] else "?",
+                               row.get("worktree")]
+                    print("\t".join(str(value) if value is not None else "-" for value in values))
+    elif a.cmd == "memory":
         from . import memory_store
         if a.memory_cmd == "migrate":
             print(json.dumps(memory_store.migrate(ROOT), sort_keys=True))

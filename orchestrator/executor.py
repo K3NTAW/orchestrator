@@ -9,7 +9,7 @@ Usage-limit errors cool Codex down and hold the task (§4.10).
 """
 import inspect, json, re, subprocess, time
 from pathlib import Path
-from . import ROOT, bus
+from . import ROOT, bus, worker_registry
 import threading
 from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
@@ -152,21 +152,38 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     from .spawn import packet_run_meta
     log["packet_meta"] = task.get("packet_meta") or packet_run_meta(packet_span(args[-1]))
     t0 = time.time()
+    worker_registry.upsert(log_task, status="starting", role=task.get("role", "execute"),
+                           provider="codex", account="codex", model=ex.model if ex else cfg.get("model"),
+                           worktree=str(cwd), branch=task.get("branch") or f"task/{task['id']}",
+                           parent=task.get("parent"), started_at=t0)
     try:
-        run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+        run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
         if kind == "resume":
             run_kwargs["cwd"] = cwd
-        r = subprocess.run(cmd, **run_kwargs)
+        p = subprocess.Popen(cmd, **run_kwargs)
+        worker_registry.event(log_task, "spawned", pid=p.pid)
+        stdout, stderr = p.communicate(timeout=timeout)
+        r = subprocess.CompletedProcess(cmd, p.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        worker_registry.finish(log_task, "failed", "timeout")
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
+    except OSError:
+        worker_registry.finish(log_task, "failed", "launch_error")
+        raise
     if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
+        worker_registry.finish(log_task, "failed", "argv_error")
         reason = f"codex argv error: {r.stderr[-800:]}"
         bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex",
                     duration_s=round(time.time() - t0, 1), outcome="failed", reason=reason, **log)
         bus.update(_state_target(task), resume_hint={"argv_error": reason[:300]})
         return {"status": "failed", "reason": reason}
     ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
+    worker_registry.usage(log_task, "codex", ev["usage"],
+                          pool.usd_of({"usage": ev["usage"]}, ex) if ev["usage"] else None)
     if ev["thread_id"]:
+        worker_registry.event(log_task, "claimed", thread=ev["thread_id"])
         # The head is a resume boundary, not merely result metadata: later replies must not
         # expose an old conversation to unrelated worktree changes.
         fields = {"codex_thread": ev["thread_id"]}
@@ -183,6 +200,7 @@ def _run(pool, task, args, cwd, timeout, ex=None):
                    resume_hint={"thread": ev["thread_id"], "diff_stat": _diff_stat(cwd)})
         bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
                     cooldown_s=secs, **log)
+        worker_registry.finish(log_task, "held", "usage_limit")
         return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
     u = ev["usage"]
     try:
@@ -200,7 +218,9 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
                 outcome="error" if ev["error"] else "done", usage=u, **log, **(_tokens(u) if u else {}))
     if ev["error"] or r.returncode:
+        worker_registry.finish(log_task, "failed", "process_error")
         return {"status": "failed", "reason": ev["error"] or r.stderr[-800:], "thread": ev["thread_id"]}
+    worker_registry.finish(log_task, "done")
     return {"status": "done", "thread": ev["thread_id"], "message": ev["message"][:6000], "usage": u}
 
 

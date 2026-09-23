@@ -1,5 +1,5 @@
-"""orchestrator.cli: `status`, `scorecard` and `pick` subcommands, plain-text and JSON output."""
 import _harness
+"""orchestrator.cli: `status`, `scorecard` and `pick` subcommands, plain-text and JSON output."""
 import contextlib, io, json, os, sys, tempfile, time, unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +11,29 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_workers_cli_lists_active(self):
+        from orchestrator import worker_registry as registry
+        task = bus.create_task("cli worker", "s", ["a"], ["x.py"])
+        tid = task["id"]
+        self.addCleanup(registry._path(tid).unlink, missing_ok=True)
+        self.addCleanup(registry._path(tid, events=True).unlink, missing_ok=True)
+        registry.upsert(tid, status="running", role="execute")
+        for _ in range(25):
+            registry.event(tid, "stage", stage="execute")
+        def output(*args):
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["orchestrator", "workers", *args]), contextlib.redirect_stdout(out):
+                cli.main()
+            return out.getvalue()
+        self.assertIn(tid, [r["task"] for r in json.loads(output("--json"))])
+        detail = json.loads(output("--task", tid, "--json"))
+        self.assertEqual(detail["task"], tid)
+        self.assertEqual(len(detail["events"]), 20)
+        self.assertIn("task\trole\tmodel\tprovider", output())
+        registry.finish(tid, "done")
+        self.assertNotIn(tid, [r["task"] for r in json.loads(output("--json"))])
+        self.assertIn(tid, [r["task"] for r in json.loads(output("--all", "--json"))])
+
     def test_memory_search_cli(self):
         import shutil
         source = Path(__file__).resolve().parents[1] / ".orchestrator" / "memory"

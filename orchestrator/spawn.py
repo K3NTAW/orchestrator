@@ -3,6 +3,7 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
+from . import worker_registry
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
@@ -1038,32 +1039,47 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         log["prompt_chars"] = len(prompt)
     if task.get("packet_meta"):
         log["packet_meta"] = task["packet_meta"]
+    t0 = time.time()
+    worker_registry.upsert(task["id"], status="starting", role=task["role"], provider="claude",
+                           model=model, account=acct.id, worktree=str(wt),
+                           branch=task.get("branch") or f"task/{task['id']}",
+                           parent=task.get("parent"), started_at=t0)
     if shutil.which("claude") is None:
+        worker_registry.finish(task["id"], "held", "no_cli")
         bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
-    t0 = time.time()
     try:
         p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        worker_registry.event(task["id"], "spawned", pid=p.pid, account=acct.id,
+                              model=model, worktree=str(wt), branch=task.get("branch") or f"task/{task['id']}")
         bus.update(task["id"], pid=p.pid, account=acct.id)
         stdout, stderr = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         p.kill()
+        p.communicate()
+        worker_registry.finish(task["id"], "failed", "timeout")
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
     except FileNotFoundError:
+        worker_registry.finish(task["id"], "held", "no_cli")
         # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never
         # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.
         bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
+    except OSError:
+        worker_registry.finish(task["id"], "failed", "launch_error")
+        raise
     text = stdout + stderr
     if p.returncode != 0 and is_rate_limited(text):
         secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
         pool.cooldown(acct, secs)
         bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
                     cooldown_s=secs, **log)
+        worker_registry.finish(task["id"], "held", "rate_limit")
         return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
     try:
         out = json.loads(stdout)
     except json.JSONDecodeError:
+        worker_registry.finish(task["id"], "failed", "non_json")
         return {"status": "failed", "reason": f"non-JSON output (rc={p.returncode}): {text[-500:]}"}
     session_id = out.get("session_id")
     if session_id is not None:
@@ -1082,6 +1098,9 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     except Exception as exc:
         notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
     used = out.get("usage", {})
+    worker_registry.usage(task["id"], "claude", used, out.get("total_cost_usd"))
+    worker_registry.finish(task["id"], "done" if not out.get("is_error") and p.returncode == 0 else "failed",
+                           None if not out.get("is_error") and p.returncode == 0 else "process_error")
     n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
     pool.record(acct, n)
     review_log = {}

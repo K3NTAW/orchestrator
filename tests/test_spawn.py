@@ -25,6 +25,29 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_spawn_records_worker_registry_entry(self):
+        from orchestrator import worker_registry as registry
+        task = bus.create_task("registry spawn", "s", ["a"], ["x.py"], role="execute")
+        task["worktree"] = str(TMP)
+        self.addCleanup(registry._path(task["id"]).unlink, missing_ok=True)
+        self.addCleanup(registry._path(task["id"], events=True).unlink, missing_ok=True)
+        process = mock.Mock(pid=4242, returncode=0)
+        def communicate(timeout):
+            self.assertEqual(registry.get(task["id"])["status"], "running")
+            return json.dumps({"result": "private result", "usage": {"input_tokens": 5, "output_tokens": 2},
+                               "total_cost_usd": .01}), ""
+        process.communicate.side_effect = communicate
+        pl = P.Pool()
+        with mock.patch.object(spawn.subprocess, "Popen", return_value=process), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"):
+            result = spawn.run_claude(pl, pl.get("A"), task, "private prompt", "model", "Read", 1, 30)
+        self.assertEqual(result["status"], "done")
+        self.assertEqual([e["kind"] for e in registry.events(task["id"])], ["spawned", "usage", "exit"])
+        self.assertEqual(registry.get(task["id"])["usd"], .01)
+        self.assertNotIn("private", registry._path(task["id"], events=True).read_text())
+
     def test_render_bytes_identical_in_shadow(self):
         task = {"id": "T-shadow", "scope": ["x.py"]}
         with mock.patch.object(spawn.instructions, "mode", return_value="shadow"), \
