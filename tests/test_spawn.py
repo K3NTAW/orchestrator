@@ -806,6 +806,30 @@ class Render(unittest.TestCase):
         self.assertIn("file: widget.py", text)
         self.assertGreater(text.index("## prior_worker"), text.index("## evidence"))
 
+    def test_three_packet_builds_do_not_grow_the_pool_and_evidence_section_capped(self):
+        task = {**self.packet_fixture(), "id": "T-bounded", "parent": "G-bounded",
+                "inputs": [{"summary": "task result"}]}
+        pool = evidence.EvidencePool("G-bounded")
+        self.addCleanup(pool.path.unlink, missing_ok=True)
+        for index in range(5000):
+            pool.add(evidence.make("external_doc", f"legacy:{index}", "x" * 80,
+                                   provenance="external"))
+        composition = mock.Mock()
+        composition.shared_evidence.side_effect = lambda unused: evidence.EvidencePool(
+            "G-bounded").by_type("external_doc")
+        composition.filter_evidence.side_effect = lambda rows: rows
+        composition.context_requirements = []
+        skills = {"mode": "active", "_specialist": composition}
+        cfg = {"context_router": {"mode": "off", "legacy_evidence_chars": 6000}}
+        before = len(pool.path.read_text().splitlines())
+
+        packets = [spawn.packet(task, TMP, cfg=cfg, skills=skills) for _ in range(3)]
+
+        self.assertEqual(before, len(pool.path.read_text().splitlines()))
+        for packet in packets:
+            section = packet.split("## evidence\n", 1)[1].split("\n## ", 1)[0]
+            self.assertLessEqual(len(section), 6000)
+
     def test_prior_worker_section_inert_in_shadow_mode(self):
         task = self.packet_fixture()
         head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()

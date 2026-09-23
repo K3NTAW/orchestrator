@@ -74,6 +74,28 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(pool.fresh(ev, "def"))
         self.assertEqual([ev.id], pool.stale_ids("def"))
 
+    def test_previous_result_rows_keyed_per_task_and_superseded_dropped(self):
+        pool = evidence.EvidencePool("previous-results")
+        self.addCleanup(pool.path.unlink, missing_ok=True)
+        first = evidence.make("previous_result", "task:T-one:evidence:first", "old",
+                              provenance="bus")
+        latest = evidence.make("previous_result", "task:T-one:evidence:latest", "new",
+                               provenance="bus")
+        other = evidence.make("previous_result", "task:T-two:evidence:other", "other",
+                              provenance="bus")
+        pool.path.write_text("\n".join(json.dumps(asdict(item))
+                                       for item in (first, latest, other)) + "\n")
+
+        loaded = evidence.EvidencePool("previous-results")
+
+        self.assertEqual({latest.id, other.id}, set(loaded._items))
+        self.assertEqual(2, len(pool.path.read_text().splitlines()))
+        replacement = evidence.make("previous_result", "task:T-one:evidence:replacement", "final",
+                                    provenance="bus")
+        loaded.add(replacement)
+        self.assertEqual({replacement.id, other.id}, set(loaded._items))
+        self.assertEqual(2, len(pool.path.read_text().splitlines()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,8 @@ class EvidencePool:
         self.path = STATE / "evidence" / f"{goal}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._items = {}
+        compacted = False
+        previous_by_task = {}
         if self.path.exists():
             for line in self.path.read_text().splitlines():
                 if line.strip():
@@ -135,7 +137,28 @@ class EvidencePool:
                     row.setdefault("scope", [])
                     row = {key: value for key, value in row.items()
                            if key in {field.name for field in fields(Evidence)}}
-                    self._items[row["id"]] = Evidence(**row)
+                    item = Evidence(**row)
+                    task_id = self._previous_result_task(item)
+                    if task_id is not None and task_id in previous_by_task:
+                        self._items.pop(previous_by_task[task_id], None)
+                        compacted = True
+                    self._items[item.id] = item
+                    if task_id is not None:
+                        previous_by_task[task_id] = item.id
+        if compacted:
+            self._write()
+
+    @staticmethod
+    def _previous_result_task(ev):
+        if ev.source_type != "previous_result":
+            return None
+        match = re.match(r"^task:([^:]+):evidence(?::|$)", ev.location)
+        return match.group(1) if match else None
+
+    def _write(self):
+        self.path.write_text("".join(
+            json.dumps(asdict(item), sort_keys=True) + "\n"
+            for item in self._items.values()))
 
     def add(self, ev):
         if ev.id in self._items:
@@ -143,9 +166,19 @@ class EvidencePool:
         persisted = replace(ev, content=jev.redact(ev.content),
                             summary_short=jev.redact(ev.summary_short),
                             summary_long=jev.redact(ev.summary_long))
-        self._items[ev.id] = persisted
-        with self.path.open("a") as handle:
-            handle.write(json.dumps(asdict(persisted), sort_keys=True) + "\n")
+        task_id = self._previous_result_task(persisted)
+        replaced = False
+        if task_id is not None:
+            for evidence_id, item in list(self._items.items()):
+                if self._previous_result_task(item) == task_id:
+                    del self._items[evidence_id]
+                    replaced = True
+        self._items[persisted.id] = persisted
+        if replaced:
+            self._write()
+        else:
+            with self.path.open("a") as handle:
+                handle.write(json.dumps(asdict(persisted), sort_keys=True) + "\n")
         return persisted
 
     def get(self, evidence_id):

@@ -677,7 +677,10 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
             logging.getLogger(__name__).warning("packet memory retrieval failed")
         if memory_mode == "active" and tiered_sections is not None:
             gotchas, decisions = tiered_sections["gotchas"], tiered_sections["decisions"]
-    evidence_lines = []
+    # 2026-09-23: bound legacy evidence while old, oversized pools age out.
+    legacy_evidence_chars = max(0, int((cfg.get("context_router") or {}).get(
+        "legacy_evidence_chars", 6000)))
+    input_evidence_lines = []
     for item in task.get("inputs", []):
         value = item
         if isinstance(item, str):
@@ -686,12 +689,28 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
             except KeyError:
                 value = {}
         summary = value.get("summary", value) if isinstance(value, dict) else value
-        evidence_lines.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
+        input_evidence_lines.append(
+            f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
+
+    def capped_lines(lines, limit):
+        kept, used = [], 0
+        for line in lines:
+            available = limit - used
+            if available <= 0:
+                break
+            value = str(line)[:available]
+            kept.append(value)
+            used += len(value) + 1
+        return kept
+
+    evidence_lines = capped_lines(input_evidence_lines, legacy_evidence_chars)
 
     composition = (skills or {}).get("_specialist")
     if composition and skills.get("mode") == "active":
-        evidence_lines.extend(f"- {item.id} {item.location}: {item.summary_short}"
-                              for item in composition.shared_evidence(task))
+        shared_lines = capped_lines(
+            (f"- {item.id} {item.location}: {item.summary_short}"
+             for item in composition.shared_evidence(task)), legacy_evidence_chars)
+        evidence_lines = capped_lines([*evidence_lines, *shared_lines], legacy_evidence_chars)
     objective = [str(task.get("title", ""))]
     if task.get("spec"):
         objective.append(f"- discovery: {task['spec']}")
@@ -735,9 +754,11 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
     candidates.extend(evidence.make(
         "decision", f"task:{task_id}:decision:{index}", value,
         provenance="memory", task=task, section="decisions") for index, value in enumerate(decisions, 1))
-    candidates.extend(evidence.make(
-        "previous_result", f"task:{task_id}:evidence:{index}", value,
-        provenance="bus", task=task, section="evidence") for index, value in enumerate(evidence_lines, 1))
+    for previous_result in capped_lines(input_evidence_lines, legacy_evidence_chars):
+        content_hash = hashlib.sha256(previous_result.encode()).hexdigest()
+        candidates.append(evidence.make(
+            "previous_result", f"task:{task_id}:evidence:{content_hash}", previous_result,
+            provenance="bus", task=task, section="evidence"))
     candidates.extend(evidence.make(
         "test_result", value, value, commit=merge_base, provenance="repo", task=task)
         for value in tests)
