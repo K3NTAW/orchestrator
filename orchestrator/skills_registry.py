@@ -264,7 +264,8 @@ def sync(root: Path = STATE, skills_dir: Path = REPO / "skills") -> dict[str, An
         tests = _tests_for(skill_file.parent, REPO / "tests")
         created, updated = _git_dates(skill_file)
         dependencies = _list(meta.get("depends_on"))
-        hashes = dependency_hashes(skill_file, dependencies, body, skills_dir.parent)
+        hashes = _record_dependency_hashes(
+            skill_file, dependencies, entry, now, body=body, repo=skills_dir.parent)
         changed = sorted(path for path in set(previous.get("dependency_hashes", {})) | set(hashes)
                          if previous.get("dependency_hashes", {}).get(path) != hashes.get(path)) if previous.get("dependency_hashes") is not None else []
         stale = bool(previous.get("stale") or changed)
@@ -321,7 +322,9 @@ def sync(root: Path = STATE, skills_dir: Path = REPO / "skills") -> dict[str, An
             continue
         meta, body = _frontmatter(source.read_text())
         dependencies = _list(meta.get("depends_on"))
-        hashes = dependency_hashes(source, dependencies, repo=skills_dir.parent)
+        hashes = _record_dependency_hashes(
+            source, dependencies, states[skill_id], now, repo=skills_dir.parent,
+            allowed_root=root / "skills/quarantine" / skill_id)
         previous_hashes = record.get("dependency_hashes")
         changed = sorted(path for path in set(previous_hashes or {}) | set(hashes)
                          if (previous_hashes or {}).get(path) != hashes.get(path)) if previous_hashes is not None else []
@@ -496,30 +499,81 @@ def candidates(task: dict[str, Any], role: str, cfg: Any = None,
     return sorted(selected, key=lambda row: (-len(row["matched"]), row["id"]))
 
 
-def dependency_hashes(source, dependencies, body="", repo=REPO):
-    """Hash whole files, including builtin support files and referenced modules."""
-    source, repo = Path(source), Path(repo)
+def _record_dependency_hashes(source, dependencies, entry, now, **kwargs):
+    if entry["state"] in {"discovered", "quarantined"}:
+        return {}
+    ignored = []
+    hashes = dependency_hashes(source, dependencies, ignored=ignored, **kwargs)
+    for declaration in sorted(set(ignored)):
+        entry.setdefault("history", []).append({
+            "at": now, "from": entry["state"], "to": entry["state"],
+            "reason": "dependency_ignored", "dependency": declaration,
+        })
+    return hashes
+
+
+def dependency_hashes(source, dependencies, body="", repo=REPO, *, allowed_root=None, ignored=None):
+    """Hash only repository files or files in an external skill's quarantine."""
+    source, repo = Path(source), Path(repo).resolve()
+    boundary = Path(allowed_root).resolve() if allowed_root is not None else repo
     paths = set()
+    ignored = [] if ignored is None else ignored
+
+    def include(path, declaration):
+        resolved = path.resolve()
+        if not resolved.is_relative_to(boundary):
+            ignored.append(declaration)
+        elif resolved.is_file():
+            paths.add(resolved)
+
     for folder in ("scripts", "references"):
-        paths.update(p for p in (source.parent / folder).rglob("*") if p.is_file())
+        base = source.parent / folder
+        if not base.resolve().is_relative_to(boundary):
+            ignored.append(folder)
+            continue
+        for path in base.rglob("*"):
+            include(path, str(path.relative_to(source.parent)))
     declarations = list(dependencies)
     declarations += re.findall(r"(?:[\w.-]+/)+[\w.*?-]+\.(?:py|sh|md|toml|json)", body)
     declarations += [m.replace(".", "/") + ".py" for m in
                      re.findall(r"\borchestrator(?:\.[a-zA-Z_]\w*)+", body)]
     for declaration in declarations:
+        original = declaration
         declaration = declaration.removeprefix("script:")
-        if declaration.startswith("mcp__") or declaration in {"Read", "Write", "Edit", "Grep", "Glob", "Search", "Bash"}:
-            if declaration.startswith("mcp__bus__") and (repo / "orchestrator/bus.py").is_file():
-                paths.add(repo / "orchestrator/bus.py")
-            declaration = "orchestrator/tool_catalog.py"
         candidate = Path(declaration)
-        if candidate.is_absolute():
-            if candidate.is_file():
-                paths.add(candidate)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            ignored.append(original)
             continue
-        for base in (repo, source.parent):
-            paths.update(p for p in base.glob(declaration) if p.is_file())
-    return {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(paths)}
+        if declaration.startswith("mcp__") or declaration in {"Read", "Write", "Edit", "Grep", "Glob", "Search", "Bash"}:
+            if declaration.startswith("mcp__bus__"):
+                include(boundary / "orchestrator/bus.py", original)
+            declaration = "orchestrator/tool_catalog.py"
+        def matches(base, parts):
+            if not base.resolve().is_relative_to(boundary):
+                ignored.append(original)
+                return
+            if not parts:
+                yield base
+                return
+            if not base.is_dir():
+                return
+            part, *rest = parts
+            if part == "**":
+                yield from matches(base, rest)
+                for child in base.iterdir():
+                    if not child.resolve().is_relative_to(boundary):
+                        ignored.append(original)
+                    elif not child.is_symlink() and child.is_dir():
+                        yield from matches(child, parts)
+            else:
+                # Match one segment at a time, checking containment before descent.
+                for child in base.glob(part):
+                    yield from matches(child, rest)
+
+        for base in dict.fromkeys((boundary, source.parent)):
+            for path in matches(base, list(Path(declaration).parts)):
+                include(path, original)
+    return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(paths)}
 
 
 def _update_record(skill_id, fields, root):
