@@ -86,3 +86,25 @@ class WorkerRegistry(unittest.TestCase):
                               constraints={"fix_round_for": self.tid})
         registry.upsert(self.tid, parent="goal")
         self.assertEqual(registry.get(self.tid)["children"], [fix["id"]])
+
+
+class SteeringEpoch(unittest.TestCase):
+    setUp = WorkerRegistry.setUp
+    clean_registry = WorkerRegistry.clean_registry
+    def test_finish_ignores_stale_epoch_after_steer(self):
+        registry.upsert(self.tid, status="running")
+        registry.event(self.tid, "steer", epoch=2, status="steering", message_chars=4)
+        before = registry._path(self.tid).read_bytes()
+        registry.finish(self.tid, "failed", epoch=1)
+        self.assertEqual(registry._path(self.tid).read_bytes(), before)
+        registry.finish(self.tid, "done", epoch=2)
+        self.assertEqual(registry.get(self.tid)["status"], "done")
+
+    def test_upsert_starting_carries_epoch_forward(self):
+        self.assertEqual(registry.upsert(self.tid, status="starting")["epoch"], 1)
+        registry.event(self.tid, "steer", epoch=3, message_chars=4)
+        self.assertEqual(registry.upsert(self.tid, status="starting")["epoch"], 3)
+        self.assertEqual(registry.upsert(self.tid, status="starting", epoch=4)["epoch"], 4)
+        for fields in ({"epoch": 0}, {"epoch": True}, {"message_chars": 1.5}, {"tools": "Read"}):
+            with self.assertRaises(ValueError):
+                registry.upsert(self.tid, **fields)

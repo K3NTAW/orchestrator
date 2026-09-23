@@ -358,8 +358,8 @@ def reconcile_dead(t, pool=None):
     if is_goal(t):
         return None
     worker = worker_registry.get(t["id"])
-    if worker and worker.get("status") in ("cancelling", "cancelled"):
-        return "cancelled"
+    if worker and worker.get("status") in ("cancelling", "cancelled", "steering"):
+        return "steering" if worker["status"] == "steering" else "cancelled"
     tid, worktree = t["id"], t.get("worktree")
     (pool or Pool()).release(tid, t.get("result") or {})
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
@@ -537,6 +537,7 @@ def hold_render_error(task_id, exc):
 
 
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
+    epoch = worker_control.launch_epoch(task_id)
     routing = None
     try:
         task = bus.get(task_id)
@@ -559,36 +560,41 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
         if packet_meta is not None and accepts_meta:
             kwargs["packet_meta"] = packet_meta
         r = executor.start(task_id, prompt, **kwargs)
-        if routing is not None:
-            jev_route.record_shadow(task_id, routing)
-        if r["status"] == "done":
-            bus.post_result(task_id, spawn.fit_result({
-                "summary": r["message"][:3000],
-                "executed_by": "codex:" + bus.get(task_id)["executor"],
-                "thread": r["thread"],
-                "usage": r.get("usage"),
-            }), "done")
-        elif r["status"] == "failed":
-            bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
-        elif r["status"] in ("held", "budget"):
-            with bus.locked():
-                task = bus.get(task_id)
-                pipeline = dict(task.get("pipeline") or {})
-                pipeline.pop("dispatched_at", None)
-                pipeline["hold_note"] = r.get("reason", r["status"])
-                bus.update(task_id, status="queued", pipeline=pipeline)
-        elif r["status"] in ("refused", "incompatible"):
-            reason = r.get("reason", r["status"])
-            bus.post_result(task_id, spawn.fit_result({"reason": reason[:3000]}), "failed")
-        elif r["status"] == "fallback":
-            pass
+        with bus.locked():
+            if not worker_control.is_current(task_id, epoch):
+                return
+            if routing is not None:
+                jev_route.record_shadow(task_id, routing)
+            if r["status"] == "done":
+                bus.post_result(task_id, spawn.fit_result({
+                    "summary": r["message"][:3000],
+                    "executed_by": "codex:" + bus.get(task_id)["executor"],
+                    "thread": r["thread"],
+                    "usage": r.get("usage"),
+                }), "done")
+            elif r["status"] == "failed":
+                bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+            elif r["status"] in ("held", "budget"):
+                with bus.locked():
+                    task = bus.get(task_id)
+                    pipeline = dict(task.get("pipeline") or {})
+                    pipeline.pop("dispatched_at", None)
+                    pipeline["hold_note"] = r.get("reason", r["status"])
+                    bus.update(task_id, status="queued", pipeline=pipeline)
+            elif r["status"] in ("refused", "incompatible"):
+                reason = r.get("reason", r["status"])
+                bus.post_result(task_id, spawn.fit_result({"reason": reason[:3000]}), "failed")
+            elif r["status"] == "fallback":
+                pass
     except Exception as e:
         with bus.locked():
+            if not worker_control.is_current(task_id, epoch):
+                return
             t = bus.get(task_id)
             pipeline = dict(t.get("pipeline") or {})
             pipeline["dispatch_error"] = str(e)[:300]
             bus.update(task_id, pipeline=pipeline)
-        bus.post_result(task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
+        worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
 
 
 def _fix_round_delta(parent, fix):

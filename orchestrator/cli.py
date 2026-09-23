@@ -129,6 +129,10 @@ def main():
     cancel_worker = worker_sub.add_parser("cancel")
     cancel_worker.add_argument("task")
     cancel_worker.add_argument("--reason", required=True)
+    steer_worker = worker_sub.add_parser("steer")
+    steer_worker.add_argument("task")
+    steer_worker.add_argument("--reason", required=True)
+    steer_worker.add_argument("--message", required=True)
     from . import context_scanner
     scanner = sub.add_parser("scan")
     scanner.add_argument("path")
@@ -249,6 +253,9 @@ def main():
         if a.workers_cmd == "cancel":
             from . import worker_control
             print(json.dumps(worker_control.cancel(a.task, a.reason), indent=2))
+        elif a.workers_cmd == "steer":
+            from . import worker_control
+            print(json.dumps(worker_control.steer(a.task, a.message, reason=a.reason), indent=2))
         elif a.task:
             doc = worker_registry.get(a.task)
             if doc is None:

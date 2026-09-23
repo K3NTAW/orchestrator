@@ -2162,3 +2162,55 @@ class OutputContracts(unittest.TestCase):
                 self.assertEqual(task["result"]["verdict"], "approve")
                 self.assertEqual(len(calls), 1)
                 popen.assert_not_called()
+
+
+class SteeringResume(unittest.TestCase):
+    def test_resume_reuses_recorded_tool_allowlist(self):
+        from orchestrator import worker_registry as registry
+        task = bus.create_task("resume tools", "s", ["a"], ["x.py"], role="execute")
+        tid = task["id"]
+        self.addCleanup(registry._path(tid).unlink, missing_ok=True)
+        self.addCleanup(registry._path(tid, events=True).unlink, missing_ok=True)
+        registry.upsert(tid, status="running", provider="claude", account="A", model="recorded-model",
+                        tools=["Read", "Bash(rg *)"], epoch=2)
+        task = bus.update(tid, status="running", pipeline={"steer_epoch": 2})
+        with mock.patch.object(spawn, "run_claude", return_value={"status": "done", "output": {"result": "done"}}) as run, \
+                mock.patch.object(spawn, "_shadow_tool_disclosure") as disclosure, \
+                mock.patch.object(spawn, "render") as render:
+            spawn.resume_worker(task, "steering", "session-example")
+        args = run.call_args.args
+        self.assertEqual(args[3:6], ("steering", "recorded-model", "Read,Bash(rg *)"))
+        self.assertEqual(args[2]["_resume_session"], "session-example")
+        self.assertEqual(args[2]["_launch_epoch"], 2)
+        disclosure.assert_not_called()
+        render.assert_not_called()
+
+
+    def test_interrupted_claude_cleanup_cannot_publish_or_release(self):
+        from orchestrator import worker_registry as registry
+        task = bus.create_task("stale Claude", "s", ["a"], ["x.py"], role="execute")
+        tid = task["id"]
+        self.addCleanup(registry._path(tid).unlink, missing_ok=True)
+        self.addCleanup(registry._path(tid, events=True).unlink, missing_ok=True)
+        task = bus.update(tid, status="running", worktree=str(TMP))
+        registry.upsert(tid, status="running", provider="claude", account="A", model="model", tools=["Read"])
+        process = mock.Mock(pid=43211, returncode=-15)
+        def communicate(timeout):
+            registry.event(tid, "steer", epoch=2, status="running")
+            bus.update(tid, pipeline={"steer_epoch": 2}, packet_meta={"steering_count": 1})
+            return json.dumps({"is_error": True, "result": "interrupted", "session_id": "old-session"}), ""
+        process.communicate.side_effect = communicate
+        with mock.patch.object(spawn.subprocess, "Popen", return_value=process), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                mock.patch.object(P.Pool, "release") as release, \
+                mock.patch.object(bus, "post_result") as post:
+            result = spawn.resume_worker(task, "steering", "session-example")
+        self.assertEqual(result["status"], "superseded")
+        release.assert_not_called()
+        post.assert_not_called()
+        self.assertEqual(bus.get(tid)["status"], "running")
+        self.assertEqual(bus.get(tid)["packet_meta"], {"steering_count": 1})
+        self.assertEqual(registry.get(tid)["status"], "running")
+        self.assertEqual(registry.get(tid)["epoch"], 2)

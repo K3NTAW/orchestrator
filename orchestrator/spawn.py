@@ -4,7 +4,7 @@ import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import contracts, worker_registry, env_policy
+from . import contracts, worker_registry, env_policy, worker_control
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -1153,6 +1153,7 @@ def trust_workspace(config_dir, wt):
 
 def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, *, resume_session=None):
     log_run = (lambda **fields: None) if resume_session else bus.log_run
+    epoch = task.get("_launch_epoch", worker_control.launch_epoch(task["id"]))
     wt = Path(task.get("worktree") or ensure_worktree(task["id"]))
     trust_workspace(acct.config_dir, wt)
     # Explicit --mcp-config + --strict-mcp-config means workers never auto-load the project/user configs
@@ -1177,6 +1178,8 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
     if resume_session:
         cmd += ["--resume", resume_session, "--tools", ""]
         cmd[cmd.index("--mcp-config") + 1] = '{"mcpServers": {}}'
+    elif task.get("_resume_session"):
+        cmd += ["--resume", task["_resume_session"]]
     if (task.get("packet_meta") or {}).get("skill_routing_mode") == "active":
         cmd.append("--disable-slash-commands")
     if task["role"] != "execute":
@@ -1187,85 +1190,94 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
     if task.get("packet_meta"):
         log["packet_meta"] = task["packet_meta"]
     t0 = time.time()
-    worker_registry.upsert(task["id"], status="starting", role=task["role"], provider="claude",
-                           model=model, account=acct.id, worktree=str(wt),
-                           branch=task.get("branch") or f"task/{task['id']}",
-                           parent=task.get("parent"), started_at=t0)
+
     if shutil.which("claude") is None:
-        worker_registry.finish(task["id"], "held", "no_cli")
+        worker_registry.finish(task["id"], "held", "no_cli", epoch=epoch)
         log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
     try:
-        p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        worker_registry.event(task["id"], "spawned", pid=p.pid, account=acct.id,
-                              model=model, worktree=str(wt), branch=task.get("branch") or f"task/{task['id']}")
-        bus.update(task["id"], pid=p.pid, account=acct.id)
+        with bus.locked():
+            if not worker_control.is_current(task["id"], epoch):
+                return {"status": "superseded"}
+            worker_registry.upsert(task["id"], status="starting", role=task["role"], provider="claude",
+                                   model=model, account=acct.id, worktree=str(wt),
+                                   branch=task.get("branch") or f"task/{task['id']}",
+                                   parent=task.get("parent"), started_at=t0, epoch=epoch, tools=tools.split(","))
+            p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            worker_registry.event(task["id"], "spawned", pid=p.pid, account=acct.id,
+                                  model=model, worktree=str(wt), branch=task.get("branch") or f"task/{task['id']}")
+            if task.get("_steering"):
+                worker_registry.event(task["id"], "steered", status="running")
+            worker_control.write_if_current(task["id"], epoch, bus.update, task["id"], pid=p.pid, account=acct.id)
         stdout, stderr = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         p.kill()
         p.communicate()
-        worker_registry.finish(task["id"], "failed", "timeout")
+        worker_registry.finish(task["id"], "failed", "timeout", epoch=epoch)
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
     except FileNotFoundError:
-        worker_registry.finish(task["id"], "held", "no_cli")
+        worker_registry.finish(task["id"], "held", "no_cli", epoch=epoch)
         # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never
         # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.
         log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
     except OSError:
-        worker_registry.finish(task["id"], "failed", "launch_error")
+        worker_registry.finish(task["id"], "failed", "launch_error", epoch=epoch)
         raise
-    text = stdout + stderr
-    if p.returncode != 0 and is_rate_limited(text):
-        secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
-        pool.cooldown(acct, secs)
-        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
-                    cooldown_s=secs, **log)
-        worker_registry.finish(task["id"], "held", "rate_limit")
-        return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
-    try:
-        out = json.loads(stdout)
-    except json.JSONDecodeError:
-        worker_registry.finish(task["id"], "failed", "non_json")
-        return {"status": "failed", "reason": f"non-JSON output (rc={p.returncode}): {text[-500:]}"}
-    session_id = out.get("session_id")
-    if session_id is not None:
-        task.setdefault("packet_meta", {})["session_id"] = session_id
-        bus.update(task["id"], packet_meta=task["packet_meta"])
-    try:
-        skills_used, skill_tokens_l2 = _skills_from_gate(task["id"], session_id)
-        task.setdefault("packet_meta", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)
-        pipeline = dict(bus.get(task["id"]).get("pipeline") or {})
-        pipeline["skills_used"] = skills_used
-        bus.update(task["id"], packet_meta=task["packet_meta"], pipeline=pipeline)
-        decision_log.outcome(task["id"], "skill_selection", skills_used=skills_used,
-                             skill_tokens_l2=skill_tokens_l2,
-                             skill_recovery=sorted(set(skills_used) - set(task["packet_meta"].get("skills_selected") or [])))
-        log["packet_meta"] = task["packet_meta"]
-    except Exception as exc:
-        notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
-    used = out.get("usage", {})
-    worker_registry.usage(task["id"], "claude", used, out.get("total_cost_usd"))
-    worker_registry.finish(task["id"], "done" if not out.get("is_error") and p.returncode == 0 else "failed",
-                           None if not out.get("is_error") and p.returncode == 0 else "process_error")
-    n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
-    pool.record(acct, n)
-    review_log = {}
-    if task.get("role") == "review":
-        parsed = extract_json(out.get("result", ""))
-        if not parsed.get("verdict"):
-            parsed = (bus.get(task["id"]).get("result") or parsed)
-        parsed["packet_version"] = (task.get("packet_meta") or {}).get("version")
-        facts = attribution.review_facts({**task, "result": parsed})
-        review_log = {key: facts[key] for key in ("verdict", "findings_count", "findings_by_severity",
-                      "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
-    log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
-                outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
-                provider="claude", usage=used, session_id=session_id, **log, **review_log, **used)
-    if not out.get("is_error") and p.returncode == 0:
-        return {"status": "done", "output": out}
-    reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
-    return {"status": "failed", "output": out, "reason": reason}
+    with bus.locked():
+        if not worker_control.is_current(task["id"], epoch):
+            return {"status": "superseded"}
+        text = stdout + stderr
+        if p.returncode != 0 and is_rate_limited(text):
+            secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
+            pool.cooldown(acct, secs)
+            log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
+                        cooldown_s=secs, **log)
+            worker_registry.finish(task["id"], "held", "rate_limit", epoch=epoch)
+            return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
+        try:
+            out = json.loads(stdout)
+        except json.JSONDecodeError:
+            worker_registry.finish(task["id"], "failed", "non_json", epoch=epoch)
+            return {"status": "failed", "reason": f"non-JSON output (rc={p.returncode}): {text[-500:]}"}
+        session_id = out.get("session_id")
+        if session_id is not None:
+            task.setdefault("packet_meta", {})["session_id"] = session_id
+            bus.update(task["id"], packet_meta=task["packet_meta"])
+        try:
+            skills_used, skill_tokens_l2 = _skills_from_gate(task["id"], session_id)
+            task.setdefault("packet_meta", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)
+            pipeline = dict(bus.get(task["id"]).get("pipeline") or {})
+            pipeline["skills_used"] = skills_used
+            bus.update(task["id"], packet_meta=task["packet_meta"], pipeline=pipeline)
+            decision_log.outcome(task["id"], "skill_selection", skills_used=skills_used,
+                                 skill_tokens_l2=skill_tokens_l2,
+                                 skill_recovery=sorted(set(skills_used) - set(task["packet_meta"].get("skills_selected") or [])))
+            log["packet_meta"] = task["packet_meta"]
+        except Exception as exc:
+            notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
+        used = out.get("usage", {})
+        worker_registry.usage(task["id"], "claude", used, out.get("total_cost_usd"))
+        worker_registry.finish(task["id"], "done" if not out.get("is_error") and p.returncode == 0 else "failed",
+                               None if not out.get("is_error") and p.returncode == 0 else "process_error", epoch=epoch)
+        n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
+        pool.record(acct, n)
+        review_log = {}
+        if task.get("role") == "review":
+            parsed = extract_json(out.get("result", ""))
+            if not parsed.get("verdict"):
+                parsed = (bus.get(task["id"]).get("result") or parsed)
+            parsed["packet_version"] = (task.get("packet_meta") or {}).get("version")
+            facts = attribution.review_facts({**task, "result": parsed})
+            review_log = {key: facts[key] for key in ("verdict", "findings_count", "findings_by_severity",
+                          "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
+        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
+                    outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
+                    provider="claude", usage=used, session_id=session_id, **log, **review_log, **used)
+        if not out.get("is_error") and p.returncode == 0:
+            return {"status": "done", "output": out}
+        reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
+        return {"status": "failed", "output": out, "reason": reason}
 
 
 def extract_json(text):
@@ -1356,9 +1368,12 @@ def _account_from_assigned_to(assigned_to):
     return None
 
 
-def run_worker(task_id, account_id=None):
+def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None, session_id=None):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
-    pool = Pool(); t = bus.get(task_id); role = t["role"]
+    pool = Pool(); t = dict(resume_task or bus.get(task_id)); role = t["role"]
+    epoch = t.get("_launch_epoch", worker_control.launch_epoch(task_id))
+    t["_launch_epoch"] = epoch
+    recorded = worker_registry.get(task_id) if resume_task else None
     if (t.get("constraints") or {}).get("goal"):
         return {"status": "refused", "reason": "goal container"}
     avoid = None
@@ -1375,68 +1390,75 @@ def run_worker(task_id, account_id=None):
             avoid = reviewed.get("account") or _account_from_assigned_to(reviewed.get("assigned_to"))
     acct = next((a for a in pool.accounts if a.id == account_id), None) if account_id else pool.pick(role, avoid=avoid)
     if acct is None:
-        bus.update(task_id, status="held", hold_reason="no account with headroom")
+        worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason="no account with headroom")
         return {"status": "held"}
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
-    try:
-        skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, pool.cfg)
-        if role == "review":
-            src = reviewed if reviewed is not None else t
-            role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice)
-            security_signals = {"security": "## security\n" in role_packet}
-            prompt = render("review", packet=role_packet, task=t, signals=security_signals)
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-        elif role == "challenge":
-            prompt = render("challenge", task=t, **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
-                                            for k in ("claim", "evidence", "confidence")})
-        elif role == "spec_review":
-            src = bus.get(t["inputs"][0])
-            role_packet = spec_review_packet(src)
-            prompt = render("spec-review", packet=role_packet, task=t)
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-        elif role == "execute":
-            t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
-            bus.update(task_id, executor=t["executor"])
-            packet_worktree = t.get("worktree") or ROOT
-            role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice)
-            prompt = render("execute", packet=role_packet, task=t) + \
-                "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
-                "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-        else:
-            role_packet = scout_packet(t)
-            prompt = render("scout", packet=role_packet, task=t)
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-    except Exception as exc:
-        hold_render_error(task_id, exc)
-        return {"status": "held", "reason": "render_error"}
-    disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg, skill_choice)
-    allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
-    disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
-    t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
-    try:
-        exposure = (_skill_exposure(t, role) if not harness_depth.active(t)
-                    and promotion.mode("skill_routing", pool.cfg) == "off" else None)
-        if exposure is None:
-            records = _skill_records()
-            exposed = sorted(skill_id for skill_id, record in records.items()
-                             if record.get("state") == "active" and record.get("provenance") == "builtin")
-            exposure = {"skills_exposed": exposed,
-                        "skill_tokens_l0": sum(int(records[item].get("est_tokens_l0") or 0) for item in exposed)}
-        t["packet_meta"].update(exposure)
-        t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure, skill_choice))
-        bus.update(task_id, packet_meta=t["packet_meta"])
-    except Exception as exc:
-        notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")
-    if pool.reserve(task_id, acct.id, role, t) is None:
-        pipeline = dict(t.get("pipeline") or {})
-        pipeline["hold_note"] = "budget"
-        pipeline.pop("dispatched_at", None)
-        bus.update(task_id, status="queued", pipeline=pipeline)
-        return {"status": "budget"}
-    bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
-    bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
+    if resume_task:
+        prompt = resume_prompt
+        t["_resume_session"] = session_id
+        model = recorded["model"]
+        allowlist = ",".join(recorded["tools"])
+        disclosure_mode = "off"
+    else:
+        try:
+            skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, pool.cfg)
+            if role == "review":
+                src = reviewed if reviewed is not None else t
+                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice)
+                security_signals = {"security": "## security\n" in role_packet}
+                prompt = render("review", packet=role_packet, task=t, signals=security_signals)
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+            elif role == "challenge":
+                prompt = render("challenge", task=t, **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
+                                                for k in ("claim", "evidence", "confidence")})
+            elif role == "spec_review":
+                src = bus.get(t["inputs"][0])
+                role_packet = spec_review_packet(src)
+                prompt = render("spec-review", packet=role_packet, task=t)
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+            elif role == "execute":
+                t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, executor=t["executor"])
+                packet_worktree = t.get("worktree") or ROOT
+                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice)
+                prompt = render("execute", packet=role_packet, task=t) + \
+                    "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
+                    "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+            else:
+                role_packet = scout_packet(t)
+                prompt = render("scout", packet=role_packet, task=t)
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+        except Exception as exc:
+            hold_render_error(task_id, exc)
+            return {"status": "held", "reason": "render_error"}
+        disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg, skill_choice)
+        allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
+        disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
+        t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
+        try:
+            exposure = (_skill_exposure(t, role) if not harness_depth.active(t)
+                        and promotion.mode("skill_routing", pool.cfg) == "off" else None)
+            if exposure is None:
+                records = _skill_records()
+                exposed = sorted(skill_id for skill_id, record in records.items()
+                                 if record.get("state") == "active" and record.get("provenance") == "builtin")
+                exposure = {"skills_exposed": exposed,
+                            "skill_tokens_l0": sum(int(records[item].get("est_tokens_l0") or 0) for item in exposed)}
+            t["packet_meta"].update(exposure)
+            t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure, skill_choice))
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, packet_meta=t["packet_meta"])
+        except Exception as exc:
+            notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")
+        if pool.reserve(task_id, acct.id, role, t) is None:
+            pipeline = dict(t.get("pipeline") or {})
+            pipeline["hold_note"] = "budget"
+            pipeline.pop("dispatched_at", None)
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="queued", pipeline=pipeline)
+            return {"status": "budget"}
+        bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
+        worker_control.write_if_current(task_id, epoch, bus.update, task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = None
     release_usage = None
     try:
@@ -1445,6 +1467,8 @@ def run_worker(task_id, account_id=None):
         started = time.monotonic()
         first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)
         r = first
+        if not worker_control.is_current(task_id, epoch):
+            return {"status": "superseded"}
         tool_id = _hidden_tool_request(task_id)
         if (disclosure_mode == "active" and tool_id
                 and not (bus.get(task_id).get("pipeline") or {}).get("tool_escalation_used")):
@@ -1453,7 +1477,7 @@ def run_worker(task_id, account_id=None):
             timeout_left = timeout - (time.monotonic() - started)
             if budget_left < budget * .1 or timeout_left < timeout * .1:
                 reason = f"{NEEDS_TOOL_PREFIX}{tool_id} (no budget for respawn)"
-                bus.update(task_id, status="held", hold_reason=reason, result={"reason": reason})
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason=reason, result={"reason": reason})
                 r = {"status": "held", "reason": reason, "output": first.get("output", {})}
             else:
                 decision_log.record(kind="tool_disclosure", subject=task_id,
@@ -1462,7 +1486,7 @@ def run_worker(task_id, account_id=None):
                     reason="hidden_tool_requested", mode="active")
                 pipeline = dict(bus.get(task_id).get("pipeline") or {})
                 pipeline["tool_escalation_used"] = True
-                bus.update(task_id, status="running", result=None, pipeline=pipeline)
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="running", result=None, pipeline=pipeline)
                 r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                                budget_left, timeout_left)
                 release_usage = _combined_usage(first, r)
@@ -1490,7 +1514,7 @@ def run_worker(task_id, account_id=None):
             posted = fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
                                  "review": "other account, different model; label PR same-family-review"})
             posted = contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session)
-            bus.post_result(task_id, posted, "done")
+            worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, posted, "done")
         elif r["status"] == "done":
             text = r["output"].get("result", "")
             result = extract_json(text)
@@ -1510,7 +1534,7 @@ def run_worker(task_id, account_id=None):
                 result = existing_result
                 if role == "review":
                     result["packet_version"] = (t.get("packet_meta") or {}).get("version")
-                    bus.post_result(task_id, fit_result(result), "done")
+                    worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, fit_result(result), "done")
             else:
                 # A model repair may supply a verdict only when neither output has one.
                 session = repair_session if not review_role or not result.get("verdict") else None
@@ -1519,40 +1543,40 @@ def run_worker(task_id, account_id=None):
                     result["packet_version"] = (t.get("packet_meta") or {}).get("version")
                 parse_failed = bool(result.get("parse_error")) or (review_role and not result.get("verdict"))
                 if parse_failed and review_role:
-                    bus.update(task_id, status="failed", reason="review returned no parseable verdict",
+                    worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="failed", reason="review returned no parseable verdict",
                               resume_hint={"raw": text[-2000:]})
                     result = None
                 else:
-                    bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+                    worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
             if result and review_role and result.get("verdict"):
                 verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
                     if role == "spec_review" else {"review_verdict": result["verdict"]}
-                bus.update(task_id, **verdict_fields)
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, **verdict_fields)
                 if role == "review":
                     completed_task = bus.get(task_id)
                     facts = attribution.review_facts(completed_task)
                     fact_fields = {key: value for key, value in facts.items()
                                    if value is not None or completed_task.get(key) is None}
-                    bus.update(task_id, review_facts=facts, **fact_fields)
+                    worker_control.write_if_current(task_id, epoch, bus.update, task_id, review_facts=facts, **fact_fields)
                 if t.get("inputs") and isinstance(t["inputs"][0], str):
                     try:
-                        bus.update(t["inputs"][0], **verdict_fields)
+                        worker_control.write_if_current(task_id, epoch, bus.update, t["inputs"][0], **verdict_fields)
                     except KeyError:
                         pass
         elif r["status"] == "held":
-            bus.update(task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
         else:
             update_fields = {"status": "failed", "reason": r.get("reason", "unknown failure")}
             result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
             if isinstance(result, str):
                 update_fields["resume_hint"] = {"partial_output": result[:2000]}
-            bus.update(task_id, **update_fields)
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, **update_fields)
     except Exception as e:
         bus.log_run(task=task_id, role=role, outcome="post_failed",
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
-        bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
+        worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     finally:
-        pool.release(task_id, release_usage or r or {})
+        worker_control.release_if_current(task_id, epoch, pool, release_usage or r or {})
     return r
 
 
@@ -1583,3 +1607,10 @@ def scoped_diff(src):
     base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
     r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"
+
+
+def resume_worker(task, prompt, session_id):
+    """Use the original role, account, model, tools, and environment policy."""
+    recorded = worker_registry.get(task["id"])
+    return run_worker(task["id"], recorded["account"], resume_task=task,
+                      resume_prompt=prompt, session_id=session_id)

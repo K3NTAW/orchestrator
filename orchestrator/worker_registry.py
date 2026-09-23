@@ -14,7 +14,7 @@ TERMINAL = {"cancelled", "done", "failed", "held"}
 KINDS = {"spawned", "claimed", "stage", "tool", "usage", "exit", "reconciled", "held", "thread", "cancel_requested", "cancelled", "steer", "steered"}
 FIELDS = {"role", "model", "provider", "account", "pid", "thread", "worktree", "branch",
           "started_at", "last_event_at", "stage", "current_tool", "tokens", "usd",
-          "parent", "status", "status_reason", "source", "cancel_reason"}
+          "parent", "status", "status_reason", "source", "cancel_reason", "epoch", "message_chars", "tools"}
 NUMBERS = {"pid", "started_at", "last_event_at", "usd"}
 TOKEN_KEYS = {"input_uncached", "cache_read", "output"}
 
@@ -34,12 +34,21 @@ def _validate(fields, *, tool_event=False):
         raise ValueError("unsupported registry field")
     for key, value in fields.items():
         if value is None:
+            if key in {"epoch", "message_chars", "tools"}:
+                raise ValueError("invalid registry value")
             continue
         if key == "tokens":
             if not isinstance(value, dict) or set(value) - TOKEN_KEYS:
                 raise ValueError("invalid token buckets")
             if any(type(v) is not int or v < 0 for v in value.values()):
                 raise ValueError("invalid token count")
+        elif key in {"epoch", "message_chars"}:
+            if type(value) is not int or value < (1 if key == "epoch" else 0):
+                raise ValueError("invalid registry integer")
+        elif key == "tools":
+            if not isinstance(value, list) or any(not isinstance(tool, str) or not tool or
+                    len(tool) > 512 or any(ord(c) < 32 for c in tool) for tool in value):
+                raise ValueError("invalid tool allowlist")
         elif key in NUMBERS:
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
                 raise ValueError("invalid registry number")
@@ -79,7 +88,7 @@ def _document(task_id):
             "account": None, "pid": None, "worktree": None, "branch": None,
             "started_at": now, "last_event_at": now, "stage": None, "tokens": {},
             "usd": None, "parent": None, "children": [], "status": "starting",
-            "status_reason": None}
+            "status_reason": None, "epoch": 1}
 
 
 def _write(task_id, doc):
@@ -105,7 +114,7 @@ def upsert(task_id, **fields):
         doc = _read(task_id) or _document(task_id)
         # A new launch replaces the previous attempt's snapshot, retaining its event history.
         if fields.get("status") == "starting":
-            doc = _document(task_id)
+            doc = {**_document(task_id), "epoch": doc.get("epoch", 1)}
         doc.update(fields)
         _write(task_id, doc)
         return get(task_id)
@@ -174,11 +183,13 @@ def usage(task_id, provider, counts, usd=None):
     event(task_id, "usage", tokens=tokens, usd=usd)
 
 
-def finish(task_id, status, reason=None):
+def finish(task_id, status, reason=None, *, epoch=None):
     if status not in TERMINAL:
         raise ValueError("finish requires a terminal status")
     with bus.locked():
         doc = _read(task_id)
+        if doc and epoch is not None and epoch < doc.get("epoch", 1):
+            return get(task_id)
         if doc and doc["status"] in ("cancelling", "cancelled") and status != "cancelled":
             return get(task_id)
         if status == "cancelled":

@@ -113,3 +113,137 @@ class WorkerControl(unittest.TestCase):
                            signal_fn=mock.Mock(side_effect=PermissionError))
         pool.assert_not_called()
         self.assertEqual(registry.get(self.tid)['status'], 'cancelling')
+
+
+class Steering(unittest.TestCase):
+    def setUp(self):
+        WorkerControl.setUp(self)
+        registry.upsert(self.tid, thread="thread-example")
+        self.path = registry._path(self.tid).with_suffix(".steering.jsonl")
+        self.addCleanup(self.path.unlink, missing_ok=True)
+
+    def test_steer_records_before_delivery_and_never_edits_spec(self):
+        from orchestrator import executor
+        before = json.dumps({k: bus.get(self.tid)[k] for k in ("spec", "acceptance", "scope")}).encode()
+        bus.update(self.tid, reason="existing reason")
+        def deliver(task, thread, prompt):
+            row = json.loads(self.path.read_text())
+            self.assertEqual(row["message"], "Inspect the failing check")
+            self.assertEqual(row["reason"], "new evidence")
+            self.assertEqual(row["source"], "planner")
+            self.assertEqual(row["task"], self.tid)
+            event = registry.events(self.tid)[-1]
+            self.assertEqual(event["kind"], "steer")
+            self.assertEqual(event["data"]["message_chars"], len(row["message"]))
+            self.assertNotIn(row["message"], registry._path(self.tid, events=True).read_text())
+            self.assertEqual(task["packet_meta"]["steering_count"], 1)
+            self.assertEqual(task["pipeline"]["steer_epoch"], 2)
+            return {"status": "running"}
+        with mock.patch.object(executor, "steer_resume", side_effect=deliver), \
+                mock.patch.object(control, "_terminate") as terminate:
+            control.steer(self.tid, "Inspect the failing check", reason="new evidence")
+        terminate.assert_called_once()
+        after = bus.get(self.tid)
+        self.assertEqual(before, json.dumps({k: after[k] for k in ("spec", "acceptance", "scope")}).encode())
+        self.assertEqual(after["reason"], "existing reason")
+        self.assertEqual(after["status"], "running")
+        self.assertTrue(any(e.get("pipeline", {}).get("steer_epoch") == 2 for e in after["events"]))
+        self.assertEqual(registry.events(self.tid)[-1]["kind"], "steered")
+
+    def test_steer_codex_resumes_thread_with_message(self):
+        from orchestrator import executor
+        with mock.patch.object(executor, "steer_resume", return_value={}) as resume:
+            control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: False)
+        task, thread, prompt = resume.call_args.args
+        self.assertEqual(thread, "thread-example")
+        self.assertEqual(prompt, "Steering from planner (new evidence):\nCheck evidence\nThe original task contract is unchanged.")
+        self.assertEqual(task["_launch_epoch"], 2)
+
+    def test_steer_claude_resumes_session(self):
+        from orchestrator import spawn
+        registry.upsert(self.tid, provider="claude", account="A", model="model", tools=["Read", "Bash(rg *)"])
+        bus.update(self.tid, packet_meta={"session_id": "session-example"})
+        process = mock.Mock(pid=43211, returncode=0)
+        def communicate(timeout):
+            self.assertEqual(registry.get(self.tid)["status"], "running")
+            self.assertEqual(registry.events(self.tid)[-1]["kind"], "steered")
+            return json.dumps({"result": "done", "usage": {}}), ""
+        process.communicate.side_effect = communicate
+        with mock.patch.object(spawn.subprocess, "Popen", return_value=process) as popen, \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"):
+            control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: False)
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--resume") + 1], "session-example")
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Read,Bash(rg *)")
+        self.assertEqual(registry.get(self.tid)["epoch"], 2)
+        self.assertEqual(bus.get(self.tid)["status"], "done")
+
+    def test_steer_refuses_without_session_or_thread(self):
+        for provider, error in (("codex", "thread"), ("claude", "session")):
+            registry.upsert(self.tid, provider=provider, thread=None)
+            with mock.patch.object(control, "_terminate") as terminate, self.assertRaisesRegex(ValueError, error):
+                control.steer(self.tid, "Check evidence", reason="new evidence")
+            terminate.assert_not_called()
+            self.assertEqual(registry.get(self.tid)["status"], "running")
+            self.assertFalse(self.path.exists())
+
+    def test_steer_codex_uses_steer_resume_not_reply(self):
+        from orchestrator import executor
+        bus.update(self.tid, rounds=3)
+        process = mock.Mock(pid=43211, returncode=0)
+        process.communicate.return_value = ('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}', '')
+        with mock.patch.object(executor, "reply") as reply, \
+                mock.patch.object(executor, "resume_plan") as plan, \
+                mock.patch.object(executor.subprocess, "Popen", return_value=process) as popen:
+            control.steer(self.tid, "Check evidence", reason="new evidence", alive=lambda pid: False)
+        reply.assert_not_called()
+        plan.assert_not_called()
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[:4], ["codex", "exec", "resume", "thread-example"])
+        self.assertIn("Steering from planner (new evidence):\nCheck evidence\nThe original task contract is unchanged.", argv)
+        self.assertNotIn("-C", argv)
+        self.assertEqual(str(popen.call_args.kwargs["cwd"]), str(self.repo))
+        self.assertEqual(bus.get(self.tid)["rounds"], 3)
+
+    def test_release_if_current_and_stale_thread_bus_writes_skipped(self):
+        from orchestrator import daemon
+        pool = mock.Mock()
+        def interrupted(*args, **kwargs):
+            registry.event(self.tid, "steer", epoch=2, status="running")
+            bus.update(self.tid, pipeline={"steer_epoch": 2})
+            return {"status": "failed", "reason": "interrupted"}
+        with mock.patch.object(daemon.executor, "start", side_effect=interrupted), \
+                mock.patch.object(daemon.jev_route, "shadow_context", return_value=None), \
+                mock.patch.object(bus, "post_result") as post:
+            daemon._dispatch_worker(self.tid, "prompt")
+        post.assert_not_called()
+        self.assertEqual(bus.get(self.tid)["status"], "running")
+        self.assertFalse(control.release_if_current(self.tid, 1, pool))
+        pool.release.assert_not_called()
+        self.assertTrue(control.release_if_current(self.tid, 2, pool))
+        pool.release.assert_called_once_with(self.tid, {})
+
+
+    def test_codex_cleanup_and_result_publication_use_launch_epoch(self):
+        from orchestrator import executor
+        bus.update(self.tid, assigned_to="codex", executor="astra")
+        task = bus.get(self.tid)
+        process = mock.Mock(pid=43211, returncode=0)
+        def communicate(timeout):
+            registry.event(self.tid, "steer", epoch=2, status="running")
+            bus.update(self.tid, pipeline={"steer_epoch": 2})
+            return '{"type":"thread.started","thread_id":"old-thread"}', ''
+        process.communicate.side_effect = communicate
+        with mock.patch.object(executor.subprocess, "Popen", return_value=process):
+            result = executor._run(executor.Pool(), task, ["prompt"], self.repo, 10)
+        self.assertEqual(result["status"], "superseded")
+        self.assertEqual(registry.get(self.tid)["epoch"], 2)
+        self.assertEqual(registry.get(self.tid)["status"], "running")
+        with mock.patch.object(bus, "post_result") as post:
+            posted, reason = executor.post_tool_result(self.tid,
+                {"status": "done", "message": "commit " + self.sha, "epoch": 1})
+        self.assertFalse(posted)
+        self.assertIn("superseded", reason)
+        post.assert_not_called()

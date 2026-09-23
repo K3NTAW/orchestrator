@@ -3602,6 +3602,18 @@ class DispatchWorker(unittest.TestCase):
         self.start = p.start()
         self.addCleanup(p.stop)
 
+    def test_dispatch_worker_skips_exception_writes_after_steer(self):
+        def interrupted(*args, **kwargs):
+            self.state["pipeline"] = {"steer_epoch": 2}
+            raise RuntimeError("interrupted")
+        self.start.side_effect = interrupted
+        with mock.patch.object(daemon.worker_control, "launch_epoch", return_value=1), \
+                mock.patch.object(bus, "post_result") as post:
+            daemon._dispatch_worker(self.task_id, "prompt")
+        post.assert_not_called()
+        self.assertEqual(self.state["status"], "running")
+        self.assertEqual(self.state["pipeline"], {"steer_epoch": 2})
+
     def test_dispatch_worker_posts_codex_done(self):
         usage = {"input_tokens": 100, "output_tokens": 20}
         self.start.return_value = {"status": "done", "message": "x" * 6000,

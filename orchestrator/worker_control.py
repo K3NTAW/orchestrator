@@ -8,7 +8,12 @@ import time
 
 from . import bus, evidence, pool, worker_registry
 from .gitutil import _git_in, _resolve_base
-from .jev import redact
+
+
+def redact(text):
+    # Worker launch modules are also imported while Jev initializes.
+    from .jev import redact as redact_text
+    return redact_text(text)
 
 
 def _tail(path):
@@ -154,6 +159,19 @@ def cancel(task_id, reason, *, source="planner", grace_s=20, sleep=time.sleep,
             raise ValueError("refusing unsafe worker pid")
         worker_registry.event(task_id, "cancel_requested", status="cancelling",
                               cancel_reason=reason, source=source)
+    _terminate(pid, grace_s=grace_s, sleep=sleep, alive=alive, signal_fn=signal_fn)
+    partial = partial_result(task)
+    result = _bounded_result(partial, reason, source)
+    with bus.locked():
+        bus.update(task_id, status="held", hold_reason="cancelled", pid=None, result=result)
+        pool.Pool().release(task_id, {})
+        worker_registry.finish(task_id, "cancelled")
+    preserve_partial(bus.get(task_id))
+    return partial
+
+
+def _terminate(pid, *, grace_s, sleep, alive, signal_fn):
+    """Interrupt a process and escalate after the bounded grace period."""
     if pid and alive(pid):
         try:
             signal_fn(pid, signal.SIGTERM)
@@ -170,11 +188,94 @@ def cancel(task_id, reason, *, source="planner", grace_s=20, sleep=time.sleep,
                     signal_fn(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-    partial = partial_result(task)
-    result = _bounded_result(partial, reason, source)
+
+
+def launch_epoch(task_id):
+    epoch = (worker_registry.get(task_id) or {}).get("epoch", 1)
+    return epoch if type(epoch) is int else 1
+
+
+def is_current(task_id, epoch):
+    """Call under the bus lock when a mutation follows this check."""
+    try:
+        task = bus.get(task_id)
+    except KeyError:
+        return epoch == launch_epoch(task_id)
+    return epoch >= (task.get("pipeline") or {}).get("steer_epoch", 1)
+
+
+def release_if_current(task_id, epoch, pool, usage=None):
     with bus.locked():
-        bus.update(task_id, status="held", hold_reason="cancelled", pid=None, result=result)
-        pool.Pool().release(task_id, {})
-        worker_registry.finish(task_id, "cancelled")
-    preserve_partial(bus.get(task_id))
-    return partial
+        if epoch == launch_epoch(task_id):
+            pool.release(task_id, usage or {})
+            return True
+    return False
+
+
+def write_if_current(task_id, epoch, method, *args, **fields):
+    with bus.locked():
+        if is_current(task_id, epoch):
+            return method(*args, **fields)
+
+
+def steer(task_id, message, *, reason, source="planner", grace_s=20,
+          sleep=time.sleep, alive=None, signal_fn=os.kill):
+    """Record steering separately from the immutable contract, interrupt, and resume."""
+    from . import executor, spawn
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError("steering message must be nonempty text")
+    if not isinstance(reason, str):
+        raise ValueError("steering reason must be text")
+    message, reason = redact(message), redact(reason)
+    if isinstance(source, str):
+        source = redact(source)
+    worker_registry._validate({"cancel_reason": reason, "source": source})
+    if source is None or not isinstance(grace_s, (int, float)) or not math.isfinite(grace_s) or grace_s < 0:
+        raise ValueError("invalid steering source or grace")
+    with bus.locked():
+        task = bus.get(task_id)
+        worker = worker_registry.get(task_id)
+        if not worker or worker["status"] not in ("running", "waiting"):
+            raise ValueError("worker is not running")
+        provider = worker.get("provider")
+        thread = worker.get("thread") or task.get("codex_thread")
+        session = (task.get("packet_meta") or {}).get("session_id")
+        if provider == "codex" and not thread:
+            raise ValueError("cannot steer: no recorded Codex thread")
+        if provider == "claude" and not session:
+            raise ValueError("cannot steer: no recorded Claude session")
+        if provider not in ("codex", "claude"):
+            raise ValueError("cannot steer: unsupported provider")
+        if provider == "claude" and (worker.get("tools") is None or not worker.get("account")):
+            raise ValueError("cannot steer: no recorded Claude tools or account")
+        pid = worker.get("pid")
+        if pid is not None and (pid <= 1 or pid == os.getpid()):
+            raise ValueError("refusing unsafe worker pid")
+        path = worker_registry._path(task_id).with_suffix(".steering.jsonl")
+        row = {"ts": time.time(), "task": task_id, "reason": reason, "message": message, "source": source}
+        with path.open("a") as stream:
+            stream.write(json.dumps(row) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        epoch = worker.get("epoch", 1) + 1
+        worker_registry.event(task_id, "steer", status="steering", epoch=epoch,
+                              message_chars=len(message), source=source)
+        meta = dict(task.get("packet_meta") or {})
+        meta["steering_count"] = meta.get("steering_count", 0) + 1
+        pipeline = dict(task.get("pipeline") or {})
+        pipeline["steer_epoch"] = epoch
+        # bus.update appends its own event, including these payload-free counters.
+        task = bus.update(task_id, packet_meta=meta, pipeline=pipeline)
+    _terminate(pid, grace_s=grace_s, sleep=sleep, alive=alive or _alive, signal_fn=signal_fn)
+    prompt = f"Steering from {source} ({reason}):\n{message}\nThe original task contract is unchanged."
+    task = {**task, "_launch_epoch": epoch, "_steering": True,
+            "worktree": task.get("worktree") or worker.get("worktree")}
+    if provider == "codex":
+        result = executor.steer_resume(task, thread, prompt)
+    else:
+        result = spawn.resume_worker(task, prompt, session)
+    with bus.locked():
+        current = worker_registry.get(task_id)
+        if current["epoch"] == epoch and current["status"] not in worker_registry.TERMINAL:
+            worker_registry.event(task_id, "steered", status="running")
+    return {"status": "steered", "task": task_id, "epoch": epoch, "delivery": result}
