@@ -185,7 +185,26 @@ class Pool:
         """[[executors]] rows -> {id: Executor}. No table (old config) -> one row synthesized from [codex]."""
         out = {}
         for r in executor_rows(self.cfg):
-            ex = Executor(**{k: v for k, v in r.items() if k in EXEC_FIELDS})
+            row = {k: v for k, v in r.items() if k in EXEC_FIELDS}
+            if row.get("provider") == "claude":
+                eid = row.setdefault("id", "")
+                tier = eid.split(":", 1)[1] if isinstance(eid, str) and eid.startswith("claude:") else None
+                model = self.cfg.get("models", {}).get(tier)
+                reason = None
+                if tier is None:
+                    reason = "id must be claude:<tier>"
+                elif tier not in ("haiku", "sonnet", "opus"):
+                    reason = f"unknown tier {tier}"
+                elif not isinstance(model, str):
+                    reason = f"models[{tier}] must be a string"
+                elif "model" in row and row["model"] != model:
+                    reason = f"model must match models[{tier}]"
+                row.setdefault("model", model if isinstance(model, str) else "")
+                row.setdefault("roles", [])
+                if reason:
+                    row.update(enabled=False, hold_reason=f"invalid claude row: {reason}")
+                    print(f"{eid}: {row['hold_reason']}", file=sys.stderr)
+            ex = Executor(**row)
             out[ex.id] = ex
         return out
 
@@ -205,7 +224,8 @@ class Pool:
                                                 "oauth_token_env", *PLANNER_ACCOUNT_FIELDS}})
             self.codex.__dict__.update(st.get("codex", {}))
             for eid, ex in self.executors.items():
-                ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in EXEC_STATE_FIELDS})
+                state_fields = EXEC_STATE_FIELDS - {"hold_reason"} if ex.hold_reason.startswith("invalid claude row:") else EXEC_STATE_FIELDS
+                ex.__dict__.update({k: v for k, v in st.get("executors", {}).get(eid, {}).items() if k in state_fields})
         for ex in self.executors.values():
             ex.running = sum(1 for task in bus.read(status="running", role="execute")
                              if task.get("executor", task.get("tier")) == ex.id)
