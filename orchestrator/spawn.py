@@ -681,9 +681,6 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
 
 def packet(task, worktree, *, cfg=None, skills=None) -> str:
     """Build a bounded executor briefing with a verifiable provenance header."""
-    cfg = Pool().cfg if cfg is None else cfg
-    if skills is None:
-        skills = _prepare_skills(task, task.get("role", "execute"), cfg)
     body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
@@ -733,9 +730,6 @@ def _acceptance_test_ids(acceptance):
 def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
-    cfg = Pool().cfg if cfg is None else cfg
-    if skills is None:
-        skills = _prepare_skills(task, task.get("role", "review"), cfg)
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
     raw_diff = scoped_diff(src)

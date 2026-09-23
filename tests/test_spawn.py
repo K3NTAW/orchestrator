@@ -1349,9 +1349,12 @@ class ContextTelemetry(unittest.TestCase):
                 mock.patch.object(spawn.decision_log, "record"):
             for mode in ("off", "shadow", "active"):
                 cfg = {"skills": {"mode": mode}, "context_router": {"mode": "off"}}
-                execute = spawn.packet(task, TMP, cfg=cfg)
+                skills = spawn._prepare_skills(task, "execute", cfg)
+                execute = spawn.packet(task, TMP, cfg=cfg, skills=skills)
                 for role in ("review", "security_review"):
-                    review = spawn.review_packet({**task, "role": role}, task, cfg=cfg)
+                    review_task = {**task, "role": role}
+                    skills = spawn._prepare_skills(review_task, role, cfg)
+                    review = spawn.review_packet(review_task, task, cfg=cfg, skills=skills)
                     with self.subTest(mode=mode, role=role):
                         self.assertEqual("specialist: " in review.splitlines()[0], mode == "active")
                         if mode == "active":
@@ -1361,6 +1364,44 @@ class ContextTelemetry(unittest.TestCase):
                 self.assertEqual("specialist: " in execute.splitlines()[0], mode == "active")
                 if mode == "active":
                     self.assertIn("specialist: execute+implement-spec", execute.splitlines()[0])
+
+    def test_packet_with_skills_none_runs_no_specialist_machinery(self):
+        from contextlib import ExitStack
+
+        task = {"id": "T-no-specialist", "title": "legacy dispatch", "spec": "s",
+                "acceptance": [], "scope": [], "role": "execute", "constraints": {}}
+        off = {"skills": {"mode": "off"}, "context_router": {"mode": "off"}}
+        active = {**off, "skills": {"mode": "active"}}
+        with ExitStack() as stack:
+            machinery = [stack.enter_context(mock.patch.object(owner, name,
+                         side_effect=AssertionError("unexpected specialist machinery: " + name)))
+                         for owner, name in ((spawn, "_prepare_skills"), (spawn.specialist, "compose"),
+                                             (spawn.skill_router, "select"), (spawn.skills_registry, "load"),
+                                             (spawn.tool_catalog, "minimal_set"), (P.Pool, "pick_executor"),
+                                             (spawn.bus, "get"))]
+            pool = stack.enter_context(mock.patch.object(spawn, "Pool"))
+            pool.return_value.cfg = active
+            stack.enter_context(mock.patch.object(spawn, "memory_recall",
+                                return_value={"hits": [], "layers_consulted": []}))
+            stack.enter_context(mock.patch.object(spawn, "scoped_diff", return_value="diff"))
+            stack.enter_context(mock.patch.object(spawn, "_base_sha", return_value="head"))
+            for constraints in ({}, {"fix_round_for": "T-original"}):
+                execute_task = {**task, "constraints": constraints}
+                baseline = spawn.packet(execute_task, TMP, cfg=off)
+                # Match daemon dispatch calls: cfg and skills are both omitted.
+                self.assertEqual(spawn.packet(execute_task, TMP), baseline)
+                self.assertEqual(spawn.packet(execute_task, TMP, cfg=active, skills=None), baseline)
+                self.assertNotIn("specialist:", baseline)
+                self.assertNotIn("## skills", baseline)
+            for role in ("review", "security_review"):
+                review_task = {**task, "role": role, "inputs": ["T-reviewed"]}
+                baseline = spawn.review_packet(review_task, task, cfg=off)
+                self.assertEqual(spawn.review_packet(review_task, task), baseline)
+                self.assertEqual(spawn.review_packet(review_task, task, cfg=active, skills=None), baseline)
+                self.assertNotIn("specialist:", baseline)
+                self.assertNotIn("## skills", baseline)
+            for operation in machinery:
+                operation.assert_not_called()
 
     def _active_choice(self):
         return {"selected": ["executor/implement-spec"], "mandatory": ["executor/implement-spec"],
