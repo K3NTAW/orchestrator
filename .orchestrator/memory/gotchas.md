@@ -456,3 +456,63 @@ type: gotcha · goal: T-0760 · tasks: T-0809,T-0827,T-0833,T-0837 · provenance
 - orchestrator/spawn.py:887 scoped_diff diffs goal/<parent>...HEAD; once merge() rebases the task branch onto the goal head the diff is empty, so T-0833 rejected round 2 of T-0809 as a no-op although 049cb87 held the fix
 - daemon accepted/merged T-0809 at 18:46 before the fix round's review T-0833 finished (accepted_at == T-0833 created_at), so the security review of the round-2 diff never had a diff
 outcome: remedy: supersede the fix round, file a review task whose spec names the explicit range (T-0837). backlog c4: daemon must not merge a root while a fix-round review is pending, and reviews should diff base_sha..HEAD not goal...HEAD
+
+## 2026-09-23 07:50 — executors keep writing filters against an imagined gate.jsonl row shape (T-0894 read "input", T-0938 matched lowercase tool names); the tests passed because they built fake rows in the same imagined shape
+- Symptom: the feature is dead in production while its unit test is green: skills_used always empty (T-0894), redundancy overlap always None (T-0938). Both caught by the security review, not by the gate.
+- Rule for specs that read .orchestrator/runs/jev/gate.jsonl: name the real fields (session, task, tool with the raw Claude tool name such as Read/Grep/Glob/Bash, tool_target, input_hash) and require the test to build rows through jev_gate's own logging helper or a copied real row. Same rule for any other log consumed by a scorecard: the test must use the writer's shape, never a hand-written dict.
+
+## 2026-09-23 09:35 — a goal auto-closed as soon as its only child posted done, before the gate ran; daemon.stale() then skipped the child forever (T-0985 / T-0986)
+- Symptom: execute task done, never gated (no gate_attempts), daemon alive and idle; the parent goal shows status done with an event at the child's completion time and no reason.
+- Cause (corrected 09:55): the daemon DISPATCHED the goal task itself. A GOAL task is role execute, parentless and queued, which daemon.stale() treats as a work item; Codex ran it for 324 s and posted done, closing the goal; gate() then skipped the real child. planner_runs' closable rule was not involved (it already requires merged_into). T-0760/T-0861 escaped only because they were set to running by hand.
+- Remedy: bus.update(goal, status="running") right after creating any goal task, until the daemon fix lands. Fix task filed 09:58: the dispatcher, gate and merge stages skip tasks whose constraints.goal is true; goals close only through the closable decision (every execute child merged).
+
+## 2026-09-23 bus.sqlite index rows for deleted task files crash bus.read (KeyError in bus.get) on every daemon tick and in orchestrator status; the daemon stays alive but dispatches nothing
+type: gotcha · goal: T-0012 · tasks: T-0013 · provenance: repo
+- docs-kentawaibel 2026-09-23 13:45: rows T-0014..T-0017 stayed in .orchestrator/bus.sqlite after the task files were removed in the 10:38 cleanup; T-0013 sat queued for an hour with pipeline null. Fix: delete the dangling rows (sqlite3 delete from tasks where id in ...). Polish candidate: bus.read skips or prunes ids whose file is missing.
+outcome: revert path: none needed; the index is derived state
+
+## 2026-09-23 Other repos' .orchestrator/prompts drift: docs-kentawaibel had templates with the pre-packet placeholders (complexity, spec, acceptance, scope, code) and no prompts/modules directory, so every spec review died with render_error
+type: gotcha · goal: T-0012 · tasks: T-0014 · provenance: repo
+- 2026-09-23 13:30 fixed by copying the orchestrator repo's prompts/*.md and prompts/modules/ into the docs repo (backup prompts.bak-<stamp>), with a repo-specific python-unittest module (vitest, tsc, eslint). Polish candidate: install.py syncs templates and modules into managed repos, or spawn falls back to the orchestrator repo's templates.
+outcome: revert path: restore prompts.bak-<stamp> in the docs repo
+
+## 2026-09-23 Folding spec-review findings into acceptance test ids without adding their files to scope makes the gate red with 'test not defined' (T-1048, T-1058): the executor cannot write outside scope
+type: gotcha · goal: T-0991 · tasks: T-1048,T-1058 · provenance: repo
+- 2026-09-23 15:00: round-2 folds added tests in tests/test_executor.py, tests/test_daemon.py and tests/test_cli.py while the scope lists were unchanged; the daemon skipped the auto fix round (auto_fix_skipped) so hand fix rounds with widened scope were filed. Rule: every acceptance test id's file must be in scope; check with a one-liner before filing.
+outcome: revert path: none; fix rounds T-1065/T-1066 supersede nothing
+
+## 2026-09-23 tests-green.sh reads stdin (hook input) first: run it by hand with stdin closed (subprocess.DEVNULL or < /dev/null) or it blocks forever on cat
+type: gotcha · goal: T-0991 · tasks: T-0996 · provenance: repo
+- 2026-09-23 15:30: a hand gate-then-merge runner sat 28 min on cat before the suite started.
+outcome: revert path: none
+
+## 2026-09-23 Resume-mode fix rounds cannot resolve rebase conflicts: Codex resumed on the root thread reported success three times while the worktree reflog showed only aborted rebases (T-1066, T-1123, T-1135; caught by review T-1136)
+type: gotcha · goal: T-0991 · tasks: T-1058 · provenance: repo
+- 2026-09-23 20:00: the resume packet carries only failures plus acceptance lines, and a rebase inside codex exec resume does not complete. Fix: land through a fresh task in its own worktree that cherry-picks the reviewed commits onto the goal head. Polish candidate: the daemon dispatches merge-conflict fix rounds fresh, never resume.
+outcome: revert path: none
+
+## 2026-09-23 Dispatch dies with KeyError 'routed-findings' (spawn._shadow_route active mode) when a task's merged dependency carries a result; the task is marked failed with dispatch error
+type: gotcha · goal: T-0991 · tasks: T-1270 · provenance: repo
+- Seen real 21:20 on main code. Workaround: re-file without depends_on when the dependency is already merged. Bugfix task filed on the goal branch; takes effect for the daemon only after the PR merges to main.
+outcome: revert path: none
+
+## 2026-09-23 Evidence pool growth: previous_result rows are re-added on every result change (10,676 rows for T-0991); with the context router in shadow the legacy evidence section is unbounded and a review packet reached 2.3 MB (argv too long)
+type: gotcha · goal: T-0991 · tasks: T-1279 · provenance: repo
+- Real 21:55. Workaround: pool pruned to the latest row per live task (backup in the session scratchpad), context_router back to active. Bugfix filed on the goal branch: key previous_result rows by location, drop superseded, cap the legacy section.
+outcome: revert path: restore the scratchpad backup of evidence/T-0991.jsonl
+
+## 2026-09-23 Evidence feedback loop under active skills: specialist.shared_evidence lists the goal pool into each packet and spawn re-adds every line as a previous_result row with a fresh index; the pool and packets grow on every build
+type: gotcha · goal: T-0991 · provenance: repo
+- Real 22:15: T-1274 alone added 3,034 rows in a few dispatches. Workaround: [skills].mode shadow until the fix reaches main, pool pruned to one row per task. Bugfix task on the goal branch.
+outcome: revert path: [skills] mode = active
+
+## 2026-09-23 Acceptance test ids must be tests/x.py::test_name; tests/x.py::Class::test is read as a function named after the class and the gate holds gate_red "test not defined"
+type: gotcha · goal: T-1334 · provenance: repo
+- acceptance._TEST_ID (acceptance.py:8) matches path::name and a following ::short only when not preceded by a word char, so Class::test yields (path, Class); missing_tests then greps for def Class( and fails.
+- T-1347 was green locally (tests-green OK 1504 at 3925705) but held; the daemon's auto fix round chased tests that already existed. Fix: respec with path::test_name ids and cherry-pick the green commit (T-1352).
+outcome: write acceptance as tests/test_<module>.py::test_name (write-spec already says so); describe behaviour in the spec, not after the id
+
+## 2026-09-23 A fix round resumes the parent's Codex thread with the parent's write_scope; widening scope in the fix-round spec does not reach Codex
+type: gotcha · goal: T-1334 · provenance: repo
+- T-1370 needed tests/_harness.py; fix rounds T-1371 and T-1372 (scope + explicit "extension granted" text) both came back with Codex asking for the scope and no change.
+outcome: when a fix needs files outside the parent scope, respec as a fresh task (cherry-pick the parent commit) instead of a fix round

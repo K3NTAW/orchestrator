@@ -1,4 +1,4 @@
-repo map 0f550d7 2026-09-22
+repo map 91e264c 2026-09-23
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
@@ -16,15 +16,23 @@ repo map 0f550d7 2026-09-22
 
 ## bus_mcp.py — MCP server `bus`: the only way workers report back.
 
+## cache_telemetry.py — Prompt-cache economics derived from canonical run rows.
+
 ## capacity.py — Read-only executor capacity snapshots and deterministic task admission.
 
 ## cli.py — orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] |…
 
 ## concurrency.py — Pure adaptive-concurrency selection for scheduler-ready tasks.
 
+## context_eval.py — Deterministic fixture evaluation for context-economy shadow features.
+
 ## context_router.py — Pure, deterministic routing of canonical evidence into context levels.
 
+## context_scanner.py — Deterministic, heuristic inspection of untrusted context; no I/O or model calls.
+
 ## context_scorecard.py — Context-economy reporting from run-log packet telemetry.
+
+## contracts.py — Worker contracts from .orchestrator/prompts/{scout,review,spec-review,challenge}…
 
 ## critical_path.py — Deterministic critical-path priority for ready execute tasks.
 
@@ -35,6 +43,8 @@ repo map 0f550d7 2026-09-22
 ## decision_log.py — Structured, bounded evidence for orchestrator decisions.
 
 ## duration.py — Empirical execution-duration estimates for scheduler task ranking.
+
+## env_policy.py — Allowlisted worker environments with names-only, best-effort telemetry.
 
 ## evidence.py — Canonical, content-addressed evidence for deterministic context selection.
 
@@ -49,6 +59,10 @@ repo map 0f550d7 2026-09-22
 ## handoff_scorecard.py — Read-only economics for executor and Planner handoffs.
 
 ## handover.py — Auto-handover: refreshes a resumable snapshot at the end of plan.md so a fresh P…
+
+## harness_depth.py — Deterministic harness depth and dispatch-local shadow evidence.
+
+## hermes_eval.py — Deterministic Hermes integration checks, isolated from production state.
 
 ## install.py — Scaffold the §9 orchestrator layout into another repo, so `ORCH_ROOT=<target>` a…
 
@@ -70,24 +84,10 @@ repo map 0f550d7 2026-09-22
 
 ## jev_sched.py — Bounded Jev shadow signals for ambiguous scheduler interference pairs.
 
+## jev_skills.py — Bounded Jev classification for only the ambiguous skill-routing bucket.
+
 ## mcp.py — MCP server `orchestrator`: scheduler for the Planner.
 
-## merge.py — Serial merge queue: one at a time, rebase onto target -> tests-green -> fast-for…
+## memory_eval.py — Deterministic P34 checks for HOT, WARM and COLD memory behavior.
 
-## merge_pressure.py — Measure merge-queue pressure and selectively defer interfering work.
-
-## notify.py — Notifications with persistent transition deduplication.
-
-## planner_packet.py — Pure, compact packets for Planner decisions and Opus-to-Fable escalation.
-
-## planner_router.py — Pure Planner tier policy; callers resolve aliases and gather all state.
-
-## planner_runs.py — Autonomous Planner decisions: launch a short-lived headless Planner to act on on…
-
-## planner_scorecard.py — Read-side Planner routing evidence; no routing decisions or ledger writes.
-
-## planner_shadow.py — Isolated shadow Planner launches and bounded, prompt-free evaluation rows.
-
-## planner_taxonomy.py — Purpose-first taxonomy for Planner decisions.
-
-## planner_telemetry.py — Per-invocation Planner telemetry 
+## memory_hot.py — Build the bounded, generated HOT memory vi

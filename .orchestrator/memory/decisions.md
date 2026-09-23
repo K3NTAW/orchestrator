@@ -434,3 +434,159 @@ outcome: watch the kgpt harness scorecards (GET /harness/scorecard, /harness/too
 type: decision · goal: T-0760 · tasks: T-0847,T-0858,T-0859 · provenance: repo
 - A fix round with depends_on on a never-executed held task never dispatches (bus.ready needs merged); the respec T-0858 binds all five T-0851 risks; T-0847 failed as superseded; constraints.respec_for=T-0847 set on T-0858
 outcome: watch T-0859 spec review once an account has headroom; revert path: git revert the plan commit "T-0847 spec-review hold resolved by the existing v2 respec T-0858", bus.update T-0858 constraints without respec_for
+
+## 2026-09-23 00:20 — GitGuardian incident on PR 19: false positive from redaction test fixtures
+type: decision · goal: T-0760 · provenance: repo, gitguardian check
+- Finding: "1 secret uncovered" over the 12 commits of PR 19 (head 6ca204e8). Scan of every pushed diff for credential shapes found only two fixtures: tests/test_evidence.py (API_TOKEN assignment with a made-up value) and tests/test_jev_boundary.py (made-up value joined into an API_KEY assignment). No real credential; the real tokens live in the f token store and the Keychain, never in files.
+- Action: hygiene task filed (fixtures built at runtime, .gitguardian.yaml for the helper only, doc note); the human marks the dashboard incident as false positive.
+outcome: rule: redaction tests must build credential-shaped strings at runtime from parts; never commit a literal NAME=value with a secret-looking value, even a fake one.
+
+## 2026-09-23 06:45 — PR 21 opened: Jev context program checkpoint 4, the four active paths
+type: decision · goal: T-0760 · tasks: T-0855,T-0903,T-0918,T-0928,T-0858,T-0900,T-0860,T-0868,T-0875 · provenance: repo
+- goal/T-0760 → main, 9 commits: context router active (+ redaction fix caught by review T-0901), tool disclosure active (+ persisted respawn cap from review T-0924), handoff-aware routing active (+ calendar-day cap and per-group active share), read suppression active (+ signature-keyed override), scanner hygiene. Every mode stays shadow in pool.toml; each active branch refuses without evidence.
+- Process note: three hand-run sonnet reviews of the 11-file tool-disclosure diff exhausted their turns without posting; the daemon's own retry with the standard packet posted the valid verdict. Keep hand-run reviews to the standard packet and budget.
+outcome: revert path: git revert the PR 21 merge commit, or leave the modes at shadow.
+
+## 2026-09-23 17:10 — Skill Intelligence program complete in shadow; PR opened (goal/T-0861 → main)
+type: decision · goal: T-0861 · tasks: T-0863,T-0867,T-0884,T-0894,T-0913,T-0938,T-0939,T-0954,T-0964,T-0971,T-0980 (+fix rounds T-0886,T-0906,T-0926,T-0946,T-0948/T-0956,T-0970,T-0982) · provenance: repo
+- Delivered (P0–P38, shadow-first): registry with lifecycle and content-hash versions; telemetry; compaction to P6 (Level 2 down 49.8%); deterministic routing with mandatory sets and an ambiguous bucket; scorecard with marginal value and redundancy; active routing (packet-presented Level 2, --disable-slash-commands, recovery reads, refusal without evidence); temporary specialists with conflict resolution; external discovery/quarantine/static inspection; learned skill drafts into quarantine; Jev routing for the ambiguous bucket with a declared boundary and cache; version-scoped promotion/demotion, dependency freshness with a 24 h debounce, the P36 suite (all seven groups pass).
+- Process: every stage spec-reviewed (two rounds each, remaining points folded in and Planner-approved); security reviews caught two imagined log-row filters, a packet path running machinery with no specialist requested, a dependency-hash trust-boundary gap, and a missing top-level role field. Ids cascaded five times because depends_on is immutable. Account B's quota cooldowns held reviews four times; hand re-spawns fixed each.
+- Left open: tool-disclosure hand-over for specialists (shadow-only until goal/T-0861 is rebased onto main with PR 21); the human adds "Skill" to the jev-gate PreToolUse matcher in .claude/settings.json.
+outcome: revert path: git revert the PR merge commit, or [skills] mode/jev_mode = off in pool.toml.
+
+## 2026-09-23 09:20 — PR 21 and PR 22 merged on the user's word; Skill matcher added to the jev-gate hook
+type: decision · goal: T-0760, T-0861 · provenance: repo
+- PR 21 (5646e4b): the context program's four active paths. PR 22 (860c1cf): the skills program stages 1-10 plus the merge of main into the skills branch (T-0984, 1261 tests, both eval suites green; goal/T-0861 fast-forwarded by hand because a daemon rebase would have linearized the merge commit) and the settings change.
+- .claude/settings.json: "Skill" added to the jev-gate PreToolUse matcher (user request); backup .claude/settings.json.bak-20260923-082103; the commit rode PR 22 to origin.
+- Root main replayed onto origin/main; daemon restarted on the merged code. Every context and skills feature stays shadow except [instructions] (active since 2026-09-22 22:20).
+outcome: revert paths: git revert 5646e4b -m 1 and 860c1cf -m 1; remove |Skill from the matcher; modes to off in pool.toml.
+
+## 2026-09-23 09:50 — specialists' tool-disclosure hand-over merged on goal/T-0985; PR 23 opened
+type: decision · goal: T-0985 · tasks: T-0986 · provenance: repo
+- Rule: only when [skills] mode and [tool_disclosure] mode are both active (and skill routing was not refused) does the specialist's tool set become the Claude worker allowlist; otherwise unchanged; tool_allowlist_source recorded per spawn. Gate green, security review approved. Both modes stay shadow.
+- Process: the goal auto-closed the moment its single child posted done, so daemon.stale() skipped the gate for 40 minutes; reopening the goal fixed it (gotcha 09:35; backlog c3: goal auto-close must require merged_into on every child).
+outcome: revert path: git revert the PR 23 merge commit, or either mode back to shadow.
+
+## 2026-09-23 10:40 — daemon goal-container fix merged on goal/T-0988 (T-0989 d0611d7); PR pending GitHub availability
+type: decision · goal: T-0988 · tasks: T-0989 · provenance: repo
+- Goal containers (constraints.goal true) are excluded from dispatch, gate, merge, auto fix rounds and reconciliation; executor.start and worker result paths refuse them; goals close only via the closable decision with every execute child merged. Five tests; gate green; security review approved.
+- Live reproduction during filing: the daemon dispatched T-0988 itself to Codex terra within 16 s of creation; the run was stopped by SIGTERM and the goal restored. Until the PR merges and the daemon restarts on it, set every new goal task to running immediately after creation.
+outcome: revert path: git revert the PR merge commit.
+
+## 2026-09-23 11:00 — PR 23 (tool hand-over) and PR 24 (goal-container fix) merged on the user's word
+type: decision · goal: T-0985, T-0988 · provenance: repo
+- main: 46c1cc0 (PR 23), 1acfc3b (PR 24). Root main replayed onto origin/main; daemon restarted on the fixed code, so goal containers are no longer dispatchable and the "set the goal running right after creation" workaround is retired.
+outcome: revert paths: git revert 46c1cc0 -m 1 / 1acfc3b -m 1.
+
+## 2026-09-23 11:20 — user: "make them all active": every shadow mode in pool.toml flipped to active
+type: decision · goal: T-0760, T-0861 · provenance: repo
+- Flipped (13 keys): planner.routing mode + jev_mode, jev.read_suppression, jev.routing mode, allocation, strategy, context_router, tool_disclosure, handoff, scheduler mode + jev_mode, skills mode + jev_mode. instructions was already active; speculation stays off (never shadow). Backup: scratchpad pool.toml.bak-active; each line carries the dated comment.
+- Fresh passing runs of context-eval (7/7) and skill-eval (7/7) persisted so the router's and promotion's refusal rules see recent evidence. Self-refusing until evidence accumulates: skill routing active (needs 30 shadow rows per role in 7 days), read suppression (needs 50 would_suppress rows and a low false-suppression rate), handoff routing (needs min_samples per executor and class; keeps the baseline otherwise). Daemon restarted.
+outcome: revert path: set the flipped keys back to "shadow" (scratchpad backup restores the whole file); watch `orchestrator scorecard --economy` and `--skills` for regressions; promotion reports demotion recommendations.
+
+## 2026-09-23 Hermes-inspired program opened as GOAL T-0991: brief verbatim in roadmap-hermes.md, P0 audit matrix and interface contracts in plan.md, goal branch goal/T-0991 cut from origin/main (commit 6b7a412 on main, e9cb682 on the goal branch)
+type: decision · goal: T-0991 · tasks: T-1004,T-0993,T-0994,T-1005,T-0996,T-1002 · provenance: repo
+- Adopt: WARM/COLD SQLite FTS5 store with reversible migration, cache telemetry from existing usage rows, worker registry, deterministic context scanner with trust classes, allowlisted worker env, overhead metric, harness depth. Adapt: bounded HOT view, stable prefix reorder, cache-aware disclosure, steering as interrupt plus resume. Skip: messaging, cron, approval modes, containers, SSRF, pairing (P36).
+- Context goal T-0760 closed done and its stale fix round T-0777 superseded at 12:20; both were leftovers after PRs 19-21 merged. Spec reviews T-0998 and T-1001 (request_changes: list-valued source_tasks and goal labels, ignored index db, evidence dataclass defaults, single scanner in skill inspection) folded into re-filed T-1004 and T-1005.
+outcome: revert path: git revert 6b7a412 on main and e9cb682 on goal/T-0991; mark T-0991 and its children superseded on the bus
+
+## 2026-09-23 Account A daily_budget_tokens raised 30M to 200M (user 2026-09-23 16:20) so A carries reviews while B is provider rate-limited
+type: decision · goal: T-0991 · provenance: repo
+- Daily budget was the stated blocker; the 5-hour window cap (window_cap_tokens 10M, A at 1.51 mostly Planner tokens) still excludes A until the window resets at 16:31 local, after which pick prefers A (utilization 0) over B. B answered 429 on five spawns since 13:41 (30-min cooldown each).
+outcome: revert path: set daily_budget_tokens back to 30_000_000 (backup scratchpad/pool.toml.bak-budget)
+
+## 2026-09-23 window_cap_tokens raised 10M to 40M (user 2026-09-23 16:35) so account A takes reviews immediately instead of after the 16:31 window reset
+type: decision · goal: T-0991 · provenance: repo
+- A sat at 1.51 window utilization (15M, mostly Planner-session tokens) under the 10M cap; with 40M it reads 0.39 and pick() admits it. B still answers 429 and is preferred by least-utilization once its cooldown ends, so one wasted attempt per 30 min remains possible.
+outcome: revert path: window_cap_tokens = 10_000_000 (backup scratchpad/pool.toml.bak-budget holds the pre-16:20 file)
+
+## 2026-09-23 2026-09-23 T-1038 S2a1 memory_hot spec-review hold resolved by the v2 respec T-1078, not a fix round
+type: decision · goal: T-0991 · tasks: T-1038,T-1064,T-1078,T-1039 · provenance: repo
+- .orchestrator/tasks/T-1038.json — held spec_review request_changes with worktree null; a fix round with depends_on=[T-1038] can never dispatch (bus.ready needs merged), so the Planner filed T-1078 (respec_for=T-1038, depends_on=[T-1036]) and superseded T-1038
+- orchestrator/memory_store.py:14,279,206 — T-1078 binds all six T-1064 suggestions: open-status allowlist {queued,held,running} instead of a closed denylist (bus.STATUSES lacks merged/superseded); explicit all_records accessor (search() defaults limit=20, LIMIT 0 returns nothing); reference kind weight 1; ANY-open over source_tasks (list); never-compact classes are kind+outcome/tag heuristics, not literal tags; set_tiers helper updates only the tier column
+- .orchestrator/tasks/T-1039.json — depends_on re-pointed in place T-1038 -> T-1078 under bus.locked() with an event, instead of re-creating the downstream tasks (T-1039, T-1040, T-1042, T-1062, T-1063 keep their ids)
+outcome: T-1078 queued behind T-1036 (done); daemon runs spec review then execute. Revert path: git revert b0f8ba5; bus: set T-1078 superseded, T-1038 status held, T-1039 depends_on back to [T-1038]
+
+## 2026-09-23 [planner].autonomous set to false while the interactive Planner session runs without an MCP host (2026-09-23 17:25)
+type: decision · goal: T-0991 · tasks: T-1078,T-1079 · provenance: repo
+- planner_runs._session_attached reads planner_session.json written by the MCP host; this session has no orchestrator MCP server, so the daemon believed no Planner was attached and launched headless decisions (12:42, 13:46, 13:47 UTC rows); the 13:46 launch on account A re-filed S2a1 as v2 T-1078 in parallel to the interactive re-file T-1071, and a second spec review was spent on it. Polish candidate: the launcher writes planner_session.json for the interactive CLI session too.
+outcome: revert path: autonomous = true in pool.toml
+
+## 2026-09-23 2026-09-23 T-1018 S2i spec-review hold resolved by respec T-1093; T-1065 review hold was a B rate limit, cleared back to done
+type: decision · goal: T-0991 · tasks: T-1018,T-1070,T-1093,T-1075,T-1065,T-1080 · provenance: repo
+- .orchestrator/tasks/T-1018.json — held spec_review request_changes with worktree null; fix round cannot dispatch (bus.ready needs merged_into), so T-1093 filed (respec_for T-1018, depends_on [T-0996]) and T-1018 superseded; T-1075 depends_on re-pointed in place under bus.locked()
+- orchestrator/daemon.py:533 and orchestrator/spawn.py:1217 — T-1093 binds all four T-1070 risks: no constraints.architectural (never persisted), would_skip limited to jev_route.shadow_context in _dispatch_worker and _prepare_skills in spawn.run_worker (strategy lookup and scout suggestions are not on the dispatch path), history threshold first_pass_defined_count >= 5, history computed once per tick
+- .orchestrator/tasks/T-1065.json — hold reviews failed: T-1080 came from rate_limit on B while the sweeper re-queued T-1080; daemon.clear_stage(review_held_at, status=done) instead of a fix round, since merge_reviewed() only walks status done
+outcome: T-1093 queued behind T-0996 (merged); daemon runs spec review then execute. T-1065 done awaiting T-1080. Revert path: git revert the plan commit; bus: set T-1093 superseded, T-1018 status held, T-1075 depends_on back to [T-1018]; T-1065 status held hold_reason reviews failed: T-1080
+
+## 2026-09-23 Env policy (T-1114) merged into goal/T-0991 by hand through landing T-1183 after review T-1212 objected only to the empty landing commit
+type: decision · goal: T-0991 · tasks: T-1114,T-1168,T-1183,T-1176,T-1212 · provenance: repo
+- The landing branch carried exactly the reviewed content (dc48246 original + 54a04c0 fix round, approved by security review T-1176 on the same diff), rebased onto goal head a9ef808 with the gate green at b1910bd; goal/T-0991 verified to lack env_policy.py before the merge, so the reviewer's claim that the content was already on the goal branch was a branch mix-up.
+outcome: revert path: git revert the merge commit of T-1183 on goal/T-0991
+
+## 2026-09-23 Account B no longer takes review or spec_review roles while it answers 429 on every review spawn (pool.toml role_affinity, real 20:10)
+type: decision · goal: T-0991 · provenance: repo
+- Least-utilization picking chose B (0.0) before A (0.3) for every review; each attempt hit the provider rate limit and cost a 30-minute cooldown, so reviews stalled between attempts. A carries all reviews now (daily budget 200M, window cap 40M).
+outcome: revert path: restore review and spec_review in B's role_affinity
+
+## 2026-09-23 [context_router].mode back to shadow (real 21:45) until the routed-findings trim bug is fixed on main
+type: decision · goal: T-0991 · tasks: T-1274,T-1279 · provenance: repo
+- Active mode appends a routed-findings section that the packet trim loop does not know (spawn._trim_routed_item pops by_name[name]); any packet over the 4800-char cap with routed items dies at dispatch with KeyError. Bugfix T-1279 on the goal branch; the daemon runs main, so shadow is the only safe setting until the PR merges.
+outcome: revert path: set [context_router].mode back to active once the fix is on main
+
+## 2026-09-23 window_cap_tokens 40M to 80M (2026-09-24 00:15): account A alone carries reviews and hit the 0.65 headroom ceiling
+type: decision · goal: T-0991 · provenance: repo
+- Reviews (T-1306 and the pending fix-round reviews) sat queued with no account with headroom: A at 0.66 of the 40M window with reserve 0.35, B without review affinity while provider rate-limited.
+outcome: revert path: window_cap_tokens = 40_000_000
+
+## 2026-09-23 PR 25 opened: Hermes-inspired program stages 1 and 2 (goal/T-0991 to main, 45 commits, 89 files, ~10k lines)
+type: decision · goal: T-0991 · provenance: repo
+- Twenty-two program tasks plus two bugfixes merged into goal/T-0991 through spec review, gate and security review; stage 3 (stale severity, promotion/evals, docs index) continues on the branch and lands in the same PR or a follow-up.
+outcome: revert path: close PR 25 unmerged; or git revert the merge commit on main
+
+## 2026-09-23 PR 25 merged into main (a721601, human approval 2026-09-24): Hermes program stages 1 and 2 live on main
+type: decision · goal: T-0991 · provenance: repo
+- Daemon restarted on the merged code; [skills].mode restored to active because the evidence feedback-loop fix (T-1286) and the trim fix (T-1280) are on main; B's review affinity and the 80M window cap stay until B stops answering 429 on review spawns.
+outcome: revert path: git revert -m 1 a721601 on main
+
+## 2026-09-23 Promotion gate for the cache features lives in context_router.effective_cache_mode (called once per packet build), not in the pure config accessor
+type: decision · goal: T-0991 · tasks: T-1325 · provenance: repo
+- The automatic fix round put promotion.evaluate inside cache_mode(); that gated every spawn with state I/O and a notify and broke the S2d1/S2d2 tests that expect the raw value. Decision: accessor stays pure; the gate is applied at the spawn entry points and recorded on decision rows as configured versus effective mode with the refusal reason.
+outcome: revert path: git revert the fix-round commits of T-1325
+
+## 2026-09-23 Retrospective, GOAL T-0991 complete: Hermes-inspired memory, cache, worker control and security hardening (P0-P36), 26 execute tasks merged into goal/T-0991 over 2026-09-23/24; PR 25 (stages 1-2) merged, stage 3 PR opened
+type: decision · goal: T-0991 · provenance: repo
+- Delivered shadow-first: memory_store (FTS5 warm/cold, reversible migration), memory_hot with packet wiring and memory scorecard/eval; cache_telemetry, stable prefixes, cache-aware context router and tool/skill catalogs, handoff economics; worker_registry, worker_control cancel and steer, steering_policy (cancel shadow-only), contracts with recovery; context_scanner and trust classes, skill hardening, env_policy; overhead metric, harness_depth and fast path; evidence reuse; memory to skills and strategy; promotion features with the hermes-eval suite and scorecard --hermes; docs/hermes-hardening 00-19.
+- Process lessons: most specs needed two review rounds folded into re-files, then Planner approval; overlapping scopes on cli.py, spawn.py and daemon.py produced rebase holds and conflicts, resolved by hand rebase+gate+merge or fresh landing tasks (resume-mode conflict rounds never rebase). Two main-branch bugs found and fixed (routed-findings trim KeyError, evidence feedback loop). Account B answered 429 on every review spawn; reviews moved to A (daily budget 200M, window cap 80M, B review affinity off); headless Planner launches turned off after duplicate re-files.
+- Follow-ups: revert B's review affinity and the window cap when B stops rate-limiting; run orchestrator hermes-eval and scorecard --hermes on main after the stage 3 PR merges; shadow features promote only on evidence.
+outcome: revert path: git revert -m 1 the merge commits on main (PR 25 and the stage 3 PR)
+
+## 2026-09-23 PR 26 merged into main (737c7a5, human approval 2026-09-24): Hermes program stage 3 live; hermes-eval 21/21 pass on main; daemon restarted (pid 75847)
+type: decision · goal: T-0991 · provenance: repo
+- scorecard --hermes on main: accepted-goal success 0.89, first-pass 0.69, fix-round rate 0.31, cache hit ratio 0.94, orchestration amplification 1.56 (cost share 0.11, latency share 0.11), hot memory 3000 tokens; steering, retrieval precision and compaction still unknown (no shadow rows yet).
+outcome: revert path: git revert -m 1 737c7a5 on main
+
+## 2026-09-23 docs PR 5 merged (docs-kentawaibel main 1ef7297, human approval 2026-09-24): /orchestrator page live with the Hermes program
+type: decision · goal: T-0019 · provenance: repo
+- Cross-repo record; the docs repo's own decisions.md carries the retrospective. Vercel deploys main.
+outcome: revert path: git revert -m 1 1ef7297 in the docs repo
+
+## 2026-09-23 opus tier moved to Opus 5.5 (pool.toml [models].opus claude-opus-5 -> claude-opus-5-5, user request)
+type: decision · goal: config · provenance: repo
+- Covers the headless Planner default tier (planner.routing active), `orchestrator pick planner --model`, the fallback executor at complexity 6-8, and cross-tier review of sonnet-executed tasks. Escalation tier [models].planner stays claude-fable-5-1; Codex executor rows unchanged.
+- Executor rows are codex-only in code (executor.py rejects other providers), so Opus 5.5 executes only as the Codex fallback until a claude provider row exists. Planner routing evidence keyed by model id starts cold for claude-opus-5-5.
+outcome: revert path: set [models].opus back to "claude-opus-5" in .orchestrator/pool.toml
+
+## 2026-09-23 GOAL T-1334 provider-agnostic executor pool: Claude models as routed [[executors]] rows (id claude:<tier>); Opus 5.5 first
+type: decision · goal: T-1334 · provenance: repo
+- Merged into goal/T-1334 (goal gate tests-green OK 1510 at ba27dd4): T-1352 S1 (pool.executor_rows/executor_identity, claude rows need account headroom, codex_available Codex-only, review tier compares model ids with fail-closed lookup), T-1360 S2a (claude rows validated at load, id claude:<tier>, routed through _exhausted(tier=...) so account pick, reservation handoff, review_rule and running_claude_workers counting are the fallback path's), T-1367 S3 README "Adding or removing models", T-1370 S4 claude:opus row + [models].opus = claude-opus-5-5.
+- Design pivot: rows keyed claude:<tier> reuse the executor value the fallback path already wrote; the first design (row id opus55, tier = row id, own dispatch) drew five spec-review rounds on reservation keying, tier leaks and capacity.
+- Parked S2b (scheduler-level Claude accounting) after four spec reviews with no high findings in the last three; bounded meanwhile by S1 eligibility and the row's max_parallel 2. Follow-ups in plan.md.
+- Cost of process: 13 superseded tasks, mostly spec-precision rounds and one acceptance-id format error (gotchas.md 2026-09-23).
+outcome: revert path: git revert -m 1 <goal PR merge sha> on main; or set the claude:opus row enabled = false for routing only
+
+## 2026-09-23 pool.toml reconciled: origin/main sections restored under today's live overrides (user approved)
+type: decision · goal: config · provenance: repo
+- Local commit 147cbb2 ("Planner state after PR 25 ... pool config") had committed an older live pool.toml, dropping 65 lines PR 25/26 added: [cache], memory HOT/packet settings, cache_mode keys, legacy_evidence_chars, [secrets].env_mode/env_passthrough, [harness], [contracts], [steering]. The daemon ran those features on code defaults.
+- Rebuilt from 737c7a5's pool.toml with every live value applied on top (18 overrides: window cap, budgets, B affinity, planner autonomous off, active modes, [models].opus = claude-opus-5-5); no live key dropped; restored sections stay shadow as shipped.
+outcome: revert path: restore .orchestrator/pool.toml.bak-20260923-reconcile (the pre-reconcile live file) or git revert this commit

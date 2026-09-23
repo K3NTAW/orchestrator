@@ -13,3 +13,10 @@ type: model · goal: T-0043 · provenance: repo
 - sonnet executed the test split (4), depends_on (3), spec_review (4), two fix rounds (2, 4) and docs (2): all green first try, 2-4 min each
 - opus executed the daemon (7): green first try; the security review then found two highs (blocking dispatch, stamp-before-effect) — design-level issues a spec review would likely have caught, which is the feature this goal adds
 outcome: Keep: sonnet ≤5, opus 6-8. With spec review live, expect fewer design-level fix rounds; measure via scorecard review_request_changes
+
+## 2026-09-23 Spec review on sonnet keeps finding new medium edge cases in capacity/scheduler specs; converge by changing the design, not by patching
+type: model · goal: T-1334 · provenance: repo
+- S1 needed five rounds (three were Planner spec-precision errors: wrong import, wrong function, test-id format); S2 capacity four rounds with no high findings in the last three. Findings were real each time, but new ones appeared every round.
+- One spec review (T-1355) returned output that did not parse and was marked failed without retry; the reviewed task sat queued silently.
+- Codex (astra) executed every accepted spec green first try.
+outcome: grep exact symbols before writing a spec; when a spec draws a second round of new medium findings, look for a design that reuses a tested path; park scheduler precision as its own goal
