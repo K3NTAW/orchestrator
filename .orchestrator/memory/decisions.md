@@ -570,3 +570,23 @@ outcome: revert path: git revert -m 1 737c7a5 on main
 type: decision · goal: T-0019 · provenance: repo
 - Cross-repo record; the docs repo's own decisions.md carries the retrospective. Vercel deploys main.
 outcome: revert path: git revert -m 1 1ef7297 in the docs repo
+
+## 2026-09-23 opus tier moved to Opus 5.5 (pool.toml [models].opus claude-opus-5 -> claude-opus-5-5, user request)
+type: decision · goal: config · provenance: repo
+- Covers the headless Planner default tier (planner.routing active), `orchestrator pick planner --model`, the fallback executor at complexity 6-8, and cross-tier review of sonnet-executed tasks. Escalation tier [models].planner stays claude-fable-5-1; Codex executor rows unchanged.
+- Executor rows are codex-only in code (executor.py rejects other providers), so Opus 5.5 executes only as the Codex fallback until a claude provider row exists. Planner routing evidence keyed by model id starts cold for claude-opus-5-5.
+outcome: revert path: set [models].opus back to "claude-opus-5" in .orchestrator/pool.toml
+
+## 2026-09-23 GOAL T-1334 provider-agnostic executor pool: Claude models as routed [[executors]] rows (id claude:<tier>); Opus 5.5 first
+type: decision · goal: T-1334 · provenance: repo
+- Merged into goal/T-1334 (goal gate tests-green OK 1510 at ba27dd4): T-1352 S1 (pool.executor_rows/executor_identity, claude rows need account headroom, codex_available Codex-only, review tier compares model ids with fail-closed lookup), T-1360 S2a (claude rows validated at load, id claude:<tier>, routed through _exhausted(tier=...) so account pick, reservation handoff, review_rule and running_claude_workers counting are the fallback path's), T-1367 S3 README "Adding or removing models", T-1370 S4 claude:opus row + [models].opus = claude-opus-5-5.
+- Design pivot: rows keyed claude:<tier> reuse the executor value the fallback path already wrote; the first design (row id opus55, tier = row id, own dispatch) drew five spec-review rounds on reservation keying, tier leaks and capacity.
+- Parked S2b (scheduler-level Claude accounting) after four spec reviews with no high findings in the last three; bounded meanwhile by S1 eligibility and the row's max_parallel 2. Follow-ups in plan.md.
+- Cost of process: 13 superseded tasks, mostly spec-precision rounds and one acceptance-id format error (gotchas.md 2026-09-23).
+outcome: revert path: git revert -m 1 <goal PR merge sha> on main; or set the claude:opus row enabled = false for routing only
+
+## 2026-09-23 pool.toml reconciled: origin/main sections restored under today's live overrides (user approved)
+type: decision · goal: config · provenance: repo
+- Local commit 147cbb2 ("Planner state after PR 25 ... pool config") had committed an older live pool.toml, dropping 65 lines PR 25/26 added: [cache], memory HOT/packet settings, cache_mode keys, legacy_evidence_chars, [secrets].env_mode/env_passthrough, [harness], [contracts], [steering]. The daemon ran those features on code defaults.
+- Rebuilt from 737c7a5's pool.toml with every live value applied on top (18 overrides: window cap, budgets, B affinity, planner autonomous off, active modes, [models].opus = claude-opus-5-5); no live key dropped; restored sections stay shadow as shipped.
+outcome: revert path: restore .orchestrator/pool.toml.bak-20260923-reconcile (the pre-reconcile live file) or git revert this commit

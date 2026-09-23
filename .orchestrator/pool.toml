@@ -2,6 +2,14 @@
 # window_cap_tokens is a calibration knob: set from observed 5h-window resets (§13).
 window_cap_tokens = 80_000_000  # 2026-09-24 00:15 raised from 40M: account A alone carries reviews and its window (Planner tokens included) hit the 0.65 headroom ceiling, stalling every review; revert path: 40_000_000 (then 10_000_000)
 
+[cache]
+# 2026-09-23: provider cache prices expressed as input-token equivalents for telemetry.
+claude_read_ratio = 0.1
+claude_write_ratio = 1.25
+codex_read_ratio = 0.25
+codex_write_ratio = 1.0
+output_ratio = 5.0
+
 [[claude_accounts]]
 id = "A"
 config_dir = "~/.claude-a"
@@ -231,7 +239,7 @@ success_floor = 0.6
 min_samples = 3
 haiku   = "claude-haiku-4-5-20251001"
 sonnet  = "claude-sonnet-5"
-opus    = "claude-opus-5"
+opus    = "claude-opus-5-5"  # 2026-09-23 user: Opus 5.5 for the opus tier (Planner default, fallback executor 6-8, cross-tier review); revert: "claude-opus-5"
 planner = "claude-fable-5-1"
 
 [limits]
@@ -253,11 +261,20 @@ spec_review_code_chars = 8000
 recall_hits = 30
 
 [memory]
+# 2026-09-23: compare tiered packet memory in shadow; revert by setting mode back to off.
+mode = "shadow"
+# 2026-09-23: shared HOT/WARM packet allowance, estimated as chars/4.
+packet_hot_tokens = 1200
 # Progressive recall stops after enough useful hits or the character cap; packets only use the two cheapest layers.
 budget_hits = 8
 min_score = 0.5
 budget_chars = 6000
 packet_layers = ["notes", "bus"]
+
+# HOT view settings added 2026-09-23; tokens use the deterministic chars/4 estimate.
+hot_budget_tokens = 3000
+hot_never_compact = ["gotcha:open", "architecture", "decision:constraint", "decision:security"]
+hot_recent_days = 14
 
 # Jev (TypeSafe AI): typed questions about a state answered with calibrated probabilities instead of text
 # (orchestrator/jev.py). Off by default -- flip enabled = true only once daily_budget_tokens has been sized
@@ -338,8 +355,14 @@ min_retry_cost_usd = 1.0
 [context_router]
 # P23, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
 mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; back to active real 22:00 after a 15-minute shadow: the legacy evidence section is unbounded (a 2.3 MB review packet, argv too long); the routed-findings trim KeyError (T-1280) is worked around by pruning the evidence pool instead. revert: set back to "shadow"
+# 2026-09-23: record cache-adjusted disclosure decisions; revert: set cache_mode = "off".
+cache_mode = "shadow"
+# 2026-09-23: cap legacy/shared evidence while oversized legacy pools age out.
+legacy_evidence_chars = 6000
 
 [tool_disclosure]
+# 2026-09-23: measure stable disclosure in shadow; revert: cache_mode = "off".
+cache_mode = "shadow"
 # P24, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
 mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 
@@ -361,6 +384,11 @@ max_active_share = 0.5
 # wrapper below. On a headless host with no Keychain, use the form ENV_NAME = "env:OTHER_NAME" instead, which
 # reads OTHER_NAME straight from this process's environment (e.g. set by systemd/CI, not by a shell command).
 # Never store values here.
+[secrets]
+# P22, 2026-09-23: shadow measures names only; off disables, active filters worker environments.
+env_mode = "shadow"
+env_passthrough = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR", "XDG_*", "CLAUDE_*", "ORCH_*", "UV_*", "VIRTUAL_ENV", "PYTHONPATH", "NODE_*", "GIT_*", "SSH_AUTH_SOCK"]
+
 [secrets.scout]
 GH_READ_TOKEN = "source ~/.config/f/f.sh && f tok get gh-read --reveal"
 # Headless equivalent: GH_READ_TOKEN = "env:GH_READ_TOKEN"
@@ -409,6 +437,8 @@ max_wave = 0 # 0 uses all available dispatch capacity
 stale_rebase = false
 
 [skills]
+# 2026-09-23: measure stable disclosure in shadow; revert: cache_mode = "off".
+cache_mode = "shadow"
 # 2026-09-23: shadow records minimal routing without changing exposure; revert: off.
 mode = "active"  # 2026-09-24 01:40: back to active after PR 25 merged the evidence feedback-loop fix (T-1286) and the trim fix (T-1280); revert: set back to "shadow"
 jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
@@ -423,3 +453,21 @@ cache_max_entries = 500
 trusted_repos = []
 # Exact hostnames accepted by static endpoint inspection.
 allowed_domains = []
+
+[harness]
+# 2026-09-23: observe depth before promotion permits worker-visible skips.
+depth_mode = "shadow" # off | shadow | active
+
+[contracts]
+# 2026-09-23: collect prompt-derived contract evidence before promotion.
+mode = "shadow"
+repair_budget_usd = 0.5
+
+[steering]
+# 2026-09-23: observe noncritical medium stale work without interrupting it.
+noncritical_medium_continue = true
+# 2026-09-23: collect P14 evidence before enabling worker steering (off|shadow|active).
+mode = "shadow"
+stuck_after_s = 900
+out_of_scope_events = 3
+min_interval_s = 1800
