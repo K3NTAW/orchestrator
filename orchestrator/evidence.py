@@ -3,14 +3,14 @@
 Evidence content is raw in memory.  :class:`EvidencePool` always applies
 ``jev.redact`` before persistence so secrets are never written to its JSONL file.
 """
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 import hashlib
 import json
 import re
 import time
 from pathlib import Path
 
-from . import STATE, jev
+from . import STATE, jev, context_scanner
 
 
 SOURCE_TYPES = (
@@ -35,6 +35,12 @@ class Evidence:
     provenance: str
     observed_at: float
     trust: str
+    trust_class: str = ""
+    scan: dict | None = None
+
+
+def _trust_class(provenance):
+    return {"repo": "TRUSTED_REPO", "memory": "LOCAL_USER"}.get(provenance, "EXTERNAL")
 
 
 def _scope(task):
@@ -83,11 +89,16 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
     relevance_task = task
     if relevance_task is None and scope:
         relevance_task = {"scope": list(scope)}
+    result = context_scanner.scan(content, source_kind="evidence")
+    trust_class = "UNTRUSTED" if result["verdict"] == "blocked" else _trust_class(provenance)
+    scan_summary = dict(verdict=result["verdict"],
+                        patterns=sorted({f["pattern"] for f in result["findings"]}))
     provisional = Evidence(
         evidence_id, source_type, str(location), str(commit), content_hash,
         content, short, long, {}, provenance,
         time.time() if observed_at is None else float(observed_at),
         "trusted" if provenance in ("repo", "memory") else "untrusted",
+        trust_class, scan_summary,
     )
     relevance = relevance_for(provisional, relevance_task)
     if section is not None:
@@ -115,6 +126,10 @@ class EvidencePool:
             for line in self.path.read_text().splitlines():
                 if line.strip():
                     row = json.loads(line)
+                    row.setdefault("trust_class", _trust_class(row.get("provenance")))
+                    row.setdefault("scan", None)
+                    row = {key: value for key, value in row.items()
+                           if key in {field.name for field in fields(Evidence)}}
                     self._items[row["id"]] = Evidence(**row)
 
     def add(self, ev):

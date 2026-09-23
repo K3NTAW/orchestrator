@@ -12,7 +12,7 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlparse
 
-from . import STATE
+from . import STATE, context_scanner
 from . import skills_registry as registry
 
 MAX_FILES = 50
@@ -271,7 +271,6 @@ CHECKS = (
     ("credentials", "block", r"\b[A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*\b|keychain|1password|\.env\b"),
     ("mcp", "warn", r"mcp__\w+|\bmcp\b|\bserver(?:s|_name)?\s*[:=]"),
     ("destructive", "block", r"\brm\s+-[\w]*r[\w]*f|\brm\s+-[\w]*f[\w]*r|git\s+push\s+.*--force|git\s+reset\s+--hard|\bDROP\b|\btruncate\b"),
-    ("hidden-instructions", "block", r"ignore previous|you are now|system prompt|<!--|[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]|[A-Za-z0-9+/]{80,}={0,2}"),
 )
 
 
@@ -293,10 +292,17 @@ def inspect(skill_id, root=STATE):
     def add(check, severity, name, line, excerpt):
         findings.append(dict(id=f"{check}-{len(findings)+1:04d}", severity=severity, check=check,
                              line=f"{name}:{line}", excerpt=excerpt[:200]))
-    for name, data in sorted(files.items()):
+    scans = {}
+    for name, data in sorted(files.items(), key=lambda item: (item[0] != "SKILL.md", item[0])):
         if name.startswith("scripts/") or name in record.get("executable_files", []) or data.startswith(b"#!"):
             add("script", "warn", name, 1, "script file (never executed)")
-        for number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if "\0" in text:
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
             for check, severity, pattern in CHECKS:
                 flags = 0 if check == "credentials" else re.I
                 if re.search(pattern, line, flags):
@@ -304,8 +310,20 @@ def inspect(skill_id, root=STATE):
             for url in re.findall(r"https?://[^\s<>\"')]+", line):
                 if urlparse(url).hostname not in allowed:
                     add("external-endpoint", "warn", name, number, url)
+        result = context_scanner.scan(text, source_kind="skill")
+        scans[name] = result
+        if result["verdict"] != "safe":
+            severity = {"blocked": "block", "suspicious": "warn"}[result["verdict"]]
+            for finding in result["findings"]:
+                family = {"exfiltration": "network", "credential_read": "credentials"}.get(finding["pattern"])
+                if any(f["check"] == family and f["line"] == f"{name}:{finding['line']}" for f in findings):
+                    continue
+                add(finding["pattern"], severity, name, finding["line"], finding["excerpt"])
+    overall = max((result["verdict"] for result in scans.values()),
+                  key={"safe": 0, "suspicious": 1, "blocked": 2}.get, default="safe")
     severity = max((f["severity"] for f in findings), key={"info": 0, "warn": 1, "block": 2}.get, default="info")
-    report = dict(inspected_at=registry._now(), content_hash=record["content_hash"], findings=findings, max_severity=severity)
+    report = dict(inspected_at=registry._now(), content_hash=record["content_hash"], findings=findings, max_severity=severity,
+                  scan=scans, scan_overall=overall)
     registry._write_json(directory / "findings.json", report)
     return report
 

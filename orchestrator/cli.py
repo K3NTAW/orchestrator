@@ -125,6 +125,11 @@ def main():
     workers.add_argument("--task")
     workers.add_argument("--all", action="store_true")
     workers.add_argument("--json", action="store_true")
+    from . import context_scanner
+    scanner = sub.add_parser("scan")
+    scanner.add_argument("path")
+    scanner.add_argument("--kind", choices=context_scanner.SOURCE_KINDS, default="other")
+    scanner.add_argument("--json", action="store_true")
     st = sub.add_parser("status"); st.add_argument("--plain", action="store_true")
     c = sub.add_parser("cost"); c.add_argument("--by", default="role", choices=["role", "tier", "account", "task"])
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
@@ -214,6 +219,19 @@ def main():
         if command == "quarantine":
             skaction.add_argument("--reason", default="external skill quarantine")
     a = ap.parse_args()
+    if a.cmd == "scan":
+        from pathlib import Path
+        try:
+            result = context_scanner.scan(Path(a.path).read_text(encoding="utf-8"), source_kind=a.kind)
+        except (OSError, UnicodeError) as error:
+            ap.error(str(error))
+        if a.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print(f"{result['verdict']} (score={result['score']})")
+            for finding in result["findings"]:
+                print(f"{finding['line']}: {finding['pattern']}: {finding['excerpt']}")
+        return
     if a.cmd == "workers":
         if a.task:
             doc = worker_registry.get(a.task)
