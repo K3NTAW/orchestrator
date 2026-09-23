@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from orchestrator import jev, jev_rank
+from _fixtures import fake_secret
 from test_jev import ENABLED_CFG, FakeResp
 
 
@@ -93,18 +94,19 @@ class JevBoundaryTests(unittest.TestCase):
             self.assertFalse(jev.allowed_for_class('PUBLIC'))
 
     def test_rank_redacts_goal_text(self):
-        secret = 'abc123supersecret'
-        goal = 'Goal API_KEY=' + secret
-        items = [{'id': 'item', 'text': 'Entry API_KEY=' + secret}]
+        redaction_value = fake_secret("rank")
+        key_name = "API_" + "KEY"
+        goal = 'Goal ' + key_name + '=' + redaction_value
+        items = [{'id': 'item', 'text': 'Entry ' + key_name + '=' + redaction_value}]
         # Spy before central redaction to verify rank owns both redactions.
         with patch.object(jev, 'ask', wraps=jev.ask) as ask:
             jev_rank.rank(items, goal)
-        self.assertNotIn(secret, ask.call_args.args[0])
+        self.assertNotIn(redaction_value, ask.call_args.args[0])
         payload = self.payloads[0]
         self.assertIn('[REDACTED]', payload['state'])
         self.assertIn('[REDACTED]', payload['questions']['item']['criteria'])
-        self.assertNotIn(secret, json.dumps(payload))
-        self.assertIn(secret, items[0]['text'])
+        self.assertNotIn(redaction_value, json.dumps(payload))
+        self.assertIn(redaction_value, items[0]['text'])
 
     def test_legacy_and_unknown_sites_warn_once_per_call(self):
         for kwargs in ({}, {'site': 'unknown'}):

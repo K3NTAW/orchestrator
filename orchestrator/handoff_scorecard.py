@@ -122,6 +122,7 @@ def lineage_rows(root=STATE):
                         estimated = True
                 pairs.append((executors[position - 1], executor, _reason(task)))
         first = tasks.get(lineage_root, {})
+        handoff = (first.get("pipeline") or {}).get("handoff")
         accepted = bool(first.get("merged_into"))
         output.append({
             "lineage": lineage_root, "task_class": attribution.task_class(first),
@@ -133,17 +134,22 @@ def lineage_rows(root=STATE):
             "accepted_usd": sum(costs) if accepted else 0,
             "reconstruction_tokens": reconstruction, "estimated": estimated,
             "handoff_pairs": pairs,
+            "handoff": handoff if isinstance(handoff, dict) else None,
         })
     return output
 
 
 def by_start(root=STATE):
+    lineage = lineage_rows(root)
     grouped = defaultdict(list)
-    for row in lineage_rows(root):
+    for row in lineage:
         grouped[(row["first_executor"], row["task_class"])].append(row)
     result = {}
     for key, rows in grouped.items():
         n = len(rows)
+        stamped = [row for row in rows if row.get("handoff")]
+        active_share = (sum(bool(row["handoff"].get("switched")) for row in stamped) / len(stamped)
+                        if stamped else 0.0)
         result[key] = {
             "n": n,
             "first_pass_rate": sum(row["first_pass"] for row in rows) / n,
@@ -151,6 +157,7 @@ def by_start(root=STATE):
             "avg_accepted_tokens": sum(row["accepted_tokens"] for row in rows) / n,
             "avg_accepted_usd": sum(row["accepted_usd"] for row in rows) / n,
             "avg_reconstruction_tokens": sum(row["reconstruction_tokens"] for row in rows) / n,
+            "active_share": active_share,
         }
     return result
 

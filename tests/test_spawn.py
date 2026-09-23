@@ -1,3 +1,4 @@
+import _harness
 """spawn.run_worker's review-verdict propagation, prompt template rendering / result fitting, base-branch
 selection for stacked/challenge/review tasks (review T-0026, T-0030), and headless-host secret/token wiring
 (env-form secrets, CLAUDE_CODE_OAUTH_TOKEN injection)."""
@@ -531,6 +532,145 @@ class SpecReview(unittest.TestCase):
 
 
 class Render(unittest.TestCase):
+    def active_eval(self):
+        from datetime import datetime, timezone
+        path = spawn.STATE / "context_eval.json"
+        previous = path.read_bytes() if path.exists() else None
+        self.addCleanup(lambda: path.write_bytes(previous) if previous is not None else path.unlink(missing_ok=True))
+        path.write_text(json.dumps({"ran_at": datetime.now(timezone.utc).isoformat(), "suite_passed": True}))
+        return path
+
+    def test_execute_packet_active_replaces_routed_sections_only(self):
+        self.active_eval()
+        task = self.packet_fixture()
+        task.update(spec="Keep the contract", inputs=[{"summary": "widget prior result"},
+                                                      {"summary": "irrelevant historical fact"}])
+        hits = {"hits": [{"id": "mem:gotchas.md:1", "title": "widget useful gotcha"},
+                         {"id": "mem:gotchas.md:2", "title": "irrelevant dinosaur"}],
+                "layers_consulted": ["notes"]}
+        with mock.patch.object(spawn, "memory_recall", return_value=hits):
+            shadow = spawn.packet(task, TMP, cfg={"context_router": {"mode": "shadow"}})
+            active = spawn.packet(task, TMP, cfg={"context_router": {"mode": "active"}})
+        a, b = spawn.section_meta(active), spawn.section_meta(shadow)
+        for name in ("objective", "acceptance", "base", "write_scope", "constraints", "relevant_tests", "symbols", "verify"):
+            self.assertEqual(a[name], b[name], name)
+        for name in ("gotchas", "decisions", "evidence", "read_scope"):
+            self.assertNotEqual(a[name], b[name], name)
+        self.assertIn("task:T-P:gotcha:1", active)
+        self.assertIn("widget prior result", active)
+        self.assertNotIn("irrelevant", active)
+        self.assertNotIn("return json.dumps", active)
+        self.assertIn("routed=active", active.splitlines()[0])
+        self.assertLessEqual(len(active), 4800)
+
+    def test_review_packet_active_keeps_diff_and_security_section(self):
+        from dataclasses import replace
+        self.active_eval()
+        task = {**self.packet_fixture(), "spec": "security widget", "constraints": {"fix_round_for": "T-prior"},
+                "result": {"summary": "widget previous result"}}
+        comments = [{"text": "widget long finding details"}, {"text": "unrelated hidden finding"}]
+        original = spawn.context_router.route
+        def route(*args, **kwargs):
+            routed = original(*args, **kwargs)
+            return replace(routed, items=[replace(item, level="LONG")
+                if item.evidence_id == next(ev.id for ev in args[1] if ev.source_type == "review_finding")
+                else item for item in routed.items])
+        raw = "diff --git a/widget.py b/widget.py\n@@ -1 +1 @@\n-old\n+new\n"
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw), \
+             mock.patch.object(bus, "get", return_value={"role": "review", "result": {"comments": comments}}), \
+             mock.patch.object(spawn.context_router, "route", side_effect=route):
+            shadow = spawn.review_packet(task, task, cfg={"context_router": {"mode": "shadow"}})
+            active = spawn.review_packet(task, task, cfg={"context_router": {"mode": "active"}})
+        for name in ("diff", "security", "spec", "acceptance", "scope", "gate"):
+            self.assertEqual(spawn.section_meta(active)[name], spawn.section_meta(shadow)[name])
+        self.assertIn("## fix-round context\n\n## routed-findings", active)
+        findings = active.split("## routed-findings\n")[1]
+        self.assertIn("widget long finding details", findings)
+        self.assertIn("widget previous result", findings)
+        self.assertNotIn("unrelated hidden finding", active)
+        self.assertIn("routed=active", active.splitlines()[0])
+
+    def test_active_packet_never_contains_unredacted_evidence(self):
+        from dataclasses import replace
+        from orchestrator import jev
+        self.active_eval()
+        task = {**self.packet_fixture(), "id": "T-redaction", "parent": "G-redaction",
+                "constraints": {"fix_round_for": "T-prior"}}
+        secrets = ("sk-" + "a" * 24, "ghp_" + "b" * 36,
+                   "API_KEY=synthetic-private-value", "Bearer synthetic-private-token")
+        original_route = spawn.context_router.route
+        cfg = {"context_router": {"mode": "active"}}
+        for secret in secrets:
+            value = "widget " + secret
+            redacted = jev.redact(value)
+            self.assertNotEqual(value, redacted)
+            hits = {"hits": [{"id": "mem:gotchas.md:1", "title": value}],
+                    "layers_consulted": ["notes"]}
+            task["inputs"] = [{"summary": value}]
+            task["result"] = {"summary": value}
+            for level in ("SHORT", "LONG", "FULL"):
+                with self.subTest(secret_type=secret.split("-")[0], level=level):
+                    def route(*args, **kwargs):
+                        # Every field reaching routing must already be sanitized.
+                        for ev in args[1]:
+                            for field in (ev.content, ev.summary_short, ev.summary_long):
+                                self.assertNotIn(secret, field)
+                        routed = original_route(*args, **kwargs)
+                        return replace(routed, items=[replace(item, level=level) for item in routed.items])
+                    with mock.patch.object(spawn, "memory_recall", return_value=hits), \
+                         mock.patch.object(spawn, "_memory_entries", return_value=[(1, "G-redaction " + value, "")]), \
+                         mock.patch.object(spawn, "scoped_diff", return_value=""), \
+                         mock.patch.object(bus, "get", return_value={"role": "review", "result": {"comments": [{"text": value}]}}), \
+                         mock.patch.object(spawn.context_router, "route", side_effect=route):
+                        packets = (spawn.packet(task, TMP, cfg=cfg), spawn.review_packet(task, task, cfg=cfg))
+                        source = spawn.evidence.make("source_chunk", "support.py", value, commit="base",
+                            provenance="repo", task=task, section="read_scope")
+                        meta = spawn._shadow_route(task, [source], role="execute", head_sha="base", cfg=cfg)
+                    for packet in packets:
+                        self.assertIn("routed=active", packet.splitlines()[0])
+                        self.assertNotIn(secret, packet)
+                        self.assertIn(redacted, packet)
+                    source_text = meta["_routed_sections"]["read_scope"][0][1]
+                    self.assertNotIn(secret, source_text)
+                    self.assertIn(redacted, source_text)
+
+    def test_active_refused_without_passing_context_eval(self):
+        path = self.active_eval()
+        task = self.packet_fixture()
+        shadow = spawn.packet(task, TMP, cfg={"context_router": {"mode": "shadow"}})
+        for report in (None, {"suite_passed": False},
+                       {"suite_passed": True, "ran_at": "2000-01-01T00:00:00+00:00"}):
+            if report is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(json.dumps(report))
+            with mock.patch.object(spawn.notify, "notify") as notice:
+                active = spawn.packet(task, TMP, cfg={"context_router": {"mode": "active"}})
+            self.assertEqual(active, shadow)
+            self.assertTrue(any("active refused" in call.args[0] for call in notice.call_args_list))
+
+    def test_packet_run_meta_parses_routed_marker(self):
+        for mode in ("active", "shadow"):
+            text = f"packet vabcdef base deadbeef sources pool.toml@policy gotchas@notes memory@notes routed={mode}\n## objective\nwork"
+            meta = spawn.packet_run_meta(text)
+            self.assertEqual((meta["hash"], meta["base"], meta["policy_version"], meta["gotchas"]),
+                             ("abcdef", "deadbeef", "policy", "notes"))
+            self.assertTrue(meta["sources"].endswith("routed=" + mode))
+
+    def test_cap_trim_removes_whole_routed_items(self):
+        self.active_eval()
+        task = self.packet_fixture()
+        items = [("FULL", "full item\n```\n" + "body\n" * 40 + "```"),
+                 ("SHORT", "short item " * 400), ("LONG", "long item " * 400)]
+        meta = {"routed_mode": "active", "_routed_sections": {"evidence": items}}
+        with mock.patch.object(spawn, "_shadow_route", return_value=meta):
+            text = spawn.packet(task, TMP)
+        self.assertLessEqual(len(text), 4800)
+        self.assertIn("full item\n```", text)
+        self.assertNotIn("short item", text)
+        self.assertNotIn("long item", text)
+        self.assertEqual(text.count("```"), 2)
+
     def packet_fixture(self):
         scratch_repo(TMP)
         (TMP / "widget.py").write_text("import json\n\ndef build_widget():\n    return json.dumps({})\n")
@@ -707,7 +847,7 @@ class Render(unittest.TestCase):
         meta = spawn.packet_meta(self.packet_fixture(), TMP)
         self.assertEqual(text.splitlines()[0],
                          f"packet v{meta['hash']} base {meta['base']} sources "
-                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@notes,bus")
+                         f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@notes,bus routed=shadow")
 
     def test_packet_hash_changes_when_body_changes(self):
         task = self.packet_fixture()
@@ -1090,6 +1230,127 @@ class OauthTokenInjection(unittest.TestCase):
 
 
 class ContextTelemetry(unittest.TestCase):
+    def _active_review(self):
+        reviewed = bus.create_task("active target", "s", ["a"], ["x.py"], role="execute")
+        review = bus.create_task("active review", "s", ["a"], ["x.py"], role="review", inputs=[reviewed["id"]])
+        return review
+
+    def test_active_allowlist_is_minimal_set_with_mandatory(self):
+        review = self._active_review()
+        captured = []
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=lambda *a, **k: captured.append(a[5]) or
+                                  {"status": "done", "output": {"result": '{"verdict":"approve"}', "usage": {}}}):
+            spawn.run_worker(review["id"])
+        expected = spawn.tool_catalog.minimal_set(review, "review")
+        self.assertEqual(captured, [",".join(expected["keep"])])
+        self.assertTrue(set(expected["mandatory"]) <= set(expected["keep"]))
+
+    def test_hidden_tool_request_respawns_once_with_full_allowlist(self):
+        review = self._active_review()
+        calls = []
+        def run(*args):
+            calls.append(args)
+            if len(calls) == 1:
+                bus.post_result(review["id"], {"reason": spawn.NEEDS_TOOL_PREFIX + "Glob"}, "held")
+                return {"status": "done", "output": {"usage": {}, "total_cost_usd": .25}}
+            return {"status": "done", "output": {"result": '{"verdict":"approve"}', "usage": {}}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            spawn.run_worker(review["id"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][5], spawn.TOOLS["review"])
+        self.assertLess(calls[1][6], calls[0][6])
+
+    def test_tool_escalation_cap_persists_across_worker_invocations(self):
+        review = self._active_review()
+        reason = spawn.NEEDS_TOOL_PREFIX + "Glob"
+
+        def run(*args):
+            bus.post_result(review["id"], {"reason": reason}, "held")
+            return {"status": "held", "reason": reason,
+                    "output": {"usage": {}, "total_cost_usd": .25}}
+
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}) as reserve, \
+                mock.patch.object(P.Pool, "release") as release, \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run) as worker:
+            spawn.run_worker(review["id"])
+            self.assertEqual(worker.call_count, 2)
+            self.assertEqual(worker.call_args.args[5], spawn.TOOLS["review"])
+            self.assertTrue(bus.get(review["id"])["pipeline"]["tool_escalation_used"])
+
+            bus.update(review["id"], status="queued", result=None, assigned_to=None)
+            worker.reset_mock()
+            reserve.reset_mock()
+            release.reset_mock()
+            result = spawn.run_worker(review["id"])
+
+            worker.assert_called_once()
+            reserve.assert_called_once()
+            release.assert_called_once_with(review["id"], result)
+            expected = spawn.tool_catalog.minimal_set(review, "review")
+            self.assertEqual(worker.call_args.args[5], ",".join(expected["keep"]))
+            self.assertEqual(result["status"], "held")
+            self.assertEqual(bus.get(review["id"])["hold_reason"], reason)
+            self.assertTrue(bus.get(review["id"])["pipeline"]["tool_escalation_used"])
+
+    def test_respawn_skipped_when_budget_remainder_too_small(self):
+        review = self._active_review()
+        calls = []
+        def run(*args):
+            calls.append(args)
+            bus.post_result(review["id"], {"reason": spawn.NEEDS_TOOL_PREFIX + "Glob"}, "held")
+            return {"status": "done", "output": {"usage": {}, "total_cost_usd": args[6] * .95}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            spawn.run_worker(review["id"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("no budget for respawn", bus.get(review["id"])["hold_reason"])
+
+    def test_escalation_stamps_tool_escalation_used_and_sums_usage(self):
+        review = self._active_review()
+        calls = []
+        def run(*args):
+            calls.append(args)
+            if len(calls) == 1:
+                bus.post_result(review["id"], {"reason": spawn.NEEDS_TOOL_PREFIX + "Glob"}, "held")
+                return {"status": "done", "output": {"usage": {"input_tokens": 2}, "total_cost_usd": .2}}
+            return {"status": "done", "output": {"result": '{"verdict":"approve"}',
+                                                    "usage": {"input_tokens": 3}, "total_cost_usd": .3}}
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(P.Pool, "release") as release, \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn.promotion, "mode", return_value="active"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            spawn.run_worker(review["id"])
+        self.assertTrue(bus.get(review["id"])["pipeline"]["tool_escalation_used"])
+        released = release.call_args.args[1]
+        self.assertEqual(released["usage"]["input_tokens"], 5)
+        self.assertAlmostEqual(released["total_cost_usd"], .5)
+
     def test_worker_allowlist_unchanged_under_tool_disclosure_shadow(self):
         reviewed = bus.create_task("disclosure target", "s", ["a"], ["x.py"], role="execute")
         review = bus.create_task("disclosure review", "s", ["a"], ["x.py"], role="review",

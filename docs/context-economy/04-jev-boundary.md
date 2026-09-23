@@ -35,6 +35,11 @@ PUBLIC < INTERNAL < SENSITIVE < SECRET; unknown classes/ceilings fail closed.
 Refusal returns None before key lookup or transport, increments `refused_calls`,
 and emits a fixed warning. No current caller labels data SENSITIVE.
 
+## Fixtures
+
+Write redaction tests by composing credential-like names and fixture values at runtime.
+Shared fixture helpers contain clearly labelled synthetic values, never real secrets.
+
 ## Revert
 
 Set `[jev].enabled = false` to stop all Jev requests while retaining local fallbacks.
