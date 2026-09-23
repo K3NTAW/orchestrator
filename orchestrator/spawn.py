@@ -1202,7 +1202,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
             worker_registry.upsert(task["id"], status="starting", role=task["role"], provider="claude",
                                    model=model, account=acct.id, worktree=str(wt),
                                    branch=task.get("branch") or f"task/{task['id']}",
-                                   parent=task.get("parent"), started_at=t0, epoch=epoch, tools=tools.split(","))
+                                   parent=task.get("parent"), started_at=t0, epoch=epoch, tools=tools.split(",") if tools else [])
             p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             worker_registry.event(task["id"], "spawned", pid=p.pid, account=acct.id,
                                   model=model, worktree=str(wt), branch=task.get("branch") or f"task/{task['id']}")
