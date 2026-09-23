@@ -185,3 +185,26 @@ class MemoryRetrievalDocumentation(unittest.TestCase):
                                       hard_constraints={}, deterministic={}, reason="memory", mode="shadow",
                                       extra={"tokens_legacy": 10, "tokens_tiered": 5})
         self.assertEqual(row["extra"]["tokens_tiered"], 5)
+
+
+class SteeringDecisionLogTests(unittest.TestCase):
+    def test_steering_rows_omit_message_text(self):
+        message = "repeated_failure: synthetic check failure"
+        extra = {"trigger": "repeated_failure", "severity": "medium", "critical": False,
+                 "action": "steer", "evidence_hash": "synthetic", "message_chars": len(message)}
+        fields = dict(candidates=["continue", "steer", "cancel"], hard_constraints={},
+                      deterministic={}, selected="steer", reason=["repeated_failure"], mode="shadow")
+        with tempfile.TemporaryDirectory() as root:
+            row = decision_log.record("steering", "T-steering", extra=extra, root=root, **fields)
+            serialized = (Path(root) / "runs/sched/decisions.jsonl").read_text()
+            self.assertEqual(row["extra"]["message_chars"], len(message))
+            self.assertNotIn(message, serialized)
+            self.assertNotIn('"message":', serialized)
+            for key in decision_log.STEERING_KEYS:
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    decision_log.record("steering", "T-steering", root=root,
+                                        extra={k: v for k, v in extra.items() if k != key}, **fields)
+            with self.assertRaises(ValueError):
+                decision_log.record("steering", "T-steering", root=root,
+                                    extra={**extra, "nested": {"message": message}}, **fields)
+            self.assertEqual(decision_log.recent(root=root), [row])

@@ -252,3 +252,44 @@ class ContractPromotion(unittest.TestCase):
         self.assertEqual(result["repair_rate"], .5)
         self.assertEqual(result["repair_success_rate"], 1)
         self.assertIsNone(result["failed_results_delta"])
+
+
+class SteeringPromotionTests(unittest.TestCase):
+    def test_steering_policy_feature_registered(self):
+        spec = promotion.FEATURES["steering_policy"]
+        self.assertEqual((spec["table"], spec["key"], spec["default"]), ("steering", "mode", "shadow"))
+        self.assertEqual(spec["criteria"]["min_shadow_samples"], 20)
+        self.assertEqual(promotion.evaluate("steering_policy", {"n": 20, "shadow_n": 19})["recommendation"], "stay")
+        self.assertEqual(promotion.evaluate("steering_policy", {"n": 20, "shadow_n": 20})["recommendation"], "promote")
+        cfg = {"steering": {"mode": "active"}}
+        measured = {"n": 40, "shadow_n": 20, "fix_rounds_delta": -.5, "accepted_tokens_delta": 0}
+        self.assertEqual(promotion.evaluate("steering_policy", measured, cfg)["recommendation"], "promote")
+        for change in ({"fix_rounds_delta": 0}, {"accepted_tokens_delta": 1}, {"accepted_tokens_delta": None}):
+            self.assertEqual(promotion.evaluate("steering_policy", {**measured, **change}, cfg)["recommendation"], "stay")
+
+    def test_steering_collection_compares_lineages_and_candidates(self):
+        import json
+        from pathlib import Path
+        from unittest.mock import patch
+        from orchestrator import scorecard
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tasks").mkdir()
+            tasks = [{"id": "shadow", "constraints": {}}, {"id": "active", "constraints": {}},
+                     {"id": "fix-one", "constraints": {"fix_round_for": "shadow"}},
+                     {"id": "fix-two", "constraints": {"fix_round_for": "fix-one"}}]
+            for task in tasks:
+                (root / "tasks" / (task["id"] + ".json")).write_text(json.dumps(task))
+            rows = [{"kind": "steering", "subject": "shadow", "mode": "shadow", "selected": "cancel",
+                     "extra": {"candidate_action": "cancel", "outcome": "shadow"}}] * 20
+            rows += [{"kind": "steering", "subject": "active", "mode": "active", "selected": "steer",
+                      "extra": {"candidate_action": "steer", "outcome": "applied"}}]
+            with patch.object(promotion.decision_log, "read_all", return_value=rows), \
+                    patch.object(scorecard, "efficiency", return_value={"tasks": {
+                        "active": {"tokens": 100, "calls": 1}, "shadow": {"tokens": 120, "calls": 1}}}):
+                data = promotion.collect("steering_policy", root)
+            self.assertEqual((data["n"], data["shadow_n"], data["steer"], data["cancel"]), (21, 20, 1, 20))
+            self.assertEqual(data["mean_fix_rounds_steered"], 0)
+            self.assertEqual(data["mean_fix_rounds_non_steered"], 2)
+            self.assertEqual(data["fix_rounds_delta"], -2)
+            self.assertEqual(data["accepted_tokens_delta"], -20)

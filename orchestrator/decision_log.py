@@ -7,6 +7,7 @@ has no legacy synonym. retrieval rows are memory retrievals: candidates carry id
 tiers and scores; extra carries legacy_ids, tokens_legacy, tokens_tiered and hot_fresh.
 """
 
+import json
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -47,6 +48,7 @@ KINDS = (
     "scout",
     "review_plan",
     "planner_route",
+    "steering",
 ) + CONTEXT_KINDS
 
 _MAX_TEXT = 2000
@@ -152,6 +154,8 @@ def record(
     }
     if role is not None:
         row["role"] = role
+    if kind == "steering":
+        validate_steering(row)
     return _append(_bounded(row), root=root)
 
 
@@ -238,3 +242,44 @@ def format_explain(rows):
             )
             lines.append(f"outcome: {summary}")
     return "\n".join(lines)
+
+
+STEERING_KEYS = {"trigger", "severity", "critical", "action", "evidence_hash", "message_chars"}
+
+
+def validate_steering(row):
+    """Steering metadata lives in extra, following other decision kinds."""
+    def has_message(value):
+        if isinstance(value, dict):
+            return "message" in value or any(has_message(v) for v in value.values())
+        return isinstance(value, (tuple, list)) and any(has_message(v) for v in value)
+    required = {"candidates", "hard_constraints", "deterministic", "reason", "selected", "mode"}
+    if not required <= row.keys() or not STEERING_KEYS <= (row.get("extra") or {}).keys():
+        raise ValueError("missing steering metadata")
+    if has_message(row):
+        raise ValueError("steering rows must omit message text")
+
+
+def recent(root=None, limit=500):
+    """Read only the tail needed for at most limit persisted decision rows."""
+    path = _directory(root) / "decisions.jsonl"
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, 2)
+            pos, data = stream.tell(), b""
+            while pos and data.count(b"\n") <= limit:
+                size = min(pos, 8192)
+                pos -= size
+                stream.seek(pos)
+                data = stream.read(size) + data
+    except FileNotFoundError:
+        return []
+    rows = []
+    for line in data.splitlines()[-limit:]:
+        try:
+            row = json.loads(line)
+            if isinstance(row, dict):
+                rows.append(row)
+        except (ValueError, UnicodeError):
+            pass
+    return rows

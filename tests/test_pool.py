@@ -576,3 +576,16 @@ class OrchestrateSkillCopies(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SteeringConfiguration(unittest.TestCase):
+    def test_steering_section_defaults_and_invalid_mode_falls_back(self):
+        from orchestrator import steering_policy
+        self.assertEqual(steering_policy.DEFAULTS, {"mode": "shadow", "stuck_after_s": 900,
+                         "out_of_scope_events": 3, "min_interval_s": 1800})
+        self.assertEqual(steering_policy.mode({}), "shadow")
+        self.assertEqual(P.config()["steering"]["mode"], "shadow")
+        for value in ("off", "shadow", "active"):
+            self.assertEqual(steering_policy.mode({"steering": {"mode": value}}), value)
+        for value in ("invalid", None, 9):
+            self.assertEqual(steering_policy.mode({"steering": {"mode": value}}), "off")

@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import harness_depth, worker_registry, memory_hot
+from . import harness_depth, worker_registry, memory_hot, steering_policy
 from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
                planner_runs, spawn, strategy, worker_control)
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
@@ -1650,6 +1650,83 @@ def maybe_handover(reason, now=None):
     return True
 
 
+def _steering_decisions(pool, running, tasks, ranked, now):
+    """Persist proposals; only active steering can affect a worker."""
+    cfg = pool.cfg
+    mode = steering_policy.mode(cfg)
+    section = cfg.get("steering", {})
+    invalid = not isinstance(section, dict) or section.get("mode", "shadow") not in ("off", "shadow", "active")
+    if mode == "off" and not invalid:
+        return
+    rows = decision_log.recent(root=bus.STATE, limit=500)
+    interval = section.get("min_interval_s", 1800) if isinstance(section, dict) else 1800
+    for task in running:
+        doc = worker_registry.get(task["id"])
+        if mode == "active" and doc and (doc.get("status") in ("steering", "cancelling") or
+                (task.get("pipeline") or {}).get("steer_epoch", 1) > doc.get("epoch", 1)):
+            continue
+        critical = bool(ranked and ranked[0] == task["id"])
+        try:
+            result = steering_policy.evaluate(task, tasks=tasks, registry_doc=doc,
+                stale_evidence=stale_check(task), gate_history=steering_policy.gate_history(task, tasks),
+                cfg=cfg, critical=critical, now=now)
+        except Exception:
+            result = {"action": "continue", "trigger": None, "reasons": ["evaluation_error"],
+                      "message": None, "evidence": {}, "severity": "none"}
+        if invalid:
+            result.update(action="continue", message=None, reasons=["invalid_config"])
+        digest = steering_policy.evidence_hash(result)
+        previous = [r for r in rows if r.get("kind") == "steering" and r.get("subject") == task["id"]]
+        applied = [r for r in previous if r.get("mode") == "active" and
+                   (r.get("extra") or {}).get("outcome") == "applied"]
+        in_interval = bool(applied and now - applied[-1]["ts"] < interval)
+        if in_interval and previous and (previous[-1].get("extra") or {}).get("trigger") == result["trigger"] and (previous[-1].get("extra") or {}).get("evidence_hash") == digest:
+            continue
+        action = result["action"]
+        outcome = "shadow" if mode == "shadow" else "observed"
+        if in_interval:
+            action, outcome = "continue", "interval"
+        elif mode == "active" and action in ("steer", "cancel"):
+            # Cancellation remains a proposal until a later promotion enables it.
+            action = "steer"
+            try:
+                worker_control.steer(task["id"], result["message"],
+                                     reason=result["trigger"], source="steering_policy")
+                outcome = "applied"
+            except Exception as exc:
+                gone = isinstance(exc, (ProcessLookupError, KeyError)) or any(text in str(exc) for text in
+                    ("worker is not running", "worker not found", "not alive", "already finished"))
+                outcome = "worker_gone" if gone else "error"
+        decision_log.record("steering", task["id"], candidates=["continue", "steer", "cancel"],
+            hard_constraints={"critical": critical, "cancel_shadow_only": True,
+                              "min_interval_s": interval, "in_interval": in_interval},
+            deterministic=result["evidence"], selected=action, reason=result["reasons"], mode=mode,
+            extra={"trigger": result["trigger"], "severity": result["severity"], "critical": critical,
+                   "action": action, "candidate_action": result["action"], "evidence_hash": digest,
+                   "message_chars": len(result["message"] or ""), "outcome": outcome}, root=bus.STATE)
+
+
+def steering_tick(pool):
+    running = [t for t in bus.read(status="running", role="execute") if not is_goal(t)]
+    if not running:
+        return
+    # Match scheduler eligibility, ancestry/descendants, and duration estimates.
+    harness_depth.begin_tick(pool, notify, root=bus.STATE)
+    candidates = [t for t in bus.read(role="execute") if not is_goal(t) and
+                  (t["status"] == "queued" or (t["status"] == "held" and
+                   t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")))]
+    ready = set(eligible(pool, candidates))
+    candidates = [t for t in candidates if t["id"] in ready]
+    wave_tasks = _wave_tasks(candidates, running)
+    try:
+        durations = duration.durations_for(list(wave_tasks.values()))
+    except Exception:
+        durations = None
+    ranked = _wave_order([t["id"] for t in running + candidates], wave_tasks, durations)
+    tasks = {t["id"]: t for t in bus.read()}
+    _steering_decisions(pool, running, tasks, ranked, time.time())
+
+
 def tick(pool=None, stop_event=None):
     pool = pool or Pool()
     try:
@@ -1676,7 +1753,7 @@ def tick(pool=None, stop_event=None):
             memory_hot.build(STATE.parent)
     except Exception:
         print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
-    for stage in (dispatch, gate, merge_reviewed):
+    for stage in (steering_tick, dispatch, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return
         try:

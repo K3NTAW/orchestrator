@@ -3741,3 +3741,123 @@ class WorkerCancellation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SteeringPolicyTickTests(unittest.TestCase):
+    def setUp(self):
+        from contextlib import ExitStack
+        from test_steering_policy import stale_fixture
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.task = {"id": "T-steering", "parent": "T-goal", "role": "execute", "status": "running",
+                     "scope": ["app.py"], "read_scope": ["lib/", "orchestrator/"],
+                     "pipeline": {}, "constraints": {}, "complexity": 1}
+        self.ready = {"id": "T-ready", "role": "execute", "status": "queued", "complexity": 1}
+        self.doc = {"last_event_at": 990, "epoch": 1, "status": "running"}
+        self.now = 1000
+        self.pool = mock.Mock(cfg={"steering": {"mode": "shadow"}, "memory": {"mode": "off"}}, accounts=[])
+        self.pool.both_cooling_minutes.return_value = 0
+        self.pool.notification_transition.return_value = False
+        self.pool.codex_available.return_value = True
+        self.stack.enter_context(mock.patch.object(bus, "STATE", self.root))
+        self.stack.enter_context(mock.patch.object(bus, "read", side_effect=lambda **kw: [
+            t for t in (self.task, self.ready) if all(t.get(k) == v for k, v in kw.items())]))
+        for name in ("_load_review_cfg", "sweep_leases", "dispatch", "gate", "merge_reviewed",
+                     "auto_fix_round", "maybe_handover"):
+            self.stack.enter_context(mock.patch.object(daemon, name))
+        self.stack.enter_context(mock.patch.object(daemon.worker_registry, "reconcile"))
+        self.stack.enter_context(mock.patch.object(daemon.worker_registry, "get", side_effect=lambda tid: self.doc))
+        self.stack.enter_context(mock.patch.object(daemon.harness_depth, "begin_tick"))
+        self.stack.enter_context(mock.patch.object(daemon, "eligible", return_value=[self.ready["id"]]))
+        self.stack.enter_context(mock.patch.object(daemon, "_wave_tasks", return_value={
+            t["id"]: t for t in (self.task, self.ready)}))
+        self.stack.enter_context(mock.patch.object(daemon.duration, "durations_for", return_value={}))
+        self.rank = self.stack.enter_context(mock.patch.object(daemon, "_wave_order", return_value=[
+            self.ready["id"], self.task["id"]]))
+        self.stale = self.stack.enter_context(mock.patch.object(daemon, "stale_check", return_value=stale_fixture(["lib/api.py"], "high")))
+        self.stack.enter_context(mock.patch.object(daemon.steering_policy, "changed_paths", return_value=[]))
+        self.stack.enter_context(mock.patch.object(daemon.steering_policy, "no_commits", return_value=True))
+        self.stack.enter_context(mock.patch.object(daemon.time, "time", side_effect=lambda: self.now))
+        self.steer = self.stack.enter_context(mock.patch.object(daemon.worker_control, "steer"))
+        self.cancel = self.stack.enter_context(mock.patch.object(daemon.worker_control, "cancel"))
+
+    def rows(self):
+        return daemon.decision_log.recent(root=self.root)
+
+    def test_tick_records_steering_rows_in_shadow_without_calling_worker_control(self):
+        daemon.tick(self.pool)
+        row = self.rows()[-1]
+        self.assertEqual((row["kind"], row["mode"], row["selected"]), ("steering", "shadow", "steer"))
+        self.assertFalse(row["extra"]["critical"])
+        self.assertEqual(set(self.rank.call_args.args[0]), {self.task["id"], self.ready["id"]})
+        self.stale.return_value["stale_paths"] = ["orchestrator/auth.py"]
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["selected"], "cancel")
+        self.steer.assert_not_called()
+        self.cancel.assert_not_called()
+        # Shadow observations never start the active interval.
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        self.steer.assert_called_once()
+
+    def test_active_steering_calls_once_respects_interval_and_logs_errors(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        self.steer.assert_called_once_with(self.task["id"], "dependency_changed: lib/api.py",
+                                           reason="dependency_changed", source="steering_policy")
+        self.now += 10
+        daemon.tick(self.pool)
+        self.assertEqual(len(self.rows()), 1)
+        self.steer.assert_called_once()
+        # Changed evidence can be observed inside the interval but cannot act.
+        self.stale.return_value["stale_paths"] = ["lib/other.py"]
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "interval")
+        self.steer.assert_called_once()
+        self.now = 2800
+        self.steer.side_effect = RuntimeError("delivery failed")
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "error")
+        self.steer.side_effect = None
+        daemon.tick(self.pool)
+        self.assertEqual(self.steer.call_count, 3)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "applied")
+        self.now += 1800
+        self.steer.side_effect = ProcessLookupError()
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "worker_gone")
+        self.steer.side_effect = None
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "applied")
+        self.cancel.assert_not_called()
+
+    def test_active_mode_never_cancels_and_skips_in_flight_steers(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        self.stale.return_value["stale_paths"] = ["orchestrator/auth.py"]
+        for status, epoch in [("steering", 1), ("cancelling", 1), ("running", 2)]:
+            self.doc["status"] = status
+            self.task["pipeline"]["steer_epoch"] = epoch
+            daemon.tick(self.pool)
+        self.assertEqual(self.rows(), [])
+        self.steer.assert_not_called()
+        self.task["pipeline"]["steer_epoch"] = 1
+        daemon.tick(self.pool)
+        self.steer.assert_called_once()
+        row = self.rows()[-1]
+        self.assertEqual(row["extra"]["candidate_action"], "cancel")
+        self.assertEqual(row["selected"], "steer")
+        self.cancel.assert_not_called()
+
+    def test_invalid_mode_records_without_control_and_critical_uses_rank(self):
+        self.pool.cfg["steering"]["mode"] = "invalid"
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["reason"], ["invalid_config"])
+        self.assertEqual(self.rows()[-1]["mode"], "off")
+        self.steer.assert_not_called()
+        self.pool.cfg["steering"]["mode"] = "shadow"
+        self.stale.return_value["stale_paths"] = ["orchestrator/auth.py"]
+        self.rank.return_value = [self.task["id"], self.ready["id"]]
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["selected"], "steer")
+        self.assertTrue(self.rows()[-1]["extra"]["critical"])
