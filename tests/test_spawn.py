@@ -1367,21 +1367,48 @@ class ContextTelemetry(unittest.TestCase):
     def test_route_receives_effective_mode_and_provider(self):
         task = {"id": "T-cache", "title": "cache", "scope": []}
         item = evidence.make("external_doc", "doc", "body", provenance="bus", task=task)
-        with mock.patch.object(spawn, "_context_mode", return_value="active"), \
+        with mock.patch.object(spawn, "_context_mode", return_value=("active", "shadow", False)), \
                 mock.patch.object(spawn.context_router, "route", wraps=spawn.context_router.route) as route, \
                 mock.patch.object(spawn.decision_log, "record"):
             spawn._shadow_route(task, [item], role="execute", head_sha="head", cfg={}, provider="codex")
         self.assertEqual(route.call_args.kwargs["effective_mode"], "active")
         self.assertEqual(route.call_args.kwargs["provider"], "codex")
+        self.assertEqual(route.call_args.kwargs["cache_mode"], "shadow")
+        self.assertFalse(route.call_args.kwargs["invalid_config"])
         with mock.patch.object(spawn, "_packet_body", side_effect=RuntimeError("stop after provider")) as body:
             with self.assertRaisesRegex(RuntimeError, "stop after provider"):
                 spawn.packet(task, TMP)
         self.assertEqual(body.call_args.kwargs["provider"], "codex")
-        with mock.patch.object(spawn, "_shadow_route", return_value={}) as shadow, \
+
+    def test_scout_packet_does_not_route_or_record_context(self):
+        task = {"id": "T-cache-scout", "title": "cache", "scope": []}
+        with mock.patch.object(spawn, "_shadow_route") as shadow, \
+                mock.patch.object(spawn.decision_log, "record") as record, \
+                mock.patch.object(spawn, "_role_packet", wraps=spawn._role_packet) as role_packet, \
                 mock.patch.object(spawn, "_base_sha", return_value="head"), \
                 mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}):
-            spawn.scout_packet(task, cfg={})
-        self.assertEqual(shadow.call_args.kwargs["provider"], "claude")
+            spawn.scout_packet(task)
+        shadow.assert_not_called()
+        record.assert_not_called()
+        self.assertEqual(role_packet.call_args.kwargs, {})
+
+    def test_cache_mode_validated_once_without_mutating_config(self):
+        task = {"id": "T-cache-invalid", "scope": []}
+        item = evidence.make("test_result", "test_ok", "x" * 4000, provenance="repo")
+        for configured, expected, invalid in (("invalid", "off", True), ("active", "active", False)):
+            cfg = {"context_router": {"cache_mode": configured}}
+            before = json.dumps(cfg, sort_keys=True)
+            with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                    mock.patch.object(spawn.context_router, "cache_mode",
+                                      wraps=spawn.context_router.cache_mode) as validate, \
+                    mock.patch.object(spawn.context_router, "route", wraps=spawn.context_router.route) as route, \
+                    mock.patch.object(spawn.decision_log, "record") as record:
+                spawn._shadow_route(task, [item], role="execute", head_sha=None, cfg=cfg, provider="codex")
+            validate.assert_called_once_with(cfg)
+            self.assertEqual(json.dumps(cfg, sort_keys=True), before)
+            self.assertEqual(route.call_args.kwargs["cache_mode"], expected)
+            self.assertEqual(route.call_args.kwargs["invalid_config"], invalid)
+            self.assertEqual(record.call_args.kwargs["deterministic"]["invalid_config"], invalid)
 
     def _active_review(self):
         reviewed = bus.create_task("active target", "s", ["a"], ["x.py"], role="execute")

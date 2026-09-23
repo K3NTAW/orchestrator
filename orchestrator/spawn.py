@@ -393,14 +393,14 @@ def _memory_entries(path):
 
 
 def _context_mode(cfg):
+    invalid_config = False
     try:
-        context_router.cache_mode(cfg)
-        cfg.pop("_context_cache_invalid", None)
+        cache_mode = context_router.cache_mode(cfg)
     except ValueError:
-        cfg["_context_cache_invalid"] = True
+        cache_mode, invalid_config = "off", True
     mode = promotion.mode("context_router", cfg)
     if mode != "active":
-        return mode
+        return mode, cache_mode, invalid_config
     try:
         from datetime import datetime, timezone
         report = json.loads((STATE / "context_eval.json").read_text())
@@ -408,15 +408,15 @@ def _context_mode(cfg):
             raise ValueError("invalid context evaluation")
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(report["ran_at"])).total_seconds()
         if report.get("suite_passed") is True and 0 <= age <= 7 * 86400:
-            return "active"
+            return "active", cache_mode, invalid_config
     except (OSError, ValueError, KeyError, TypeError):
         pass
     notify.notify("context_router active refused; running shadow: context_eval missing, stale, or failed")
-    return "shadow"
+    return "shadow", cache_mode, invalid_config
 
 def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None, provider=None):
     """Persist routing telemetry and return section items for guarded active mode."""
-    mode = _context_mode(cfg)
+    mode, cache_mode, invalid_config = _context_mode(cfg)
     if mode == "off" or not task.get("id"):
         return {}
     try:
@@ -431,7 +431,7 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None, provide
         routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
                                       required_types=composition.context_requirements if composition else (),
                                       provider=provider, effective_mode=mode,
-                                      invalid_config=bool(cfg.get("_context_cache_invalid")))
+                                      cache_mode=cache_mode, invalid_config=invalid_config)
         row = context_router.decision_row(task, routed, mode=mode)
         partial_items = context_router.section_items(
             routed, {ev.id: ev for ev in candidates}, "prior_worker")
@@ -1102,7 +1102,7 @@ def spec_review_packet(task) -> str:
     return _role_packet(body, _base_sha(task, wt), f"task@{task.get('id', '(none)')} tree@HEAD")
 
 
-def scout_packet(task, *, cfg=None, provider="claude") -> str:
+def scout_packet(task) -> str:
     wt = Path(task.get("worktree") or ROOT)
     tree = []
     for item in task.get("scope", []):
@@ -1120,15 +1120,8 @@ def scout_packet(task, *, cfg=None, provider="claude") -> str:
                        _section("scope tree", tree), _section("memory titles", titles),
                        _section("result contract", ["bus_post_result fields: findings, open_questions, suggested_next, blocked",
                                                     "result limit: 1,500 tokens"])])
-    head_sha = _base_sha(task, wt)
-    candidates = [evidence.make("architecture_note", f"task:{task.get('id')}:spec",
-                                task.get("spec") or "", provenance="repo", task=task)]
-    meta = _shadow_route(task, candidates, role="scout", head_sha=head_sha,
-                         cfg=Pool().cfg if cfg is None else cfg, provider=provider)
-    meta.pop("_routed_sections", None)
-    return _role_packet(body, head_sha,
-                        f"task@{task.get('id', '(none)')} tree@HEAD memory@{','.join(memory['layers_consulted'])}",
-                        **meta)
+    return _role_packet(body, _base_sha(task, wt),
+                        f"task@{task.get('id', '(none)')} tree@HEAD memory@{','.join(memory['layers_consulted'])}")
 
 
 def resolve_secrets(mapping: dict[str, str]) -> dict[str, str]:
@@ -1443,7 +1436,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
                     "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
             else:
-                role_packet = scout_packet(t, cfg=pool.cfg, provider="claude")
+                role_packet = scout_packet(t)
                 prompt = render("scout", packet=role_packet, task=t)
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         except Exception as exc:

@@ -10,11 +10,11 @@ cache write ratio. Configured ratios override the telemetry defaults; a missing 
 cost.
 
 The only adjustment is `LONG` to `SHORT` when an item is dynamic, its effective cost exceeds
-`cache_downgrade_tokens` (default 600), and its routing reason is a generic source-type fallback:
-`test_result` or `worker_partial`. These fallbacks apply only after all named rules have been checked.
+`cache_downgrade_tokens` (default 600), and its routing reason is the generic fallback:
+`ambiguous`. This is the sole fallback reason assigned by `_choice` after all named rules have been checked.
 All named-rule reasons are exempt: `in_scope_file`, `security_path`, `failing_output`, `acceptance`,
 `skill_required_context`, `read_scope`, `section_items`, `prior_worker_overlap`, `unrelated`,
-`unrelated_memory`, `stale`, `ambiguous`, and `dependency`. `HIDE` never changes. Shadow mode records the proposed
+`unrelated_memory`, `stale`, and `dependency`. `HIDE` never changes. Shadow mode records the proposed
 level without changing presented context. Active cache mode changes presentation only while the
 effective context-router mode is also active.
 

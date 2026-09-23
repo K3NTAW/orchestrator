@@ -8,7 +8,7 @@ from .failures import _test_ids as test_ids
 
 
 LEVELS = ("HIDE", "SHORT", "LONG", "FULL")
-FALLBACK_REASONS = frozenset(("test_result", "worker_partial"))
+FALLBACK_REASONS = frozenset(("ambiguous",))
 
 
 @dataclass(frozen=True)
@@ -120,19 +120,13 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
     if ev.source_type in ("previous_result", "scout_finding", "decision", "memory_entry") \
             and (relevance["scope_match"] or relevance["title_terms"]):
         return "LONG", "dependency"
-    if ev.source_type in FALLBACK_REASONS:
-        return "LONG", ev.source_type
     return "LONG", "ambiguous"
 
 
 def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=(), provider=None,
-          effective_mode="off", invalid_config=False):
+          effective_mode="off", cache_mode="off", invalid_config=False):
     profile = role if role in ("execute", "review", "security_review", "planner", "scout") else "execute"
     failing_ids = test_ids((task.get("resume_hint") or {}).get("failures")) or []
-    configured_cache_mode = ((cfg or {}).get("context_router") or {}).get("cache_mode", "off")
-    if configured_cache_mode not in ("off", "shadow", "active"):
-        configured_cache_mode = "off"
-        invalid_config = True
     items, ambiguous = [], []
     for ev in candidates:
         level, reason = _choice(task, ev, profile, head_sha, cfg, failing_ids)
@@ -146,7 +140,7 @@ def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=(),
         if (presented_level == "LONG" and cacheability == "dynamic" and reason in FALLBACK_REASONS
                 and cost is not None and cost > threshold):
             adjusted = "SHORT"
-        if configured_cache_mode == "active" and effective_mode == "active":
+        if cache_mode == "active" and effective_mode == "active":
             level = adjusted
         full_tokens = len(_text(ev, "FULL")) // 4
         routed_tokens = len(_text(ev, level)) // 4

@@ -2,9 +2,10 @@ import _harness
 import tempfile
 import unittest
 import json
+from unittest import mock
 from pathlib import Path
 
-from orchestrator import context_router, decision_log, evidence
+from orchestrator import context_router, decision_log, evidence, spawn
 
 
 def ev(kind, location, content, task=None, commit=""):
@@ -18,7 +19,7 @@ class ContextRouterTests(unittest.TestCase):
         item = ev("test_result", "test_ok", "x" * 4000)
         plain = context_router.route({"id": "T"}, [item], role="execute", provider="codex")
         shadow = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
-                                      cfg={"context_router": {"cache_mode": "shadow",
+                                      cache_mode="shadow", cfg={"context_router": {"cache_mode": "shadow",
                                                                "cache_downgrade_tokens": 100}})
         self.assertEqual([x.level for x in plain.items], [x.level for x in shadow.items])
         deterministic = context_router.decision_row({"id": "T"}, shadow, mode="shadow")["deterministic"]
@@ -45,12 +46,12 @@ class ContextRouterTests(unittest.TestCase):
                                  provenance="worker_partial", commit="head")
         active = context_router.route(task, [dynamic, named, hidden, ambiguous, required],
                                       role="execute", head_sha="head", provider="codex",
-                                      effective_mode="active", required_types=("source_chunk",),
+                                      effective_mode="active", cache_mode="active", required_types=("source_chunk",),
                                       cfg={"context_router": {"cache_mode": "active",
                                                                "cache_downgrade_tokens": 100}})
         self.assertEqual([item.reason for item in active.items],
-                         ["test_result", "prior_worker_overlap", "stale", "ambiguous", "skill_required_context"])
-        self.assertEqual([item.level for item in active.items], ["SHORT", "LONG", "HIDE", "LONG", "LONG"])
+                         ["ambiguous", "prior_worker_overlap", "stale", "ambiguous", "skill_required_context"])
+        self.assertEqual([item.level for item in active.items], ["SHORT", "LONG", "HIDE", "SHORT", "LONG"])
         unknown = context_router.route(task, [dynamic], role="execute", provider="unknown")
         self.assertIsNone(unknown.items[0].cache_cost)
         self.assertEqual(unknown.cache_data, "missing")
@@ -59,9 +60,9 @@ class ContextRouterTests(unittest.TestCase):
         item = ev("test_result", "test_ok", "x" * 4000)
         cfg = {"context_router": {"cache_mode": "active", "cache_downgrade_tokens": 100}}
         shadow = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
-                                      cfg=cfg, effective_mode="shadow")
+                                      cfg=cfg, cache_mode="active", effective_mode="shadow")
         active = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
-                                      cfg=cfg, effective_mode="active")
+                                      cfg=cfg, cache_mode="active", effective_mode="active")
         self.assertEqual((shadow.items[0].level, active.items[0].level), ("LONG", "SHORT"))
         self.assertLess(active.items[0].tokens_at_level, shadow.items[0].tokens_at_level)
         row = context_router.decision_row({"id": "T"}, active, mode="active")
@@ -69,7 +70,7 @@ class ContextRouterTests(unittest.TestCase):
         self.assertEqual(row["deterministic"]["cache_adjusted_level"][item.id], "SHORT")
         self.assertEqual(row["candidates"], [f"{item.id}:SHORT"])
         off = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
-                                   cfg=cfg, effective_mode="off")
+                                   cfg=cfg, cache_mode="active", effective_mode="off")
         self.assertEqual(off.items[0].level, "LONG")
 
     def test_cache_mode_helper_validates_and_shadow_keeps_candidates_byte_identical(self):
@@ -82,17 +83,49 @@ class ContextRouterTests(unittest.TestCase):
             {"id": "T"}, [item], role="execute", provider="codex"), mode="shadow")
         shadow = context_router.decision_row({"id": "T"}, context_router.route(
             {"id": "T"}, [item], role="execute", provider="codex",
-            cfg={"context_router": {"cache_mode": "shadow"}}), mode="shadow")
+            cache_mode="shadow", cfg={"context_router": {"cache_mode": "shadow"}}), mode="shadow")
         self.assertEqual(json.dumps(off["candidates"]).encode(), json.dumps(shadow["candidates"]).encode())
 
     def test_invalid_cache_mode_falls_back_to_off_with_flag(self):
         item = ev("test_result", "test_ok", "x" * 4000)
-        packet = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
-                                      effective_mode="active",
-                                      cfg={"context_router": {"cache_mode": "invalid"}})
+        cfg = {"context_router": {"cache_mode": "invalid"}}
+        with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                mock.patch.object(context_router, "cache_mode", wraps=context_router.cache_mode) as validate:
+            mode, cache_mode, invalid = spawn._context_mode(cfg)
+            packet = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
+                                          effective_mode=mode, cache_mode=cache_mode,
+                                          invalid_config=invalid, cfg=cfg)
+        validate.assert_called_once_with(cfg)
+        self.assertEqual(cfg, {"context_router": {"cache_mode": "invalid"}})
+        self.assertEqual(cache_mode, "off")
         self.assertEqual(packet.items[0].level, "LONG")
         self.assertTrue(context_router.decision_row({"id": "T"}, packet, mode="shadow")
                         ["deterministic"]["invalid_config"])
+
+    def test_shadow_preserves_original_ambiguous_counts_and_reduction_bytes(self):
+        task = {"id": "T"}
+        values = [ev("test_result", "test_ok", "x" * 4000),
+                  evidence.make("worker_partial", "prior", "y" * 4000, provenance="worker_partial"),
+                  ev("external_doc", "doc", "z" * 4000)]
+        self.assertEqual(context_router.FALLBACK_REASONS, frozenset({"ambiguous"}))
+        full_tokens = sum(len(context_router._text(item, "FULL")) // 4 for item in values)
+        long_tokens = sum(len(context_router._text(item, "LONG")) // 4 for item in values)
+        expected = {"candidates": [f"{item.id}:LONG" for item in values],
+                    "ambiguous_ids": [item.id for item in values],
+                    "reasons": ["ambiguous"] * 3,
+                    "stats": {"role": "execute", "HIDE": 0, "SHORT": 0, "LONG": 3, "FULL": 0,
+                              "candidate_tokens": full_tokens, "routed_tokens": long_tokens,
+                              "reduction_ratio": long_tokens / full_tokens, "ambiguous": 3}}
+        for cache_mode in ("off", "shadow"):
+            packet = context_router.route(task, values, role="execute", provider="codex",
+                                          cache_mode=cache_mode, effective_mode="shadow",
+                                          cfg={"context_router": {"cache_downgrade_tokens": 100}})
+            row = context_router.decision_row(task, packet, mode="shadow")
+            actual = {"candidates": row["candidates"], "ambiguous_ids": packet.ambiguous_ids,
+                      "reasons": [item.reason for item in packet.items],
+                      "stats": {key: row["deterministic"][key] for key in expected["stats"]}}
+            self.assertEqual(json.dumps(actual, sort_keys=True).encode(),
+                             json.dumps(expected, sort_keys=True).encode())
 
     def test_stale_source_preserves_scope_and_security_precedence(self):
         item = ev("source_chunk", "orchestrator/auth.py:1-4", "code", commit="old")
