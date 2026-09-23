@@ -48,6 +48,31 @@ class ReviewVerdict(unittest.TestCase):
         self.assertEqual(registry.get(task["id"])["usd"], .01)
         self.assertNotIn("private", registry._path(task["id"], events=True).read_text())
 
+    def test_packet_meta_carries_prefix_identity(self):
+        first = Render().packet_fixture(); second = Render().packet_fixture()
+        second["spec"] = "different task-specific objective"
+        first_packet = spawn.packet(first, TMP)
+        second_packet = spawn.packet(second, TMP)
+        spawn.render("execute", packet=first_packet, task=first)
+        spawn.render("execute", packet=second_packet, task=second)
+        first_meta = spawn.packet_run_meta(first_packet)
+        second_meta = spawn.packet_run_meta(second_packet)
+        self.assertEqual(first_meta["prefix_sha"], second_meta["prefix_sha"])
+
+    def test_render_records_prefix_identity_before_packet_header(self):
+        first = Render().packet_fixture(); second = Render().packet_fixture()
+        second["acceptance"] = ["a longer criterion that changes the packet suffix"]
+        packets = [spawn.packet(task, TMP) for task in (first, second)]
+        prompts = [spawn.render("execute", packet=packet, task=task)
+                   for packet, task in zip(packets, (first, second))]
+        metas = [spawn.packet_run_meta(packet) for packet in packets]
+        self.assertEqual(metas[0]["prefix_sha"], metas[1]["prefix_sha"])
+        self.assertNotEqual(metas[0]["suffix_chars"], metas[1]["suffix_chars"])
+        for prompt, packet, meta in zip(prompts, packets, metas):
+            boundary = prompt.index(packet.splitlines()[0])
+            self.assertEqual(meta["prefix_chars"], boundary)
+            self.assertIn("objective", meta["dynamic_sections"])
+
     def test_render_bytes_identical_in_shadow(self):
         task = {"id": "T-shadow", "scope": ["x.py"]}
         with mock.patch.object(spawn.instructions, "mode", return_value="shadow"), \

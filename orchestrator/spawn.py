@@ -281,16 +281,38 @@ def render(name, *, task=None, signals=None, **kw):
         _INSTRUCTION_RENDER_META[result] = {"instruction_tokens_modular": len(modular) // 4}
         while len(_INSTRUCTION_RENDER_META) > _PACKET_BUILD_META_MAX:
             _INSTRUCTION_RENDER_META.popitem(last=False)
-        return result
+        return _record_prefix_identity(result, task)
     placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
     missing = next((match.group(1) for match in placeholder.finditer(t) if match.group(1) not in kw), None)
     if missing is not None:
         raise ValueError(f"unfilled_placeholder: {missing}")
-    return placeholder.sub(
+    result = placeholder.sub(
         lambda match: kw[match.group(1)] if isinstance(kw[match.group(1)], str)
         else json.dumps(kw[match.group(1)], indent=0),
         t,
     )
+    return _record_prefix_identity(result, task)
+
+
+def _record_prefix_identity(rendered, task=None):
+    """Record the stable wrapper before the task-specific packet header."""
+    header = re.search(r"(?m)^packet v([0-9a-f]+)\b", rendered)
+    if not header:
+        return rendered
+    version = header.group(1)
+    prefix, suffix = rendered[:header.start()], rendered[header.start():]
+    values = {"prefix_sha": hashlib.sha256(prefix.encode()).hexdigest()[:12],
+              "prefix_chars": len(prefix), "suffix_chars": len(suffix),
+              "dynamic_sections": re.findall(r"(?m)^## ([^\n]+)", suffix)}
+    _remember_packet_meta(version, {**_PACKET_BUILD_META.get(version, {}), **values})
+    if task is not None and task.get("id"):
+        try:
+            current = bus.get(task["id"])
+            meta = {**(current.get("packet_meta") or {}), **values}
+            bus.update(task["id"], packet_meta=meta)
+        except (KeyError, OSError, ValueError):
+            pass
+    return rendered
 
 
 def hold_render_error(task_id, exc):

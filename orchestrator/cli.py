@@ -152,6 +152,9 @@ def main():
     sc.add_argument("--parallelism", action="store_true")
     sc.add_argument("--scheduling", action="store_true")
     sc.add_argument("--strategies", action="store_true")
+    sc.add_argument("--cache", action="store_true")
+    sc.add_argument("--days", type=int, default=7)
+    sc.add_argument("--root")
     sc.add_argument("--goal")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
@@ -299,7 +302,7 @@ def main():
                          else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
+        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
@@ -546,7 +549,11 @@ def main():
         if not document["suite_passed"]:
             raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.overhead:
+        if a.cache:
+            from . import cache_telemetry
+            card = cache_telemetry.report(a.root or scorecard.STATE, a.days)
+            print(json.dumps(card, indent=1) if a.json else cache_telemetry.format_report(card))
+        elif a.overhead:
             from . import overhead
             card = overhead.report(root=scorecard.STATE)
             if a.goal:

@@ -22,6 +22,17 @@ class BusSandbox(unittest.TestCase):
 
 class Bus(BusSandbox):
 
+    def test_log_run_annotates_cache_fields(self):
+        row = self.written_row(provider="claude", usage={"input_tokens": 10,
+            "cache_read_input_tokens": 30, "output_tokens": 2},
+            packet_meta={"hash": "v", "prefix_sha": "prefix"})
+        self.assertEqual(row["input_uncached_tokens"], 10)
+        self.assertEqual(row["cache_read_tokens"], 30)
+        self.assertEqual(row["hit_ratio"], .75)
+        self.assertEqual(row["prefix_sha"], "prefix")
+        with patch("orchestrator.cache_telemetry.annotate", side_effect=RuntimeError("telemetry")):
+            self.written_row(provider="claude", usage={"input_tokens": 1})
+
     def test_create_task_sets_created_at(self):
         with patch.object(bus.time, "time", return_value=1234.5):
             task = bus.create_task("Timestamp", "spec", ["ok"], ["x.py"])

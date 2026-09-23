@@ -306,7 +306,8 @@ def log_run(*, attempt=1, **fields):
                               "tool_tokens_minimal", "skills_exposed", "skills_used",
                               "skill_tokens_l0", "skill_tokens_l2", "skills_selected",
                               "skill_tokens_selected_l0", "skill_tokens_selected_l2",
-                              "skill_tokens_presented_l2")}
+                              "skill_tokens_presented_l2", "prefix_sha", "prefix_chars",
+                              "suffix_chars", "dynamic_sections")}
         fields["context"]["packet_version"] = packet_meta.get("packet_version") or packet_meta.get("version")
     else:
         fields["context"] = None
@@ -361,6 +362,11 @@ def log_run(*, attempt=1, **fields):
             fields.setdefault("usd_source", "token_estimate")
         elif fields.get("usd") is not None:
             fields.setdefault("usd_source", "reported")
+    try:
+        from . import cache_telemetry
+        cache_telemetry.annotate(fields, cfg)
+    except Exception:
+        pass
     RUNS.mkdir(parents=True, exist_ok=True)
     with open(RUNS / f"{date.today().isoformat()}.jsonl", "a") as f:
         f.write(json.dumps({"ts": time.time(), **fields}) + "\n")
