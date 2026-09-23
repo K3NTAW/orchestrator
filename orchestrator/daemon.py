@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import harness_depth, worker_registry, memory_hot, steering_policy
+from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
 from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
                planner_runs, spawn, strategy, worker_control)
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
@@ -684,20 +684,21 @@ def _load_scheduler_cfg(pool):
     return cfg
 
 
-def eligible(pool, candidates):
+def eligible(pool, candidates, *, depth_tick=None):
     """Filter candidates in their supplied order without changing bus state.
 
     A dispatched task is already owned, even while queued before its worker claims it;
     it belongs to the wave's running set, never its ready candidates.
     """
+    depth_tick = depth_tick if depth_tick is not None else getattr(pool, "harness_depth_tick", {})
     fallback = _fallback_mode(pool)
     return [t["id"] for t in candidates
             if not stale({**t, "status": "queued"}) and bus.ready(t)
             and not (t.get("pipeline") or {}).get("dispatched_at")
             and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve"
-                 or (getattr(pool, "harness_depth_tick", {}).get("mode") == "active"
+                 or (depth_tick.get("mode") == "active"
                      and harness_depth.level(t, tasks=candidates, cfg=pool.cfg,
-                         history=pool.harness_depth_tick["history"])["eligible_fast_path"]))
+                         history=depth_tick["history"])["eligible_fast_path"]))
             and (not fallback or fallback_tier(t["complexity"]) is not None)]
 
 
@@ -1658,7 +1659,12 @@ def _steering_decisions(pool, running, tasks, ranked, now):
     invalid = not isinstance(section, dict) or section.get("mode", "shadow") not in ("off", "shadow", "active")
     if mode == "off" and not invalid:
         return
-    rows = decision_log.recent(root=bus.STATE, limit=500)
+    if mode == "active":
+        recommendation = promotion.evaluate("steering_policy",
+            promotion.collect("steering_policy", root=bus.STATE), cfg)
+        if recommendation["recommendation"] != "promote":
+            mode = "shadow"
+            notify("active steering policy refused; using shadow: " + ", ".join(recommendation["reasons"]))
     interval = section.get("min_interval_s", 1800) if isinstance(section, dict) else 1800
     for task in running:
         doc = worker_registry.get(task["id"])
@@ -1676,11 +1682,15 @@ def _steering_decisions(pool, running, tasks, ranked, now):
         if invalid:
             result.update(action="continue", message=None, reasons=["invalid_config"])
         digest = steering_policy.evidence_hash(result)
-        previous = [r for r in rows if r.get("kind") == "steering" and r.get("subject") == task["id"]]
+        previous = decision_log.recent(root=bus.STATE, limit=500,
+                                       kind="steering", subject=task["id"])
         applied = [r for r in previous if r.get("mode") == "active" and
                    (r.get("extra") or {}).get("outcome") == "applied"]
         in_interval = bool(applied and now - applied[-1]["ts"] < interval)
-        if in_interval and previous and (previous[-1].get("extra") or {}).get("trigger") == result["trigger"] and (previous[-1].get("extra") or {}).get("evidence_hash") == digest:
+        if (previous and (in_interval or mode != "active" or result["action"] == "continue")
+                and previous[-1].get("mode") == mode
+                and (previous[-1].get("extra") or {}).get("trigger") == result["trigger"]
+                and (previous[-1].get("extra") or {}).get("evidence_hash") == digest):
             continue
         action = result["action"]
         outcome = "shadow" if mode == "shadow" else "observed"
@@ -1706,16 +1716,18 @@ def _steering_decisions(pool, running, tasks, ranked, now):
                    "message_chars": len(result["message"] or ""), "outcome": outcome}, root=bus.STATE)
 
 
-def steering_tick(pool):
+def steering_tick(pool, *, depth_tick=None):
+    section = pool.cfg.get("steering", {})
+    if isinstance(section, dict) and section.get("mode") == "off":
+        return
     running = [t for t in bus.read(status="running", role="execute") if not is_goal(t)]
     if not running:
         return
     # Match scheduler eligibility, ancestry/descendants, and duration estimates.
-    harness_depth.begin_tick(pool, notify, root=bus.STATE)
     candidates = [t for t in bus.read(role="execute") if not is_goal(t) and
                   (t["status"] == "queued" or (t["status"] == "held" and
                    t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")))]
-    ready = set(eligible(pool, candidates))
+    ready = set(eligible(pool, candidates, depth_tick=depth_tick))
     candidates = [t for t in candidates if t["id"] in ready]
     wave_tasks = _wave_tasks(candidates, running)
     try:
@@ -1753,11 +1765,14 @@ def tick(pool=None, stop_event=None):
             memory_hot.build(STATE.parent)
     except Exception:
         print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
-    for stage in (steering_tick, dispatch, gate, merge_reviewed):
+    for stage in (dispatch, steering_tick, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return
         try:
-            stage(pool)
+            if stage is steering_tick:
+                stage(pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
+            else:
+                stage(pool)
         except Exception as e:
             print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
     try:

@@ -16,7 +16,7 @@ def stale_fixture(paths=(), risk="none"):
 class SteeringPolicyTests(unittest.TestCase):
     def setUp(self):
         self.task = {"id": "T-policy", "parent": "T-goal", "status": "running",
-                     "read_scope": ["orchestrator/", "lib/"], "scope": ["app.py"],
+                     "scope": ["orchestrator/work.py", "lib/work.py", "app/main.py"],
                      "pipeline": {}, "constraints": {}}
         self.inputs = dict(tasks={self.task["id"]: self.task},
                            registry_doc={"last_event_at": 950}, stale_evidence=stale_fixture(),
@@ -72,10 +72,10 @@ class SteeringPolicyTests(unittest.TestCase):
             self.task["worktree"] = directory
             output = ("R  lib/new name.py\0old name.py\0?? stray.py\0 M stray.py\0"
                       "?? __pycache__/x\0?? x.pyc\0?? .orchestrator/state\0"
-                      "?? .venv/lib/x\0?? node_modules/x\0?? .git/config\0?? app.py\0")
+                      "?? .venv/lib/x\0?? node_modules/x\0?? .git/config\0?? app/main.py\0")
             with patch.object(policy.subprocess, "run", return_value=Mock(returncode=0, stdout=output)) as run:
-                self.assertEqual(policy.changed_paths(self.task), ["app.py", "lib/new name.py", "stray.py"])
-                run.assert_called_once_with(["git", "status", "--porcelain", "-z"], cwd=directory,
+                self.assertEqual(policy.changed_paths(self.task), ["app/main.py", "lib/new name.py", "stray.py"])
+                run.assert_called_once_with(["git", "status", "--porcelain", "-z", "--untracked-files=all"], cwd=directory,
                                             capture_output=True, text=True, timeout=5, check=False)
                 self.assertEqual(self.evaluate(cfg={"steering": {"out_of_scope_events": 1}})["action"], "continue")
                 result = self.evaluate(cfg={"steering": {"out_of_scope_events": 0}})
@@ -108,3 +108,25 @@ class SteeringPolicyTests(unittest.TestCase):
         leaf = {"id": "leaf", "pipeline": {"gate_reds": 1},
                 "constraints": {"fix_round_for": "middle", "failure_signature": "last"}}
         self.assertEqual(policy.gate_history(leaf, {"root": root, "middle": middle}), ["first", "last"])
+
+    def test_real_bus_shape_derives_packet_read_scope(self):
+        self.assertNotIn("read_scope", self.task)
+        with tempfile.TemporaryDirectory() as directory:
+            wt = Path(directory)
+            (wt / "app").mkdir()
+            (wt / "shared").mkdir()
+            (wt / "shared/api.py").write_text("value = 1\n")
+            (wt / "app/main.py").write_text("from shared.api import value\n")
+            self.task.update(worktree=directory, scope=["app/main.py"])
+            self.assertEqual(policy.read_scope(self.task), ["app/", "shared/api.py", "tests/"])
+            with patch.object(policy, "changed_paths", return_value=[]):
+                result = self.evaluate(stale_evidence=stale_fixture(["shared/api.py"], "high"))
+                self.assertEqual(result["trigger"], "dependency_changed")
+                self.assertEqual(self.evaluate(registry_doc={"last_event_at": 0})["trigger"], "stuck")
+            subprocess.run(["git", "init", "-q", directory], check=True, capture_output=True)
+            (wt / "docs/newdir").mkdir(parents=True)
+            (wt / "docs/newdir/page.md").write_text("example\n")
+            self.task["scope"] += ["docs/newdir/*.md", "shared/api.py"]
+            result = self.evaluate(cfg={"steering": {"out_of_scope_events": 0}})
+            self.assertEqual(result["action"], "continue")
+            self.assertIn("docs/newdir/page.md", policy.changed_paths(self.task))

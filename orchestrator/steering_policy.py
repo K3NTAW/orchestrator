@@ -1,4 +1,5 @@
 """Deterministic steering from stale.evidence() and observable worker state."""
+import ast
 import fnmatch
 import hashlib
 import json
@@ -19,10 +20,41 @@ def mode(cfg):
 
 
 def matches(path, entries):
-    return any(fnmatch.fnmatchcase(path, entry) if any(c in entry for c in "*?[")
-               else path == entry.rstrip("/") or path.startswith(entry.rstrip("/") + "/")
+    return any(entry in (".", "./") or (fnmatch.fnmatchcase(path, entry) if any(c in entry for c in "*?[")
+               else path == entry.rstrip("/") or path.startswith(entry.rstrip("/") + "/"))
                for entry in entries)
 
+
+
+def read_scope(task):
+    """Mirror spawn._packet_body: tests, scope parents and local Python imports.
+
+    Bus tasks store scope, not packet read_scope. Keep this derivation aligned
+    with spawn without building a packet or triggering its routing side effects.
+    """
+    scope = [str(p) for p in task.get("scope", [])]
+    paths = {"tests/"}
+    paths.update(str(Path(p).parent) + ("/" if str(Path(p).parent) != "." else "")
+                 for p in scope)
+    if task.get("worktree"):
+        wt = Path(task["worktree"])
+        for entry in scope:
+            path = wt / entry
+            if path.suffix != ".py" or not path.is_file():
+                continue
+            try:
+                tree = ast.parse(path.read_text(errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            for node in tree.body:
+                names = ([a.name for a in node.names] if isinstance(node, ast.Import) else
+                         [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+                for name in filter(None, names):
+                    stem = Path(*name.split("."))
+                    for candidate in (wt / stem.with_suffix(".py"), wt / stem / "__init__.py"):
+                        if candidate.is_file():
+                            paths.add(str(candidate.relative_to(wt)))
+    return sorted(paths)
 
 def _git(task, *args):
     worktree = task.get("worktree")
@@ -37,7 +69,7 @@ def _git(task, *args):
 
 def changed_paths(task):
     """One porcelain query; -z renames list the destination before the source."""
-    entries = iter(_git(task, "status", "--porcelain", "-z").split("\0"))
+    entries = iter(_git(task, "status", "--porcelain", "-z", "--untracked-files=all").split("\0"))
     paths = set()
     for entry in entries:
         if not entry:
@@ -89,7 +121,7 @@ def evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, cr
         settings = {**DEFAULTS, **(cfg.get("steering") or {})}
         last_event_at = registry_doc["last_event_at"]
         status = task["status"]
-        read = task["read_scope"]
+        read = read_scope(task)
         write = task.get("write_scope", task.get("scope"))
         if write is None:
             raise KeyError("write_scope")

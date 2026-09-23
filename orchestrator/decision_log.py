@@ -260,26 +260,32 @@ def validate_steering(row):
         raise ValueError("steering rows must omit message text")
 
 
-def recent(root=None, limit=500):
-    """Read only the tail needed for at most limit persisted decision rows."""
+def recent(root=None, limit=500, *, kind=None, subject=None):
+    """Read backwards until limit matching rows, unaffected by unrelated traffic."""
+    if limit <= 0:
+        return []
+    rows = []
     path = _directory(root) / "decisions.jsonl"
     try:
         with path.open("rb") as stream:
             stream.seek(0, 2)
-            pos, data = stream.tell(), b""
-            while pos and data.count(b"\n") <= limit:
+            pos, pending = stream.tell(), b""
+            while pos:
                 size = min(pos, 8192)
                 pos -= size
                 stream.seek(pos)
-                data = stream.read(size) + data
+                lines = (stream.read(size) + pending).split(b"\n")
+                pending = lines.pop(0) if pos else b""
+                for line in reversed(lines):
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    if (isinstance(row, dict) and (kind is None or row.get("kind") == kind)
+                            and (subject is None or row.get("subject") == subject)):
+                        rows.append(row)
+                        if len(rows) >= limit:
+                            return rows[::-1]
     except FileNotFoundError:
-        return []
-    rows = []
-    for line in data.splitlines()[-limit:]:
-        try:
-            row = json.loads(line)
-            if isinstance(row, dict):
-                rows.append(row)
-        except (ValueError, UnicodeError):
-            pass
-    return rows
+        pass
+    return rows[::-1]

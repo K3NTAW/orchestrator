@@ -262,7 +262,7 @@ class SteeringPromotionTests(unittest.TestCase):
         self.assertEqual(promotion.evaluate("steering_policy", {"n": 20, "shadow_n": 19})["recommendation"], "stay")
         self.assertEqual(promotion.evaluate("steering_policy", {"n": 20, "shadow_n": 20})["recommendation"], "promote")
         cfg = {"steering": {"mode": "active"}}
-        measured = {"n": 40, "shadow_n": 20, "fix_rounds_delta": -.5, "accepted_tokens_delta": 0}
+        measured = {"n": 40, "shadow_n": 20, "active_n": 1, "fix_rounds_delta": -.5, "accepted_tokens_delta": 0}
         self.assertEqual(promotion.evaluate("steering_policy", measured, cfg)["recommendation"], "promote")
         for change in ({"fix_rounds_delta": 0}, {"accepted_tokens_delta": 1}, {"accepted_tokens_delta": None}):
             self.assertEqual(promotion.evaluate("steering_policy", {**measured, **change}, cfg)["recommendation"], "stay")
@@ -288,7 +288,7 @@ class SteeringPromotionTests(unittest.TestCase):
                     patch.object(scorecard, "efficiency", return_value={"tasks": {
                         "active": {"tokens": 100, "calls": 1}, "shadow": {"tokens": 120, "calls": 1}}}):
                 data = promotion.collect("steering_policy", root)
-            self.assertEqual((data["n"], data["shadow_n"], data["steer"], data["cancel"]), (21, 20, 1, 20))
+            self.assertEqual((data["n"], data["shadow_n"], data["steer"], data["cancel"]), (21, 1, 1, 20))
             self.assertEqual(data["mean_fix_rounds_steered"], 0)
             self.assertEqual(data["mean_fix_rounds_non_steered"], 2)
             self.assertEqual(data["fix_rounds_delta"], -2)

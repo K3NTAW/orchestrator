@@ -3751,7 +3751,7 @@ class SteeringPolicyTickTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.task = {"id": "T-steering", "parent": "T-goal", "role": "execute", "status": "running",
-                     "scope": ["app.py"], "read_scope": ["lib/", "orchestrator/"],
+                     "scope": ["app/main.py", "lib/work.py", "orchestrator/work.py"],
                      "pipeline": {}, "constraints": {}, "complexity": 1}
         self.ready = {"id": "T-ready", "role": "execute", "status": "queued", "complexity": 1}
         self.doc = {"last_event_at": 990, "epoch": 1, "status": "running"}
@@ -3768,7 +3768,11 @@ class SteeringPolicyTickTests(unittest.TestCase):
             self.stack.enter_context(mock.patch.object(daemon, name))
         self.stack.enter_context(mock.patch.object(daemon.worker_registry, "reconcile"))
         self.stack.enter_context(mock.patch.object(daemon.worker_registry, "get", side_effect=lambda tid: self.doc))
-        self.stack.enter_context(mock.patch.object(daemon.harness_depth, "begin_tick"))
+        self.begin_depth = self.stack.enter_context(mock.patch.object(daemon.harness_depth, "begin_tick"))
+        self.pool.harness_depth_tick = {"mode": "shadow", "history": {}}
+        self.promotion_collect = self.stack.enter_context(mock.patch.object(daemon.promotion, "collect",
+            return_value={"shadow_n": 20, "active_n": 0}))
+        self.notify = self.stack.enter_context(mock.patch.object(daemon, "notify"))
         self.stack.enter_context(mock.patch.object(daemon, "eligible", return_value=[self.ready["id"]]))
         self.stack.enter_context(mock.patch.object(daemon, "_wave_tasks", return_value={
             t["id"]: t for t in (self.task, self.ready)}))
@@ -3861,3 +3865,49 @@ class SteeringPolicyTickTests(unittest.TestCase):
         daemon.tick(self.pool)
         self.assertEqual(self.rows()[-1]["selected"], "steer")
         self.assertTrue(self.rows()[-1]["extra"]["critical"])
+
+    def test_shadow_dedupes_and_active_interval_survives_other_log_traffic(self):
+        daemon.tick(self.pool)
+        daemon.tick(self.pool)
+        self.assertEqual(len(self.rows()), 1)
+        self.stale.return_value.update(stale_paths=[], risk="none")
+        daemon.tick(self.pool)
+        daemon.tick(self.pool)
+        self.assertEqual(len(self.rows()), 2)
+        self.stale.return_value.update(stale_paths=["lib/api.py"], risk="high")
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        for i in range(510):
+            daemon.decision_log.record("routing", "T-other", candidates=[], hard_constraints={},
+                deterministic={}, selected=None, reason="synthetic", root=self.root)
+        self.now += 10
+        daemon.tick(self.pool)
+        self.steer.assert_called_once()
+        own = daemon.decision_log.recent(root=self.root, kind="steering", subject=self.task["id"])
+        self.assertEqual(len(own), 3)
+
+    def test_off_and_shadow_do_not_refresh_harness_state(self):
+        depth = self.pool.harness_depth_tick
+        self.pool.cfg["steering"]["mode"] = "off"
+        with mock.patch.object(bus, "read") as read:
+            daemon.steering_tick(self.pool, depth_tick=depth)
+        read.assert_not_called()
+        self.pool.cfg["steering"]["mode"] = "shadow"
+        daemon.steering_tick(self.pool, depth_tick=depth)
+        self.begin_depth.assert_not_called()
+        self.promotion_collect.assert_not_called()
+        self.assertIs(self.pool.harness_depth_tick, depth)
+        self.notify.assert_not_called()
+
+    def test_active_promotion_refusal_uses_shadow(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        for evidence in ({"shadow_n": 19}, {"shadow_n": 20, "active_n": 1,
+                         "fix_rounds_delta": 0, "accepted_tokens_delta": 1}):
+            self.promotion_collect.return_value = evidence
+            daemon.tick(self.pool)
+            self.assertEqual(self.rows()[-1]["mode"], "shadow")
+        self.promotion_collect.assert_called_with("steering_policy", root=self.root)
+        self.steer.assert_not_called()
+        self.cancel.assert_not_called()
+        self.assertEqual(self.notify.call_count, 2)
+        self.begin_depth.assert_not_called()

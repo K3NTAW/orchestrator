@@ -119,7 +119,7 @@ def evaluate(feature, evidence, cfg=None):
     if feature == "steering_policy":
         if evidence.get("shadow_n", 0) < 20:
             reasons.append("insufficient_evidence")
-        if mode == "active":
+        if mode == "active" and evidence.get("active_n", 0):
             fixes, tokens = evidence.get("fix_rounds_delta"), evidence.get("accepted_tokens_delta")
             if fixes is None or fixes >= 0:
                 reasons.append("fix_rounds_not_lower_than_shadow")
@@ -487,8 +487,8 @@ def _collect_steering(root):
     current_tokens, baseline_tokens = tokens(active), tokens(shadow)
     candidates = [(r.get("extra") or {}).get("candidate_action", r.get("selected")) for r in rows]
     return {"n": len(rows), "steer": candidates.count("steer"), "cancel": candidates.count("cancel"),
-            "shadow_n": sum(r.get("mode") == "shadow" and action in ("steer", "cancel")
-                            for r, action in zip(rows, candidates)),
+            "shadow_n": len({root_id(r["subject"]) for r, action in zip(rows, candidates)
+                             if r.get("mode") == "shadow" and action in ("steer", "cancel")}),
             "active_n": len(active), "mean_fix_rounds_steered": current,
             "mean_fix_rounds_non_steered": mean(observed - active),
             "mean_fix_rounds_shadow": baseline,
