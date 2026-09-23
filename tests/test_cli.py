@@ -70,6 +70,22 @@ class Cli(unittest.TestCase):
         self.assertNotIn(tid, [r["task"] for r in json.loads(output("--json"))])
         self.assertIn(tid, [r["task"] for r in json.loads(output("--all", "--json"))])
 
+    def test_scorecard_cache_is_exclusive_with_other_modes(self):
+        from orchestrator import cache_telemetry
+        modes = ("--planner-routing", "--context", "--reads", "--handoffs", "--economy",
+                 "--skills", "--overhead", "--economics", "--efficiency", "--routing", "--reviews",
+                 "--parallelism", "--scheduling", "--strategies")
+        with mock.patch.object(cache_telemetry, "report") as report:
+            for mode in modes:
+                with self.subTest(mode=mode):
+                    err = io.StringIO()
+                    with mock.patch.object(sys, "argv", ["orchestrator", "scorecard", "--cache", mode]), \
+                            contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as error:
+                        cli.main()
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn("choose one of", err.getvalue())
+            report.assert_not_called()
+
     def test_memory_search_cli(self):
         import shutil
         source = Path(__file__).resolve().parents[1] / ".orchestrator" / "memory"
