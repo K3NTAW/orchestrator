@@ -206,6 +206,26 @@ class SkillScorecardTests(unittest.TestCase):
         self.assertEqual(card["by_role_skill"]["execute/executor/x"]["skill_tokens_l2"], 12)
         self.assertEqual(card["by_role"]["execute"]["skill_recovery_rate"], 1)
 
+    def test_usage_rows_window_filters_and_skill_versions(self):
+        # v3 deliberately uses timestamps only; headers never supply versions.
+        self._rows([{'ts': ts, 'context': {'skills_used': ['s']}}
+                    for ts in (100, 199, 200, 299, 300, None)])
+        rows = skill_scorecard.usage_rows(self.root, since_s=200, until_s=300)
+        self.assertEqual([r['ts'] for r in rows], [200, 299])
+        self.assertTrue(all('skill_versions' not in r for r in rows))
+        result = skill_scorecard.marginal(self.root, 's', since_s=200, until_s=300)
+        self.assertEqual(result[0]['n_with'], 2)
+
+    def test_economy_reuse_requires_all_selected_used(self):
+        self._rows([{'input_tokens': 100, 'context': {'skills_selected': ['a', 'b'],
+                     'skills_used': used, 'skill_tokens_l0': 5, 'skill_tokens_l2': 5}}
+                    for used in (['a'], ['a', 'b'], ['a', 'b', 'c'])])
+        card = skill_scorecard.build(self.root)
+        self.assertEqual(card['skill_reuse_rate'], .667)
+        self.assertEqual(card['skill_recovery_rate'], .333)
+        self.assertEqual(card['skill_overhead_ratio'], .1)
+        self.assertIsNone(card['skill_utility'])
+
 
 if __name__ == "__main__":
     unittest.main()

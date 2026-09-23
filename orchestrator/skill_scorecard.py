@@ -90,13 +90,35 @@ def _pool_cfg(root):
     return {}
 
 
-def usage_rows(root=STATE):
+def timestamp(value):
+    """Unix seconds, accepting the ISO timestamps used by older run logs."""
+    from datetime import datetime, timezone
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        try:
+            stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return stamp.replace(tzinfo=stamp.tzinfo or timezone.utc).timestamp()
+        except (ValueError, TypeError):
+            return None
+
+
+def in_window(row, since_s=None, until_s=None):
+    if since_s is None and until_s is None:
+        return True
+    stamp = timestamp(row.get("ts", row.get("at")))
+    return (stamp is not None and (since_s is None or stamp >= since_s)
+            and (until_s is None or stamp < until_s))
+
+
+def usage_rows(root=STATE, since_s=None, until_s=None):
     """Return one outcome-attributed row for each run that records skills used."""
     root = Path(root)
     tasks = _tasks(root)
     raw = [row for row in _json_rows(root / "runs")
            if isinstance(row.get("context"), dict)
-           and row["context"].get("skills_used") is not None]
+           and row["context"].get("skills_used") is not None
+           and in_window(row, since_s, until_s)]
     roots = {tid: _execute_root(task, tasks) for tid, task in tasks.items()}
     root_runs = defaultdict(list)
     for row in raw:
@@ -199,14 +221,15 @@ def _configured_min_samples(root):
         return 20
 
 
-def marginal(root, skill, group_by=("role", "task_class"), min_samples=None):
+def marginal(root, skill, group_by=("role", "task_class"), min_samples=None,
+             since_s=None, until_s=None):
     group_by = tuple(group_by)
     invalid = set(group_by) - set(DIMENSIONS)
     if invalid:
         raise ValueError("unknown skill scorecard dimension: " + ",".join(sorted(invalid)))
     minimum = _configured_min_samples(root) if min_samples is None else int(min_samples)
     buckets = defaultdict(lambda: {"with": [], "without": []})
-    for row in usage_rows(root):
+    for row in usage_rows(root, since_s=since_s, until_s=until_s):
         key = tuple(row.get(name) for name in group_by)
         if skill in row["skills_used"]:
             buckets[key]["with"].append(row)
@@ -413,7 +436,7 @@ def build(root=STATE):
         accepted.setdefault(lineage, 0)
         accepted[lineage] += (row["context"].get("skill_tokens_l0") or 0) + (row["context"].get("skill_tokens_l2") or 0)
     return {"by_role_skill": by_role_skill, "by_role": by_role,
-            "skill_tokens_per_accepted_task": accepted}
+            "skill_tokens_per_accepted_task": accepted, **economy(root, rows=rows)}
 
 
 def format_report(card):
@@ -425,6 +448,7 @@ def format_report(card):
         lines.append(f"{key}\t{row['exposures']}\t{row['uses']}\t{row['use_rate']}\t{row['skill_tokens_l0']}\t{row['skill_tokens_l2']}\t{row['skill_overhead_ratio']}")
     lines += ["", "accepted lineage\tskill tokens", *
               (f"{key}\t{value}" for key, value in card["skill_tokens_per_accepted_task"].items())]
+    lines += ["", json.dumps({name: card.get(name) for name in ("skill_reuse_rate", "skill_overhead_ratio", "skill_utility", "skill_recovery_rate")}, sort_keys=True)]
     return "\n".join(lines)
 
 
@@ -434,6 +458,8 @@ def format_skill_analysis(card, group_by=("role", "task_class")):
     lines = ["\t".join(columns)]
     for row in card.get("by_skill", []):
         lines.append("\t".join(str(row.get(name)) for name in columns))
+    if "economy" in card:
+        lines += ["", json.dumps(card["economy"], sort_keys=True)]
     if "marginal" in card:
         lines += ["", "marginal", json.dumps(card["marginal"], sort_keys=True)]
     if "redundancy" in card:
@@ -446,3 +472,29 @@ def format_skill_analysis(card, group_by=("role", "task_class")):
         for role, row in card["jev_by_role"].items():
             lines.append(f"{role}\t{row['jev_agreement_rate']}\t{row['jev_calls_per_spawn']}")
     return "\n".join(lines)
+
+
+def economy(root=STATE, rows=None):
+    """P30 metrics; unknown quality and costs remain unknown, never zero."""
+    rows = list(_json_rows(Path(root) / "runs")) if rows is None else rows
+    selected = [r for r in rows if (r.get("context") or {}).get("skills_selected")]
+    reuse = [set(r["context"]["skills_selected"]) <= set(r["context"].get("skills_used") or [])
+             for r in selected]
+    recovery = [bool(set(r["context"].get("skills_used") or []) - set(r["context"]["skills_selected"]))
+                for r in selected]
+    overhead = []
+    for row in rows:
+        context = row.get("context") or {}
+        tokens = row.get("input_tokens") or (row.get("usage") or {}).get("input_tokens")
+        if tokens:
+            overhead.append(((context.get("skill_tokens_l0") or 0) +
+                             (context.get("skill_tokens_presented_l2", context.get("skill_tokens_l2")) or 0)) / tokens)
+    utility = []
+    skills = sorted({s for r in rows for s in (r.get("context") or {}).get("skills_used", [])})
+    for skill in skills:
+        for row in marginal(root, skill):
+            quality, tokens = row.get("first_pass_delta"), row.get("skill_token_overhead")
+            if quality is not None and tokens:
+                utility.append(quality * 1000 / tokens)
+    return {"skill_reuse_rate": _avg(reuse), "skill_overhead_ratio": _avg(overhead),
+            "skill_utility": _avg(utility), "skill_recovery_rate": _avg(recovery)}

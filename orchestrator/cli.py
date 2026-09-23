@@ -182,7 +182,10 @@ def main():
     rs = sub.add_parser("roadmap-status")
     rs.add_argument("--json", action="store_true")
     rs.add_argument("--write", action="store_true")
+    sub.add_parser("skill-eval")
     sk = sub.add_parser("skills"); sksub = sk.add_subparsers(dest="skills_cmd", required=True)
+    skpromote = sksub.add_parser("promote"); skpromote.add_argument("--dry-run", action="store_true")
+    skvalidate = sksub.add_parser("revalidate"); skvalidate.add_argument("id")
     sksync = sksub.add_parser("sync"); sksync.add_argument("--json", action="store_true")
     sklist = sksub.add_parser("list"); sklist.add_argument("--json", action="store_true")
     skshow = sksub.add_parser("show"); skshow.add_argument("id"); skshow.add_argument("--json", action="store_true")
@@ -252,7 +255,13 @@ def main():
             ap.error(f"--by {a.by} is not supported by {mode}; {mode} supports --by {choices}")
         if mode == "default":
             a.by = a.by or "executor"
-    if a.cmd == "skills":
+    if a.cmd == "skill-eval":
+        from . import skill_eval
+        result = skill_eval.run_all()
+        print(skill_eval.format_report(result))
+        if not result["suite_passed"]:
+            raise SystemExit(1)
+    elif a.cmd == "skills":
         from . import skills_registry
         try:
             if a.skills_cmd in ("discover", "import", "inspect", "check-upstream", "quarantine"):
@@ -266,6 +275,17 @@ def main():
                 else:
                     result = skill_discovery.check_upstream(a.id)
                 print(json.dumps(result, indent=2))
+            elif a.skills_cmd == "promote":
+                from . import skill_promotion
+                for recommendation in skill_promotion.recommendations(cfg=Pool().cfg):
+                    print(json.dumps(recommendation, sort_keys=True))
+                    if recommendation["to"] and not a.dry_run:
+                        skills_registry.transition(recommendation["id"], recommendation["to"], recommendation["reason"])
+            elif a.skills_cmd == "revalidate":
+                result = skills_registry.revalidate(a.id)
+                print(json.dumps(result, indent=2))
+                if result["status"] != "tested":
+                    raise SystemExit(1)
             elif a.skills_cmd == "sync":
                 document = skills_registry.sync()
                 print(json.dumps(document, indent=2) if a.json else f"synced {len(document['skills'])} skills")
@@ -275,10 +295,10 @@ def main():
                 if a.json:
                     print(json.dumps(rows, indent=2))
                 else:
-                    print("id\tstate\ttrust\troles\tl0/l2\tversion")
+                    print("id\tstate\ttrust\troles\tl0/l2\tversion\tstale")
                     for skill_id, record in sorted(rows.items()):
                         print(f"{skill_id}\t{record['state']}\t{record['trust']}\t{','.join(record['roles'])}\t"
-                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}")
+                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}\t{record.get('stale', False)}")
             elif a.skills_cmd == "show":
                 record = skills_registry.load()["skills"].get(a.id)
                 if record is None:
@@ -435,7 +455,8 @@ def main():
         if a.skills:
             from . import skill_scorecard
             card = {"by_skill": skill_scorecard.by_skill(scorecard.STATE, skill_group_by),
-                    "jev_by_role": skill_scorecard.jev_metrics(scorecard.STATE)}
+                    "jev_by_role": skill_scorecard.jev_metrics(scorecard.STATE),
+                    "economy": skill_scorecard.build(scorecard.STATE)}
             if a.marginal:
                 card["marginal"] = skill_scorecard.marginal(
                     scorecard.STATE, a.marginal, skill_group_by,
@@ -484,6 +505,7 @@ def main():
                 print("executor/class\thandoffs")
                 for key, value in handoffs_by_executor.items(): print(f"{key}\t{value}")
                 print(promotion.format_report(card["promotion"]))
+                print(skill_scorecard.format_report(card["skills"]))
         elif a.handoffs:
             from . import handoff_scorecard
             card = handoff_scorecard.build(root=scorecard.STATE, cfg=Pool().cfg)
