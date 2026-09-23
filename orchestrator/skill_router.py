@@ -29,7 +29,7 @@ def select(task, role, cfg=None, history=None):
     """Return the smallest deterministic set; history is reserved for Stage 4."""
     del history
     records = skills_registry.load().get("skills", {})
-    registry_role = "execute" if role == "codex_execute" else role
+    registry_role = {"codex_execute": "execute", "security_review": "review"}.get(role, role)
     eligible = {
         skill_id: record for skill_id, record in records.items()
         if record.get("state") == "active" and registry_role in (record.get("roles") or [])

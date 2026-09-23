@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -56,6 +56,7 @@ class SkillRecord:
     updated_at: str
     source: str
     provenance_info: dict[str, Any] | None = None
+    conflicts_with: list[str] = field(default_factory=list)
 
 
 def _now() -> str:
@@ -251,6 +252,7 @@ def sync(root: Path = STATE, skills_dir: Path = REPO / "skills") -> dict[str, An
         created, updated = _git_dates(skill_file)
         record = SkillRecord(
             id=skill_id, version=version, content_hash=version,
+            conflicts_with=_list(meta.get("conflicts_with")),
             name=str(meta.get("name", directory_name)), description=str(meta.get("description", "")),
             provenance="builtin", trust=entry["trust"], state=entry["state"],
             roles=_roles(role, meta.get("roles")), task_classes=_list(meta.get("task_classes"), ["*"]),

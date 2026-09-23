@@ -1333,6 +1333,35 @@ class ContextTelemetry(unittest.TestCase):
         self.assertEqual(len(spawn._PACKET_BUILD_META), spawn._PACKET_BUILD_META_MAX)
         self.assertNotIn(first_version, spawn._PACKET_BUILD_META)
 
+    def test_packet_header_carries_specialist_name_in_active_only(self):
+        task = {"id": "T-specialist-header", "title": "header", "spec": "s", "acceptance": [],
+                "scope": [], "role": "execute", "tier": "sonnet", "constraints": {}}
+        records = {"executor/implement-spec": {"state": "active", "roles": ["execute"],
+                    "task_classes": ["*"], "version": "v1", "triggers": [], "tools": []},
+                   "review/adversarial-review": {"state": "active", "roles": ["review"],
+                    "task_classes": ["*"], "version": "v1", "triggers": [], "tools": []}}
+        with mock.patch.object(spawn.skills_registry, "load", return_value={"skills": records}), \
+                mock.patch.object(spawn.skills_registry, "render", return_value="Skill procedure"), \
+                mock.patch.object(spawn.skill_scorecard, "selection_rows", return_value=30), \
+                mock.patch.object(spawn.skill_scorecard, "recovery_rate", return_value=0), \
+                mock.patch.object(spawn, "scoped_diff", return_value="diff"), \
+                mock.patch.object(spawn, "_base_sha", return_value="head"), \
+                mock.patch.object(spawn.decision_log, "record"):
+            for mode in ("off", "shadow", "active"):
+                cfg = {"skills": {"mode": mode}, "context_router": {"mode": "off"}}
+                execute = spawn.packet(task, TMP, cfg=cfg)
+                for role in ("review", "security_review"):
+                    review = spawn.review_packet({**task, "role": role}, task, cfg=cfg)
+                    with self.subTest(mode=mode, role=role):
+                        self.assertEqual("specialist: " in review.splitlines()[0], mode == "active")
+                        if mode == "active":
+                            self.assertIn("specialist: " + role, review.splitlines()[0])
+                            self.assertIn("## scope\n", review)
+                            self.assertIn("## diff\n", review)
+                self.assertEqual("specialist: " in execute.splitlines()[0], mode == "active")
+                if mode == "active":
+                    self.assertIn("specialist: execute+implement-spec", execute.splitlines()[0])
+
     def _active_choice(self):
         return {"selected": ["executor/implement-spec"], "mandatory": ["executor/implement-spec"],
                 "ambiguous": [], "tokens_selected_l0": 2, "tokens_selected_l2": 3,

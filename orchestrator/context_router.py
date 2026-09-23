@@ -91,12 +91,14 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
     return "LONG", "ambiguous"
 
 
-def route(task, candidates, *, role, head_sha=None, cfg=None):
+def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=()):
     profile = role if role in ("execute", "review", "security_review", "planner", "scout") else "execute"
     failing_ids = test_ids((task.get("resume_hint") or {}).get("failures")) or []
     items, ambiguous = [], []
     for ev in candidates:
         level, reason = _choice(task, ev, profile, head_sha, cfg, failing_ids)
+        if ev.source_type in required_types and LEVELS.index(level) < LEVELS.index("LONG"):
+            level, reason = "LONG", "skill_required_context"
         full_tokens = len(_text(ev, "FULL")) // 4
         routed_tokens = len(_text(ev, level)) // 4
         items.append(Routed(ev.id, level, reason, full_tokens, routed_tokens))

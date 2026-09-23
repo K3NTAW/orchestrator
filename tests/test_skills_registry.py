@@ -36,6 +36,16 @@ class SkillsRegistryTests(unittest.TestCase):
             self.assertEqual("builtin", record["provenance"])
             self.assertEqual("active", record["state"])
 
+    def test_conflicts_with_parsed_from_frontmatter(self):
+        directory = self.make_skill()
+        (directory / "SKILL.md").write_text(
+            "---\nname: finder\nconflicts_with: [scout/other, scout/third]\n---\nFind things.\n")
+        record = skills_registry.sync(self.root, self.skills)["skills"]["scout/finder"]
+        self.assertEqual(record["conflicts_with"], ["scout/other", "scout/third"])
+        self.make_skill(name="plain")
+        plain = skills_registry.sync(self.root, self.skills)["skills"]["scout/plain"]
+        self.assertEqual(plain["conflicts_with"], [])
+
     def test_triggers_parsed_from_use_when_clause(self):
         self.make_skill(description="Find callers. Use when tracing risky symbols and configs.")
         record = skills_registry.sync(self.root, self.skills)["skills"]["scout/finder"]

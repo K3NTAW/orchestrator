@@ -3,7 +3,7 @@ with the role's .mcp.json and role-scoped secrets. Never shares or extracts cred
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, skill_scorecard, tool_catalog, skills_registry
+from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
 _MEMORY_RECALL = None
@@ -40,9 +40,11 @@ def _prepare_skills(task, role, cfg):
     mode = promotion.mode("skill_routing", cfg)
     if mode not in ("shadow", "active"):
         return None
-    choice = skill_router.select(task, role, cfg=cfg)
+    composition = specialist.compose(task, role, cfg=cfg)
+    choice = composition.decision
+    choice["_specialist"] = composition
     choice["mode"] = mode
-    if role not in ("execute", "review", "codex_execute"):
+    if role not in ("execute", "review", "security_review", "codex_execute"):
         choice["mode"] = "shadow"
     if choice["mode"] == "active":
         rows = skill_scorecard.selection_rows(STATE, role, _SKILL_EVIDENCE_WINDOW_S)
@@ -103,7 +105,8 @@ def _skill_routing(task, role, cfg, exposure, choice=None):
                         reason=choice["reason"], mode=choice["mode"],
                         extra={key: choice[key] for key in ("tokens_exposed_l0", "tokens_selected_l0",
                                                             "tokens_selected_l2", "ambiguous")}
-                              | {"role": role, "demoted": choice["demoted"]})
+                              | {"role": role, "demoted": choice["demoted"],
+                                 "specialist": choice.get("specialist")})
     return {"skills_selected": presented,
             "skill_tokens_selected_l0": choice["tokens_selected_l0"],
             "skill_tokens_selected_l2": choice["tokens_selected_l2"],
@@ -360,7 +363,7 @@ def _memory_entries(path):
             for n, (i, title) in enumerate(starts)]
 
 
-def _shadow_route(task, candidates, *, role, head_sha, cfg):
+def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
     """Persist and route evidence for telemetry without changing packet bytes."""
     global _CONTEXT_ROUTER_ACTIVE_WARNED
     mode = promotion.mode("context_router", cfg)
@@ -372,7 +375,13 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg):
     try:
         pool = evidence.EvidencePool(task.get("parent") or task["id"])
         candidates = [pool.add(candidate) for candidate in candidates]
-        routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg)
+        composition = (skills or {}).get("_specialist")
+        if composition:
+            candidates = list({item.id: item for item in
+                               [*candidates, *composition.shared_evidence(task)]}.values())
+            candidates = composition.filter_evidence(candidates)
+        routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
+                                      required_types=composition.context_requirements if composition else ())
         decision_log.record(**context_router.decision_row(task, routed, mode=mode))
         return {
             "routed_tokens": routed.routed_tokens,
@@ -513,6 +522,10 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
         summary = value.get("summary", value) if isinstance(value, dict) else value
         evidence_lines.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
 
+    composition = (skills or {}).get("_specialist")
+    if composition and skills.get("mode") == "active":
+        evidence_lines.extend(f"- {item.id} {item.location}: {item.summary_short}"
+                              for item in composition.shared_evidence(task))
     objective = [str(task.get("title", ""))]
     if task.get("spec"):
         objective.append(f"- discovery: {task['spec']}")
@@ -568,7 +581,7 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
         candidates.append(evidence.make(
             "test_result", f"task:{task_id}:failures", failure_match.group(1),
             commit=merge_base, provenance="repo", task=task))
-    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg)
+    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
     dependencies = []
     for dependency_id in task.get("depends_on", []):
         try:
@@ -668,9 +681,14 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
 
 def packet(task, worktree, *, cfg=None, skills=None) -> str:
     """Build a bounded executor briefing with a verifiable provenance header."""
+    cfg = Pool().cfg if cfg is None else cfg
+    if skills is None:
+        skills = _prepare_skills(task, task.get("role", "execute"), cfg)
     body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
+    if skills and skills.get("mode") == "active" and skills.get("specialist"):
+        header += f" specialist: {skills['specialist']['name']}"
     # Account for the header itself, including a possible extra digit in n.
     over = len(header) + 1 + len(body) - 4800
     if over > 0:
@@ -715,6 +733,9 @@ def _acceptance_test_ids(acceptance):
 def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
+    cfg = Pool().cfg if cfg is None else cfg
+    if skills is None:
+        skills = _prepare_skills(task, task.get("role", "review"), cfg)
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
     raw_diff = scoped_diff(src)
@@ -787,11 +808,16 @@ def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
         sections.append(_section("fix-round context", [json.dumps(x, sort_keys=True) for x in comments] or ["(none)"]))
     else:
         comments = []
+    composition = (skills or {}).get("_specialist")
+    if composition and skills.get("mode") == "active":
+        shared = composition.shared_evidence(task)
+        sections.append(_section("evidence", [f"{item.id} {item.location}: {item.summary_short}"
+                                              for item in shared]))
     other_chars = len("\n".join(section for section in sections if section is not None)) + 1
     diff_heading_chars = len("## diff\n")
     configured_cap = cfg.get("limits", {}).get("review_diff_chars", 12000)
     diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
-    sections[3] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
+    sections[sections.index(None)] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
     candidates = []
@@ -813,7 +839,9 @@ def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
     shadow_meta = _shadow_route(task, candidates,
                                 role="security_review" if any(section.startswith("## security\n")
                                                                for section in sections) else "review",
-                                head_sha=_base_sha(src, wt), cfg=cfg)
+                                head_sha=_base_sha(src, wt), cfg=cfg, skills=skills)
+    if skills and skills.get("mode") == "active" and skills.get("specialist"):
+        role_source += f" specialist: {skills['specialist']['name']}"
     return _role_packet(body, _base_sha(src, wt),
                         f"task@{src.get('id', '(none)')} scoped-diff@HEAD{role_source}",
                         candidate_tokens=len(raw_diff) // 4, candidate_known=True,
