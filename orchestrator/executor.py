@@ -313,6 +313,8 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
     allocation_mode = pool.cfg.get("allocation", {}).get("mode", "shadow")
     try:
         t = bus.get(task_id)
+        if (t.get("constraints") or {}).get("goal"):
+            return {"status": "refused", "reason": "goal container"}
         previous = t.get("result")
         if previous is not None and (t.get("status") == "done" or t.get("merged_into") is not None):
             return {"status": "refused", "reason":
@@ -542,6 +544,8 @@ def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):
     is supplied, the fix task owns execution status, reasons, holds, and hints.
     """
     t = bus.get(task_id)
+    if (t.get("constraints") or {}).get("goal"):
+        return {"status": "refused", "reason": "goal container"}
     if fix_round_task_id is not None:
         fix = bus.get(fix_round_task_id)
         t = {**t, "_run_task_id": fix_round_task_id,
