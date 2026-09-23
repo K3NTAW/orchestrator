@@ -284,14 +284,16 @@ def log_run(*, attempt=1, **fields):
         try:
             from . import decision_log, promotion, tool_catalog
             task = get(fields["task"])
-            mode = promotion.mode("tool_disclosure")
+            cfg = pool_config()
+            mode = promotion.mode("tool_disclosure", cfg)
             if mode in ("shadow", "active"):
                 choice = tool_catalog.minimal_set(task, "codex_execute")
                 decision_log.record(kind="tool_disclosure", subject=fields["task"],
                     candidates=["CODEX_TOOLS"], hard_constraints=choice["mandatory"],
                     deterministic={"task_class": tool_catalog._task_class(task), "role": "codex_execute",
                                    "kept": choice["keep"], "dropped": choice["drop"],
-                                   "tokens_disclosed": 0, "tokens_minimal": 0},
+                                   "tokens_disclosed": 0, "tokens_minimal": 0,
+                                   **tool_catalog.cache_fields(task, "codex_execute", choice["keep"], cfg)},
                     selected="allowlist unchanged (shadow)", reason=choice["reason"], mode=mode)
                 tool_context = {"tool_tokens_disclosed": 0, "tool_tokens_minimal": 0}
         except Exception:

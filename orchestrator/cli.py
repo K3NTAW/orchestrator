@@ -99,6 +99,49 @@ def cost(by):
     return dict(agg)
 
 
+def _disclosure_cache_summary(root, days):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from . import decision_log
+    import time
+    cutoff = time.time() - days * 86400
+    rows = decision_log.read_all(root=root, since_ts=cutoff)
+    latest = {}
+    for row in sorted(rows, key=lambda row: row.get("ts", 0)):
+        data = row.get("deterministic") or {}
+        if (row.get("kind") != "tool_disclosure" or "kept" not in data
+                or row.get("reason") == "hidden_tool_requested"):
+            continue
+        latest[(data.get("role", "unknown"), row.get("subject"))] = row
+    groups = {}
+    for (role, _), row in latest.items():
+        groups.setdefault(role, []).append(row)
+    report = []
+    for role, group in sorted(groups.items()):
+        measured = [row["deterministic"] for row in group
+                    if "stable_catalog_chars" in row["deterministic"]
+                    and "dynamic_chars" in row["deterministic"]]
+        flags = [row["deterministic"].get("changed_since_previous") for row in group]
+        known = sum(flag is True or flag is False for flag in flags)
+        dates = [datetime.fromtimestamp(row["ts"], ZoneInfo("Europe/Zurich")).date().isoformat()
+                 for row in group]
+        report.append({"role": role, "rows": len(group), "measured_rows": len(measured),
+                       "date_range": [min(dates), max(dates)],
+                       "mean_stable_catalog_chars": (sum(d["stable_catalog_chars"] for d in measured)
+                                                     / len(measured) if measured else None),
+                       "mean_dynamic_chars": (sum(d["dynamic_chars"] for d in measured)
+                                              / len(measured) if measured else None),
+                       "changed_share": sum(flag is True for flag in flags) / known if known else None,
+                       "none_count": sum(flag is None for flag in flags)})
+    return report
+
+
+def _format_disclosure_cache(rows):
+    if not rows:
+        return "no tool_disclosure rows in range"
+    return "\n".join(" ".join(f"{key}={value}" for key, value in row.items()) for row in rows)
+
+
 def _scorecard_measurement_totals(card, by):
     totals = {}
     for field in ("calls", "blocked", "turns"):
@@ -173,6 +216,7 @@ def main():
     sc.add_argument("--reads", action="store_true")
     sc.add_argument("--handoffs", action="store_true")
     sc.add_argument("--economy", action="store_true")
+    sc.add_argument("--disclosure-cache", action="store_true")
     sc.add_argument("--overhead", action="store_true")
     sc.add_argument("--skills", action="store_true")
     sc.add_argument("--group-by")
@@ -357,6 +401,8 @@ def main():
                          else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
+        if a.disclosure_cache and not a.economy:
+            ap.error("--disclosure-cache requires --economy")
         if a.cache_shadow and not a.context:
             ap.error("--cache-shadow requires --context")
         if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache, a.memory)) > 1:
@@ -619,7 +665,10 @@ def main():
         if document["passed"] != document["total"]:
             raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.memory:
+        if a.disclosure_cache:
+            card = _disclosure_cache_summary(a.root or scorecard.STATE, a.days)
+            print(json.dumps(card, indent=1) if a.json else _format_disclosure_cache(card))
+        elif a.memory:
             from . import memory_scorecard
             card = memory_scorecard.build(a.root or scorecard.STATE, a.days)
             print(json.dumps(card, indent=1) if a.json else memory_scorecard.format_report(card))

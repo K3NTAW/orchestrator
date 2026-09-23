@@ -71,3 +71,23 @@ class ToolCatalogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DisclosureCache(unittest.TestCase):
+    def test_cache_view_stable_across_tasks_and_changed_flag_none_first(self):
+        from orchestrator import tool_catalog as catalog
+        role = "execute"
+        first = catalog.minimal_set({"scope": ["one.py"]}, role)["keep"]
+        second = catalog.minimal_set({"scope": ["two.md"]}, role)["keep"]
+        before = catalog.level0(catalog.disclosed(role))
+        one = catalog.cache_view(role, first, None)
+        two = catalog.cache_view(role, second, {"deterministic": {"kept": first}})
+        self.assertEqual(one["stable_catalog_chars"], len(before))
+        self.assertEqual(one["stable_catalog_chars"], two["stable_catalog_chars"])
+        self.assertEqual(before, catalog.level0(catalog.disclosed(role)))
+        self.assertIsNone(one["changed_since_previous"])
+        self.assertTrue(two["changed_since_previous"])
+        self.assertFalse(catalog.cache_view(role, first[::-1],
+            {"deterministic": {"kept": first}})["changed_since_previous"])
+        self.assertEqual(two["dynamic_chars"], len(catalog.level2(second)))
+        self.assertGreater(catalog.cache_view("codex_execute", ["CODEX_TOOLS"], None)["stable_catalog_chars"], 0)

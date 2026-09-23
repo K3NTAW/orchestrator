@@ -728,3 +728,38 @@ class Cli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DisclosureCacheScorecard(unittest.TestCase):
+    def test_scorecard_disclosure_cache_summary(self):
+        import contextlib
+        import io
+        import json
+        import sys
+        from datetime import datetime
+        from unittest import mock
+        from zoneinfo import ZoneInfo
+        from orchestrator import cli, decision_log
+        stamp = datetime(2026, 9, 23, 0, 30, tzinfo=ZoneInfo("Europe/Zurich")).timestamp()
+        def row(subject, changed, stable, dynamic, offset=0):
+            return {"kind": "tool_disclosure", "subject": subject, "ts": stamp + offset,
+                    "deterministic": {"role": "codex_execute", "kept": ["CODEX_TOOLS"],
+                    "stable_catalog_chars": stable, "dynamic_chars": dynamic,
+                    "changed_since_previous": changed}}
+        rows = [row("one", True, 999, 999), row("one", None, 10, 20, 1),
+                row("two", True, 20, 30), row("three", False, 30, 40)]
+        def run(extra=()):
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", ["orchestrator", "scorecard", "--economy", "--disclosure-cache", *extra]), contextlib.redirect_stdout(out):
+                cli.main()
+            return out.getvalue()
+        with mock.patch.object(decision_log, "read_all", return_value=rows) as read:
+            output = run()
+            for field in ("rows=3", "measured_rows=3", "2026-09-23", "mean_stable_catalog_chars=20.0",
+                          "mean_dynamic_chars=30.0", "changed_share=0.5", "none_count=1", "role=codex_execute"):
+                self.assertIn(field, output)
+            parsed = json.loads(run(["--json"]))
+            self.assertEqual(parsed[0]["date_range"], ["2026-09-23", "2026-09-23"])
+            self.assertIn("since_ts", read.call_args.kwargs)
+        with mock.patch.object(decision_log, "read_all", return_value=[]):
+            self.assertEqual(run().strip(), "no tool_disclosure rows in range")

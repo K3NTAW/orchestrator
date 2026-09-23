@@ -37,10 +37,10 @@ class RoutedPacket:
     invalid_config: bool = False
 
 
-def cache_mode(cfg):
-    mode = ((cfg or {}).get("context_router") or {}).get("cache_mode", "off")
+def cache_mode(cfg, section="context_router"):
+    mode = ((cfg or {}).get(section) or {}).get("cache_mode", "off")
     if mode not in ("off", "shadow", "active"):
-        raise ValueError(f"unknown context_router.cache_mode: {mode}")
+        raise ValueError(f"unknown {section}.cache_mode: {mode}")
     return mode
 
 

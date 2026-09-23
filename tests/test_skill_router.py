@@ -100,3 +100,17 @@ class SkillRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillCacheCatalog(unittest.TestCase):
+    def test_catalog_block_sorted_and_stable(self):
+        from orchestrator import skill_router
+        records = {
+            "zeta": {"state": "active", "roles": ["execute"], "triggers": ["z", "a"]},
+            "alpha": {"state": "active", "roles": ["execute"], "triggers": ["docs"]},
+            "other": {"state": "active", "roles": ["review"], "triggers": []},
+            "disabled": {"state": "shadow", "roles": ["execute"]},
+        }
+        block = skill_router.catalog_block("execute", records)
+        self.assertEqual(block, "- alpha — triggers: docs\n- zeta — triggers: a, z")
+        self.assertEqual(block, skill_router.catalog_block("codex_execute", {"skills": dict(reversed(list(records.items())))}))

@@ -2302,3 +2302,69 @@ class SteeringResume(unittest.TestCase):
         self.assertEqual(bus.get(tid)["packet_meta"], {"steering_count": 1})
         self.assertEqual(registry.get(tid)["status"], "running")
         self.assertEqual(registry.get(tid)["epoch"], 2)
+
+
+class DisclosureCachePresentation(unittest.TestCase):
+    def test_skill_catalog_block_only_in_active_cache_mode_and_chars_recorded(self):
+        import copy
+        from types import SimpleNamespace
+        from unittest import mock
+        from orchestrator import spawn, skill_router, decision_log
+        records = {"sample": {"state": "active", "roles": ["execute"], "triggers": ["example"]}}
+        decision = {"selected": ["sample"], "mandatory": ["sample"], "candidates": ["sample"],
+                    "triggers": {}, "task_class": "feature", "rejected": [], "reason": "fixture",
+                    "tokens_exposed_l0": 1, "tokens_selected_l0": 1, "tokens_selected_l2": 2, "ambiguous": []}
+        task = {"id": "cache-skills"}
+        catalog = skill_router.catalog_block("execute", records)
+        for mode in ("shadow", "active", "off", "invalid"):
+            cfg = {"skills": {"mode": "active", "cache_mode": mode}}
+            with mock.patch.object(spawn.harness_depth, "active", return_value=False), \
+                 mock.patch.object(spawn.specialist, "compose", return_value=SimpleNamespace(decision=copy.deepcopy(decision))), \
+                 mock.patch.object(spawn, "_skill_records", return_value=records), \
+                 mock.patch.object(spawn.skills_registry, "render", return_value="selected body"), \
+                 mock.patch.object(spawn.skill_scorecard, "selection_rows", return_value=30), \
+                 mock.patch.object(spawn.skill_scorecard, "recovery_rate", return_value=0), \
+                 mock.patch.object(decision_log, "record") as record:
+                choice = spawn._prepare_skills(task, "execute", cfg)
+                spawn._skill_routing(task, "execute", cfg, {}, choice)
+            self.assertEqual(catalog in choice["section"], mode == "active")
+            if mode == "active":
+                self.assertLess(choice["section"].index(catalog), choice["section"].index("selected body"))
+            data = record.call_args.kwargs["deterministic"]
+            self.assertEqual(data["catalog_chars"], len(catalog))
+            self.assertEqual(data["selected_chars"], len("selected body"))
+            self.assertEqual(data["invalid_config"], mode == "invalid")
+        with mock.patch.object(spawn.specialist, "compose") as compose:
+            self.assertIsNone(spawn._prepare_skills(task, "execute", {"skills": {"mode": "off", "cache_mode": "active"}}))
+            compose.assert_not_called()
+
+    def test_active_tool_cache_mode_puts_stable_catalog_before_schemas_only_in_active(self):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+        from orchestrator import spawn, tool_catalog, decision_log
+        task = {"id": "cache-tools", "title": "Example", "role": "execute", "scope": [], "acceptance": []}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}), \
+             mock.patch.object(spawn, "git", return_value=SimpleNamespace(stdout="example")), \
+             mock.patch.object(spawn, "_shadow_route", return_value={}), \
+             mock.patch.object(decision_log, "record") as record, \
+             mock.patch.object(decision_log, "last_row", return_value=None):
+            for mode in ("active", "shadow", "off", "invalid"):
+                cfg = {"tool_disclosure": {"mode": "shadow", "cache_mode": mode}, "memory": {"mode": "off"}}
+                body, _ = spawn._packet_body(task, directory, cfg=cfg, provider="claude")
+                self.assertEqual("## tools\n" in body, mode == "active")
+                if mode == "active":
+                    stable = tool_catalog.level0(tool_catalog.disclosed("execute"))
+                    dynamic = tool_catalog.level2(tool_catalog.minimal_set(task, "execute")["keep"])
+                    self.assertLess(body.index(stable), body.index(dynamic))
+                spawn._shadow_tool_disclosure(task, "execute", cfg)
+                data = record.call_args.kwargs["deterministic"]
+                if mode in ("active", "shadow"):
+                    self.assertEqual(data["stable_catalog_chars"], len(tool_catalog.level0(tool_catalog.disclosed("execute"))))
+                    self.assertIsNone(data["changed_since_previous"])
+                elif mode == "invalid":
+                    self.assertTrue(data["invalid_config"])
+            cfg["tool_disclosure"] = {"mode": "off", "cache_mode": "active"}
+            body, _ = spawn._packet_body(task, directory, cfg=cfg, provider="claude")
+            self.assertNotIn("## tools\n", body)

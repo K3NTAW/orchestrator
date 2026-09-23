@@ -10,7 +10,7 @@ tiers and scores; extra carries legacy_ids, tokens_legacy, tokens_tiered and hot
 import json
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -314,3 +314,68 @@ def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):
     except FileNotFoundError:
         pass
     return result()
+
+
+def _tail_lines(path, limit=200, max_bytes=2 * 1024 * 1024):
+    """Read a bounded suffix, never loading an entire decision archive."""
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, 2)
+            position = stream.tell()
+            chunks, size, newlines = [], 0, 0
+            while position and size < max_bytes and newlines <= limit:
+                count = min(position, 8192, max_bytes - size)
+                position -= count
+                stream.seek(position)
+                chunk = stream.read(count)
+                chunks.append(chunk)
+                size += len(chunk)
+                newlines += chunk.count(b"\n")
+            data = b"".join(reversed(chunks))
+            if position:
+                data = data.partition(b"\n")[2]
+            return data.splitlines()[-limit:]
+    except FileNotFoundError:
+        return []
+
+
+def last_row(kind, *, role, exclude_subject, require_key):
+    """Latest qualifying row in a 200-line, two-local-day bounded tail.
+
+    The current schedlog uses one decisions.jsonl archive; date filtering keeps
+    that layout compatible with daily decision files without changing writers.
+    """
+    today = datetime.now(ZoneInfo("Europe/Zurich")).date()
+    dates = (today, today - timedelta(days=1))
+    paths = [_directory() / "decisions.jsonl"]
+    paths.extend(_directory() / f"decisions-{day.isoformat()}.jsonl" for day in dates)
+    rows = []
+    remaining = 200
+    for path in paths:
+        if not remaining:
+            break
+        lines = _tail_lines(path, limit=remaining)
+        remaining -= len(lines)
+        for line in lines:
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    continue
+                day = datetime.fromtimestamp(float(row["ts"]), ZoneInfo("Europe/Zurich")).date()
+                if day in dates:
+                    rows.append(row)
+            except (ValueError, KeyError, TypeError, OSError, OverflowError):
+                continue
+    for row in sorted(rows, key=lambda row: row["ts"], reverse=True)[:200]:
+        if (row.get("kind") != kind or row.get("subject") == exclude_subject
+                or row.get("reason") == "hidden_tool_requested"
+                or (row.get("deterministic") or {}).get("role") != role):
+            continue
+        value = row
+        for key in require_key.split("."):
+            if not isinstance(value, dict) or key not in value:
+                break
+            value = value[key]
+        else:
+            return row
+    return None

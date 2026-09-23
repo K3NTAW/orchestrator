@@ -357,3 +357,26 @@ class ContextLog(BusSandbox):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolDisclosureCacheRows(unittest.TestCase):
+    def test_tool_disclosure_row_carries_cache_view_fields(self):
+        from unittest import mock
+        from orchestrator import bus, decision_log, tool_catalog
+        task = {"id": "cache-task", "scope": ["example.py"]}
+        for mode in ("shadow", "active", "invalid", "off"):
+            cfg = {"tool_disclosure": {"mode": "shadow", "cache_mode": mode}}
+            with mock.patch.object(bus, "get", return_value=task), \
+                 mock.patch.object(bus, "pool_config", return_value=cfg), \
+                 mock.patch.object(decision_log, "last_row", return_value=None), \
+                 mock.patch.object(decision_log, "record") as record:
+                bus.log_run(task=task["id"], provider="codex", role="execute", outcome="ok")
+            data = next(call.kwargs["deterministic"] for call in record.call_args_list
+                        if call.kwargs.get("kind") == "tool_disclosure")
+            if mode in ("shadow", "active"):
+                for key, value in tool_catalog.cache_view("codex_execute", ["CODEX_TOOLS"], None).items():
+                    self.assertEqual(data[key], value)
+            else:
+                self.assertNotIn("stable_catalog_chars", data)
+                if mode == "invalid":
+                    self.assertTrue(data["invalid_config"])

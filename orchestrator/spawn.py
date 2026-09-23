@@ -60,6 +60,23 @@ def _prepare_skills(task, role, cfg):
                           f"(role={role}, rows={rows}, recovery={recovery:.3f})")
     choice.update(_skills_section(choice) if choice["mode"] == "active"
                   else {"section": "", "presented": [], "demoted": [], "skill_tokens_presented_l2": 0})
+    catalog = skill_router.catalog_block(role, _skill_records())
+    choice["catalog_chars"] = len(catalog)
+    choice["selected_chars"] = 0
+    for item in choice["selected"]:
+        try:
+            choice["selected_chars"] += len(skills_registry.render(item, 2))
+        except (KeyError, OSError):
+            # Missing registry bodies must not make shadow telemetry block dispatch.
+            continue
+    try:
+        cache_mode = context_router.cache_mode(cfg, "skills")
+        choice["invalid_config"] = False
+    except ValueError:
+        cache_mode, choice["invalid_config"] = "off", True
+    choice["cache_mode"] = cache_mode
+    if cache_mode == "active" and catalog:
+        choice["section"] = "## skills\n" + catalog + "\n\n" + choice["section"].removeprefix("## skills\n")
     return choice
 
 
@@ -106,7 +123,9 @@ def _skill_routing(task, role, cfg, exposure, choice=None):
     decision_log.record("skill_selection", task["id"], role=role, candidates=choice["candidates"],
                         hard_constraints=choice["mandatory"],
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
-                                       "mandatory": choice["mandatory"]},
+                                       "mandatory": choice["mandatory"], "role": role,
+                                       **{key: choice[key] for key in ("catalog_chars", "selected_chars",
+                                                                      "cache_mode", "invalid_config") if key in choice}},
                         selected=presented, rejected=choice["rejected"],
                         reason=choice["reason"], mode=choice["mode"],
                         jev=choice.get("jev"),
@@ -494,8 +513,9 @@ def _shadow_tool_disclosure(task, role, cfg, skills=None):
         hard_constraints=choice["mandatory"],
         selected=selected if mode == "active" else "allowlist unchanged (shadow)",
         deterministic={"task_class": tool_catalog._task_class(task), "role": role,
-                       "kept": choice["keep"], "dropped": choice["drop"],
-                       "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens},
+                       "kept": selected, "dropped": [tool for tool in offered if tool not in selected],
+                       "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens,
+                       **tool_catalog.cache_fields(task, role, selected, cfg)},
         reason=reason, mode=mode, extra=extra)
     return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens,
             "tool_allowlist": ",".join(selected) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
@@ -730,6 +750,17 @@ def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tup
     ]
     if skills and skills.get("section"):
         sections.insert(0, ("skills", skills["section"].removeprefix("## skills\n").splitlines()))
+    try:
+        tool_cache_mode = context_router.cache_mode(cfg, "tool_disclosure")
+    except ValueError:
+        tool_cache_mode = "off"
+    if tool_cache_mode == "active" and promotion.mode("tool_disclosure", cfg) != "off":
+        tool_role = "codex_execute" if provider == "codex" else task.get("role", "execute")
+        kept = tool_catalog.minimal_set(task, tool_role)["keep"]
+        if (skills or {}).get("mode") == "active" and promotion.mode("tool_disclosure", cfg) == "active":
+            kept = ((skills or {}).get("specialist") or {}).get("tools", kept)
+        sections.insert(0, ("tools", [tool_catalog.level0(tool_catalog.disclosed(tool_role)),
+                                      tool_catalog.level2(kept)]))
     candidates = []
     task_id = task.get("id", "(none)")
     if task.get("spec"):

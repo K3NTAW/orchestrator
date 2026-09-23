@@ -250,3 +250,43 @@ class GroupedSteeringHistoryTests(unittest.TestCase):
             with patch.object(decision_log.json, "loads", wraps=json.loads) as loads:
                 self.assertEqual(decision_log.recent(root=root, subjects=["new"], limit=1), {"new": [newest]})
             self.assertLessEqual(loads.call_count, 2)
+
+
+class DisclosureHistory(unittest.TestCase):
+    def test_last_row_bounded_same_role_different_subject_with_kept(self):
+        import json
+        import tempfile
+        from datetime import datetime, timedelta
+        from pathlib import Path
+        from unittest import mock
+        from zoneinfo import ZoneInfo
+        from orchestrator import decision_log as log
+        today = datetime.now(ZoneInfo("Europe/Zurich")).replace(hour=12, minute=0, second=0)
+        def row(subject, role="execute", **extra):
+            return {"ts": today.timestamp(), "kind": "tool_disclosure", "subject": subject,
+                    "deterministic": {"role": role, "kept": ["Read"]}, **extra}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(log.schedlog, "SCHED_DIR", Path(directory)):
+            path = Path(directory) / "decisions.jsonl"
+            previous = row("previous", ts=(today - timedelta(days=1)).timestamp())
+            rows = [row("old", ts=(today - timedelta(days=2)).timestamp()), previous,
+                    row("other", role="review"), row("current"),
+                    row("escalation", reason="hidden_tool_requested"),
+                    row("missing", deterministic={"role": "execute"})]
+            path.write_text("\n".join(map(json.dumps, rows)) + "\nmalformed\n")
+            args = dict(role="execute", exclude_subject="current", require_key="deterministic.kept")
+            self.assertEqual(log.last_row("tool_disclosure", **args), previous)
+            with path.open("a") as stream:
+                stream.write((json.dumps(row("current")) + "\n") * 200)
+            self.assertIsNone(log.last_row("tool_disclosure", **args))
+            path.write_text(json.dumps(rows[0]) + "\n")
+            self.assertIsNone(log.last_row("tool_disclosure", **args))
+            path.unlink()
+            (Path(directory) / f"decisions-{today.date() - timedelta(days=1)}.jsonl").write_text(json.dumps(previous))
+            self.assertEqual(log.last_row("tool_disclosure", **args), previous)
+
+    def test_bounded_keeps_kept_list_and_char_fields(self):
+        from orchestrator import decision_log
+        row = {"deterministic": {"kept": [f"tool_{index}" for index in range(200)],
+               "stable_catalog_chars": 4200, "dynamic_chars": 27000,
+               "changed_since_previous": False, "catalog_chars": 5100, "selected_chars": 1234}}
+        self.assertEqual(decision_log._bounded(row), row)
