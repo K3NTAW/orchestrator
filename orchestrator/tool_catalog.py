@@ -176,13 +176,18 @@ def cache_view(role, keep, previous_row):
 
 def cache_fields(task, role, keep, cfg):
     """Attach optional cache measurements to either disclosure writer."""
-    from . import context_router, decision_log
-    try:
-        mode = context_router.cache_mode(cfg, "tool_disclosure")
-    except ValueError:
-        return {"cache_mode": "off", "invalid_config": True}
-    if mode == "off":
-        return {}
+    from . import STATE, context_router, decision_log
+    data = (cfg.get("_cache_decisions") or {}).get("tool_disclosure")
+    if data is None:
+        try:
+            configured = context_router.cache_mode(cfg, "tool_disclosure")
+            mode, reason = context_router.effective_cache_mode(cfg, "tool_disclosure", root=STATE)
+        except ValueError:
+            return {"cache_mode": "off", "invalid_config": True}
+        data = {"configured_cache_mode": configured, "cache_mode": mode,
+                "refused_reason": reason, "invalid_config": False}
+    if data["cache_mode"] == "off":
+        return data if data.get("invalid_config") else {}
     previous = decision_log.last_row("tool_disclosure", role=role,
         exclude_subject=task.get("id"), require_key="deterministic.kept")
-    return {**cache_view(role, keep, previous), "cache_mode": mode, "invalid_config": False}
+    return {**cache_view(role, keep, previous), **data}

@@ -1,10 +1,11 @@
 """Deterministic steering from stale.evidence() and observable worker state."""
-import ast
-import fnmatch
 import hashlib
 import json
 import subprocess
 from pathlib import Path
+
+from .scopes import matches, safe_scope, read_scope
+from . import stale
 
 DEFAULTS = {"mode": "shadow", "stuck_after_s": 900, "out_of_scope_events": 3,
             "min_interval_s": 1800}
@@ -18,62 +19,6 @@ def mode(cfg):
     value = section.get("mode", "shadow")
     return value if value in ("off", "shadow", "active") else "off"
 
-
-def matches(path, entries):
-    return any(entry in (".", "./") or (fnmatch.fnmatchcase(path, entry) if any(c in entry for c in "*?[")
-               else path == entry.rstrip("/") or path.startswith(entry.rstrip("/") + "/"))
-               for entry in entries)
-
-
-
-def safe_scope(task, worktree=None):
-    """Scope entries contained in the worktree, including resolved symlinks."""
-    worktree = worktree or task.get("worktree")
-    if not worktree:
-        return list(task.get("scope", []))
-    root = Path(worktree).resolve()
-    entries = []
-    for value in task.get("scope", []):
-        entry = str(value)
-        try:
-            (root / entry).resolve().relative_to(root)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if Path(entry).is_absolute() or ".." in Path(entry).parts:
-            continue
-        entries.append(entry)
-    return entries
-
-
-def read_scope(task, worktree=None):
-    """Shared packet/policy scope: tests, scope parents and contained imports."""
-    scope = safe_scope(task, worktree)
-    paths = {"tests/"}
-    paths.update(str(Path(p).parent) + ("/" if str(Path(p).parent) != "." else "")
-                 for p in scope)
-    if worktree or task.get("worktree"):
-        wt = Path(worktree or task["worktree"]).resolve()
-        for entry in scope:
-            path = wt / entry
-            if path.suffix != ".py" or not path.is_file():
-                continue
-            try:
-                tree = ast.parse(path.read_text(errors="replace"))
-            except (OSError, SyntaxError):
-                continue
-            for node in tree.body:
-                names = ([a.name for a in node.names] if isinstance(node, ast.Import) else
-                         [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
-                for name in filter(None, names):
-                    stem = Path(*name.split("."))
-                    for candidate in (wt / stem.with_suffix(".py"), wt / stem / "__init__.py"):
-                        try:
-                            candidate.resolve().relative_to(wt)
-                        except (OSError, RuntimeError, ValueError):
-                            continue
-                        if candidate.is_file():
-                            paths.add(str(candidate.relative_to(wt)))
-    return sorted(paths)
 
 
 def _git(task, *args):
@@ -156,6 +101,12 @@ def evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, cr
         result["evidence"] = {"changed_paths": changed, "outside_paths": outside,
                               "risk": stale_evidence["risk"], "gate_history": gate_history[-2:],
                               "critical": critical}
+        severity, severity_reasons = stale.severity(task, stale_evidence)
+        result["evidence"].update(stale_paths=stale_evidence["stale_paths"],
+                                  goal_head=stale_evidence.get("goal_head"),
+                                  severity=severity, severity_reasons=severity_reasons)
+        if severity == "high":
+            result["hold_after_gate"] = True
         trigger, details = None, []
         if security_changed:
             trigger, details = "security_concern", security_changed
@@ -167,8 +118,25 @@ def evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, cr
                         result["action"] = "cancel"
                 except (OSError, subprocess.TimeoutExpired, KeyError, ValueError):
                     result["reasons"].append("git_unavailable")
-        elif changed and stale_evidence["risk"] in ("medium", "high"):
-            trigger, details = "dependency_changed", changed
+        elif severity != "none":
+            result.update(trigger="stale_severity", severity=severity)
+            result["reasons"].append("stale_severity")
+            if severity in ("low", "unknown"):
+                return result
+            if severity == "medium" and not critical and settings.get("noncritical_medium_continue", True):
+                result["reasons"].append("noncritical")
+                return result
+            result["action"] = "steer"
+            result["message"] = "stale_severity: " + ", ".join(stale_evidence["stale_paths"]) + "; goal head " + str(stale_evidence.get("goal_head", "unknown"))
+            if severity == "high":
+                result["hold_after_gate"] = True
+                try:
+                    result["evidence"]["no_commits"] = no_commits(task)
+                    if result["evidence"]["no_commits"]:
+                        result["action"] = "cancel"
+                except (OSError, subprocess.TimeoutExpired, KeyError, ValueError):
+                    result["reasons"].append("git_unavailable")
+            return result
         elif (status == "running" and
               now - last_event_at >= settings["stuck_after_s"]):
             trigger, details = "stuck", ["no registry event since " + str(registry_doc["last_event_at"])]
@@ -186,10 +154,10 @@ def evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, cr
         return result
     except KeyError:
         return {**result, "action": "continue", "trigger": None, "message": None,
-                "reasons": ["missing_input"]}
+                "reasons": ["missing_input"], "hold_after_gate": False}
     except Exception:
         return {**result, "action": "continue", "trigger": None, "message": None,
-                "reasons": ["evaluation_error"]}
+                "reasons": ["evaluation_error"], "hold_after_gate": False}
 
 
 def evidence_hash(result):

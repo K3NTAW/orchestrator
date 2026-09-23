@@ -1148,3 +1148,60 @@ class Efficiency(unittest.TestCase):
         self.assertGreater(by_packet["pre-packet"]["findings_per_million_tokens"], 0)
         self.write_task("T-only", role="review", inputs=["T-root"], result={"verdict": "approve", "packet_version": "empty"})
         self.assertIsNone(scorecard.review_quality(self.root, by="packet_version")["empty"]["findings_per_million_tokens"])
+
+
+class HermesScorecard(unittest.TestCase):
+    def test_scorecard_hermes_table_has_every_p35_metric(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        expected = {
+            "accepted_goal_success", "first_pass_rate", "fix_round_rate", "tokens_per_accepted_goal",
+            "effective_uncached_tokens_per_accepted_goal", "usd_per_accepted_goal", "latency_per_accepted_goal",
+            "hot_memory_tokens", "retrieval_precision", "retrieval_usefulness", "compaction_count",
+            "cache_hit_ratio", "cache_read", "uncached", "cache_invalidations", "effective_context_cost",
+            "steering_rate", "steering_success", "cancellations", "partial_result_reuse", "fix_rounds_avoided",
+            "suspicious_context_detected", "false_positive_rate", "blocked_imports",
+            "orchestration_amplification", "orchestration_cost_share", "orchestration_latency_share"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            empty = scorecard.hermes(root)
+            self.assertEqual(set(empty["metrics"]), expected)
+            self.assertIsNone(empty["metrics"]["accepted_goal_success"])
+            for key in expected:
+                self.assertIn(key + "\t", scorecard.format_hermes(empty))
+            (root / "tasks").mkdir()
+            (root / "tasks/T-goal.json").write_text(json.dumps({"id": "T-goal", "role": "goal", "status": "done"}))
+            (root / "runs").mkdir()
+            (root / "runs/fixture.jsonl").write_text(json.dumps({"role": "execute", "goal_id": "T-goal",
+                "ts": time.time(), "provider": "claude", "input_uncached_tokens": 10,
+                "cache_read_tokens": 20, "cache_write_tokens": 4, "output_tokens": 2,
+                "usd": 3, "duration_s": 8}) + "\n")
+            report_path = root / "skills/quarantine/external/fixture/findings.json"
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text(json.dumps({"scan_overall": "suspicious", "risk": {"level": "medium"},
+                                               "inspected_at": "2026-09-20T12:00:00+02:00"}))
+            (root / "skills/state.json").write_text(json.dumps({"external/fixture": {"history": [
+                {"at": "2026-09-21T12:00:00+02:00", "to": "testing", "reason": "human-reviewed: safe documentation"}]}}))
+            values = scorecard.hermes(root)["metrics"]
+            self.assertEqual(values["accepted_goal_success"], 1)
+            self.assertEqual(values["effective_uncached_tokens_per_accepted_goal"], 27)
+            self.assertEqual(values["latency_per_accepted_goal"], 8)
+            self.assertEqual(values["cache_read"], 20)
+            self.assertEqual(values["false_positive_rate"], 1)
+            self.assertEqual(values["suspicious_context_detected"], 1)
+            self.assertEqual(values["blocked_imports"], 0)
+
+    def test_hermes_scorecard_exposes_cache_refusal_reasons(self):
+        from orchestrator import decision_log
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            decision_log.record("tool_disclosure", "T-refused", candidates=[], hard_constraints=[],
+                deterministic={"configured_cache_mode": "active", "cache_mode": "shadow",
+                               "refused_reason": "hermes_eval_missing_or_stale"},
+                selected="shadow", reason="cache_promotion_gate", mode="shadow", root=root)
+            card = scorecard.hermes(root)
+            self.assertEqual(card["cache_refusals"][0]["count"], 1)
+            self.assertIn("active->shadow:hermes_eval_missing_or_stale", scorecard.format_hermes(card))

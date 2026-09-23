@@ -35,13 +35,52 @@ class RoutedPacket:
     rules_version: str = "v1"
     cache_data: str = "missing"
     invalid_config: bool = False
+    cache_mode: str = "off"
+
+
+CACHE_FEATURES = {"context_router": "context_cache", "tool_disclosure": "tool_cache",
+                  "skills": "skill_cache"}
 
 
 def cache_mode(cfg, section="context_router"):
+    """Read and validate configuration without evaluating or notifying."""
+    if section not in CACHE_FEATURES:
+        raise ValueError(f"unknown cache section: {section}")
     mode = ((cfg or {}).get(section) or {}).get("cache_mode", "off")
     if mode not in ("off", "shadow", "active"):
         raise ValueError(f"unknown {section}.cache_mode: {mode}")
     return mode
+
+
+def effective_cache_mode(cfg, section="context_router", *, root, now=None, remembered=None):
+    """Resolve one packet's mode; optional pool-owned memory deduplicates notices."""
+    from . import promotion
+    mode = cache_mode(cfg, section)
+    reason = None
+    if mode == "active":
+        feature = CACHE_FEATURES[section]
+        try:
+            verdict = promotion.evaluate(feature, promotion.collect(feature, root), cfg,
+                                         root=root, now=now)
+            if verdict["recommendation"] != "promote":
+                mode = "shadow"
+                reason = ", ".join(verdict["reasons"]) or verdict["recommendation"]
+        except Exception:
+            mode, reason = "shadow", "gate_error"
+            if remembered is None or remembered.get(section) != reason:
+                import logging
+                logging.getLogger(__name__).warning("cache promotion evaluation failed; using shadow: %s", section)
+    if remembered is not None:
+        changed = remembered.get(section) != reason
+        remembered[section] = reason
+        if reason is not None and changed:
+            try:
+                from .notify import notify
+                notify(f"active {CACHE_FEATURES[section]} refused; using shadow: {reason}")
+            except Exception:
+                # Notification delivery must never interrupt packet construction.
+                pass
+    return mode, reason
 
 
 def _cacheability(ev, head_sha):
@@ -154,7 +193,7 @@ def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=(),
                         routed_tokens / candidate_tokens if candidate_tokens else 1.0,
                         ambiguous, profile, cache_data=("missing" if provider not in ("codex", "claude") else
                                                        "config" if (cfg or {}).get("cache") is not None else "defaults"),
-                        invalid_config=invalid_config)
+                        invalid_config=invalid_config, cache_mode=cache_mode)
 
 
 def _lookup(source, evidence_id):
@@ -207,6 +246,7 @@ def decision_row(task, routed_packet, *, mode):
                           "cache_adjusted_level": {item.evidence_id: item.cache_adjusted_level
                                                    for item in routed_packet.items},
                           "cache_data": routed_packet.cache_data,
+                          "cache_mode": routed_packet.cache_mode,
                           "presented_level": {item.evidence_id: item.presented_level or item.level
                                               for item in routed_packet.items},
                           "invalid_config": routed_packet.invalid_config},

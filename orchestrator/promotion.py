@@ -61,6 +61,21 @@ FEATURES = OrderedDict((
                            "default": "shadow", "evidence": "read_suppression"}),
 ))
 
+# Cache-aware disclosure uses independent, single-key rollout controls.
+HERMES_FEATURES = {
+    "context_cache": ("context_router", "cache_mode", "context_selection", 30),
+    "tool_cache": ("tool_disclosure", "cache_mode", "tool_disclosure", 30),
+    "skill_cache": ("skills", "cache_mode", "skill_selection", 30),
+    "stale_steering": ("steering", "stale_mode", "steering", 20),
+}
+for _name, (_section, _key, _kind, _minimum) in HERMES_FEATURES.items():
+    FEATURES[_name] = {"table": _section, "key": _key, "evidence": _kind,
+                       "modes": ("off", "shadow", "active"), "default": "shadow",
+                       "criteria": {"min_shadow_samples": _minimum, "first_pass_delta": ">=0",
+                                    "fix_rounds_delta": "<=0", "accepted_economics_delta": "<0",
+                                    "hermes_eval_max_days": 7, "demotion_tasks": 10}}
+
+
 CRITERIA = {
     "min_samples": 20,
     "first_pass_delta": -0.02,
@@ -107,7 +122,7 @@ def _criteria(cfg):
     return result
 
 
-def evaluate(feature, evidence, cfg=None):
+def evaluate(feature, evidence, cfg=None, *, root=None, now=None):
     """Evaluate evidence and return a recommendation; never changes configuration."""
     if feature not in FEATURES:
         raise KeyError(feature)
@@ -116,6 +131,37 @@ def evaluate(feature, evidence, cfg=None):
     criteria = _criteria(cfg)
     n = evidence.get("n", 0) or 0
     reasons = list(mode_flags)
+    if feature in HERMES_FEATURES:
+        from . import hermes_eval
+        spec = FEATURES[feature]["criteria"]
+        if root is None:
+            reasons.append("eval_root_missing")
+        elif not hermes_eval.fresh(root, now=now):
+            reasons.append("hermes_eval_missing_or_stale")
+            return {"feature": feature, "mode": mode, "n": n, "recommendation": "stay",
+                    "reasons": reasons, "criteria": spec, "evidence": evidence}
+        if evidence.get("invalid_config"):
+            reasons.append("invalid_config")
+        if evidence.get("shadow_n", 0) < spec["min_shadow_samples"]:
+            reasons.append("insufficient_evidence")
+        if any(evidence.get(key) is None for key in ("first_pass_delta", "fix_rounds_delta")):
+            reasons.append("shadow_quality_unmeasured")
+        elif evidence["first_pass_delta"] < 0 or evidence["fix_rounds_delta"] > 0:
+            reasons.append("quality_regression")
+        if not any(isinstance(evidence.get(key), (int, float)) and evidence[key] < 0
+                   for key in ("accepted_tokens_delta", "accepted_cost_delta")):
+            reasons.append("missing_cost_improvement")
+        demote = mode == "active" and evidence.get("active_n", 0) >= 10 and evidence.get("last10_regression")
+        if demote:
+            reasons.append("last10_quality_regression")
+        blocking = reasons
+        return {"feature": feature, "mode": mode, "n": n,
+                "recommendation": "demote" if demote else "stay" if blocking else "promote",
+                "reasons": reasons, "criteria": spec, "evidence": evidence}
+    if (feature == "memory_tiers" and mode == "active"
+            and evidence.get("active_n", 0) >= 10 and evidence.get("last10_regression")):
+        return {"feature": feature, "mode": mode, "n": n, "recommendation": "demote",
+                "reasons": ["last10_quality_regression"], "criteria": criteria}
     if feature == "steering_policy":
         if evidence.get("shadow_n", 0) < 20:
             reasons.append("insufficient_evidence")
@@ -234,6 +280,8 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature in HERMES_FEATURES:
+        return _collect_hermes(feature, root)
     if feature == "steering_policy":
         return _collect_steering(root)
     if feature == "memory_tiers":
@@ -264,7 +312,9 @@ def collect(feature, root=STATE):
                      - sum(cohorts["shadow"]) / len(cohorts["shadow"]))
         return {"n": len(rows), "tokens_legacy": legacy, "tokens_tiered": tiered,
                 "accepted_tokens_delta": (tiered - legacy) / legacy if legacy else None,
-                "fix_rounds_delta": delta}
+                "fix_rounds_delta": delta,
+                **{key: value for key, value in _cohort_metrics(rows, root, economics=False).items()
+                   if key in ("active_n", "last10_regression")}}
     if feature == "contracts":
         rows = [row for row in decision_log.read_all(root=root)
                 if row.get("kind") == "output_contract"]
@@ -437,7 +487,7 @@ def collect(feature, root=STATE):
 
 
 def report(cfg=None, root=STATE):
-    return [evaluate(feature, collect(feature, root=root), cfg=cfg) for feature in FEATURES]
+    return [evaluate(feature, collect(feature, root=root), cfg=cfg, root=root) for feature in FEATURES]
 
 
 def format_report(rows):
@@ -495,3 +545,101 @@ def _collect_steering(root):
             "fix_rounds_delta": current - baseline if None not in (current, baseline) else None,
             "accepted_tokens_delta": current_tokens - baseline_tokens
                 if None not in (current_tokens, baseline_tokens) else None}
+
+
+def _cohort_metrics(rows, root, *, economics=True):
+    """Use disjoint task cohorts and a stateless window of ten active subjects."""
+    tasks = {}
+    for path in (root / "tasks").glob("*.json"):
+        try:
+            task = json.loads(path.read_text())
+            if isinstance(task, dict):
+                tasks[task.get("id", path.stem)] = task
+        except (OSError, ValueError):
+            continue
+    rows = sorted(rows, key=lambda row: row.get("ts", 0))
+    active = list(dict.fromkeys(row.get("subject") for row in reversed(rows)
+                               if row.get("mode") == "active" and row.get("subject") in tasks))
+    shadow = {row.get("subject") for row in rows if row.get("mode") == "shadow"
+              and row.get("subject") in tasks} - set(active)
+    fixes = {}
+    for task in tasks.values():
+        parent = (task.get("constraints") or {}).get("fix_round_for")
+        if parent:
+            fixes[parent] = fixes.get(parent, 0) + 1
+    def quality(ids):
+        values = [fixes.get(tid, 0) for tid in ids]
+        return (sum(n == 0 for n in values) / len(values), sum(values) / len(values)) if values else (None, None)
+    baseline, current, recent = quality(shadow), quality(active), quality(active[:10])
+    def delta(a, b):
+        return a - b if a is not None and b is not None else None
+    result = {"active_n": len(active), "shadow_tasks": sorted(shadow), "active_tasks": active,
+              "first_pass_delta": delta(current[0], baseline[0]),
+              "fix_rounds_delta": delta(current[1], baseline[1]),
+              "last10_regression": bool(len(active) >= 10 and shadow and
+                  (recent[0] < baseline[0] or recent[1] > baseline[1]))}
+    if not economics:
+        return result
+    from . import scorecard, cache_telemetry
+    usage = [row for _, row in scorecard._read_jsonl_entries(root)]
+    goals = set(scorecard.accepted_goals(root))
+    cache_cfg = cache_telemetry._pool_cfg(root)
+    def economics(ids, metric):
+        goal_ids = {tasks[tid].get("parent") for tid in ids} & goals
+        measured = [r for r in usage if r.get("goal_id") in goal_ids]
+        if not goal_ids or {r.get("goal_id") for r in measured} != goal_ids:
+            return None
+        if metric == "usd":
+            if any(r.get("usd") is None for r in measured):
+                return None
+            return sum(r["usd"] for r in measured) / len(goal_ids)
+        if any(not any(k in r for k in ("input_tokens", "input_uncached_tokens", "effective_tokens")) for r in measured):
+            return None
+        return sum(r.get("effective_tokens") if r.get("effective_tokens") is not None else
+                   cache_telemetry.effective_cost({**(r if "input_uncached_tokens" in r else cache_telemetry.normalize(r.get("provider") or "claude", r)),
+                                                   "provider": r.get("provider") or "claude"}, cache_cfg)
+                   for r in measured) / len(goal_ids)
+    result["accepted_tokens_delta"] = delta(economics(active, "tokens"), economics(shadow, "tokens"))
+    result["accepted_cost_delta"] = delta(economics(active, "usd"), economics(shadow, "usd"))
+    return result
+
+
+def _collect_hermes(feature, root):
+    kind = FEATURES[feature]["evidence"]
+    rows = []
+    observed_rows = decision_log.read_all(root=root)
+    gated = {r.get("subject") for r in observed_rows
+             if r.get("kind") == kind and r.get("reason") == "cache_promotion_gate"}
+    for row in observed_rows:
+        if feature != "stale_steering" and row.get("subject") in gated and row.get("reason") != "cache_promotion_gate":
+            continue
+        if row.get("kind") != kind:
+            continue
+        extra, deterministic = row.get("extra") or {}, row.get("deterministic") or {}
+        if feature == "stale_steering":
+            if (extra.get("trigger") or deterministic.get("trigger") or row.get("trigger")) != "stale_severity":
+                continue
+            observed = row.get("mode")
+        else:
+            observed = extra.get("cache_mode", deterministic.get("cache_mode", row.get("cache_mode")))
+            configured = deterministic.get("configured_cache_mode", extra.get("configured_cache_mode"))
+            if observed is None or (configured == "active" and observed != "active"):
+                continue
+        if observed in ("shadow", "active") and row.get("subject"):
+            rows.append({**row, "mode": observed})
+    try:
+        cfg = tomllib.loads((root / "pool.toml").read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    spec = FEATURES[feature]
+    invalid = bool(current_mode(feature, cfg)[1]) or (
+        feature == "stale_steering" and spec["key"] not in _table(cfg, spec["table"]))
+    # Active membership wins; repeated builds never increase the sample size.
+    subjects = {}
+    for row in sorted(rows, key=lambda item: item.get("ts", 0)):
+        previous = subjects.get(row["subject"])
+        if previous is None or previous["mode"] != "active" or row["mode"] == "active":
+            subjects[row["subject"]] = row
+    rows = list(subjects.values())
+    return {"n": len(rows), "shadow_n": sum(r["mode"] == "shadow" for r in rows),
+            "invalid_config": invalid, **_cohort_metrics(rows, root)}

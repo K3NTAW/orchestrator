@@ -293,3 +293,198 @@ class SteeringPromotionTests(unittest.TestCase):
             self.assertEqual(data["mean_fix_rounds_non_steered"], 2)
             self.assertEqual(data["fix_rounds_delta"], -2)
             self.assertEqual(data["accepted_tokens_delta"], -20)
+
+
+class HermesPromotion(unittest.TestCase):
+    def test_hermes_features_registered_with_sample_quality_economics_and_eval_criteria(self):
+        for name, table in (("context_cache", "context_router"), ("tool_cache", "tool_disclosure"),
+                            ("skill_cache", "skills"), ("stale_steering", "steering")):
+            spec = promotion.FEATURES[name]
+            self.assertEqual(spec["table"], table)
+            self.assertEqual(spec["key"], "stale_mode" if name == "stale_steering" else "cache_mode")
+            self.assertEqual(spec["criteria"]["min_shadow_samples"], 20 if name == "stale_steering" else 30)
+            self.assertEqual(spec["criteria"]["hermes_eval_max_days"], 7)
+            self.assertEqual(spec["criteria"]["demotion_tasks"], 10)
+            self.assertEqual(spec["criteria"]["first_pass_delta"], ">=0")
+            self.assertEqual(spec["criteria"]["fix_rounds_delta"], "<=0")
+            self.assertEqual(spec["criteria"]["accepted_economics_delta"], "<0")
+        self.assertIn("fast_path", promotion.FEATURES)
+        self.assertIn("memory_tiers", promotion.FEATURES)
+        self.assertIn("steering_policy", promotion.FEATURES)
+
+    def test_activation_refused_without_fresh_hermes_eval(self):
+        import json
+        from datetime import datetime, timedelta
+        from pathlib import Path
+        from orchestrator import hermes_eval
+        now = datetime(2026, 9, 23, tzinfo=hermes_eval.ZONE)
+        values = {"n": 30, "shadow_n": 30, "first_pass_delta": 0,
+                  "fix_rounds_delta": 0, "accepted_tokens_delta": -1}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / ".orchestrator/hermes_eval.json"
+            path.parent.mkdir()
+            for feature in promotion.HERMES_FEATURES:
+                spec = promotion.FEATURES[feature]
+                cfg = {spec["table"]: {spec["key"]: "active"}}
+                for age, passed in ((None, None), (8, True), (-1, True), (0, False), (0, True)):
+                    path.unlink(missing_ok=True)
+                    if age is not None:
+                        path.write_text(json.dumps({"ran_at": (now - timedelta(days=age)).isoformat(),
+                            "passed": passed, "cases": [{"name": "fixture", "passed": True, "detail": "ok"}]}))
+                    result = promotion.evaluate(feature, values, cfg, root=root, now=now)
+                    self.assertEqual(result["recommendation"], "promote" if age == 0 and passed else "stay")
+                    if not (age == 0 and passed):
+                        self.assertIn("hermes_eval_missing_or_stale", result["reasons"])
+                    self.assertEqual(cfg[spec["table"]][spec["key"]], "active")
+                missing_metric = promotion.evaluate(feature, {**values, "accepted_tokens_delta": None}, cfg, root=root, now=now)
+                self.assertEqual(missing_metric["recommendation"], "stay")
+
+    def test_new_criteria_additive_existing_features_unchanged_and_stateless_demotion(self):
+        from orchestrator import hermes_eval
+        self.assertEqual(promotion.evaluate("fast_path", {"n": 20}, root="missing")["recommendation"], "promote")
+        self.assertEqual(promotion.evaluate("steering_policy", {"shadow_n": 20}, root="missing")["recommendation"], "promote")
+        self.assertEqual(promotion.evaluate("memory_tiers", evidence(accepted_tokens_delta=-1), root="missing")["recommendation"], "promote")
+        cfg = {"context_router": {"cache_mode": "active"}}
+        values = {"n": 30, "shadow_n": 30, "active_n": 10, "first_pass_delta": -0.1,
+                  "fix_rounds_delta": 0.1, "accepted_tokens_delta": -1, "last10_regression": True}
+        with mock.patch.object(hermes_eval, "fresh", return_value=True):
+            for count, expected in ((9, "stay"), (10, "demote"), (9, "stay"), (10, "demote")):
+                self.assertEqual(promotion.evaluate("context_cache", {**values, "active_n": count}, cfg,
+                                                   root="fixture")["recommendation"], expected)
+        self.assertIn("eval_root_missing", promotion.evaluate("context_cache", values)["reasons"])
+
+    def test_cohorts_and_demotion_from_synthetic_rows_and_tasks(self):
+        import json
+        from pathlib import Path
+        from orchestrator import hermes_eval
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tasks").mkdir()
+            (root / "pool.toml").write_text('[steering]\nstale_mode="active"\n')
+            def task(tid, **fields):
+                (root / "tasks" / (tid + ".json")).write_text(json.dumps({"id": tid, **fields}))
+            for feature in (*promotion.HERMES_FEATURES, "memory_tiers"):
+                kind = promotion.FEATURES[feature]["evidence"]
+                for i in range(30):
+                    tid = f"T-{feature}-s{i}"
+                    task(tid)
+                    decision_log.record(kind, tid, candidates=[], hard_constraints=[], deterministic={"cache_mode": "shadow"},
+                                        selected=[], reason="fixture", mode="shadow", extra={"trigger": "stale_severity", "severity": "low", "critical": False,
+                                            "action": "steer", "evidence_hash": "fixture", "message_chars": 0}, root=root)
+                for i in range(10):
+                    tid = f"T-{feature}-s{i}"
+                    task(f"T-{feature}-fix{i}", constraints={"fix_round_for": tid})
+                    decision_log.record(kind, tid, candidates=[], hard_constraints=[], deterministic={"cache_mode": "active"},
+                                        selected=[], reason="fixture", mode="active", extra={"trigger": "stale_severity", "severity": "low", "critical": False,
+                                            "action": "steer", "evidence_hash": "fixture", "message_chars": 0}, root=root)
+                collected = promotion.collect(feature, root)
+                self.assertEqual(collected["active_n"], 10)
+                self.assertTrue(collected["last10_regression"])
+                if feature != "memory_tiers":
+                    self.assertEqual(len(collected["shadow_tasks"]), 20)
+                    self.assertFalse(set(collected["shadow_tasks"]) & set(collected["active_tasks"]))
+                    self.assertEqual(collected["first_pass_delta"], -1)
+                    self.assertEqual(collected["fix_rounds_delta"], 1)
+                    self.assertIsNone(collected["accepted_tokens_delta"])
+                spec = promotion.FEATURES[feature]
+                cfg = {spec["table"]: {spec["key"]: "active"}}
+                with mock.patch.object(hermes_eval, "fresh", return_value=True):
+                    self.assertEqual(promotion.evaluate(feature, collected, cfg, root=root)["recommendation"], "demote")
+            (root / "pool.toml").write_text('[steering]\nstale_mode="invalid"\n')
+            self.assertTrue(promotion.collect("stale_steering", root)["invalid_config"])
+            self.assertEqual(promotion.current_mode("stale_steering", {"steering": {"stale_mode": "invalid"}})[0], "shadow")
+            (root / "pool.toml").unlink()
+            self.assertTrue(promotion.collect("stale_steering", root)["invalid_config"])
+
+    def test_hermes_economics_uses_accepted_goals_and_configured_cache_ratios(self):
+        import json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tasks").mkdir()
+            (root / "runs").mkdir()
+            (root / "pool.toml").write_text('[cache]\nclaude_read_ratio=0.5\n')
+            for mode in ("shadow", "active"):
+                goal = f"T-{mode}-goal"
+                for task in ({"id": goal, "role": "goal", "status": "done"},
+                             {"id": f"T-{mode}", "role": "execute", "parent": goal, "merged_into": "fixture"}):
+                    (root / "tasks" / (task["id"] + ".json")).write_text(json.dumps(task))
+                for _ in range(30 if mode == "shadow" else 1):
+                    decision_log.record("context_selection", f"T-{mode}", candidates=[], hard_constraints=[],
+                        deterministic={"cache_mode": mode}, selected=[], reason="fixture", mode=mode, root=root)
+            rows = [{"role": "execute", "goal_id": "T-shadow-goal", "provider": "claude",
+                     "input_uncached_tokens": 100, "cache_read_tokens": 0, "usd": 2},
+                    {"role": "execute", "goal_id": "T-active-goal", "provider": "claude",
+                     "input_uncached_tokens": 20, "cache_read_tokens": 100, "usd": 1}]
+            (root / "runs/fixture.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
+            metrics = promotion.collect("context_cache", root)
+            self.assertEqual(metrics["accepted_tokens_delta"], -30)
+            self.assertEqual(metrics["accepted_cost_delta"], -1)
+            self.assertEqual(metrics["first_pass_delta"], 0)
+            self.assertEqual(metrics["fix_rounds_delta"], 0)
+            (root / "runs/fixture.jsonl").unlink()
+            self.assertIsNone(promotion.collect("context_cache", root)["accepted_tokens_delta"])
+
+    def test_last_ten_recover_without_stateful_demotion_counter(self):
+        import json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tasks").mkdir()
+            rows = []
+            for i in range(30):
+                tid = f"T-{i}"
+                task = {"id": tid}
+                (root / "tasks" / (tid + ".json")).write_text(json.dumps(task))
+                rows.append({"subject": tid, "ts": i, "mode": "shadow" if i < 10 else "active"})
+                if 10 <= i < 20:
+                    (root / "tasks" / (tid + "-fix.json")).write_text(json.dumps(
+                        {"id": tid + "-fix", "constraints": {"fix_round_for": tid}}))
+            regressed = promotion._cohort_metrics(rows[:20], root, economics=False)
+            recovered = promotion._cohort_metrics(rows, root, economics=False)
+            self.assertTrue(regressed["last10_regression"])
+            self.assertFalse(recovered["last10_regression"])
+            self.assertGreater(recovered["fix_rounds_delta"], 0)
+            cfg = {"memory": {"mode": "active"}}
+            for metrics, expected in ((regressed, "demote"), (recovered, "demote")):
+                self.assertEqual(promotion.evaluate("memory_tiers", {"n": 30, **metrics}, cfg)["recommendation"], expected)
+
+    def test_packet_cache_gate_cohort_overrides_auxiliary_configured_active_rows(self):
+        import json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tasks").mkdir()
+            (root / "tasks/T-refused.json").write_text(json.dumps({"id": "T-refused"}))
+            for reason, mode in (("cache_promotion_gate", "shadow"), ("usage", "active")):
+                decision_log.record("tool_disclosure", "T-refused", candidates=[], hard_constraints=[],
+                    deterministic={"cache_mode": mode, "configured_cache_mode": "active"},
+                    selected=[], reason=reason, mode=mode, root=root)
+            values = promotion.collect("tool_cache", root)
+            self.assertEqual((values["n"], values["shadow_n"], values["active_n"]), (0, 0, 0))
+
+
+    def test_missing_root_blocks_even_complete_positive_evidence(self):
+        values = {"n": 30, "shadow_n": 30, "first_pass_delta": 0,
+                  "fix_rounds_delta": 0, "accepted_tokens_delta": -1}
+        for feature in promotion.HERMES_FEATURES:
+            result = promotion.evaluate(feature, values)
+            self.assertEqual(result["recommendation"], "stay")
+            self.assertIn("eval_root_missing", result["reasons"])
+
+    def test_cache_samples_are_distinct_tasks_and_exclude_refused_active(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for i in range(10):
+                for _ in range(3):
+                    decision_log.record("context_selection", f"T-{i}", candidates=[], hard_constraints=[],
+                        deterministic={"configured_cache_mode": "shadow", "cache_mode": "shadow"},
+                        selected=[], reason="cache_promotion_gate", mode="shadow", root=root)
+            for _ in range(30):
+                decision_log.record("context_selection", "T-refused", candidates=[], hard_constraints=[],
+                    deterministic={"configured_cache_mode": "active", "cache_mode": "shadow", "refused_reason": "gate_error"},
+                    selected=[], reason="cache_promotion_gate", mode="shadow", root=root)
+            values = promotion.collect("context_cache", root)
+            self.assertEqual((values["n"], values["shadow_n"]), (10, 10))

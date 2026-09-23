@@ -13,6 +13,12 @@ commit the scaffold, and start the Planner there with `ORCH_ROOT=/path/to/target
 To run the executor itself in a container on a dedicated host instead of locally, see
 [docs/executor-host.md](docs/executor-host.md).
 
+## Program guides
+
+The program entry points are the [context-economy audit](docs/context-economy/00-audit.md),
+[skill-intelligence audit](docs/skill-intelligence/00-audit.md), and
+[Hermes hardening audit](docs/hermes-hardening/00-audit.md).
+
 ## Phase 0 (you, once)
 ```bash
 CLAUDE_CONFIG_DIR=~/.claude-a claude   # /login account A, /model -> confirm ids in .orchestrator/pool.toml

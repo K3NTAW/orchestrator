@@ -20,8 +20,8 @@ Triggers are evaluated in this order:
    Empty review security paths use `orchestrator/*.py`. This is a steer unless
    the task is noncritical and has no commits beyond its merge-base with
    `goal/<parent>`, in which case it proposes cancel.
-2. `dependency_changed`: medium or high stale risk with changed read-scope paths;
-   steer and name those paths.
+2. `stale_severity`: classify moved paths using the table below. It replaces
+   stale evidence as a `dependency_changed` trigger.
 3. `stuck`: a running task has no registry event for at least stuck_after_s;
    steer and name the last event time. This interprets stuck as a steering trigger.
 4. `out_of_scope`: more than out_of_scope_events distinct dirty paths outside both
@@ -33,9 +33,37 @@ Otherwise continue. Messages name the trigger and evidence, never repeat the spe
 The daemon collects gate history by following constraints.fix_round_for through
 the root, including constraints.failure_signature only for tasks whose
 pipeline.gate_reds is positive, oldest first. It does not recompute signatures.
-Critical means first in the scheduler's critical_path rank over running and ready
-execute tasks, with the same eligibility, dependency graph and duration estimates.
-The daemon passes that ranked list into its decision loop.
+Critical means the longest duration chain starting at the head of critical_path.rank,
+using critical_path.explain duration metrics and task-id ordering to break ties.
+The daemon evaluates running workers in rank order. If duration estimation or ranking
+fails, all running workers count as critical. With noncritical_medium_continue
+(default true, introduced 2026-09-23), medium severity outside that chain continues
+with reason noncritical. Setting it false steers medium work regardless of chain.
+
+| Severity | Moved paths | Action |
+|---|---|---|
+| none | No paths moved | Continue to other triggers |
+| low | Outside write scope, read scope, imports and acceptance tests | Continue |
+| medium | Shared packet read scope or imported by a write-scope file (AST or fresh repo links) | Steer with paths and goal head SHA, subject to the critical rule |
+| high | Write scope or test file named by an acceptance test id | Propose cancel with no commits, otherwise steer; hold after gate |
+| unknown | Git failure | Continue |
+
+High takes precedence over medium and low. Security remains the first trigger.
+Severity and severity_reasons are optional extensions to stale evidence and are
+derived when absent; the required STALE_KEYS contract is unchanged. Python imports
+are walked by the shared scopes module, including nested and relative imports.
+
+Cancellation stays shadow-only; the no-commits guard is informational for the
+proposal. Effective active mode writes pipeline.stale_high with ts, paths and
+goal_head for high severity, including downgraded cancel proposals. Shadow and
+refused activation never write it. At the next gate an existing flag skips rebase,
+review and merge, holds with hold_reason stale_high even on red, and prevents an
+automatic fix round. The Planner clears the flag; a fresh check also clears it
+when no listed path still moves. Unknown evidence preserves the flag.
+
+Each emitted row's extra includes tokens_so_far (registry input_uncached +
+cache_read + output, or null when unavailable) and elapsed seconds since worker
+start (or null). These economics fields never enter the evidence hash.
 
 Scope matching uses fnmatch for globs and exact/prefix matching for literal
 entries. Spawn and steering share the read_scope helper in steering_policy:
