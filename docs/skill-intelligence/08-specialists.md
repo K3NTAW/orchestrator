@@ -24,8 +24,17 @@ worker skill with `tool_unavailable`; unknown names are logged as `unknown_tool`
 and do not drop it. Planner composition retains its mandatory skills, with no
 tools and reason `planner tools not catalogued`.
 
-Tool composition is telemetry only on this branch. No worker allowlist changes.
-Active tool hand-over follows the rebase that includes PR 21 / T-0918.
+When both skill routing and tool disclosure are active, and the skill-routing
+safety gate accepts active routing, Claude workers receive the specialist tool
+set: the minimal set plus available aliased tools declared by selected skills,
+with mandatory tools retained. Unknown or unavailable tools are never added.
+The disclosure decision records the specialist allowlist and its added tools and
+selected skill ids; run metadata identifies `specialist` as the allowlist source.
+If either mode is shadow or off, or the safety gate refuses active skill routing,
+the previous minimal (active disclosure) or legacy (shadow/off disclosure)
+allowlist behavior is restored. Codex executors keep their CLI tools and record
+`codex` as the source. A `needs_tool:` retry remains a one-shot respawn with the
+full legacy Claude allowlist and the remaining budget and timeout.
 
 ## Conflicts
 

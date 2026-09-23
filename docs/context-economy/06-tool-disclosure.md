@@ -43,6 +43,9 @@ task pipeline. If less than ten percent remains, it leaves the task held for the
 Planner. Revert by setting tool disclosure mode to `shadow` (measure only) or
 `off` (disable decisions); no worker or daemon migration is required.
 
+When skill routing is also active, the specialist hand-over rule can extend the
+minimal set with available skill-declared tools; see [Temporary specialists](../skill-intelligence/08-specialists.md).
+
 ## Shadow records and recovery
 
 In `shadow` and `active` each dispatch records a `tool_disclosure`
