@@ -5,7 +5,7 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import worker_registry
+from . import harness_depth, worker_registry
 from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
@@ -533,7 +533,7 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
     routing = None
     try:
         task = bus.get(task_id)
-        routing = jev_route.shadow_context(task, Pool())
+        routing = None if harness_depth.active(task) else jev_route.shadow_context(task, Pool())
     except Exception:
         routing = None
     try:
@@ -681,7 +681,10 @@ def eligible(pool, candidates):
     return [t["id"] for t in candidates
             if not stale({**t, "status": "queued"}) and bus.ready(t)
             and not (t.get("pipeline") or {}).get("dispatched_at")
-            and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve")
+            and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve"
+                 or (getattr(pool, "harness_depth_tick", {}).get("mode") == "active"
+                     and harness_depth.level(t, tasks=candidates, cfg=pool.cfg,
+                         history=pool.harness_depth_tick["history"])["eligible_fast_path"]))
             and (not fallback or fallback_tier(t["complexity"]) is not None)]
 
 
@@ -744,6 +747,7 @@ def _dispatch_deferrals(result, capacity_reason):
 
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
+    depth_tick = harness_depth.begin_tick(pool, notify, root=bus.STATE)
     scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
@@ -875,8 +879,11 @@ def dispatch(pool):
                 if "first_ready_at" not in pipeline:
                     pipeline["first_ready_at"] = time.time()
                     bus.update(t["id"], pipeline=pipeline)
+        depth = (harness_depth.level(t, tasks=candidates, cfg=pool.cfg, history=depth_tick["history"])
+                 if depth_tick["mode"] != "off" else None)
+        fast = bool(depth and depth_tick["mode"] == "active" and depth["eligible_fast_path"])
         verdict = t.get("spec_review_verdict")
-        if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
+        if fast or t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
             if fallback and fallback_tier(t["complexity"]) is None:
                 entry["reason"] = "fallback_no_tier"
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
@@ -885,6 +892,19 @@ def dispatch(pool):
                     (t.get("pipeline") or {}).get("dispatched_at") else capacity_reason)
                 continue
             if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
+                if depth is not None:
+                    harness_depth.record(t, depth, depth_tick["mode"])
+                with bus.locked():
+                    current = bus.get(t["id"])
+                    pipeline = dict(current.get("pipeline") or {})
+                    pipeline.pop("harness_level", None)
+                    pipeline.pop("harness_mode", None)
+                    if depth_tick["mode"] == "active":
+                        pipeline.update(harness_level=depth["level"], harness_mode="active")
+                    bus.update(t["id"], pipeline=pipeline)
+                    t = bus.get(t["id"])
+                if fast:
+                    harness_depth.record_skips(t)
                 entry["action"] = "dispatched"
                 entry.pop("reason")
                 if fallback:

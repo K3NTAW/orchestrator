@@ -9,6 +9,9 @@ from . import STATE, decision_log
 
 
 FEATURES = OrderedDict((
+    ("fast_path", {"table": "harness", "key": "depth_mode",
+                   "modes": ("off", "shadow", "active"),
+                   "default": "shadow", "evidence": "fast_path"}),
     ("jev_routing", {"table": "jev.routing", "key": "mode", "modes": ("off", "shadow", "active"),
                       "default": "shadow", "evidence": "jev_routing"}),
     ("scheduler", {"table": "scheduler", "key": "mode", "modes": ("off", "shadow", "active"),
@@ -102,6 +105,21 @@ def evaluate(feature, evidence, cfg=None):
     criteria = _criteria(cfg)
     n = evidence.get("n", 0) or 0
     reasons = list(mode_flags)
+    if feature == "fast_path":
+        if evidence.get("two_fix_rounds"):
+            reasons.append("fast_path_two_fix_rounds")
+        elif n < 20:
+            reasons.append("insufficient_evidence")
+        elif evidence.get("active_n", 0):
+            if evidence.get("first_pass_delta") is None or evidence["first_pass_delta"] < 0:
+                reasons.append("first_pass_below_shadow_or_unknown")
+            if evidence.get("accepted_tokens_delta") is None or evidence["accepted_tokens_delta"] >= 0:
+                reasons.append("tokens_not_lower_than_shadow")
+        return {"feature": feature, "mode": mode, "n": n,
+                "recommendation": ("demote" if mode == "active" and evidence.get("two_fix_rounds")
+                                   else "stay") if reasons else "promote",
+                "reasons": reasons, "criteria": {"min_shadow_samples": 20,
+                    "first_pass_delta": 0, "accepted_tokens_delta": "<0", "max_fix_rounds": 1}}
     shadow_features = {"context_router", "tool_disclosure", "conditional_instructions", "handoff_routing"}
     if n < criteria["min_samples"]:
         reasons.append("insufficient_evidence")
@@ -176,6 +194,9 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "fast_path":
+        from . import harness_depth
+        return harness_depth.promotion_evidence(root)
     if feature == "jev_skill_routing":
         rows = [row for row in decision_log.read_all(root=Path(root))
                 if row.get("kind") == "skill_selection" and isinstance(row.get("jev"), dict)]

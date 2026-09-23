@@ -31,6 +31,7 @@ CONTEXT_KINDS = (
 )
 
 KINDS = (
+    "harness_depth",
     "routing",
     "wave",
     "capacity",

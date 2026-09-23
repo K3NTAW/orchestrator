@@ -4,6 +4,7 @@ import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
 from . import worker_registry
+from . import harness_depth
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
@@ -37,6 +38,8 @@ def _skill_exposure(task, role):
 
 def _prepare_skills(task, role, cfg):
     """Select once, apply the active safety gate, and prepare bounded rendering."""
+    if harness_depth.active(task):
+        return None
     mode = promotion.mode("skill_routing", cfg)
     if mode not in ("shadow", "active"):
         return None
@@ -93,6 +96,8 @@ def _skills_section(choice):
 
 
 def _skill_routing(task, role, cfg, exposure, choice=None):
+    if harness_depth.active(task):
+        return {"skills_selected": [], "skill_routing_mode": "fast_path"}
     choice = choice or _prepare_skills(task, role, cfg)
     if choice is None:
         return {}
@@ -1233,7 +1238,7 @@ def run_worker(task_id, account_id=None):
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
     try:
-        skill_choice = _prepare_skills(t, role, pool.cfg)
+        skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, pool.cfg)
         if role == "review":
             src = reviewed if reviewed is not None else t
             role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice)
@@ -1269,7 +1274,8 @@ def run_worker(task_id, account_id=None):
     disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
     t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
     try:
-        exposure = _skill_exposure(t, role) if promotion.mode("skill_routing", pool.cfg) == "off" else None
+        exposure = (_skill_exposure(t, role) if not harness_depth.active(t)
+                    and promotion.mode("skill_routing", pool.cfg) == "off" else None)
         if exposure is None:
             records = _skill_records()
             exposed = sorted(skill_id for skill_id, record in records.items()

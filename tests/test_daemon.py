@@ -13,6 +13,7 @@ from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
 from orchestrator import bus, daemon, executor, merge, pool as P, spawn
 from orchestrator import jev_route
 
+REAL_WORKER = spawn.run_worker
 REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
 
 
@@ -146,6 +147,53 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_dispatch_records_harness_depth_row_in_shadow_and_changes_nothing(self):
+        from orchestrator import harness_depth
+        pool = self.scheduler_pool("off", slots=1)
+        pool.cfg["harness"] = {"depth_mode": "shadow"}
+        tid = self.scheduler_task("small", "a.py")
+        with mock.patch.object(harness_depth, "history_table", return_value={}), \
+             mock.patch.object(harness_depth.decision_log, "record") as record:
+            daemon.dispatch(pool)
+        rows = [call for call in record.call_args_list if call.args and call.args[0] == "harness_depth"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].kwargs["candidates"], list(range(5)))
+        self.assertEqual(rows[0].kwargs["selected"], 1)
+        self.assertEqual(rows[0].kwargs["mode"], "shadow")
+        self.assertNotIn("harness_level", bus.get(tid)["pipeline"])
+        self.assertEqual(self.scheduler_dispatched(), [tid])
+
+    def test_active_fast_path_skips_jev_and_skill_routing_but_keeps_security_review(self):
+        from orchestrator import harness_depth
+        pool = self.scheduler_pool("off", slots=1)
+        pool.cfg["harness"] = {"depth_mode": "active"}
+        tid = self.scheduler_task("small", "a.py")
+        with mock.patch.object(harness_depth, "history_table", return_value={}), \
+             mock.patch.object(harness_depth.promotion, "collect", return_value={"n": 20}):
+            daemon.dispatch(pool)
+        self.assertEqual(bus.get(tid)["pipeline"]["harness_level"], 1)
+        with mock.patch.object(jev_route, "shadow_context") as jev, \
+             mock.patch.object(executor, "start", return_value={"status": "held"}):
+            daemon._dispatch_worker(tid, "prompt")
+        jev.assert_not_called()
+        pool.pick = mock.Mock(return_value=mock.Mock(id="synthetic"))
+        pool.reserve = mock.Mock(return_value=None)
+        with mock.patch.object(spawn, "Pool", return_value=pool), \
+             mock.patch.object(spawn, "_prepare_skills") as prepare, \
+             mock.patch.object(spawn, "packet", return_value="packet"), \
+             mock.patch.object(spawn, "render", return_value="prompt"), \
+             mock.patch.object(spawn, "_shadow_tool_disclosure", return_value={}), \
+             mock.patch.object(spawn, "_skill_records", return_value={}):
+            self.assertEqual(REAL_WORKER(tid)["status"], "budget")
+        prepare.assert_not_called()
+        bus.update(tid, status="done", worktree=str(TMP))
+        self.swap(daemon, "changed_paths", lambda task: ["orchestrator/serve.py"])
+        daemon._load_review_cfg(self.review_pool("security_paths"))
+        daemon.gate(pool)
+        self.assertEqual(len(bus.read(role="review")), 1)
+        self.assertEqual(bus.get(tid)["pipeline"]["review_reason"], "security_paths:orchestrator/*.py")
+
+
     def test_dispatch_records_instruction_tokens(self):
         task = bus.create_task("fresh fix telemetry", "spec", ["passes"], ["x.py"],
                                role="execute", complexity=3)
@@ -315,6 +363,7 @@ class Daemon(unittest.TestCase):
 
     def test_dispatch_shadow_records_durations_capacity_limit_and_pressure_without_applying(self):
         pool = self.scheduler_pool("shadow", slots=2)
+        pool.cfg["harness"] = {"depth_mode": "off"}  # Isolate scheduler decision rows.
         a = self.scheduler_task("first", "a/file.py")
         b = self.scheduler_task("second", "a/file.py")
         c = self.scheduler_task("third", "c/file.py")

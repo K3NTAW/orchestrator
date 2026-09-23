@@ -16,6 +16,19 @@ def evidence(**overrides):
 
 
 class TestPromotion(unittest.TestCase):
+    def test_fast_path_feature_registered(self):
+        self.assertEqual(promotion.FEATURES["fast_path"]["key"], "depth_mode")
+        self.assertEqual(promotion.evaluate("fast_path", {"n": 19})["recommendation"], "stay")
+        self.assertEqual(promotion.evaluate("fast_path", {"n": 20})["recommendation"], "promote")
+        cfg = {"harness": {"depth_mode": "active"}}
+        for values, expected in [({"first_pass_delta": 0, "accepted_tokens_delta": -1}, "promote"),
+                                 ({"first_pass_delta": -.01, "accepted_tokens_delta": -1}, "stay"),
+                                 ({"first_pass_delta": 0, "accepted_tokens_delta": 0}, "stay"),
+                                 ({"two_fix_rounds": True}, "demote")]:
+            result = promotion.evaluate("fast_path", {"n": 20, "active_n": 1, **values}, cfg)
+            self.assertEqual(result["recommendation"], expected)
+        self.assertEqual(promotion.evaluate("fast_path", {"n": 0, "two_fix_rounds": True}, cfg)["recommendation"], "demote")
+
     def test_jev_skill_routing_feature_counts_verdict_rows(self):
         self.assertEqual(promotion.FEATURES["jev_skill_routing"]["default"], "shadow")
         with tempfile.TemporaryDirectory() as root:
