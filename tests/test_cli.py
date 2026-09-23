@@ -130,6 +130,27 @@ class Cli(unittest.TestCase):
         self.assertIn("cached_context_retained", output)
         self.assertIn("effective_handoff_cost", output)
 
+    def test_scorecard_handoffs_preserves_legacy_sections_before_table(self):
+        from orchestrator import handoff_scorecard
+        legacy = {
+            "by_start": {"worker/unfamiliar": {"n": 2}},
+            "recommendations": {"unfamiliar": {"executor": "worker"}},
+            "planner_handoffs": {"n": 1, "accepted": 1},
+        }
+        card = {**legacy, "handoffs": {
+            "rows": [{"kind": "executor_change", "predecessor": "T-first",
+                      "successor": "T-next", "effective_handoff_cost": 65}],
+            "medians_by_kind": {"executor_change": {"effective_handoff_cost": 65}},
+        }}
+        with mock.patch.object(handoff_scorecard, "build", return_value=card):
+            output = self._scorecard_output("--handoffs")
+            json_output = self._scorecard_output("--handoffs", "--json")
+        self.assertTrue(output.startswith(json.dumps(legacy, indent=1) + "\n\nkind\t"))
+        self.assertIn("cached_context_retained\tcache_lost", output)
+        self.assertIn("executor_change\tT-first\tT-next", output)
+        self.assertIn("median:executor_change\teffective_handoff_cost=65", output)
+        self.assertEqual(json.loads(json_output), card)
+
     def test_memory_search_cli(self):
         import shutil
         source = Path(__file__).resolve().parents[1] / ".orchestrator" / "memory"

@@ -385,7 +385,8 @@ def format_report(card):
     columns = ("kind", "predecessor", "successor", "cached_context_retained", "cache_lost",
                "uncached_reconstruction", "handoff_packet_tokens", "duplicated_evidence",
                "latency_s", "effective_handoff_cost")
-    lines = ["\t".join(columns)]
+    legacy = {key: value for key, value in card.items() if key != "handoffs"}
+    lines = [json.dumps(legacy, indent=1), "", "\t".join(columns)]
     for row in rows:
         lines.append("\t".join(",".join(value) if isinstance(value, list) else str(value)
                                for value in (row.get(column, "unmeasured") for column in columns)))
