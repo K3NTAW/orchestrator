@@ -1655,6 +1655,8 @@ def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task):
     """Persist proposals; only active steering can affect a worker."""
     cfg = pool.cfg
     mode = steering_policy.mode(cfg)
+    if mode != "active":
+        pool.steering_refusal_reasons = None
     section = cfg.get("steering", {})
     invalid = not isinstance(section, dict) or section.get("mode", "shadow") not in ("off", "shadow", "active")
     if mode == "off" and not invalid:
@@ -1724,6 +1726,8 @@ def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task):
 
 
 def steering_tick(pool, *, depth_tick=None):
+    if steering_policy.mode(pool.cfg) != "active":
+        pool.steering_refusal_reasons = None
     section = pool.cfg.get("steering", {})
     if isinstance(section, dict) and section.get("mode") == "off":
         return

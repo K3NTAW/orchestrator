@@ -3943,3 +3943,17 @@ class SteeringPolicyTickTests(unittest.TestCase):
         self.promotion_collect.assert_called_once()
         self.notify.assert_called_once()
         self.assertIs(fresh.steering_promotion_cache, self.pool.steering_promotion_cache)
+
+    def test_leaving_active_resets_refusal_notifications(self):
+        self.promotion_collect.return_value = {"shadow_n": 0}
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        for index, mode in enumerate(("shadow", "off"), start=2):
+            self.pool.cfg["steering"]["mode"] = mode
+            with mock.patch.object(bus, "read", return_value=[]):
+                daemon.steering_tick(self.pool)
+            self.assertIsNone(self.pool.steering_refusal_reasons)
+            self.pool.cfg["steering"]["mode"] = "active"
+            daemon.tick(self.pool)
+            self.assertEqual(self.notify.call_count, index)
+        self.promotion_collect.assert_called_once()

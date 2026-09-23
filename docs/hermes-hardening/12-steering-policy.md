@@ -42,7 +42,8 @@ entries. Spawn and steering share the read_scope helper in steering_policy:
 tests/, scope parent directories, and existing local Python imports. A repository
 root parent permits reads throughout the repository; no read_scope bus field is
 required. Scope entries and imported paths resolving outside the worktree, including
-symlinks, are skipped. Each evaluation runs one `git status --porcelain -z --untracked-files=all`
+symlinks, are skipped. When no worktree is known, scope entries are returned
+unchanged without consulting the daemon cwd. Each evaluation runs one `git status --porcelain -z --untracked-files=all`
 with a five-second timeout. Renames use the destination path. Paths containing
 __pycache__, .orchestrator, .venv, node_modules or .git components and files ending
 in .pyc are ignored. Missing worktrees, timeout and nonzero Git exit skip the scope
@@ -59,13 +60,14 @@ exception text. Worker control retains its existing redacted delivery record.
 
 Steering reuses the harness depth result passed from dispatch; it never calls
 harness_depth.begin_tick or evaluates fast_path promotion. Off returns before
-reading tasks or touching other state.
+reading tasks; leaving active mode clears remembered refusal reasons.
 
 One reverse scan per tick groups steering history for all running tasks. Each group
-retains at most two rows: the latest observation and latest successful active row.
-This per-tick cache is passed to the decision loop, avoiding a full scan per task.
-If no applied row exists the scan may reach the log start, once for the whole tick.
-Unrelated traffic and intervening observations cannot evict an interval anchor.
+retains the latest two matching rows (the caller supplies limit=2). The scan stops
+after at most 2000 lines, including malformed and unrelated lines, even when no
+applied row exists. Empty subject lists return without opening the log. This
+bounded per-tick cache is passed to the decision loop. Interval evidence older than
+these bounds is unavailable; the scan never expands to search for an applied row.
 Only successful active steering starts
 the interval. Errors and disappeared workers can retry. Shadow observations and
 continue observations with unchanged (trigger, evidence_hash) are deduplicated

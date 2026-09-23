@@ -211,7 +211,7 @@ class SteeringDecisionLogTests(unittest.TestCase):
 
 
 class GroupedSteeringHistoryTests(unittest.TestCase):
-    def test_grouped_history_keeps_latest_and_applied_in_one_scan(self):
+    def test_grouped_history_honours_per_subject_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "runs/sched/decisions.jsonl"
@@ -226,5 +226,27 @@ class GroupedSteeringHistoryTests(unittest.TestCase):
             with patch.object(Path, "open", autospec=True, side_effect=Path.open) as opened:
                 grouped = decision_log.recent(root=root, kind="steering", subjects=["worker", "new"], limit=2)
             opened.assert_called_once()
-            self.assertEqual(grouped["worker"], [applied, latest])
+            self.assertEqual(grouped["worker"], [rows[-4], latest])
             self.assertEqual(grouped["new"], [rows[-1]])
+
+    def test_grouped_history_scan_is_bounded_without_applied_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "runs/sched/decisions.jsonl"
+            path.parent.mkdir(parents=True)
+            old = {"kind": "steering", "subject": "old", "mode": "shadow"}
+            newest = {"kind": "steering", "subject": "new", "mode": "shadow"}
+            path.write_text(json.dumps(old) + "\n" +
+                            (json.dumps({"kind": "routing"}) + "\ninvalid\n") * 1500 +
+                            json.dumps(newest) + "\n")
+            with patch.object(decision_log.json, "loads", wraps=json.loads) as loads:
+                rows = decision_log.recent(root=root, kind="steering", subjects=["old", "new"], limit=1)
+            self.assertEqual(rows, {"old": [], "new": [newest]})
+            self.assertLessEqual(loads.call_count, decision_log.GROUPED_SCAN_LIMIT)
+            with patch.object(Path, "open") as opened:
+                self.assertEqual(decision_log.recent(root=root, subjects=[]), {})
+                self.assertEqual(decision_log.recent(root=root, subjects=["new"], limit=0), {"new": []})
+            opened.assert_not_called()
+            with patch.object(decision_log.json, "loads", wraps=json.loads) as loads:
+                self.assertEqual(decision_log.recent(root=root, subjects=["new"], limit=1), {"new": [newest]})
+            self.assertLessEqual(loads.call_count, 2)

@@ -28,7 +28,10 @@ def matches(path, entries):
 
 def safe_scope(task, worktree=None):
     """Scope entries contained in the worktree, including resolved symlinks."""
-    root = Path(worktree or task.get("worktree") or ".").resolve()
+    worktree = worktree or task.get("worktree")
+    if not worktree:
+        return list(task.get("scope", []))
+    root = Path(worktree).resolve()
     entries = []
     for value in task.get("scope", []):
         entry = str(value)

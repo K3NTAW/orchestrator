@@ -260,18 +260,22 @@ def validate_steering(row):
         raise ValueError("steering rows must omit message text")
 
 
-def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):
-    """Read backwards once. Grouped steering retains latest and latest applied.
+GROUPED_SCAN_LIMIT = 2000
 
-    subjects returns at most two rows per subject, so unrelated traffic cannot
-    evict the interval anchor. A subject without an applied row requires one
-    full scan, shared by all subjects rather than repeated per worker.
+
+def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):
+    """Read newest matching rows, returning each result in chronological order.
+
+    Grouped reads retain at most limit rows per subject and inspect at most
+    GROUPED_SCAN_LIMIT lines total, including malformed and unrelated lines.
     """
     grouped = {subject: [] for subject in subjects} if subjects is not None else None
+    if limit <= 0 or grouped == {}:
+        return grouped if grouped is not None else []
     completed = set()
-    if limit <= 0:
-        return []
-    rows = []
+    rows, scanned = [], 0
+    def result():
+        return {tid: own[::-1] for tid, own in grouped.items()} if grouped is not None else rows[::-1]
     path = _directory(root) / "decisions.jsonl"
     try:
         with path.open("rb") as stream:
@@ -284,6 +288,9 @@ def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):
                 lines = (stream.read(size) + pending).split(b"\n")
                 pending = lines.pop(0) if pos else b""
                 for line in reversed(lines):
+                    if grouped is not None and scanned >= GROUPED_SCAN_LIMIT:
+                        return result()
+                    scanned += 1
                     try:
                         row = json.loads(line)
                     except (ValueError, UnicodeError):
@@ -295,17 +302,15 @@ def recent(root=None, limit=500, *, kind=None, subject=None, subjects=None):
                             if tid not in grouped or tid in completed:
                                 continue
                             own = grouped[tid]
-                            applied = row.get("mode") == "active" and (row.get("extra") or {}).get("outcome") == "applied"
-                            if not own or applied:
-                                own.append(row)
-                            if applied:
+                            own.append(row)
+                            if len(own) >= limit:
                                 completed.add(tid)
                             if len(completed) == len(grouped):
-                                return {tid: own[::-1] for tid, own in grouped.items()}
+                                return result()
                             continue
                         rows.append(row)
                         if len(rows) >= limit:
-                            return {tid: own[::-1] for tid, own in grouped.items()} if grouped is not None else rows[::-1]
+                            return result()
     except FileNotFoundError:
         pass
-    return {tid: own[::-1] for tid, own in grouped.items()} if grouped is not None else rows[::-1]
+    return result()

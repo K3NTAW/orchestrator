@@ -149,3 +149,9 @@ class SteeringPolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "shared helper reached"):
                     spawn._packet_body(task, wt, cfg={})
                 shared.assert_called_once_with(task, wt)
+
+    def test_safe_scope_without_worktree_does_not_use_cwd(self):
+        entries = ["../outside.py", "/synthetic/absolute.py", "app/main.py"]
+        with patch.object(Path, "resolve", side_effect=AssertionError("must not resolve against cwd")):
+            self.assertEqual(policy.safe_scope({"scope": entries}), entries)
+            self.assertEqual(policy.safe_scope({"scope": entries, "worktree": None}), entries)
