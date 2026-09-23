@@ -5,7 +5,7 @@
 Cache-aware disclosure groups three independent features. Each entry owns one
 configuration key; evaluating a recommendation never rewrites configuration.
 
-| Feature | Configuration | Minimum shadow rows |
+| Feature | Configuration | Minimum distinct shadow tasks |
 | --- | --- | ---: |
 | context_cache | context_router.cache_mode | 30 |
 | tool_cache | tool_disclosure.cache_mode | 30 |
@@ -33,32 +33,45 @@ Demotion is stateless: compare the most recent ten distinct active subjects
 with the disjoint shadow cohort on every call. A lower first-pass rate or a
 higher mean fix-round count demotes an active feature. Fewer than ten active
 subjects cannot cause this demotion. Memory tiers gains this windowed demotion;
-its existing generic promotion path is otherwise preserved. Fast path retains
+its existing generic evaluation path, including ordinary regression demotion,
+is otherwise preserved. Fast path retains
 its 20-row threshold and two-fix-round demotion. Steering policy retains its
 existing 20-row and economics rules. Neither receives the new freshness gate.
 
 `promotion.evaluate(feature, evidence, cfg, root=..., now=...)` refuses with
 `hermes_eval_missing_or_stale` for a missing, malformed, failed, future-dated,
-or expired report. Omitting root skips only this freshness check and records
-`eval_root_missing`; it does not substitute production state.
+or expired report. Omitting root blocks activation with `eval_root_missing`;
+it never substitutes production state or promotes without a fresh evaluation.
 `context_router.cache_mode(cfg, section)` is a pure validated configuration
 accessor. Unknown sections and invalid values raise ValueError.
 `effective_cache_mode(cfg, section, root=..., now=None, remembered=None)` returns
 an effective mode and refusal reason, evaluating only configured active modes.
+Collection or evaluation errors refuse active as shadow with reason gate_error.
 
-The public execute and review packet builders resolve context, tool, and skill
-cache controls once per packet with root=STATE. Lower-level rendering helpers
+All four public packet paths (execute, review, scout, and spec review) resolve
+context, tool, and skill cache controls with root=STATE. Worker dispatch resolves
+one snapshot and explicitly passes it to the packet builder, skill preparation,
+and tool disclosure, avoiding duplicate evaluations in one build. Standalone
+builders resolve their own snapshot. Scout and spec-review templates do not
+present routed context or skill catalogs, so their unused shadow proposals
+are not recorded as exposures; active refusals remain observable. Lower-level rendering helpers
 consume that snapshot; preparing a skill selection alone does not activate the
 cache gate. Prepared skill text retains its pre-catalog section so a refused
 active catalog is removed before rendering. Configuration is never rewritten.
 Pool-owned remembered reasons deduplicate notifications, including reset after
-recovery, and notification failures cannot break spawning.
+recovery, and notification failures cannot break spawning. Without a supplied
+pool, notification memory is local to the build. No module-level pool or private
+task keys are used. Telemetry write failures also fall back to shadow/gate_error
+and log once per section on the supplied pool. Auxiliary disclosure telemetry
+cannot break spawning.
 
 Gate observations record configured_cache_mode, effective cache_mode, and
 refused_reason. Context, tool, and skill decisions carry the same values when
 available. Collection prefers packet gate observations over auxiliary rows for
 the same feature/task, so later provider usage cannot relabel refused shadow as
-active or double-count the packet. The Hermes scorecard prints refusal counts
+active or double-count the packet. Sample counts use distinct task subjects,
+with active membership taking precedence. Configured-active builds refused to
+shadow never supply shadow promotion samples. The Hermes scorecard prints refusal counts
 and reasons in its table and exposes them as cache_refusals in JSON.
 
 To revert, use git revert on this task's commits, including its fix-round

@@ -447,7 +447,7 @@ class HermesPromotion(unittest.TestCase):
             self.assertFalse(recovered["last10_regression"])
             self.assertGreater(recovered["fix_rounds_delta"], 0)
             cfg = {"memory": {"mode": "active"}}
-            for metrics, expected in ((regressed, "demote"), (recovered, "stay")):
+            for metrics, expected in ((regressed, "demote"), (recovered, "demote")):
                 self.assertEqual(promotion.evaluate("memory_tiers", {"n": 30, **metrics}, cfg)["recommendation"], expected)
 
     def test_packet_cache_gate_cohort_overrides_auxiliary_configured_active_rows(self):
@@ -462,4 +462,29 @@ class HermesPromotion(unittest.TestCase):
                     deterministic={"cache_mode": mode, "configured_cache_mode": "active"},
                     selected=[], reason=reason, mode=mode, root=root)
             values = promotion.collect("tool_cache", root)
-            self.assertEqual((values["n"], values["shadow_n"], values["active_n"]), (1, 1, 0))
+            self.assertEqual((values["n"], values["shadow_n"], values["active_n"]), (0, 0, 0))
+
+
+    def test_missing_root_blocks_even_complete_positive_evidence(self):
+        values = {"n": 30, "shadow_n": 30, "first_pass_delta": 0,
+                  "fix_rounds_delta": 0, "accepted_tokens_delta": -1}
+        for feature in promotion.HERMES_FEATURES:
+            result = promotion.evaluate(feature, values)
+            self.assertEqual(result["recommendation"], "stay")
+            self.assertIn("eval_root_missing", result["reasons"])
+
+    def test_cache_samples_are_distinct_tasks_and_exclude_refused_active(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for i in range(10):
+                for _ in range(3):
+                    decision_log.record("context_selection", f"T-{i}", candidates=[], hard_constraints=[],
+                        deterministic={"configured_cache_mode": "shadow", "cache_mode": "shadow"},
+                        selected=[], reason="cache_promotion_gate", mode="shadow", root=root)
+            for _ in range(30):
+                decision_log.record("context_selection", "T-refused", candidates=[], hard_constraints=[],
+                    deterministic={"configured_cache_mode": "active", "cache_mode": "shadow", "refused_reason": "gate_error"},
+                    selected=[], reason="cache_promotion_gate", mode="shadow", root=root)
+            values = promotion.collect("context_cache", root)
+            self.assertEqual((values["n"], values["shadow_n"]), (10, 10))

@@ -59,11 +59,17 @@ def effective_cache_mode(cfg, section="context_router", *, root, now=None, remem
     reason = None
     if mode == "active":
         feature = CACHE_FEATURES[section]
-        verdict = promotion.evaluate(feature, promotion.collect(feature, root), cfg,
-                                     root=root, now=now)
-        if verdict["recommendation"] != "promote":
-            mode = "shadow"
-            reason = ", ".join(verdict["reasons"]) or verdict["recommendation"]
+        try:
+            verdict = promotion.evaluate(feature, promotion.collect(feature, root), cfg,
+                                         root=root, now=now)
+            if verdict["recommendation"] != "promote":
+                mode = "shadow"
+                reason = ", ".join(verdict["reasons"]) or verdict["recommendation"]
+        except Exception:
+            mode, reason = "shadow", "gate_error"
+            if remembered is None or remembered.get(section) != reason:
+                import logging
+                logging.getLogger(__name__).warning("cache promotion evaluation failed; using shadow: %s", section)
     if remembered is not None:
         changed = remembered.get(section) != reason
         remembered[section] = reason

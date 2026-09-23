@@ -330,3 +330,54 @@ class CachePromotionRefusal(unittest.TestCase):
             self.assertIn("## tools\n", accepted)
             self.assertIn("fixture catalog", accepted)
             self.assertEqual(evaluate.call_count, 6)
+
+    def test_gate_errors_fail_closed_and_recording_does_not_mutate_tasks(self):
+        from types import SimpleNamespace
+        from orchestrator import promotion
+        cfg = {key: {"cache_mode": "active"} for key in context_router.CACHE_FEATURES}
+        task = {"id": "T-errors", "scope": []}
+        before = json.dumps(task)
+        pool = SimpleNamespace(cfg=cfg)
+        with mock.patch.object(promotion, "collect", side_effect=OSError("fixture")), \
+                mock.patch.object(spawn.decision_log, "record") as record, \
+                mock.patch("orchestrator.notify.notify"), \
+                self.assertLogs("orchestrator.context_router", level="WARNING") as logs:
+            for _ in range(2):
+                effective = spawn._packet_cache_config(task, cfg, pool=pool)
+                self.assertTrue(all(effective[k]["cache_mode"] == "shadow" for k in context_router.CACHE_FEATURES))
+            self.assertEqual(len(logs.output), 3)
+            self.assertTrue(all(c.kwargs["deterministic"]["refused_reason"] == "gate_error" for c in record.call_args_list))
+        self.assertEqual(json.dumps(task), before)
+        with mock.patch.object(promotion, "collect", return_value={}), \
+                mock.patch.object(promotion, "evaluate", return_value={"recommendation": "promote", "reasons": []}), \
+                mock.patch.object(spawn.decision_log, "record", side_effect=OSError("fixture")), \
+                self.assertLogs("orchestrator.spawn", level="WARNING") as logs:
+            for _ in range(2):
+                effective = spawn._packet_cache_config(task, cfg, pool=pool)
+                self.assertTrue(all(effective[k]["cache_mode"] == "shadow" for k in context_router.CACHE_FEATURES))
+                self.assertTrue(all(d["refused_reason"] == "gate_error" for d in effective["_cache_decisions"].values()))
+            self.assertEqual(len(logs.output), 3)
+        self.assertEqual(json.dumps(task), before)
+
+    def test_scout_and_spec_review_gate_and_disclosure_uses_snapshot(self):
+        from types import SimpleNamespace
+        from orchestrator import tool_catalog
+        cfg = {key: {"mode": "shadow", "cache_mode": "active"} for key in context_router.CACHE_FEATURES}
+        task = {"id": "T-other-roles", "scope": [], "role": "scout"}
+        before = dict(task)
+        with mock.patch.object(context_router, "effective_cache_mode", return_value=("shadow", "missing")) as gate, \
+                mock.patch.object(spawn.decision_log, "record") as record, \
+                mock.patch.object(spawn, "_base_sha", return_value="fixture"), \
+                mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}):
+            for builder in (spawn.scout_packet, spawn.spec_review_packet):
+                builder(task, cfg=cfg)
+            self.assertEqual(gate.call_count, 6)
+            effective = spawn._packet_cache_config(task, cfg)
+            count = gate.call_count
+            with mock.patch.object(tool_catalog, "cache_fields", wraps=tool_catalog.cache_fields) as fields:
+                spawn._shadow_tool_disclosure(task, "scout", effective)
+            self.assertEqual(gate.call_count, count)
+            self.assertEqual(fields.call_args.args[3]["tool_disclosure"]["cache_mode"], "shadow")
+            self.assertEqual(record.call_args.kwargs["deterministic"]["refused_reason"], "missing")
+        self.assertEqual(task, before)
+        self.assertFalse(hasattr(spawn, "_CACHE_NOTIFICATION_POOL"))

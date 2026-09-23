@@ -154,7 +154,7 @@ def evaluate(feature, evidence, cfg=None, *, root=None, now=None):
         demote = mode == "active" and evidence.get("active_n", 0) >= 10 and evidence.get("last10_regression")
         if demote:
             reasons.append("last10_quality_regression")
-        blocking = [reason for reason in reasons if reason != "eval_root_missing"]
+        blocking = reasons
         return {"feature": feature, "mode": mode, "n": n,
                 "recommendation": "demote" if demote else "stay" if blocking else "promote",
                 "reasons": reasons, "criteria": spec, "evidence": evidence}
@@ -234,7 +234,7 @@ def evaluate(feature, evidence, cfg=None, *, root=None, now=None):
     if regressions:
         reasons.extend("quality_regression:" + name for name in regressions)
         return {"feature": feature, "mode": mode, "n": n,
-                "recommendation": "demote" if mode == "active" and feature != "memory_tiers" else "stay",
+                "recommendation": "demote" if mode == "active" else "stay",
                 "reasons": reasons, "criteria": criteria}
 
     if feature == "planner_routing":
@@ -622,9 +622,11 @@ def _collect_hermes(feature, root):
             observed = row.get("mode")
         else:
             observed = extra.get("cache_mode", deterministic.get("cache_mode", row.get("cache_mode")))
-            if observed is None:
+            configured = deterministic.get("configured_cache_mode", extra.get("configured_cache_mode"))
+            if observed is None or (configured == "active" and observed != "active"):
                 continue
-        rows.append({**row, "mode": observed})
+        if observed in ("shadow", "active") and row.get("subject"):
+            rows.append({**row, "mode": observed})
     try:
         cfg = tomllib.loads((root / "pool.toml").read_text())
     except (OSError, ValueError):
@@ -632,5 +634,12 @@ def _collect_hermes(feature, root):
     spec = FEATURES[feature]
     invalid = bool(current_mode(feature, cfg)[1]) or (
         feature == "stale_steering" and spec["key"] not in _table(cfg, spec["table"]))
+    # Active membership wins; repeated builds never increase the sample size.
+    subjects = {}
+    for row in sorted(rows, key=lambda item: item.get("ts", 0)):
+        previous = subjects.get(row["subject"])
+        if previous is None or previous["mode"] != "active" or row["mode"] == "active":
+            subjects[row["subject"]] = row
+    rows = list(subjects.values())
     return {"n": len(rows), "shadow_n": sum(r["mode"] == "shadow" for r in rows),
             "invalid_config": invalid, **_cohort_metrics(rows, root)}

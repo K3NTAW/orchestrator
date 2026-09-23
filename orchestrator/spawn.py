@@ -19,38 +19,58 @@ _SKILL_EVIDENCE_WINDOW_S = 7 * 24 * 60 * 60
 _SKILL_PRESENTATION_CAP = 2400
 
 
-_CACHE_NOTIFICATION_POOL = None
-
-
-def _packet_cache_config(task, cfg, skills=None, pool=None):
+def _packet_cache_config(task, cfg, skills=None, pool=None, *, observe_shadow=True):
     """Resolve all cache controls once at the public packet-build boundary.
 
     Low-level render helpers consume this snapshot and retain their pure config
     behavior when exercised independently.
     """
-    global _CACHE_NOTIFICATION_POOL
     configured = (pool or Pool()).cfg if cfg is None else cfg
-    if pool is None:
-        if _CACHE_NOTIFICATION_POOL is None:
-            _CACHE_NOTIFICATION_POOL = Pool()
-        pool = _CACHE_NOTIFICATION_POOL
-    if not isinstance(getattr(pool, "cache_refusal_reasons", None), dict):
-        pool.cache_refusal_reasons = {}
+    remembered = {}
+    if pool is not None:
+        if not isinstance(getattr(pool, "cache_refusal_reasons", None), dict):
+            pool.cache_refusal_reasons = {}
+        remembered = pool.cache_refusal_reasons
     effective = dict(configured)
     decisions = {}
     for section in context_router.CACHE_FEATURES:
         try:
             mode, reason = context_router.effective_cache_mode(
-                configured, section, root=STATE, remembered=pool.cache_refusal_reasons)
+                configured, section, root=STATE, remembered=remembered)
             invalid = False
         except ValueError:
             mode, reason, invalid = "off", "invalid_config", True
+        except Exception:
+            mode, reason, invalid = "shadow", "gate_error", False
+            if remembered.get(section) != reason:
+                logging.getLogger(__name__).warning("cache promotion failed; using shadow: %s", section)
+            remembered[section] = reason
         value = (configured.get(section) or {}).get("cache_mode", "off")
         decisions[section] = {"configured_cache_mode": value, "cache_mode": mode,
                               "refused_reason": reason, "invalid_config": invalid}
         effective[section] = {**(configured.get(section) or {}), "cache_mode": mode}
     effective["_cache_decisions"] = decisions
-    task["_cache_decisions"] = decisions
+    # These observations also cover Codex, whose usage writer runs separately.
+    for section, kind in (("context_router", "context_selection"),
+                          ("tool_disclosure", "tool_disclosure"), ("skills", "skill_selection")):
+        data = decisions[section]
+        if data["configured_cache_mode"] == "off" or (
+                not observe_shadow and data["configured_cache_mode"] == "shadow"):
+            continue
+        try:
+            decision_log.record(kind, task.get("id", "(unknown)"), candidates=[], hard_constraints=[],
+                                deterministic=data, selected=[], reason="cache_promotion_gate",
+                                mode=data["cache_mode"])
+        except Exception:
+            evaluation_failed = data.get("refused_reason") == "gate_error"
+            data.update(cache_mode="shadow", refused_reason="gate_error")
+            effective[section]["cache_mode"] = "shadow"
+            error_key = "record:" + section
+            if remembered.get(error_key) != "gate_error" and not evaluation_failed:
+                logging.getLogger(__name__).warning("cache promotion recording failed; using shadow: %s", section)
+            remembered[error_key] = "gate_error"
+        else:
+            remembered.pop("record:" + section, None)
     if skills is not None:
         skills.update(decisions["skills"])
         if "_uncached_section" in skills:
@@ -58,15 +78,6 @@ def _packet_cache_config(task, cfg, skills=None, pool=None):
             catalog = skills.get("_cache_catalog", "")
             if skills["cache_mode"] == "active" and catalog:
                 skills["section"] = "## skills\n" + catalog + "\n\n" + skills["section"].removeprefix("## skills\n")
-    # These observations also cover Codex, whose usage writer runs separately.
-    for section, kind in (("context_router", "context_selection"),
-                          ("tool_disclosure", "tool_disclosure"), ("skills", "skill_selection")):
-        data = decisions[section]
-        if data["configured_cache_mode"] == "off":
-            continue
-        decision_log.record(kind, task.get("id", "(unknown)"), candidates=[], hard_constraints=[],
-                            deterministic=data, selected=[], reason="cache_promotion_gate",
-                            mode=data["cache_mode"])
     return effective
 
 
@@ -126,6 +137,7 @@ def _prepare_skills(task, role, cfg):
     except ValueError:
         cache_mode, choice["invalid_config"] = "off", True
     choice["cache_mode"] = cache_mode
+    choice.update((cfg.get("_cache_decisions") or {}).get("skills", {}))
     choice["_uncached_section"] = choice["section"]
     choice["_cache_catalog"] = catalog
     if cache_mode == "active" and catalog:
@@ -544,6 +556,8 @@ def _shadow_tool_disclosure(task, role, cfg, skills=None):
     """Record disclosure choice and return its telemetry and selected allowlist."""
     if role == "codex_execute":
         return {"tool_allowlist_source": "codex"}
+    if "_cache_decisions" not in cfg:
+        cfg = _packet_cache_config(task, cfg)
     mode = promotion.mode("tool_disclosure", cfg)
     if mode not in ("shadow", "active"):
         return {"tool_allowlist_source": "legacy"}
@@ -562,16 +576,19 @@ def _shadow_tool_disclosure(task, role, cfg, skills=None):
         reason = "specialist hand-over"
         extra.update({"tools_added": specialist_choice.get("tools_added", []),
                       "skills": list(skills.get("selected") or [])})
-    decision_log.record(
-        kind="tool_disclosure", subject=task.get("id", "(unknown)"), candidates=offered,
-        hard_constraints=choice["mandatory"],
-        selected=selected if mode == "active" else "allowlist unchanged (shadow)",
-        deterministic={"task_class": tool_catalog._task_class(task), "role": role,
-                       "kept": selected, "dropped": [tool for tool in offered if tool not in selected],
-                       "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens,
-                       **tool_catalog.cache_fields(task, role, selected, cfg),
-                       **(task.get("_cache_decisions") or {}).get("tool_disclosure", {})},
-        reason=reason, mode=mode, extra=extra)
+    try:
+        decision_log.record(
+            kind="tool_disclosure", subject=task.get("id", "(unknown)"), candidates=offered,
+            hard_constraints=choice["mandatory"],
+            selected=selected if mode == "active" else "allowlist unchanged (shadow)",
+            deterministic={"task_class": tool_catalog._task_class(task), "role": role,
+                           "kept": selected, "dropped": [tool for tool in offered if tool not in selected],
+                           "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens,
+                           **tool_catalog.cache_fields(task, role, selected, cfg),
+                           **(cfg.get("_cache_decisions") or {}).get("tool_disclosure", {})},
+            reason=reason, mode=mode, extra=extra)
+    except Exception:
+        pass  # Telemetry must not prevent spawning; gate failures already refuse.
     return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens,
             "tool_allowlist": ",".join(selected) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
             "tool_disclosure_mode": mode, "tool_allowlist_source": source}
@@ -1011,9 +1028,9 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
     return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree, *, cfg=None, skills=None, provider="codex", pool=None) -> str:
+def packet(task, worktree, *, cfg=None, skills=None, provider="codex", pool=None, cache_config=None) -> str:
     """Build the Codex dispatch briefing; Claude fallback supplies its provider explicitly."""
-    cfg = _packet_cache_config(task, cfg, skills, pool)
+    cfg = cache_config if cache_config is not None else _packet_cache_config(task, cfg, skills, pool)
     body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills, provider=provider)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
@@ -1062,10 +1079,10 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", pool=None) -> str:
+def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", pool=None, cache_config=None) -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
-    cfg = _packet_cache_config(task, cfg, skills, pool)
+    cfg = cache_config if cache_config is not None else _packet_cache_config(task, cfg, skills, pool)
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
     raw_diff = scoped_diff(src)
@@ -1197,7 +1214,8 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
                         **shadow_meta)
 
 
-def spec_review_packet(task) -> str:
+def spec_review_packet(task, *, cfg=None, pool=None, cache_config=None) -> str:
+    cache_config = cache_config if cache_config is not None else _packet_cache_config(task, cfg, pool=pool, observe_shadow=False)
     wt = Path(task.get("worktree") or ROOT)
     dependencies = []
     for task_id in task.get("depends_on", []):
@@ -1216,7 +1234,8 @@ def spec_review_packet(task) -> str:
     return _role_packet(body, _base_sha(task, wt), f"task@{task.get('id', '(none)')} tree@HEAD")
 
 
-def scout_packet(task) -> str:
+def scout_packet(task, *, cfg=None, pool=None, cache_config=None) -> str:
+    cache_config = cache_config if cache_config is not None else _packet_cache_config(task, cfg, pool=pool, observe_shadow=False)
     wt = Path(task.get("worktree") or ROOT)
     tree = []
     for item in task.get("scope", []):
@@ -1525,10 +1544,11 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
         disclosure_mode = "off"
     else:
         try:
-            skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, pool.cfg)
+            cache_config = _packet_cache_config(t, pool.cfg, pool=pool, observe_shadow=role in ("execute", "review"))
+            skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, cache_config)
             if role == "review":
                 src = reviewed if reviewed is not None else t
-                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice, provider="claude", pool=pool)
+                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice, provider="claude", pool=pool, cache_config=cache_config)
                 security_signals = {"security": "## security\n" in role_packet}
                 prompt = render("review", packet=role_packet, task=t, signals=security_signals)
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
@@ -1537,26 +1557,26 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
                                                 for k in ("claim", "evidence", "confidence")})
             elif role == "spec_review":
                 src = bus.get(t["inputs"][0])
-                role_packet = spec_review_packet(src)
+                role_packet = spec_review_packet(src, cfg=pool.cfg, pool=pool, cache_config=cache_config)
                 prompt = render("spec-review", packet=role_packet, task=t)
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
             elif role == "execute":
                 t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
                 worker_control.write_if_current(task_id, epoch, bus.update, task_id, executor=t["executor"])
                 packet_worktree = t.get("worktree") or ROOT
-                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice, provider="claude", pool=pool)
+                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice, provider="claude", pool=pool, cache_config=cache_config)
                 prompt = render("execute", packet=role_packet, task=t) + \
                     "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
                     "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
             else:
-                role_packet = scout_packet(t)
+                role_packet = scout_packet(t, cfg=pool.cfg, pool=pool, cache_config=cache_config)
                 prompt = render("scout", packet=role_packet, task=t)
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
         except Exception as exc:
             hold_render_error(task_id, exc)
             return {"status": "held", "reason": "render_error"}
-        disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg, skill_choice)
+        disclosure_meta = _shadow_tool_disclosure(t, role, cache_config, skill_choice)
         allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
         disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
         t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
