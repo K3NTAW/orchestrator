@@ -185,3 +185,4 @@ Last events:
 
 Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
 - (2026-09-24 ~22:40 CEST) GOAL COMPLETE: T-1326 docs index merged (ccf4b88); 26/26 execute tasks merged; goal T-0991 closed on the bus; PR 26 opened (stage 3, 5 commits, 25 files, +1781); retrospective recorded.
+- (2026-09-24 ~23:05 CEST) PR 26 merged (737c7a5); local main resynced (147cbb2 on the merge); daemon restarted pid 75847; hermes-eval 21/21 PASS persisted to .orchestrator/hermes_eval.json; scorecard --hermes baseline recorded in decisions.md. Open follow-ups: revert B review affinity and window cap when B stops rate-limiting; watch promotion report for the shadow features.

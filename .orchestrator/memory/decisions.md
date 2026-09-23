@@ -560,3 +560,8 @@ type: decision · goal: T-0991 · provenance: repo
 - Process lessons: most specs needed two review rounds folded into re-files, then Planner approval; overlapping scopes on cli.py, spawn.py and daemon.py produced rebase holds and conflicts, resolved by hand rebase+gate+merge or fresh landing tasks (resume-mode conflict rounds never rebase). Two main-branch bugs found and fixed (routed-findings trim KeyError, evidence feedback loop). Account B answered 429 on every review spawn; reviews moved to A (daily budget 200M, window cap 80M, B review affinity off); headless Planner launches turned off after duplicate re-files.
 - Follow-ups: revert B's review affinity and the window cap when B stops rate-limiting; run orchestrator hermes-eval and scorecard --hermes on main after the stage 3 PR merges; shadow features promote only on evidence.
 outcome: revert path: git revert -m 1 the merge commits on main (PR 25 and the stage 3 PR)
+
+## 2026-09-23 PR 26 merged into main (737c7a5, human approval 2026-09-24): Hermes program stage 3 live; hermes-eval 21/21 pass on main; daemon restarted (pid 75847)
+type: decision · goal: T-0991 · provenance: repo
+- scorecard --hermes on main: accepted-goal success 0.89, first-pass 0.69, fix-round rate 0.31, cache hit ratio 0.94, orchestration amplification 1.56 (cost share 0.11, latency share 0.11), hot memory 3000 tokens; steering, retrieval precision and compaction still unknown (no shadow rows yet).
+outcome: revert path: git revert -m 1 737c7a5 on main
