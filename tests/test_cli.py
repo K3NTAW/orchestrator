@@ -763,3 +763,24 @@ class DisclosureCacheScorecard(unittest.TestCase):
             self.assertIn("since_ts", read.call_args.kwargs)
         with mock.patch.object(decision_log, "read_all", return_value=[]):
             self.assertEqual(run().strip(), "no tool_disclosure rows in range")
+
+
+class HermesCli(unittest.TestCase):
+    def test_hermes_eval_and_scorecard_hermes_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for args in (["hermes-eval", "--root", directory, "--json"],
+                         ["scorecard", "--hermes", "--root", directory, "--json"],
+                         ["scorecard", "--hermes", "--root", directory]):
+                with mock.patch.object(sys, "argv", ["orchestrator", *args]), \
+                        contextlib.redirect_stdout(output := io.StringIO()):
+                    cli.main()
+                if args[0] == "hermes-eval":
+                    self.assertTrue(json.loads(output.getvalue())["passed"])
+                    self.assertTrue((Path(directory) / ".orchestrator/hermes_eval.json").exists())
+                elif args[-1] == "--json":
+                    self.assertIn("accepted_goal_success", json.loads(output.getvalue())["metrics"])
+                else:
+                    self.assertTrue(output.getvalue().startswith("metric\tvalue\n"))
+            with mock.patch.object(sys, "argv", ["orchestrator", "scorecard", "--hermes", "--cache"]), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                cli.main()

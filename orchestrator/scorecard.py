@@ -1,6 +1,7 @@
 """Per-executor outcome rollup: runs/*.jsonl + tasks/T-*.json, keyed by executor id. Feeds pick_executor's
 scores() so routing reacts to live merge/fail/usage-limit history instead of static weights alone."""
 import json
+import re
 import statistics
 import tomllib
 from datetime import date, datetime
@@ -1642,3 +1643,110 @@ def format_parallelism(card):
     lines.append('waves: ' + cell(card['waves']))
     lines.append('malformed: ' + str(card['malformed']))
     return '\n'.join(lines)
+
+
+def hermes(root=STATE, days=7):
+    """P35 metrics; unknown observations remain null, never synthetic successes."""
+    from . import cache_telemetry, decision_log, memory_scorecard, overhead
+    root = Path(root)
+    if (root / ".orchestrator").is_dir():
+        root = root / ".orchestrator"
+    def ratio(a, b):
+        return a / b if b else None
+    def read(path, default):
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            return default
+    tasks = [read(path, {}) for path in (root / "tasks").glob("*.json")]
+    goals = [t for t in tasks if t.get("role") in ("goal", "triage") and not t.get("parent")]
+    accepted = set(accepted_goals(root))
+    efficiency_card = efficiency(root)
+    usage = [r for _, r in _read_jsonl_entries(root)]
+    accepted_usage = [r for r in usage if r.get("goal_id") in accepted]
+    complete_usage = bool(accepted) and {r.get("goal_id") for r in accepted_usage} == accepted
+    cfg = cache_telemetry._pool_cfg(root)
+    effective = sum(r.get("effective_tokens") if r.get("effective_tokens") is not None else
+                    cache_telemetry.effective_cost({**(r if "input_uncached_tokens" in r else cache_telemetry.normalize(r.get("provider") or "claude", r)),
+                                                   "provider": r.get("provider") or "claude"}, cfg)
+                    for r in accepted_usage)
+    memory = memory_scorecard.build(root, days)
+    cache = cache_telemetry.report(root, days)["totals"]
+    rows = decision_log.read_all(root=root)
+    steering = [r for r in rows if r.get("kind") == "steering"]
+    applied = [r for r in steering if (r.get("extra") or {}).get("outcome") == "applied"]
+    proposals = [r for r in steering if r.get("mode") == "active" and
+                 (r.get("extra") or {}).get("candidate_action", r.get("selected")) == "steer"]
+    successes = [r for r in proposals if (r.get("extra") or {}).get("outcome") == "applied"]
+    avoided = [(r.get("extra") or {}).get("fix_rounds_avoided") for r in applied]
+    avoided = [v for v in avoided if isinstance(v, (int, float))]
+    workers = [read(path, {}) for path in (root / "workers").glob("*.json")]
+    detected = set()
+    for path in (root / "evidence").glob("*.jsonl"):
+        for line in path.read_text().splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if (item.get("scan") or {}).get("verdict") in ("suspicious", "blocked"):
+                detected.add(("evidence", item.get("id")))
+    states = read(root / "skills/state.json", {})
+    blocked_imports, safe = 0, 0
+    for path in (root / "skills/quarantine").rglob("findings.json"):
+        report = read(path, {})
+        skill_id = path.parent.relative_to(root / "skills/quarantine").as_posix()
+        verdict = report.get("scan_overall")
+        if verdict in ("suspicious", "blocked"):
+            detected.add(("skill", skill_id))
+            history = (states.get(skill_id) or {}).get("history", [])
+            inspected = _stamp(report.get("inspected_at"))
+            safe += any(h.get("reason", "").startswith("human-reviewed:")
+                        and re.search(r"\bsafe\b", h.get("reason", ""), re.I)
+                        and h.get("to") in ("testing", "shadow", "active")
+                        and inspected is not None and _stamp(h.get("at")) is not None
+                        and _stamp(h["at"]) >= inspected for h in history)
+        blocked_imports += int((verdict == "blocked" or (report.get("risk") or {}).get("level") == "high")
+                               and (states.get(skill_id) or {}).get("state") not in ("testing", "shadow", "active"))
+    overhead_total = next(r for r in overhead.report(root) if r["goal_id"] == "total")
+    presented = sum(r["records_presented"] for r in memory["rows"])
+    used = sum(r["used"] for r in memory["rows"])
+    retrieved = sum(r["records_retrieved"] for r in memory["rows"])
+    try:
+        hot_tokens = (len((root / "memory/HOT.md").read_text()) + 3) // 4
+    except OSError:
+        hot_tokens = None
+    compactions = [r for r in rows if r.get("kind") == "memory_compaction"]
+    metrics = {
+        "accepted_goal_success": ratio(len(accepted), len(goals)),
+        "first_pass_rate": efficiency_card["first_pass_rate"],
+        "fix_round_rate": efficiency_card["fix_round_rate"],
+        "tokens_per_accepted_goal": tokens_per_accepted_goal(root)["tokens"],
+        "effective_uncached_tokens_per_accepted_goal": ratio(effective, len(accepted)) if complete_usage else None,
+        "usd_per_accepted_goal": usd_per_accepted_goal(root)["usd"] if accepted else None,
+        "latency_per_accepted_goal": (ratio(sum(r.get("duration_s", 0) or 0 for r in accepted_usage), len(accepted))
+                                      if complete_usage and all(r.get("duration_s") is not None for r in accepted_usage) else None),
+        "hot_memory_tokens": hot_tokens,
+        "retrieval_precision": ratio(used, presented),
+        "retrieval_usefulness": ratio(used, retrieved),
+        "compaction_count": len(compactions) if compactions else None,
+        "cache_hit_ratio": cache["hit_ratio"] if cache["runs"] else None,
+        "cache_read": cache["cache_read"], "uncached": cache["input_uncached"],
+        "cache_invalidations": sum((r.get("deterministic") or {}).get("changed_since_previous") is True for r in rows),
+        "effective_context_cost": cache["effective_tokens"] if cache["runs"] else None,
+        "steering_rate": ratio(len(proposals), len([r for r in steering if r.get("mode") == "active"])),
+        "steering_success": ratio(len(successes), len(proposals)),
+        "cancellations": sum(w.get("status") == "cancelled" for w in workers),
+        "partial_result_reuse": sum(r.get("mode") == "active" and bool((r.get("extra") or {}).get("prior_worker_ids")) for r in rows),
+        "fix_rounds_avoided": sum(avoided) if avoided else None,
+        "suspicious_context_detected": len(detected),
+        "false_positive_rate": ratio(safe, len(detected)), "blocked_imports": blocked_imports,
+        "orchestration_amplification": overhead_total["amplification"],
+        "orchestration_cost_share": overhead_total["cost_share"],
+        "orchestration_latency_share": overhead_total["latency_share"],
+    }
+    return {"metrics": metrics, "accepted_goals": len(accepted), "days": days}
+
+
+def format_hermes(card):
+    return "metric\tvalue\n" + "\n".join(
+        f"{key}\t{'unknown' if value is None else value}" for key, value in card["metrics"].items())

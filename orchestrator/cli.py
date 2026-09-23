@@ -203,6 +203,7 @@ def main():
     sc.add_argument("--parallelism", action="store_true")
     sc.add_argument("--scheduling", action="store_true")
     sc.add_argument("--strategies", action="store_true")
+    sc.add_argument("--hermes", action="store_true")
     sc.add_argument("--cache", action="store_true")
     sc.add_argument("--memory", action="store_true")
     sc.add_argument("--days", type=int, default=7)
@@ -223,6 +224,7 @@ def main():
     sc.add_argument("--marginal")
     sc.add_argument("--redundancy", action="store_true")
     ce = sub.add_parser("context-eval"); ce.add_argument("--json", action="store_true"); ce.add_argument("--root")
+    he = sub.add_parser("hermes-eval"); he.add_argument("--json", action="store_true"); he.add_argument("--root")
     me = sub.add_parser("memory-eval"); me.add_argument("--json", action="store_true")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
@@ -405,7 +407,7 @@ def main():
             ap.error("--disclosure-cache requires --economy")
         if a.cache_shadow and not a.context:
             ap.error("--cache-shadow requires --context")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache, a.memory)) > 1:
+        if sum((a.hermes, a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache, a.memory)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing, --cache, --memory")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
@@ -655,6 +657,12 @@ def main():
         print(json.dumps(document, indent=1) if a.json else context_eval.format_report(results))
         if not document["suite_passed"]:
             raise SystemExit(1)
+    elif a.cmd == "hermes-eval":
+        from . import hermes_eval
+        document = hermes_eval.run(a.root or ROOT)
+        print(json.dumps(document, indent=1) if a.json else hermes_eval.format_report(document))
+        if not document["passed"]:
+            raise SystemExit(1)
     elif a.cmd == "memory-eval":
         from . import memory_eval
         document = memory_eval.run()
@@ -665,7 +673,10 @@ def main():
         if document["passed"] != document["total"]:
             raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.disclosure_cache:
+        if a.hermes:
+            card = scorecard.hermes(a.root or scorecard.STATE, a.days)
+            print(json.dumps(card, indent=1) if a.json else scorecard.format_hermes(card))
+        elif a.disclosure_cache:
             card = _disclosure_cache_summary(a.root or scorecard.STATE, a.days)
             print(json.dumps(card, indent=1) if a.json else _format_disclosure_cache(card))
         elif a.memory:

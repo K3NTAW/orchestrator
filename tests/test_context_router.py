@@ -232,3 +232,24 @@ class ContextRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CachePromotionRefusal(unittest.TestCase):
+    def test_cache_mode_active_refuses_to_shadow_when_promotion_stays(self):
+        from orchestrator import promotion, hermes_eval
+        with tempfile.TemporaryDirectory() as directory:
+            for section, feature in (("context_router", "context_cache"), ("tool_disclosure", "tool_cache"),
+                                     ("skills", "skill_cache")):
+                cfg = {section: {"cache_mode": "active"}}
+                notify = mock.Mock()
+                self.assertEqual(context_router.cache_mode(cfg, section, root=directory, notify=notify), "shadow")
+                notify.assert_called_once()
+                self.assertEqual(cfg[section]["cache_mode"], "active")
+                with mock.patch.object(promotion, "collect", return_value={"n": 30, "shadow_n": 30,
+                        "first_pass_delta": 0, "fix_rounds_delta": 0, "accepted_tokens_delta": -1}), \
+                        mock.patch.object(hermes_eval, "fresh", return_value=True):
+                    self.assertEqual(context_router.cache_mode(cfg, section, root=directory, notify=notify), "active")
+                with mock.patch.object(promotion, "evaluate") as evaluate:
+                    cfg[section]["cache_mode"] = "shadow"
+                    self.assertEqual(context_router.cache_mode(cfg, section, root=directory), "shadow")
+                    evaluate.assert_not_called()
