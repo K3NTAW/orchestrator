@@ -763,6 +763,18 @@ class Render(unittest.TestCase):
         self.assertNotIn("long item", text)
         self.assertEqual(text.count("```"), 2)
 
+    def test_trim_routed_item_handles_routed_findings_section(self):
+        self.active_eval()
+        task = {**self.packet_fixture(), "acceptance": ["criterion " + "x" * 4200]}
+        items = [("FULL", "first finding\n```\ncomplete fence\n```"),
+                 ("FULL", "last finding\n```\ncomplete fence\n```")]
+        meta = {"routed_mode": "active", "_routed_sections": {"routed-findings": items}}
+        with mock.patch.object(spawn, "_shadow_route", return_value=meta):
+            text = spawn.packet(task, TMP)
+        self.assertIn("routed=active", text.splitlines()[0])
+        self.assertLessEqual(len(text), 4800)
+        self.assertEqual(items, [])
+
     def packet_fixture(self):
         scratch_repo(TMP)
         (TMP / "widget.py").write_text("import json\n\ndef build_widget():\n    return json.dumps({})\n")

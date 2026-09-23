@@ -511,7 +511,8 @@ def _trim_routed_item(by_name, routed_sections):
             for index in range(len(items) - 1, -1, -1):
                 if items[index][0] == level:
                     items.pop(index)
-                    by_name[name].pop(index)
+                    if name in by_name:
+                        by_name[name].pop(index)
                     return True
     return False
 
