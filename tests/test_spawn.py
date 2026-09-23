@@ -1235,6 +1235,75 @@ class ContextTelemetry(unittest.TestCase):
         review = bus.create_task("active review", "s", ["a"], ["x.py"], role="review", inputs=[reviewed["id"]])
         return review
 
+    def _handover_run(self, skill_mode, disclosure_mode, skill_choice=None, worker=None):
+        review = self._active_review()
+        minimal = spawn.tool_catalog.minimal_set(review, "review")
+        choice = skill_choice or {
+            "mode": "active", "selected": ["review/tool-user"],
+            "specialist": {"tools": sorted(set(minimal["keep"]) | {"Glob"}),
+                           "tools_added": ["Glob"]},
+        }
+        calls = []
+        def run(*args):
+            calls.append(args)
+            return (worker(review, calls, *args) if worker else
+                    {"status": "done", "output": {"result": '{"verdict":"approve"}', "usage": {}}})
+        def mode(feature, cfg=None):
+            return skill_mode if feature == "skill_routing" else disclosure_mode
+        with mock.patch.object(P.Pool, "pick", lambda self, role, avoid=None: self.get("A")), \
+                mock.patch.object(P.Pool, "reserve", return_value={}), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "review_packet", return_value="packet v1 base x sources y"), \
+                mock.patch.object(spawn, "render", return_value="prompt"), \
+                mock.patch.object(spawn, "_prepare_skills", return_value=choice), \
+                mock.patch.object(spawn, "_skill_routing", return_value={}), \
+                mock.patch.object(spawn, "_skill_records", return_value={}), \
+                mock.patch.object(spawn.promotion, "mode", side_effect=mode), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            spawn.run_worker(review["id"])
+        return review, choice, minimal, calls
+
+    def test_specialist_allowlist_used_only_when_both_modes_active(self):
+        for skill_mode in ("shadow", "active"):
+            for disclosure_mode in ("shadow", "active"):
+                with self.subTest(skill_mode=skill_mode, disclosure_mode=disclosure_mode):
+                    _, choice, minimal, calls = self._handover_run(skill_mode, disclosure_mode)
+                    expected = (",".join(choice["specialist"]["tools"])
+                                if (skill_mode, disclosure_mode) == ("active", "active")
+                                else ",".join(minimal["keep"]) if disclosure_mode == "active"
+                                else spawn.TOOLS["review"])
+                    self.assertEqual(calls[0][5], expected)
+
+    def test_specialist_allowlist_keeps_mandatory_and_never_adds_unavailable_tools(self):
+        review = self._active_review()
+        minimal = spawn.tool_catalog.minimal_set(review, "review")
+        tools = sorted(set(minimal["keep"]) | {"Glob"})
+        choice = {"mode": "active", "selected": ["review/tool-user"],
+                  "specialist": {"tools": tools, "tools_added": ["Glob"],
+                                 "tools_unavailable": [{"tool": "Edit"}],
+                                 "tools_unknown": [{"tool": "Mystery"}]}}
+        _, _, _, calls = self._handover_run("active", "active", choice)
+        selected = set(calls[0][5].split(","))
+        self.assertTrue(set(minimal["mandatory"]) <= selected)
+        self.assertNotIn("Edit", selected)
+        self.assertNotIn("Mystery", selected)
+
+    def test_skill_refusal_falls_back_to_minimal_allowlist(self):
+        choice = {"mode": "shadow", "selected": ["review/tool-user"],
+                  "specialist": {"tools": ["Read", "Edit"], "tools_added": ["Edit"]}}
+        _, _, minimal, calls = self._handover_run("active", "active", choice)
+        self.assertEqual(calls[0][5], ",".join(minimal["keep"]))
+
+    def test_escalation_still_uses_legacy_allowlist_under_hand_over(self):
+        def worker(review, calls, *args):
+            if len(calls) == 1:
+                bus.post_result(review["id"], {"reason": spawn.NEEDS_TOOL_PREFIX + "Edit"}, "held")
+                return {"status": "done", "output": {"usage": {}, "total_cost_usd": .1}}
+            return {"status": "done", "output": {"result": '{"verdict":"approve"}', "usage": {}}}
+        _, choice, _, calls = self._handover_run("active", "active", worker=worker)
+        self.assertEqual(calls[0][5], ",".join(choice["specialist"]["tools"]))
+        self.assertEqual(calls[1][5], spawn.TOOLS["review"])
+
     def test_active_allowlist_is_minimal_set_with_mandatory(self):
         review = self._active_review()
         captured = []

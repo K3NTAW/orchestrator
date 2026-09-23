@@ -416,26 +416,39 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
         return {}
 
 
-def _shadow_tool_disclosure(task, role, cfg):
+def _shadow_tool_disclosure(task, role, cfg, skills=None):
     """Record disclosure choice and return its telemetry and selected allowlist."""
+    if role == "codex_execute":
+        return {"tool_allowlist_source": "codex"}
     mode = promotion.mode("tool_disclosure", cfg)
     if mode not in ("shadow", "active"):
-        return {}
+        return {"tool_allowlist_source": "legacy"}
     offered = tool_catalog.disclosed(role)
     choice = tool_catalog.minimal_set(task, role)
+    specialist_choice = (skills or {}).get("specialist") or {}
+    hand_over = (mode == "active" and (skills or {}).get("mode") == "active"
+                 and promotion.mode("skill_routing", cfg) == "active")
+    selected = specialist_choice.get("tools", choice["keep"]) if hand_over else choice["keep"]
+    source = "specialist" if hand_over else "minimal" if mode == "active" else "legacy"
     disclosed_tokens = tool_catalog.tokens(offered)
     minimal_tokens = tool_catalog.tokens(choice["keep"])
+    extra = {"tool_allowlist_source": source}
+    reason = choice["reason"]
+    if hand_over:
+        reason = "specialist hand-over"
+        extra.update({"tools_added": specialist_choice.get("tools_added", []),
+                      "skills": list(skills.get("selected") or [])})
     decision_log.record(
         kind="tool_disclosure", subject=task.get("id", "(unknown)"), candidates=offered,
         hard_constraints=choice["mandatory"],
-        selected=choice["keep"] if mode == "active" else "allowlist unchanged (shadow)",
+        selected=selected if mode == "active" else "allowlist unchanged (shadow)",
         deterministic={"task_class": tool_catalog._task_class(task), "role": role,
                        "kept": choice["keep"], "dropped": choice["drop"],
                        "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens},
-        reason=choice["reason"], mode=mode)
+        reason=reason, mode=mode, extra=extra)
     return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens,
-            "tool_allowlist": ",".join(choice["keep"]) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
-            "tool_disclosure_mode": mode}
+            "tool_allowlist": ",".join(selected) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
+            "tool_disclosure_mode": mode, "tool_allowlist_source": source}
 
 
 def _hidden_tool_request(task_id):
@@ -1230,7 +1243,7 @@ def run_worker(task_id, account_id=None):
     except Exception as exc:
         hold_render_error(task_id, exc)
         return {"status": "held", "reason": "render_error"}
-    disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg)
+    disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg, skill_choice)
     allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
     disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
     t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
