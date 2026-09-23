@@ -875,7 +875,7 @@ class Daemon(unittest.TestCase):
         self.swap(executor, "_resume_compatible", lambda task: (compatible[0], "worktree is dirty"))
         def start(tid, prompt, **kwargs):
             task = bus.get(tid)
-            executions.append((tid, prompt, task.get("worktree"), task.get("branch")))
+            executions.append((tid, prompt, task.get("worktree"), task.get("branch"), kwargs["packet_meta"]))
             own_worktree = str(self.sandbox / tid)
             bus.update(tid, worktree=own_worktree, executor="astra")
             return {"status": "done", "message": "repaired", "thread": "fresh-thread"}
@@ -901,12 +901,15 @@ class Daemon(unittest.TestCase):
                 task = bus.get(fix)
                 self.assertEqual(task["pipeline"]["resume"], {"mode": "fresh", "reason": f"compat_changed:{reason}"})
                 self.assertEqual((task["status"], task["result"]["thread"]), ("done", "fresh-thread"))
-                tid, prompt, inherited_worktree, branch = executions[-1]
+                tid, prompt, inherited_worktree, branch, packet_meta = executions[-1]
                 self.assertEqual(tid, fix)
                 self.assertIsNone(inherited_worktree)
                 self.assertEqual(branch, f"task/{fix}")
                 self.assertEqual(task["worktree"], str(self.sandbox / fix))
-                self.assertTrue(prompt.startswith("packet v"))
+                headers = [line for line in prompt.splitlines() if line.startswith("packet v")]
+                self.assertEqual(len(headers), 1)
+                self.assertIn(packet_meta["hash"], headers[0])
+                self.assertNotIn("{" * 2, prompt)
                 self.assertIn("## objective\nrepair objective", prompt)
 
     def test_dispatch_prompt_contains_packet_not_placeholder(self):
@@ -918,10 +921,11 @@ class Daemon(unittest.TestCase):
         self.swap(executor, "start", start)
         daemon.dispatch(P.Pool())
         self.assertEqual(seen["task_id"], tid)
-        self.assertTrue(seen["prompt"].startswith("packet v"))
+        headers = [line for line in seen["prompt"].splitlines() if line.startswith("packet v")]
+        self.assertEqual(len(headers), 1)
         self.assertIn("## objective\npacket dispatch objective", seen["prompt"])
         self.assertNotIn("{{", seen["prompt"])
-        self.assertIn(seen["packet_meta"]["hash"], seen["prompt"].splitlines()[0])
+        self.assertIn(seen["packet_meta"]["hash"], headers[0])
 
     def test_dispatch_render_error_holds_task(self):
         broken = bus.create_task("broken render", "keep this literal token: {{unfilled_placeholder}}",
@@ -993,12 +997,14 @@ class Daemon(unittest.TestCase):
         fix, = self.fixes_for(held)
         seen = {}
         def start(task_id, prompt, **kwargs):
-            seen.update(task_id=task_id, prompt=prompt)
+            seen.update(task_id=task_id, prompt=prompt, **kwargs)
             return {"status": "held"}
         self.swap(executor, "start", start)
         daemon.dispatch(P.Pool())
         self.assertEqual(seen["task_id"], fix["id"])
-        self.assertTrue(seen["prompt"].startswith("packet v"))
+        headers = [line for line in seen["prompt"].splitlines() if line.startswith("packet v")]
+        self.assertEqual(len(headers), 1)
+        self.assertIn(seen["packet_meta"]["hash"], headers[0])
         self.assertIn("## objective\n" + fix["title"], seen["prompt"])
         self.assertIn("works", seen["prompt"])
         self.assertNotIn("{{", seen["prompt"])
