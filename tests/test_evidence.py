@@ -8,6 +8,24 @@ from _fixtures import fake_secret
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_worker_partial_provenance_and_trust(self):
+        ev = evidence.make("worker_partial", "T-old:abc", "file: x.py",
+                           provenance="worker_partial")
+        self.assertEqual((ev.trust, ev.trust_class), ("untrusted", "LOCAL_USER"))
+
+    def test_worker_partial_enums_and_scope_field_in_one_change(self):
+        ev = evidence.make("worker_partial", "T-old:abc", "file: x.py",
+                           provenance="worker_partial", scope=["x.py"])
+        self.assertIn("worker_partial", evidence.SOURCE_TYPES)
+        self.assertIn("worker_partial", evidence.PROVENANCE)
+        self.assertEqual(ev.scope, ["x.py"])
+
+    def test_worker_partial_goes_stale_on_new_head(self):
+        ev = evidence.make("worker_partial", "T-old:abc", "file: x.py", commit="abc",
+                           provenance="worker_partial")
+        self.assertTrue(evidence.fresh(ev, "abc"))
+        self.assertFalse(evidence.fresh(ev, "def"))
+
     def test_make_ids_are_content_addressed_and_redacted(self):
         token_name = "API_" + "TOKEN"
         token_value = fake_secret("evidence")

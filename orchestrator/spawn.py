@@ -417,6 +417,7 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
     try:
         pool = evidence.EvidencePool(task.get("parent") or task["id"])
         candidates = [pool.add(candidate) for candidate in candidates]
+        candidates = list({item.id: item for item in [*candidates, *pool.by_type("worker_partial")]}.values())
         composition = (skills or {}).get("_specialist")
         if composition:
             candidates = list({item.id: item for item in
@@ -425,13 +426,19 @@ def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
         routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
                                       required_types=composition.context_requirements if composition else ())
         row = context_router.decision_row(task, routed, mode=mode)
-        row["extra"] = {"head_sha": head_sha}
+        partial_items = context_router.section_items(
+            routed, {ev.id: ev for ev in candidates}, "prior_worker")
+        row["extra"] = {"head_sha": head_sha,
+                        "prior_worker_ids": [ev.id for ev in candidates
+                                             if ev.source_type == "worker_partial" and
+                                             any(item.evidence_id == ev.id and item.level != "HIDE" for item in routed.items)],
+                        "prior_worker_chars": sum(len(text) for _, text in partial_items)}
         decision_log.record(**row)
         return {
             "routed_mode": mode,
             "_routed_sections": {section: context_router.section_items(
                 routed, {ev.id: ev for ev in candidates}, section)
-                for section in ("gotchas", "decisions", "evidence", "read_scope", "routed-findings")}
+                for section in ("gotchas", "decisions", "evidence", "prior_worker", "read_scope", "routed-findings")}
                 if mode == "active" else {},
             "routed_tokens": routed.routed_tokens,
             "routed_reduction_ratio": routed.reduction_ratio,
@@ -731,13 +738,18 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
         candidates.append(evidence.make(
             "test_result", f"task:{task_id}:failures", failure_match.group(1),
             commit=merge_base, provenance="repo", task=task))
-    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
+    routing_task = {**task, "packet_read_scope": sorted(read_scope)}
+    shadow_meta = _shadow_route(routing_task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
     routed_sections = shadow_meta.pop("_routed_sections", {})
     if memory_mode == "active" and retrieval is not None:
         routed_sections = {name: items for name, items in routed_sections.items()
                            if name not in tiered_sections}
     sections = [(name, [text for _, text in routed_sections[name]] if name in routed_sections else lines)
                 for name, lines in sections]
+    if "prior_worker" in routed_sections and routed_sections["prior_worker"]:
+        evidence_index = next(i for i, (name, _) in enumerate(sections) if name == "evidence")
+        sections.insert(evidence_index + 1,
+                        ("prior_worker", [text for _, text in routed_sections["prior_worker"]]))
     dependencies = []
     for dependency_id in task.get("depends_on", []):
         try:

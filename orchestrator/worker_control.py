@@ -6,7 +6,7 @@ from pathlib import Path
 import signal
 import time
 
-from . import bus, pool, worker_registry
+from . import bus, evidence, pool, worker_registry
 from .gitutil import _git_in, _resolve_base
 from .jev import redact
 
@@ -90,6 +90,45 @@ def _bounded_result(partial, reason, source):
     return result
 
 
+def _partial_lines(partial):
+    lines = []
+    for path in partial.get("files_changed", []):
+        lines.append(f"file: {path}")
+    if partial.get("diff_stat"):
+        lines.extend(f"diff: {line}" for line in partial["diff_stat"].splitlines() if line.strip())
+    for commit in partial.get("commits", []):
+        lines.append(f"commit: {commit.get('sha', '')} {commit.get('subject', '')}".rstrip())
+    for name in ("tests_run", "errors", "files_inspected"):
+        label = {"tests_run": "test", "errors": "error", "files_inspected": "inspected"}[name]
+        lines.extend(f"{label}: {line}" for line in partial.get(name, []))
+    return "\n".join(lines)
+
+
+def preserve_partial(task):
+    """Persist observable worktree facts once for a replacement worker."""
+    current = bus.get(task["id"])
+    pipeline = dict(current.get("pipeline") or {})
+    if pipeline.get("partial_preserved_at"):
+        return None
+    worktree = current.get("worktree")
+    if not worktree or not Path(worktree).is_dir():
+        return None
+    head = _git_in(worktree, "rev-parse", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        return None
+    sha = head.stdout.strip()
+    partial = ((current.get("result") or {}).get("partial")
+               or partial_result(current))
+    content = _partial_lines(partial)
+    limit = int((pool.Pool().cfg.get("context_router") or {}).get("partial_max_tokens", 800)) * 4
+    ev = evidence.make("worker_partial", f"{current['id']}:{sha}", content[:max(0, limit)],
+                       commit=sha, provenance="worker_partial", scope=current.get("scope") or [])
+    saved = evidence.EvidencePool(current.get("parent") or current["id"]).add(ev)
+    pipeline["partial_preserved_at"] = time.time()
+    bus.update(current["id"], pipeline=pipeline)
+    return saved
+
+
 def cancel(task_id, reason, *, source="planner", grace_s=20, sleep=time.sleep,
            alive=None, signal_fn=os.kill):
     """Stop the registered process, preserve its worktree, and hold it for the Planner."""
@@ -137,4 +176,5 @@ def cancel(task_id, reason, *, source="planner", grace_s=20, sleep=time.sleep,
         bus.update(task_id, status="held", hold_reason="cancelled", pid=None, result=result)
         pool.Pool().release(task_id, {})
         worker_registry.finish(task_id, "cancelled")
+    preserve_partial(bus.get(task_id))
     return partial

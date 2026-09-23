@@ -147,6 +147,26 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_preserve_partial_is_idempotent_across_ticks(self):
+        with tempfile.TemporaryDirectory(prefix="partial-reconcile-") as directory:
+            repo = scratch_repo(Path(directory))
+            g("branch", "goal/partial", cwd=repo, check=True)
+            g("checkout", "-qb", "task/partial", cwd=repo, check=True)
+            (repo / "x.py").write_text("changed\n")
+            g("add", ".", cwd=repo, check=True)
+            g("commit", "-qm", "partial", cwd=repo, check=True)
+            (repo / "x.py").write_text("dirty\n")
+            task = bus.create_task("partial", "spec", ["pass"], ["x.py"], role="execute",
+                                   parent="partial")
+            bus.update(task["id"], status="running", worktree=str(repo), pid=999999)
+            with mock.patch.object(daemon.worker_control.pool, "Pool") as configured:
+                configured.return_value.cfg = {"context_router": {"partial_max_tokens": 800}}
+                first = daemon.reconcile_dead(bus.get(task["id"]), configured.return_value)
+                second = daemon.reconcile_dead(bus.get(task["id"]), configured.return_value)
+            self.assertEqual((first, second), ("held", "held"))
+            items = daemon.worker_control.evidence.EvidencePool("partial").by_type("worker_partial")
+            self.assertEqual(len([item for item in items if item.location.startswith(task["id"] + ":")]), 1)
+
     def test_dispatch_records_harness_depth_row_in_shadow_and_changes_nothing(self):
         from orchestrator import harness_depth
         pool = self.scheduler_pool("off", slots=1)

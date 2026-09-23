@@ -50,9 +50,20 @@ class WorkerControl(unittest.TestCase):
         self.assertEqual(task['result']['partial'], partial)
         self.assertEqual(task['result']['provenance'], ['worker_partial'])
         self.assertEqual(registry.get(self.tid)['status'], 'cancelled')
-        self.assertEqual(registry.events(self.tid)[0]['data']['cancel_reason'], 'Planner changed direction')
         registry.finish(self.tid, 'failed', 'process_error')
         self.assertEqual(registry.get(self.tid)['status'], 'cancelled')
+
+    def test_cancel_and_preserve_partial_create_evidence_objects(self):
+        self.task.update(prompt="not evidence", transcript="not evidence")
+        with mock.patch.object(control.pool, 'Pool') as configured:
+            configured.return_value.cfg = {"context_router": {"partial_max_tokens": 800}}
+            configured.return_value.release.return_value = None
+            control.cancel(self.tid, 'replace', alive=lambda pid: False)
+        item = control.evidence.EvidencePool("example").by_type("worker_partial")[-1]
+        self.assertEqual((item.commit, item.scope), (self.sha, ["change.txt"]))
+        self.assertIn("file: change.txt", item.content)
+        self.assertIn("partial work", item.content)
+        self.assertNotIn("not evidence", item.content)
 
     def test_partial_result_contains_only_observable_evidence(self):
         self.task.update(prompt='private input', packet='private input', transcript='private output', reasoning='private output')

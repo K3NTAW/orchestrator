@@ -6,7 +6,8 @@ stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot
-from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn, strategy
+from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
+               planner_runs, spawn, strategy, worker_control)
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier
@@ -378,6 +379,7 @@ def reconcile_dead(t, pool=None):
     status = _git_in(worktree, "status", "--porcelain")
     sha = _git_in(worktree, "rev-parse", "HEAD").stdout.strip()
     if status.stdout.strip():
+        worker_control.preserve_partial(t)
         bus.update(tid, status="held", hold_reason="orphaned_dirty_worktree", pid=None,
                    resume_hint={"commit": sha, "dirty": status.stdout.splitlines()[:20]})
         notify(f"{tid}: dead worker left a dirty worktree with commit {sha[:8]} ahead of {base[:8]}; held")

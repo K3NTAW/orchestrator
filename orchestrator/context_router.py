@@ -55,6 +55,14 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
     scope = task.get("scope") or task.get("write_scope") or []
     in_scope = _path(ev) in scope
 
+    if (head_sha is not None and not evidence.fresh(ev, head_sha)
+            and ev.source_type in ("source_chunk", "test_result", "worker_partial")):
+        return "HIDE", "stale"
+    if ev.source_type == "worker_partial":
+        current_paths = set(scope) | set(task.get("packet_read_scope") or [])
+        if set(ev.scope or []) & current_paths:
+            return "LONG", "prior_worker_overlap"
+
     if ev.source_type == "source_chunk" and in_scope and role in ("execute", "scout"):
         return "FULL", "in_scope_file"
     if (role == "security_review" and ev.source_type == "source_chunk"
@@ -80,9 +88,6 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
             and relevance["path_terms"] == 0
             and ev.source_type in ("memory_entry", "decision", "previous_result", "review_finding")):
         return "HIDE", "unrelated_memory"
-    if (head_sha is not None and not evidence.fresh(ev, head_sha)
-            and ev.source_type in ("source_chunk", "test_result")):
-        return "HIDE", "stale"
     if ev.source_type == "source_chunk":
         return "SHORT", "read_scope"
     if role in ("review", "security_review") and ev.source_type in ("review_finding", "previous_result"):
@@ -138,7 +143,8 @@ def section_items(routed_packet, lookup, section):
     items = []
     for item in routed_packet.items:
         ev = _lookup(lookup, item.evidence_id)
-        if ev.relevance.get("section") != section or item.level == "HIDE":
+        belongs = (ev.source_type == "worker_partial") if section == "prior_worker" else ev.relevance.get("section") == section
+        if not belongs or item.level == "HIDE":
             continue
         if ev.source_type == "source_chunk" and item.reason == "in_scope_file":
             continue

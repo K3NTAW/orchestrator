@@ -2,8 +2,10 @@
 
 Evidence content is raw in memory.  :class:`EvidencePool` always applies
 ``jev.redact`` before persistence so secrets are never written to its JSONL file.
+``LOCAL_USER`` covers locally produced artifacts, including user memory and
+observed worker outputs; it is not limited to user-authored memory.
 """
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 import hashlib
 import json
 import re
@@ -16,9 +18,9 @@ from . import STATE, jev, context_scanner
 SOURCE_TYPES = (
     "source_chunk", "test_result", "scout_finding", "memory_entry",
     "graph_finding", "previous_result", "review_finding",
-    "architecture_note", "decision", "external_doc",
+    "architecture_note", "decision", "external_doc", "worker_partial",
 )
-PROVENANCE = ("repo", "bus", "memory", "scout", "external")
+PROVENANCE = ("repo", "bus", "memory", "scout", "external", "worker_partial")
 
 
 @dataclass(frozen=True)
@@ -37,10 +39,12 @@ class Evidence:
     trust: str
     trust_class: str = ""
     scan: dict | None = None
+    scope: list = field(default_factory=list)
 
 
 def _trust_class(provenance):
-    return {"repo": "TRUSTED_REPO", "memory": "LOCAL_USER"}.get(provenance, "EXTERNAL")
+    return {"repo": "TRUSTED_REPO", "memory": "LOCAL_USER",
+            "worker_partial": "LOCAL_USER"}.get(provenance, "EXTERNAL")
 
 
 def _scope(task):
@@ -98,7 +102,7 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
         content, short, long, {}, provenance,
         time.time() if observed_at is None else float(observed_at),
         "trusted" if provenance in ("repo", "memory") else "untrusted",
-        trust_class, scan_summary,
+        trust_class, scan_summary, list(scope),
     )
     relevance = relevance_for(provisional, relevance_task)
     if section is not None:
@@ -107,7 +111,7 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
 
 
 def fresh(ev, head_sha):
-    return ev.source_type not in ("source_chunk", "test_result") or ev.commit == head_sha
+    return ev.source_type not in ("source_chunk", "test_result", "worker_partial") or ev.commit == head_sha
 
 
 def cache_key(ev, task_class, role, level):
@@ -128,6 +132,7 @@ class EvidencePool:
                     row = json.loads(line)
                     row.setdefault("trust_class", _trust_class(row.get("provenance")))
                     row.setdefault("scan", None)
+                    row.setdefault("scope", [])
                     row = {key: value for key, value in row.items()
                            if key in {field.name for field in fields(Evidence)}}
                     self._items[row["id"]] = Evidence(**row)

@@ -781,6 +781,33 @@ class Render(unittest.TestCase):
         self.assertIn("tests/test_widget.py", text)
         self.assertIn("widget.py:3 build_widget", text)
 
+    def test_packet_prior_worker_section_lists_partial_facts(self):
+        self.active_eval()
+        task = self.packet_fixture()
+        head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
+        item = spawn.evidence.make("worker_partial", "T-old:" + head, "file: widget.py\ntest: OK",
+                                   commit=head, provenance="worker_partial", scope=["widget.py"])
+        spawn.evidence.EvidencePool("G").add(item)
+        text = spawn.packet(task, TMP, cfg={"context_router": {"mode": "active"}})
+        self.assertIn("## prior_worker", text)
+        self.assertIn("T-old:" + head, text)
+        self.assertIn("file: widget.py", text)
+        self.assertGreater(text.index("## prior_worker"), text.index("## evidence"))
+
+    def test_prior_worker_section_inert_in_shadow_mode(self):
+        task = self.packet_fixture()
+        head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
+        item = spawn.evidence.make("worker_partial", "T-shadow:" + head, "file: widget.py",
+                                   commit=head, provenance="worker_partial", scope=["widget.py"])
+        spawn.evidence.EvidencePool("G").add(item)
+        with mock.patch.object(spawn.decision_log, "record") as record:
+            text = spawn.packet(task, TMP, cfg={"context_router": {"mode": "shadow"}})
+        self.assertNotIn("## prior_worker", text)
+        route_row = next(call.kwargs for call in record.call_args_list
+                         if call.kwargs.get("kind") == "context_selection")
+        self.assertIn(item.id, route_row["extra"]["prior_worker_ids"])
+        self.assertGreater(route_row["extra"]["prior_worker_chars"], 0)
+
     def test_packet_accepts_cfg_override(self):
         task = self.packet_fixture()
         off = spawn.packet(task, TMP, cfg={"context_router": {"mode": "off"}})

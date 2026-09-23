@@ -13,6 +13,15 @@ def ev(kind, location, content, task=None, commit=""):
 
 
 class ContextRouterTests(unittest.TestCase):
+    def test_worker_partial_fresh_overlap_never_hidden_and_stale_hidden(self):
+        item = evidence.make("worker_partial", "T-old:abc", "file: router.py", commit="abc",
+                             provenance="worker_partial", scope=["router.py"])
+        task = {"id": "T-new", "scope": [], "packet_read_scope": ["router.py"]}
+        fresh = context_router.route(task, [item], role="execute", head_sha="abc").items[0]
+        stale = context_router.route(task, [item], role="execute", head_sha="def").items[0]
+        self.assertEqual((fresh.level, fresh.reason), ("LONG", "prior_worker_overlap"))
+        self.assertEqual((stale.level, stale.reason), ("HIDE", "stale"))
+
     def test_security_review_full_for_security_path_in_scope(self):
         task = {"id": "T", "scope": ["orchestrator/auth.py"]}
         item = ev("source_chunk", "orchestrator/auth.py:1-4", "authentication code")
