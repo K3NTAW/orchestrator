@@ -978,19 +978,36 @@ def dispatch(pool):
             if stamp(t["id"], "spec_review_held_at", status="held", hold_reason="spec_review request_changes"):
                 entry["reason"] = "spec_review_changes"
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
-        elif not any(r["inputs"][:1] == [t["id"]] for r in bus.read(role="spec_review")):
+        else:
+            children = [r for r in bus.read(role="spec_review") if r["inputs"][:1] == [t["id"]]]
+            live = [r for r in children if r.get("status") not in ("failed", "superseded")]
+            failed = [r for r in children if r.get("status") in ("failed", "superseded")]
+            retry = bool(children and not live)
+            respawn_max = pool.cfg.get("daemon", {}).get("respawn_max", 3)
+            if retry and len(failed) >= respawn_max:
+                reason = f"spec_review_failed: {len(failed)} spec reviews returned no verdict"
+                if stamp(t["id"], "spec_review_held_at", status="held", hold_reason=reason):
+                    entry["reason"] = "spec_review_failed"
+                    notify(f"{t['id']}: {reason}")
+                else:
+                    entry["reason"] = "spec_review_failed"
+                continue
+            if live:
+                entry["reason"] = "spec_review_pending"
+                continue
+            if retry:
+                clear_stage(t["id"], "spec_review_at")
             if stamp(t["id"], "spec_review_at"):
                 try:
                     sr = bus.create_task(f"spec review: {t['title']}", t["spec"], t["acceptance"], t["scope"],
                                          role="spec_review", inputs=[t["id"]], parent=t.get("parent"),
                                          complexity=t["complexity"], tier=SPEC_REVIEW_TIER)
-                    entry.update(action="spec_review", reason="spec_review_pending")
+                    entry.update(action="spec_review",
+                                 reason="spec_review_retry" if retry else "spec_review_pending")
                     spawn_async(spawn.run_worker, sr["id"])
                     complete(t["id"], "spec_review_at")
                 except Exception as e:
                     hold_failed(t["id"], "spec_review_error", "spec_review", e)
-        else:
-            entry["reason"] = "spec_review_pending"
     if wave_row is not None:
         if scheduler["mode"] == "active":
             wave_row["wave"] = dispatched_ids

@@ -919,6 +919,50 @@ class Daemon(unittest.TestCase):
                      if entry["task"] == review)
         self.assertEqual((entry["action"], entry["reason"]), ("skipped", "spec_review_pending"))
 
+    def test_failed_spec_review_is_retried(self):
+        pool = self.dispatch_telemetry()
+        task = self.task("retry review", complexity=daemon.SPEC_REVIEW_MIN)
+        daemon.dispatch(pool)
+        first, = bus.read(role="spec_review")
+        bus.update(first["id"], status="failed")
+
+        daemon.dispatch(pool)
+
+        reviews = bus.read(role="spec_review")
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual([review["inputs"] for review in reviews], [[task], [task]])
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual((entry["action"], entry["reason"]), ("spec_review", "spec_review_retry"))
+
+    def test_spec_review_failures_hold_after_respawn_max(self):
+        pool = self.dispatch_telemetry()
+        pool.cfg["daemon"]["respawn_max"] = 2
+        task = self.task("exhausted reviews", complexity=daemon.SPEC_REVIEW_MIN)
+        for number in range(2):
+            review = self.task(f"failed review {number}", role="spec_review", inputs=[task])
+            bus.update(review, status="failed")
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+
+        daemon.dispatch(pool)
+
+        held = bus.get(task)
+        reason = "spec_review_failed: 2 spec reviews returned no verdict"
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", reason))
+        self.assertEqual(messages, [f"{task}: {reason}"])
+        self.assertEqual(len(bus.read(role="spec_review")), 2)
+
+    def test_pending_spec_review_not_duplicated(self):
+        pool = self.dispatch_telemetry()
+        task = self.task("pending review", complexity=daemon.SPEC_REVIEW_MIN)
+        review = self.task("live review", role="spec_review", inputs=[task])
+
+        daemon.dispatch(pool)
+
+        self.assertEqual([row["id"] for row in bus.read(role="spec_review")], [review])
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual((entry["action"], entry["reason"]), ("skipped", "spec_review_pending"))
+
     def test_reply_worker_handles_held_requeues_fix_task_for_retry(self):
         parent = self.held_for_fix()
         bus.update(parent, codex_thread="parent-thread", executor="astra", rounds=1,
