@@ -565,3 +565,8 @@ outcome: revert path: git revert -m 1 the merge commits on main (PR 25 and the s
 type: decision · goal: T-0991 · provenance: repo
 - scorecard --hermes on main: accepted-goal success 0.89, first-pass 0.69, fix-round rate 0.31, cache hit ratio 0.94, orchestration amplification 1.56 (cost share 0.11, latency share 0.11), hot memory 3000 tokens; steering, retrieval precision and compaction still unknown (no shadow rows yet).
 outcome: revert path: git revert -m 1 737c7a5 on main
+
+## 2026-09-23 docs PR 5 merged (docs-kentawaibel main 1ef7297, human approval 2026-09-24): /orchestrator page live with the Hermes program
+type: decision · goal: T-0019 · provenance: repo
+- Cross-repo record; the docs repo's own decisions.md carries the retrospective. Vercel deploys main.
+outcome: revert path: git revert -m 1 1ef7297 in the docs repo
