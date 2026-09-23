@@ -363,8 +363,17 @@ def _testing_findings(skill_id: str, old_state: str, reason: str, root: Path) ->
             raise ValueError("not inspected: quarantine content changed")
         finding_ids = [f["id"] for f in report.get("findings", []) if f["severity"] == "block"]
         script_ids = [f["id"] for f in report.get("findings", []) if f.get("check") == "script"]
-        if (finding_ids or script_ids) and not reason.startswith("override:"):
-            raise ValueError("blocked findings: " + ", ".join(finding_ids or script_ids))
+        risk = report.get("risk", {})
+        risk_reasons = []
+        if risk.get("level") == "high":
+            risk_reasons.append("risk level high")
+        if report.get("scan_overall") == "blocked":
+            risk_reasons.append("scan blocked")
+        bypass = reason.startswith(("override:", "human-reviewed:"))
+        if (finding_ids or script_ids or risk_reasons) and not bypass:
+            reasons = (["blocked findings: " + ", ".join(finding_ids or script_ids)]
+                       if finding_ids or script_ids else []) + risk_reasons
+            raise ValueError("; ".join(reasons))
         finding_ids = finding_ids or script_ids
     return finding_ids
 
@@ -384,7 +393,7 @@ def transition(skill_id: str, new_state: str, reason: str, root: Path = STATE) -
     now = _now()
     entry.setdefault("history", []).append({"at": now, "from": old_state, "to": new_state,
                                             "reason": reason})
-    if finding_ids:
+    if finding_ids or reason.startswith(("override:", "human-reviewed:")):
         entry["history"][-1].update(override=reason, finding_ids=finding_ids)
     entry.update({"state": new_state, "since": now, "reason": reason})
     _write_json(_paths(root)[1], states)
@@ -405,7 +414,9 @@ def rollback(skill_id: str, root: Path = STATE) -> dict[str, Any]:
     previous = last["from"]
     current = entry["state"]
     if previous == "testing":
-        _testing_findings(skill_id, current, f"rollback: {last['reason']}", root)
+        original = next((row["reason"] for row in reversed(history)
+                         if row.get("from") == "quarantined" and row.get("to") == "testing"), last["reason"])
+        _testing_findings(skill_id, current, original, root)
     now = _now()
     history.append({"at": now, "from": current, "to": previous,
                     "reason": f"rollback: {last['reason']}"})

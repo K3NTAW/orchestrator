@@ -11,6 +11,25 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_skills_inspect_prints_risk_level(self):
+        report = {"risk": {"level": "medium"}}
+        with mock.patch("orchestrator.skill_discovery.inspect", return_value=report), \
+                mock.patch.object(sys, "argv", ["orchestrator", "skills", "inspect", "external/example"]), \
+                contextlib.redirect_stdout(output := io.StringIO()):
+            cli.main()
+        self.assertEqual("medium", json.loads(output.getvalue())["risk"]["level"])
+
+    def test_skills_list_level_dash_without_report(self):
+        record = {"state": "active", "trust": "trusted", "roles": [], "est_tokens_l0": 1,
+                  "est_tokens_l2": 2, "version": "abc", "stale": False}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("orchestrator.skills_registry.load", return_value={"skills": {"builtin/x": record}}), \
+                mock.patch.object(cli, "ROOT", Path(directory)), \
+                mock.patch.object(sys, "argv", ["orchestrator", "skills", "list"]), \
+                contextlib.redirect_stdout(output := io.StringIO()):
+            cli.main()
+        self.assertEqual("-", output.getvalue().splitlines()[1].split("\t")[-1])
+
     def test_memory_hot_cli(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

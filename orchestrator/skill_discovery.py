@@ -273,6 +273,75 @@ CHECKS = (
     ("destructive", "block", r"\brm\s+-[\w]*r[\w]*f|\brm\s+-[\w]*f[\w]*r|git\s+push\s+.*--force|git\s+reset\s+--hard|\bDROP\b|\btruncate\b"),
 )
 
+SCRIPT_EXTENSIONS = {".bash", ".js", ".mjs", ".pl", ".ps1", ".py", ".rb", ".sh", ".zsh"}
+CREDENTIAL_NAME = re.compile(r"\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]*\b")
+
+
+def _risk_report(files, executable_files, scans):
+    scripts, endpoints, tools, credential_refs, dependencies, filesystem = [], set(), set(), set(), set(), set()
+    url_dependencies = False
+    for name, data in sorted(files.items()):
+        suffix = PurePosixPath(name).suffix.lower()
+        first = data.splitlines()[0].decode("utf-8", errors="replace") if data else ""
+        shebang = first if first.startswith("#!") else None
+        if shebang or suffix in SCRIPT_EXTENSIONS or name in executable_files:
+            item = {"path": name, "executable": name in executable_files}
+            item["shebang" if shebang else "extension"] = shebang or suffix
+            scripts.append(item)
+        text = data.decode("utf-8", errors="replace")
+        urls = re.findall(r"https?://[^\s<>\"')\]}]+", text)
+        endpoints.update(urls)
+        endpoints.update(host for url in urls if (host := urlparse(url).hostname))
+        credential_refs.update(CREDENTIAL_NAME.findall(text))
+        credential_refs.update(re.findall(r"(?i)(?:^|[/\s'\"])(\.env(?:\.[\w.-]+)?|[^/\s'\"]*credentials?(?:\.[\w.-]+)?)", text))
+        if name == "SKILL.md":
+            meta, _ = registry._frontmatter(text)
+            for field in ("allowed-tools", "allowed_tools", "tools"):
+                tools.update(registry._list(meta.get(field)))
+        if re.search(r"(?i)\b(?:bash|shell|sh|zsh)\b", text):
+            tools.add("Bash")
+        if PurePosixPath(name).name == "requirements.txt":
+            dependencies.update(line.strip() for line in text.splitlines()
+                                if line.strip() and not line.lstrip().startswith("#"))
+        elif PurePosixPath(name).name == "package.json":
+            try:
+                package = json.loads(text)
+                for field in ("dependencies", "devDependencies", "optionalDependencies"):
+                    dependencies.update(f"{key}@{value}" for key, value in package.get(field, {}).items())
+            except (ValueError, TypeError):
+                pass
+        elif PurePosixPath(name).name == "pyproject.toml":
+            try:
+                project = tomllib.loads(text)
+                dependencies.update(project.get("project", {}).get("dependencies", []))
+            except (tomllib.TOMLDecodeError, TypeError):
+                pass
+        for match in re.finditer(r"(?im)^\s*(?:python\s+-m\s+)?(pip|npm)\s+install\s+([^\n;&|]+)", text):
+            dependencies.update(part for part in re.split(r"\s+", match.group(2).strip()) if not part.startswith("-"))
+        filesystem.update(re.findall(r"(?<![\w.])(?:~(?:/[^\s'\"`]+)?|/(?:[^\s'\"`]+))", text))
+        filesystem.update(m.group(0).strip() for m in re.finditer(
+            r"(?im)^\s*(?:sudo\s+)?(?:rm\s+[^\n]*(?:-[^\s]*r|--recursive)|chmod\s+[^\n]+)", text))
+    url_dependencies = any(re.search(r"(?:https?://|git\+|github\.com[:/])", item, re.I) for item in dependencies)
+    blocked = any(result.get("verdict") == "blocked" for result in scans.values())
+    destructive = any(re.search(r"(?i)\b(?:rm\s+.*(?:-[^\s]*r|--recursive)|chmod)\b", item)
+                      for item in filesystem)
+    reasons = []
+    if blocked:
+        reasons.append("blocked context scan")
+    if endpoints and credential_refs:
+        reasons.append("endpoint and credential reference")
+    if destructive:
+        reasons.append("recursive delete or permission change")
+    if url_dependencies:
+        reasons.append("dependency installed from URL or git source")
+    populated = scripts or endpoints or dependencies or credential_refs
+    level = "high" if reasons else "medium" if populated else "low"
+    if level == "medium":
+        reasons.append("script, endpoint, dependency, or credential reference present")
+    return {"scripts": scripts, "endpoints": sorted(endpoints), "tools": sorted(tools),
+            "credential_refs": sorted(credential_refs), "dependencies": sorted(dependencies),
+            "filesystem": sorted(filesystem), "scan": scans, "level": level, "reasons": reasons}
+
 
 def inspect(skill_id, root=STATE):
     root = Path(root)
@@ -294,7 +363,8 @@ def inspect(skill_id, root=STATE):
                              line=f"{name}:{line}", excerpt=excerpt[:200]))
     scans = {}
     for name, data in sorted(files.items(), key=lambda item: (item[0] != "SKILL.md", item[0])):
-        if name.startswith("scripts/") or name in record.get("executable_files", []) or data.startswith(b"#!"):
+        if (name.startswith("scripts/") or PurePosixPath(name).suffix.lower() in SCRIPT_EXTENSIONS
+                or name in record.get("executable_files", []) or data.startswith(b"#!")):
             add("script", "warn", name, 1, "script file (never executed)")
         try:
             text = data.decode("utf-8")
@@ -322,8 +392,9 @@ def inspect(skill_id, root=STATE):
     overall = max((result["verdict"] for result in scans.values()),
                   key={"safe": 0, "suspicious": 1, "blocked": 2}.get, default="safe")
     severity = max((f["severity"] for f in findings), key={"info": 0, "warn": 1, "block": 2}.get, default="info")
+    risk = _risk_report(files, record.get("executable_files", []), scans)
     report = dict(inspected_at=registry._now(), content_hash=record["content_hash"], findings=findings, max_severity=severity,
-                  scan=scans, scan_overall=overall)
+                  scan=scans, scan_overall=overall, risk=risk)
     registry._write_json(directory / "findings.json", report)
     return report
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from orchestrator import skills_registry
+from orchestrator import skill_discovery
 
 
 class SkillsRegistryTests(unittest.TestCase):
@@ -27,6 +28,68 @@ class SkillsRegistryTests(unittest.TestCase):
             f"---\nname: {name}\ndescription: {description}\n---\n# Finder\nFinish with evidence.\n"
         )
         return directory
+
+    def make_external(self, body, name="example", script=None):
+        repository = Path(self.temp.name) / "external"
+        skill = repository / "skills" / name
+        skill.mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text(body)
+        if script is not None:
+            (skill / "run.py").write_text(script)
+        subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+        candidates = skill_discovery.discover(repository, self.root)["candidates"]
+        record = next(candidate for candidate in candidates
+                      if Path(candidate["source"]).parent.name == name)
+        skills_registry.transition(record["id"], "quarantined", "review", self.root)
+        return record
+
+    def test_quarantined_to_testing_blocked_on_high_risk_unless_human_reviewed(self):
+        record = self.make_external("# Client\nhttps://example.invalid uses CLIENT_AUTH\n")
+        report = skill_discovery.inspect(record["id"], self.root)
+        self.assertEqual("high", report["risk"]["level"])
+        with self.assertRaisesRegex(ValueError, "risk level high"):
+            skills_registry.transition(record["id"], "testing", "reviewed", self.root)
+        state = skills_registry.transition(record["id"], "testing", "human-reviewed: approved", self.root)
+        self.assertEqual("human-reviewed: approved", state["history"][-1]["override"])
+
+    def test_transition_requires_matching_inspection_hash(self):
+        record = self.make_external("# Notes\n")
+        skill_discovery.inspect(record["id"], self.root)
+        Path(record["source"]).write_text("# Changed\n")
+        with self.assertRaisesRegex(ValueError, "content changed"):
+            skills_registry.transition(record["id"], "testing", "reviewed", self.root)
+
+    def test_rollback_uses_the_same_wrapped_gate(self):
+        record = self.make_external("# Client\nhttps://example.invalid uses CLIENT_AUTH\n")
+        skill_discovery.inspect(record["id"], self.root)
+        skills_registry.transition(record["id"], "testing", "human-reviewed: approved", self.root)
+        skills_registry.transition(record["id"], "disabled", "pause", self.root)
+        state = skills_registry._state_document(self.root)
+        approval = next(row for row in state[record["id"]]["history"] if row["to"] == "testing")
+        approval["reason"] = "reviewed"
+        skills_registry._write_json(self.root / "skills/state.json", state)
+        with self.assertRaisesRegex(ValueError, "risk level high"):
+            skills_registry.rollback(record["id"], self.root)
+
+        latest = self.make_external("# Script\n", name="scripted", script="print('ok')\n")
+        skill_discovery.inspect(latest["id"], self.root)
+        with self.assertRaisesRegex(ValueError, "blocked findings"):
+            skills_registry.transition(latest["id"], "testing", "reviewed", self.root)
+
+    def test_rollback_keeps_original_override_reason(self):
+        record = self.make_external("# Client\nhttps://example.invalid uses CLIENT_AUTH\n")
+        skill_discovery.inspect(record["id"], self.root)
+        skills_registry.transition(record["id"], "testing", "override: approved", self.root)
+        skills_registry.transition(record["id"], "disabled", "pause", self.root)
+        self.assertEqual("testing", skills_registry.rollback(record["id"], self.root)["state"])
+
+        state = skills_registry._state_document(self.root)
+        state[record["id"]]["state"] = "disabled"
+        state[record["id"]]["history"] = [{"from": "testing", "to": "disabled", "reason": "pause"}]
+        skills_registry._write_json(self.root / "skills/state.json", state)
+        skills_registry._update_registry_state(self.root, record["id"], state[record["id"]])
+        with self.assertRaisesRegex(ValueError, "risk level high"):
+            skills_registry.rollback(record["id"], self.root)
 
     def test_sync_builds_twelve_builtin_records_with_content_hashes(self):
         document = skills_registry.sync(self.root, _harness.REPO / "skills")

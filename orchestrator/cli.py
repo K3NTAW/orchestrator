@@ -386,10 +386,13 @@ def main():
                 if a.json:
                     print(json.dumps(rows, indent=2))
                 else:
-                    print("id\tstate\ttrust\troles\tl0/l2\tversion\tstale")
+                    print("id\tstate\ttrust\troles\tl0/l2\tversion\tstale\tlevel")
                     for skill_id, record in sorted(rows.items()):
+                        report = skills_registry._read_json(
+                            ROOT / "skills" / "quarantine" / skill_id / "findings.json", {})
+                        level = report.get("risk", {}).get("level", "-")
                         print(f"{skill_id}\t{record['state']}\t{record['trust']}\t{','.join(record['roles'])}\t"
-                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}\t{record.get('stale', False)}")
+                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}\t{record.get('stale', False)}\t{level}")
             elif a.skills_cmd == "show":
                 record = skills_registry.load()["skills"].get(a.id)
                 if record is None:
