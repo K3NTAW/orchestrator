@@ -7,7 +7,7 @@ from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_spawn.py` doesn't add this dir itself
 from _harness import TMP, g, scratch_repo
-from orchestrator import bus, pool as P, spawn
+from orchestrator import bus, evidence, pool as P, spawn
 
 
 class FakePopen:
@@ -1364,6 +1364,16 @@ class OauthTokenInjection(unittest.TestCase):
 
 
 class ContextTelemetry(unittest.TestCase):
+    def test_route_receives_effective_mode_and_provider(self):
+        task = {"id": "T-cache", "title": "cache", "scope": []}
+        item = evidence.make("external_doc", "doc", "body", provenance="bus", task=task)
+        with mock.patch.object(spawn, "_context_mode", return_value="active"), \
+                mock.patch.object(spawn.context_router, "route", wraps=spawn.context_router.route) as route, \
+                mock.patch.object(spawn.decision_log, "record"):
+            spawn._shadow_route(task, [item], role="execute", head_sha="head", cfg={}, provider="codex")
+        self.assertEqual(route.call_args.kwargs["effective_mode"], "active")
+        self.assertEqual(route.call_args.kwargs["provider"], "codex")
+
     def _active_review(self):
         reviewed = bus.create_task("active target", "s", ["a"], ["x.py"], role="execute")
         review = bus.create_task("active review", "s", ["a"], ["x.py"], role="review", inputs=[reviewed["id"]])

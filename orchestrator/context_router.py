@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import fnmatch
 import re
 
-from . import evidence
+from . import cache_telemetry, evidence
 from .failures import _test_ids as test_ids
 
 
@@ -17,6 +17,9 @@ class Routed:
     reason: str
     tokens_full: int
     tokens_at_level: int
+    cacheability: str = None
+    cache_cost: float = None
+    cache_adjusted_level: str = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,25 @@ class RoutedPacket:
     ambiguous_ids: list
     profile: str
     rules_version: str = "v1"
+    cache_data: str = "missing"
+    invalid_config: bool = False
+
+
+def cache_mode(cfg):
+    mode = ((cfg or {}).get("context_router") or {}).get("cache_mode", "off")
+    if mode not in ("off", "shadow", "active"):
+        raise ValueError(f"unknown context_router.cache_mode: {mode}")
+    return mode
+
+
+def _cacheability(ev, head_sha):
+    if ev.provenance == "worker_partial" or ev.source_type == "worker_partial":
+        return "dynamic"
+    if ev.source_type == "test_result":
+        return "dynamic"
+    if ev.source_type == "source_chunk" and ev.commit and head_sha is not None and ev.commit == head_sha:
+        return "stable"
+    return "semi"
 
 
 def _path(ev):
@@ -99,24 +121,42 @@ def _choice(task, ev, role, head_sha, cfg, failing_ids):
     return "LONG", "ambiguous"
 
 
-def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=()):
+def route(task, candidates, *, role, head_sha=None, cfg=None, required_types=(), provider=None,
+          effective_mode="off", invalid_config=False):
     profile = role if role in ("execute", "review", "security_review", "planner", "scout") else "execute"
     failing_ids = test_ids((task.get("resume_hint") or {}).get("failures")) or []
+    configured_cache_mode = ((cfg or {}).get("context_router") or {}).get("cache_mode", "off")
+    if configured_cache_mode not in ("off", "shadow", "active"):
+        configured_cache_mode = "off"
+        invalid_config = True
     items, ambiguous = [], []
     for ev in candidates:
         level, reason = _choice(task, ev, profile, head_sha, cfg, failing_ids)
         if ev.source_type in required_types and LEVELS.index(level) < LEVELS.index("LONG"):
             level, reason = "LONG", "skill_required_context"
+        presented_level = level
+        cacheability = _cacheability(ev, head_sha)
+        cost = cache_telemetry.dynamic_cost(len(_text(ev, presented_level)), provider, cfg)
+        adjusted = presented_level
+        threshold = ((cfg or {}).get("context_router") or {}).get("cache_downgrade_tokens", 600)
+        if (presented_level == "LONG" and cacheability == "dynamic" and reason == "ambiguous"
+                and cost is not None and cost > threshold):
+            adjusted = "SHORT"
+        if configured_cache_mode == "active" and effective_mode == "active":
+            level = adjusted
         full_tokens = len(_text(ev, "FULL")) // 4
         routed_tokens = len(_text(ev, level)) // 4
-        items.append(Routed(ev.id, level, reason, full_tokens, routed_tokens))
+        items.append(Routed(ev.id, level, reason, full_tokens, routed_tokens,
+                            cacheability, cost, adjusted))
         if reason == "ambiguous":
             ambiguous.append(ev.id)
     candidate_tokens = sum(item.tokens_full for item in items)
     routed_tokens = sum(item.tokens_at_level for item in items)
     return RoutedPacket(items, candidate_tokens, routed_tokens,
                         routed_tokens / candidate_tokens if candidate_tokens else 1.0,
-                        ambiguous, profile)
+                        ambiguous, profile, cache_data=("missing" if provider is None else
+                                                       "config" if (cfg or {}).get("cache") is not None else "defaults"),
+                        invalid_config=invalid_config)
 
 
 def _lookup(source, evidence_id):
@@ -163,7 +203,13 @@ def decision_row(task, routed_packet, *, mode):
         "deterministic": {"role": routed_packet.profile, **counts, "candidate_tokens": routed_packet.candidate_tokens,
                           "routed_tokens": routed_packet.routed_tokens,
                           "reduction_ratio": routed_packet.reduction_ratio,
-                          "ambiguous": len(routed_packet.ambiguous_ids)},
+                          "ambiguous": len(routed_packet.ambiguous_ids),
+                          "cacheability": {item.evidence_id: item.cacheability for item in routed_packet.items},
+                          "cache_cost": {item.evidence_id: item.cache_cost for item in routed_packet.items},
+                          "cache_adjusted_level": {item.evidence_id: item.cache_adjusted_level
+                                                   for item in routed_packet.items},
+                          "cache_data": routed_packet.cache_data,
+                          "invalid_config": routed_packet.invalid_config},
         "selected": "routed v1",
         "reason": f"{routed_packet.profile} profile rules v1",
         "mode": mode,

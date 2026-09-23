@@ -13,6 +13,64 @@ def ev(kind, location, content, task=None, commit=""):
 
 
 class ContextRouterTests(unittest.TestCase):
+    def test_cache_fields_on_rows_and_presented_level_unchanged_in_shadow(self):
+        item = ev("test_result", "test_ok", "x" * 4000)
+        plain = context_router.route({"id": "T"}, [item], role="execute", provider="codex")
+        shadow = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
+                                      cfg={"context_router": {"cache_mode": "shadow",
+                                                               "cache_downgrade_tokens": 100}})
+        self.assertEqual([x.level for x in plain.items], [x.level for x in shadow.items])
+        deterministic = context_router.decision_row({"id": "T"}, shadow, mode="shadow")["deterministic"]
+        self.assertEqual(deterministic["cacheability"][item.id], "dynamic")
+        self.assertGreater(deterministic["cache_cost"][item.id], 100)
+        self.assertEqual(deterministic["cache_adjusted_level"][item.id], "SHORT")
+        self.assertEqual(deterministic["cache_data"], "defaults")
+
+    def test_cache_adjusted_level_algorithm(self):
+        dynamic = ev("test_result", "test_ok", "x" * 4000, commit="head")
+        named = evidence.make("worker_partial", "prior", "x" * 4000,
+                              provenance="worker_partial", scope=["x.py"], commit="head")
+        hidden = ev("test_result", "test_hidden", "x" * 4000, commit="old")
+        task = {"id": "T", "packet_read_scope": ["x.py"]}
+        packet = context_router.route(task, [dynamic, named, hidden], role="execute", head_sha="head",
+                                      provider="codex",
+                                      cfg={"context_router": {"cache_downgrade_tokens": 100}})
+        self.assertEqual([item.cache_adjusted_level for item in packet.items],
+                         ["SHORT", "LONG", "HIDE"])
+        self.assertIsNone(context_router.route(task, [dynamic], role="execute").items[0].cache_cost)
+
+    def test_active_cache_mode_applies_adjusted_levels_only_when_mode_not_off(self):
+        item = ev("test_result", "test_ok", "x" * 4000)
+        cfg = {"context_router": {"cache_mode": "active", "cache_downgrade_tokens": 100}}
+        shadow = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
+                                      cfg=cfg, effective_mode="shadow")
+        active = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
+                                      cfg=cfg, effective_mode="active")
+        self.assertEqual((shadow.items[0].level, active.items[0].level), ("LONG", "SHORT"))
+        self.assertLess(active.items[0].tokens_at_level, shadow.items[0].tokens_at_level)
+
+    def test_cache_mode_helper_validates_and_shadow_keeps_candidates_byte_identical(self):
+        self.assertEqual(context_router.cache_mode({}), "off")
+        self.assertEqual(context_router.cache_mode({"context_router": {"cache_mode": "shadow"}}), "shadow")
+        with self.assertRaises(ValueError):
+            context_router.cache_mode({"context_router": {"cache_mode": "future"}})
+        item = ev("test_result", "test_ok", "x" * 4000)
+        off = context_router.decision_row({"id": "T"}, context_router.route(
+            {"id": "T"}, [item], role="execute", provider="codex"), mode="shadow")
+        shadow = context_router.decision_row({"id": "T"}, context_router.route(
+            {"id": "T"}, [item], role="execute", provider="codex",
+            cfg={"context_router": {"cache_mode": "shadow"}}), mode="shadow")
+        self.assertEqual(off["candidates"], shadow["candidates"])
+
+    def test_invalid_cache_mode_falls_back_to_off_with_flag(self):
+        item = ev("test_result", "test_ok", "x" * 4000)
+        packet = context_router.route({"id": "T"}, [item], role="execute", provider="codex",
+                                      effective_mode="active",
+                                      cfg={"context_router": {"cache_mode": "invalid"}})
+        self.assertEqual(packet.items[0].level, "LONG")
+        self.assertTrue(context_router.decision_row({"id": "T"}, packet, mode="shadow")
+                        ["deterministic"]["invalid_config"])
+
     def test_stale_source_preserves_scope_and_security_precedence(self):
         item = ev("source_chunk", "orchestrator/auth.py:1-4", "code", commit="old")
         for role, scope, cfg, expected in (

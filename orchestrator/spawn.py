@@ -1406,7 +1406,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
             skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, pool.cfg)
             if role == "review":
                 src = reviewed if reviewed is not None else t
-                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice)
+                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice, provider="claude")
                 security_signals = {"security": "## security\n" in role_packet}
                 prompt = render("review", packet=role_packet, task=t, signals=security_signals)
                 t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
@@ -1422,7 +1422,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
                 t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
                 worker_control.write_if_current(task_id, epoch, bus.update, task_id, executor=t["executor"])
                 packet_worktree = t.get("worktree") or ROOT
-                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice)
+                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice, provider="claude")
                 prompt = render("execute", packet=role_packet, task=t) + \
                     "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
                     "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."

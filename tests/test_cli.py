@@ -11,6 +11,21 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_scorecard_context_cache_shadow_summary(self):
+        from orchestrator import context_scorecard, decision_log
+        rows = [{"ts": "2026-09-22T01:00:00Z", "kind": "context_selection",
+                 "candidates": ["one:LONG", "two:SHORT"],
+                 "deterministic": {"cache_adjusted_level": {"one": "SHORT", "two": "SHORT"}}},
+                {"ts": "2026-09-23T01:00:00Z", "kind": "other"}]
+        with mock.patch.object(context_scorecard, "build", return_value={}), \
+                mock.patch.object(decision_log, "read_all", return_value=rows), \
+                mock.patch.object(sys, "argv", ["orchestrator", "scorecard", "--context", "--cache-shadow"]), \
+                contextlib.redirect_stdout(output := io.StringIO()):
+            cli.main()
+        self.assertIn("rows=1", output.getvalue())
+        self.assertIn("date_range=2026-09-22..2026-09-22", output.getvalue())
+        self.assertIn("changed_share=0.500", output.getvalue())
+
     def test_scorecard_memory_and_memory_eval_cli(self):
         from orchestrator import memory_eval, memory_scorecard
         card = {"days": 7, "rows": [], "by_mode": {},

@@ -32,6 +32,14 @@ def _cache_cfg(cfg):
     return values
 
 
+def dynamic_cost(chars, provider, cfg=None):
+    """Return cache-write token equivalents for dynamically supplied text."""
+    if provider is None:
+        return None
+    ratios = _cache_cfg(cfg)
+    return (chars / 4) * (1 + ratios[f"{provider}_write_ratio"])
+
+
 def effective_cost(norm, cfg):
     """Return effective token-equivalents using provider-specific cache ratios."""
     ratios = _cache_cfg(cfg)

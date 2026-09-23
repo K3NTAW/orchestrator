@@ -169,6 +169,7 @@ def main():
     sc.add_argument("--planner", action="store_true")
     sc.add_argument("--planner-routing", action="store_true")
     sc.add_argument("--context", action="store_true")
+    sc.add_argument("--cache-shadow", action="store_true")
     sc.add_argument("--reads", action="store_true")
     sc.add_argument("--handoffs", action="store_true")
     sc.add_argument("--economy", action="store_true")
@@ -356,6 +357,8 @@ def main():
                          else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
+        if a.cache_shadow and not a.context:
+            ap.error("--cache-shadow requires --context")
         if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache, a.memory)) > 1:
             ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing, --cache, --memory")
         groupings = {
@@ -695,7 +698,29 @@ def main():
         elif a.context:
             from . import context_scorecard
             card = context_scorecard.build(root=scorecard.STATE)
-            print(json.dumps(card, indent=1) if a.json else context_scorecard.format_report(card))
+            if a.cache_shadow:
+                from . import decision_log
+                rows = [row for row in decision_log.read_all(root=a.root or scorecard.STATE)
+                        if row.get("kind") == "context_selection"]
+                changed = total = 0
+                for row in rows:
+                    deterministic = row.get("deterministic") or {}
+                    adjusted = deterministic.get("cache_adjusted_level") or {}
+                    presented = dict(part.rsplit(":", 1) for part in row.get("candidates", []) if ":" in part)
+                    total += len(adjusted)
+                    changed += sum(presented.get(key) != value for key, value in adjusted.items())
+                dates = sorted(datetime.fromtimestamp(value).date().isoformat() if isinstance(value, (int, float))
+                               else str(value)[:10]
+                               for row in rows if (value := row.get("ts")) is not None)
+                summary = {"rows": len(rows), "date_from": dates[0] if dates else None,
+                           "date_to": dates[-1] if dates else None,
+                           "changed_share": changed / total if total else None}
+                print(json.dumps(summary, indent=1) if a.json else
+                      ("no context_selection rows" if not rows else
+                       f"rows={summary['rows']} date_range={summary['date_from']}..{summary['date_to']} "
+                       f"changed_share={summary['changed_share']:.3f}"))
+            else:
+                print(json.dumps(card, indent=1) if a.json else context_scorecard.format_report(card))
         elif a.planner_routing:
             from . import planner_scorecard
             card = planner_scorecard.build(root=scorecard.STATE)
