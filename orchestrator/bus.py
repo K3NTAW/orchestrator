@@ -284,14 +284,16 @@ def log_run(*, attempt=1, **fields):
         try:
             from . import decision_log, promotion, tool_catalog
             task = get(fields["task"])
-            mode = promotion.mode("tool_disclosure")
+            cfg = pool_config()
+            mode = promotion.mode("tool_disclosure", cfg)
             if mode in ("shadow", "active"):
                 choice = tool_catalog.minimal_set(task, "codex_execute")
                 decision_log.record(kind="tool_disclosure", subject=fields["task"],
                     candidates=["CODEX_TOOLS"], hard_constraints=choice["mandatory"],
                     deterministic={"task_class": tool_catalog._task_class(task), "role": "codex_execute",
                                    "kept": choice["keep"], "dropped": choice["drop"],
-                                   "tokens_disclosed": 0, "tokens_minimal": 0},
+                                   "tokens_disclosed": 0, "tokens_minimal": 0,
+                                   **tool_catalog.cache_fields(task, "codex_execute", choice["keep"], cfg)},
                     selected="allowlist unchanged (shadow)", reason=choice["reason"], mode=mode)
                 tool_context = {"tool_tokens_disclosed": 0, "tool_tokens_minimal": 0}
         except Exception:
@@ -306,7 +308,8 @@ def log_run(*, attempt=1, **fields):
                               "tool_tokens_minimal", "skills_exposed", "skills_used",
                               "skill_tokens_l0", "skill_tokens_l2", "skills_selected",
                               "skill_tokens_selected_l0", "skill_tokens_selected_l2",
-                              "skill_tokens_presented_l2")}
+                              "skill_tokens_presented_l2", "prefix_sha", "prefix_chars",
+                              "suffix_chars", "dynamic_sections")}
         fields["context"]["packet_version"] = packet_meta.get("packet_version") or packet_meta.get("version")
     else:
         fields["context"] = None
@@ -361,6 +364,11 @@ def log_run(*, attempt=1, **fields):
             fields.setdefault("usd_source", "token_estimate")
         elif fields.get("usd") is not None:
             fields.setdefault("usd_source", "reported")
+    try:
+        from . import cache_telemetry
+        cache_telemetry.annotate(fields, cfg)
+    except Exception:
+        pass
     RUNS.mkdir(parents=True, exist_ok=True)
     with open(RUNS / f"{date.today().isoformat()}.jsonl", "a") as f:
         f.write(json.dumps({"ts": time.time(), **fields}) + "\n")

@@ -174,3 +174,119 @@ class DecisionLogTests(unittest.TestCase):
         self.assertIn("rejected: careful: Higher latency, local: Unavailable", lines)
         self.assertIn("confidence/n: 0.9/10", lines)
         self.assertIn("outcome: merged=True", lines)
+
+
+class MemoryRetrievalDocumentation(unittest.TestCase):
+    def test_retrieval_kind_documented_for_memory_rows(self):
+        self.assertIn("retrieval rows are memory retrievals", decision_log.__doc__)
+        self.assertIn("retrieval", decision_log.CONTEXT_KINDS)
+        with patch.object(decision_log, "_append", side_effect=lambda row, **kw: row):
+            row = decision_log.record("retrieval", "T-memory", candidates=[], selected=[],
+                                      hard_constraints={}, deterministic={}, reason="memory", mode="shadow",
+                                      extra={"tokens_legacy": 10, "tokens_tiered": 5})
+        self.assertEqual(row["extra"]["tokens_tiered"], 5)
+
+
+class SteeringDecisionLogTests(unittest.TestCase):
+    def test_steering_rows_omit_message_text(self):
+        message = "repeated_failure: synthetic check failure"
+        extra = {"trigger": "repeated_failure", "severity": "medium", "critical": False,
+                 "action": "steer", "evidence_hash": "synthetic", "message_chars": len(message)}
+        fields = dict(candidates=["continue", "steer", "cancel"], hard_constraints={},
+                      deterministic={}, selected="steer", reason=["repeated_failure"], mode="shadow")
+        with tempfile.TemporaryDirectory() as root:
+            row = decision_log.record("steering", "T-steering", extra=extra, root=root, **fields)
+            serialized = (Path(root) / "runs/sched/decisions.jsonl").read_text()
+            self.assertEqual(row["extra"]["message_chars"], len(message))
+            self.assertNotIn(message, serialized)
+            self.assertNotIn('"message":', serialized)
+            for key in decision_log.STEERING_KEYS:
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    decision_log.record("steering", "T-steering", root=root,
+                                        extra={k: v for k, v in extra.items() if k != key}, **fields)
+            with self.assertRaises(ValueError):
+                decision_log.record("steering", "T-steering", root=root,
+                                    extra={**extra, "nested": {"message": message}}, **fields)
+            self.assertEqual(decision_log.recent(root=root), [row])
+
+
+class GroupedSteeringHistoryTests(unittest.TestCase):
+    def test_grouped_history_honours_per_subject_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "runs/sched/decisions.jsonl"
+            path.parent.mkdir(parents=True)
+            applied = {"kind": "steering", "subject": "worker", "mode": "active",
+                       "extra": {"outcome": "applied"}}
+            latest = {"kind": "steering", "subject": "worker", "mode": "shadow", "ts": 99}
+            rows = [applied] + [{"kind": "routing", "subject": "other"}] * 600
+            rows += [{"kind": "steering", "subject": "worker", "mode": "shadow"}] * 40
+            rows += [latest, {"kind": "steering", "subject": "new", "mode": "shadow"}]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            with patch.object(Path, "open", autospec=True, side_effect=Path.open) as opened:
+                grouped = decision_log.recent(root=root, kind="steering", subjects=["worker", "new"], limit=2)
+            opened.assert_called_once()
+            self.assertEqual(grouped["worker"], [rows[-4], latest])
+            self.assertEqual(grouped["new"], [rows[-1]])
+
+    def test_grouped_history_scan_is_bounded_without_applied_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "runs/sched/decisions.jsonl"
+            path.parent.mkdir(parents=True)
+            old = {"kind": "steering", "subject": "old", "mode": "shadow"}
+            newest = {"kind": "steering", "subject": "new", "mode": "shadow"}
+            path.write_text(json.dumps(old) + "\n" +
+                            (json.dumps({"kind": "routing"}) + "\ninvalid\n") * 1500 +
+                            json.dumps(newest) + "\n")
+            with patch.object(decision_log.json, "loads", wraps=json.loads) as loads:
+                rows = decision_log.recent(root=root, kind="steering", subjects=["old", "new"], limit=1)
+            self.assertEqual(rows, {"old": [], "new": [newest]})
+            self.assertLessEqual(loads.call_count, decision_log.GROUPED_SCAN_LIMIT)
+            with patch.object(Path, "open") as opened:
+                self.assertEqual(decision_log.recent(root=root, subjects=[]), {})
+                self.assertEqual(decision_log.recent(root=root, subjects=["new"], limit=0), {"new": []})
+            opened.assert_not_called()
+            with patch.object(decision_log.json, "loads", wraps=json.loads) as loads:
+                self.assertEqual(decision_log.recent(root=root, subjects=["new"], limit=1), {"new": [newest]})
+            self.assertLessEqual(loads.call_count, 2)
+
+
+class DisclosureHistory(unittest.TestCase):
+    def test_last_row_bounded_same_role_different_subject_with_kept(self):
+        import json
+        import tempfile
+        from datetime import datetime, timedelta
+        from pathlib import Path
+        from unittest import mock
+        from zoneinfo import ZoneInfo
+        from orchestrator import decision_log as log
+        today = datetime.now(ZoneInfo("Europe/Zurich")).replace(hour=12, minute=0, second=0)
+        def row(subject, role="execute", **extra):
+            return {"ts": today.timestamp(), "kind": "tool_disclosure", "subject": subject,
+                    "deterministic": {"role": role, "kept": ["Read"]}, **extra}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(log.schedlog, "SCHED_DIR", Path(directory)):
+            path = Path(directory) / "decisions.jsonl"
+            previous = row("previous", ts=(today - timedelta(days=1)).timestamp())
+            rows = [row("old", ts=(today - timedelta(days=2)).timestamp()), previous,
+                    row("other", role="review"), row("current"),
+                    row("escalation", reason="hidden_tool_requested"),
+                    row("missing", deterministic={"role": "execute"})]
+            path.write_text("\n".join(map(json.dumps, rows)) + "\nmalformed\n")
+            args = dict(role="execute", exclude_subject="current", require_key="deterministic.kept")
+            self.assertEqual(log.last_row("tool_disclosure", **args), previous)
+            with path.open("a") as stream:
+                stream.write((json.dumps(row("current")) + "\n") * 200)
+            self.assertIsNone(log.last_row("tool_disclosure", **args))
+            path.write_text(json.dumps(rows[0]) + "\n")
+            self.assertIsNone(log.last_row("tool_disclosure", **args))
+            path.unlink()
+            (Path(directory) / f"decisions-{today.date() - timedelta(days=1)}.jsonl").write_text(json.dumps(previous))
+            self.assertEqual(log.last_row("tool_disclosure", **args), previous)
+
+    def test_bounded_keeps_kept_list_and_char_fields(self):
+        from orchestrator import decision_log
+        row = {"deterministic": {"kept": [f"tool_{index}" for index in range(200)],
+               "stable_catalog_chars": 4200, "dynamic_chars": 27000,
+               "changed_since_previous": False, "catalog_chars": 5100, "selected_chars": 1234}}
+        self.assertEqual(decision_log._bounded(row), row)

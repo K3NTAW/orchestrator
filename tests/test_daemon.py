@@ -13,6 +13,7 @@ from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
 from orchestrator import bus, daemon, executor, merge, pool as P, spawn
 from orchestrator import jev_route
 
+REAL_WORKER = spawn.run_worker
 REAL_RUN = daemon.subprocess.run  # captured before any test's gate_green() fakes the shared subprocess module
 
 
@@ -146,6 +147,73 @@ def raiser(exc):
 
 
 class Daemon(unittest.TestCase):
+    def test_preserve_partial_is_idempotent_across_ticks(self):
+        with tempfile.TemporaryDirectory(prefix="partial-reconcile-") as directory:
+            repo = scratch_repo(Path(directory))
+            g("branch", "goal/partial", cwd=repo, check=True)
+            g("checkout", "-qb", "task/partial", cwd=repo, check=True)
+            (repo / "x.py").write_text("changed\n")
+            g("add", ".", cwd=repo, check=True)
+            g("commit", "-qm", "partial", cwd=repo, check=True)
+            (repo / "x.py").write_text("dirty\n")
+            task = bus.create_task("partial", "spec", ["pass"], ["x.py"], role="execute",
+                                   parent="partial")
+            bus.update(task["id"], status="running", worktree=str(repo), pid=999999)
+            with mock.patch.object(daemon.worker_control.pool, "Pool") as configured:
+                configured.return_value.cfg = {"context_router": {"partial_max_tokens": 800}}
+                first = daemon.reconcile_dead(bus.get(task["id"]), configured.return_value)
+                second = daemon.reconcile_dead(bus.get(task["id"]), configured.return_value)
+            self.assertEqual((first, second), ("held", "held"))
+            items = daemon.worker_control.evidence.EvidencePool("partial").by_type("worker_partial")
+            self.assertEqual(len([item for item in items if item.location.startswith(task["id"] + ":")]), 1)
+
+    def test_dispatch_records_harness_depth_row_in_shadow_and_changes_nothing(self):
+        from orchestrator import harness_depth
+        pool = self.scheduler_pool("off", slots=1)
+        pool.cfg["harness"] = {"depth_mode": "shadow"}
+        tid = self.scheduler_task("small", "a.py")
+        with mock.patch.object(harness_depth, "history_table", return_value={}), \
+             mock.patch.object(harness_depth.decision_log, "record") as record:
+            daemon.dispatch(pool)
+        rows = [call for call in record.call_args_list if call.args and call.args[0] == "harness_depth"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].kwargs["candidates"], list(range(5)))
+        self.assertEqual(rows[0].kwargs["selected"], 1)
+        self.assertEqual(rows[0].kwargs["mode"], "shadow")
+        self.assertNotIn("harness_level", bus.get(tid)["pipeline"])
+        self.assertEqual(self.scheduler_dispatched(), [tid])
+
+    def test_active_fast_path_skips_jev_and_skill_routing_but_keeps_security_review(self):
+        from orchestrator import harness_depth
+        pool = self.scheduler_pool("off", slots=1)
+        pool.cfg["harness"] = {"depth_mode": "active"}
+        tid = self.scheduler_task("small", "a.py")
+        with mock.patch.object(harness_depth, "history_table", return_value={}), \
+             mock.patch.object(harness_depth.promotion, "collect", return_value={"n": 20}):
+            daemon.dispatch(pool)
+        self.assertEqual(bus.get(tid)["pipeline"]["harness_level"], 1)
+        with mock.patch.object(jev_route, "shadow_context") as jev, \
+             mock.patch.object(executor, "start", return_value={"status": "held"}):
+            daemon._dispatch_worker(tid, "prompt")
+        jev.assert_not_called()
+        pool.pick = mock.Mock(return_value=mock.Mock(id="synthetic"))
+        pool.reserve = mock.Mock(return_value=None)
+        with mock.patch.object(spawn, "Pool", return_value=pool), \
+             mock.patch.object(spawn, "_prepare_skills") as prepare, \
+             mock.patch.object(spawn, "packet", return_value="packet"), \
+             mock.patch.object(spawn, "render", return_value="prompt"), \
+             mock.patch.object(spawn, "_shadow_tool_disclosure", return_value={}), \
+             mock.patch.object(spawn, "_skill_records", return_value={}):
+            self.assertEqual(REAL_WORKER(tid)["status"], "budget")
+        prepare.assert_not_called()
+        bus.update(tid, status="done", worktree=str(TMP))
+        self.swap(daemon, "changed_paths", lambda task: ["orchestrator/serve.py"])
+        daemon._load_review_cfg(self.review_pool("security_paths"))
+        daemon.gate(pool)
+        self.assertEqual(len(bus.read(role="review")), 1)
+        self.assertEqual(bus.get(tid)["pipeline"]["review_reason"], "security_paths:orchestrator/*.py")
+
+
     def test_dispatch_records_instruction_tokens(self):
         task = bus.create_task("fresh fix telemetry", "spec", ["passes"], ["x.py"],
                                role="execute", complexity=3)
@@ -315,6 +383,7 @@ class Daemon(unittest.TestCase):
 
     def test_dispatch_shadow_records_durations_capacity_limit_and_pressure_without_applying(self):
         pool = self.scheduler_pool("shadow", slots=2)
+        pool.cfg["harness"] = {"depth_mode": "off"}  # Isolate scheduler decision rows.
         a = self.scheduler_task("first", "a/file.py")
         b = self.scheduler_task("second", "a/file.py")
         c = self.scheduler_task("third", "c/file.py")
@@ -826,7 +895,7 @@ class Daemon(unittest.TestCase):
         self.swap(executor, "_resume_compatible", lambda task: (compatible[0], "worktree is dirty"))
         def start(tid, prompt, **kwargs):
             task = bus.get(tid)
-            executions.append((tid, prompt, task.get("worktree"), task.get("branch")))
+            executions.append((tid, prompt, task.get("worktree"), task.get("branch"), kwargs["packet_meta"]))
             own_worktree = str(self.sandbox / tid)
             bus.update(tid, worktree=own_worktree, executor="astra")
             return {"status": "done", "message": "repaired", "thread": "fresh-thread"}
@@ -852,12 +921,15 @@ class Daemon(unittest.TestCase):
                 task = bus.get(fix)
                 self.assertEqual(task["pipeline"]["resume"], {"mode": "fresh", "reason": f"compat_changed:{reason}"})
                 self.assertEqual((task["status"], task["result"]["thread"]), ("done", "fresh-thread"))
-                tid, prompt, inherited_worktree, branch = executions[-1]
+                tid, prompt, inherited_worktree, branch, packet_meta = executions[-1]
                 self.assertEqual(tid, fix)
                 self.assertIsNone(inherited_worktree)
                 self.assertEqual(branch, f"task/{fix}")
                 self.assertEqual(task["worktree"], str(self.sandbox / fix))
-                self.assertTrue(prompt.startswith("packet v"))
+                headers = [line for line in prompt.splitlines() if line.startswith("packet v")]
+                self.assertEqual(len(headers), 1)
+                self.assertIn(packet_meta["hash"], headers[0])
+                self.assertNotIn("{" * 2, prompt)
                 self.assertIn("## objective\nrepair objective", prompt)
 
     def test_dispatch_prompt_contains_packet_not_placeholder(self):
@@ -869,10 +941,11 @@ class Daemon(unittest.TestCase):
         self.swap(executor, "start", start)
         daemon.dispatch(P.Pool())
         self.assertEqual(seen["task_id"], tid)
-        self.assertTrue(seen["prompt"].startswith("packet v"))
+        headers = [line for line in seen["prompt"].splitlines() if line.startswith("packet v")]
+        self.assertEqual(len(headers), 1)
         self.assertIn("## objective\npacket dispatch objective", seen["prompt"])
         self.assertNotIn("{{", seen["prompt"])
-        self.assertIn(seen["packet_meta"]["hash"], seen["prompt"].splitlines()[0])
+        self.assertIn(seen["packet_meta"]["hash"], headers[0])
 
     def test_dispatch_render_error_holds_task(self):
         broken = bus.create_task("broken render", "keep this literal token: {{unfilled_placeholder}}",
@@ -944,12 +1017,14 @@ class Daemon(unittest.TestCase):
         fix, = self.fixes_for(held)
         seen = {}
         def start(task_id, prompt, **kwargs):
-            seen.update(task_id=task_id, prompt=prompt)
+            seen.update(task_id=task_id, prompt=prompt, **kwargs)
             return {"status": "held"}
         self.swap(executor, "start", start)
         daemon.dispatch(P.Pool())
         self.assertEqual(seen["task_id"], fix["id"])
-        self.assertTrue(seen["prompt"].startswith("packet v"))
+        headers = [line for line in seen["prompt"].splitlines() if line.startswith("packet v")]
+        self.assertEqual(len(headers), 1)
+        self.assertIn(seen["packet_meta"]["hash"], headers[0])
         self.assertIn("## objective\n" + fix["title"], seen["prompt"])
         self.assertIn("works", seen["prompt"])
         self.assertNotIn("{{", seen["prompt"])
@@ -2666,6 +2741,14 @@ class Daemon(unittest.TestCase):
         self.assertNotIn("hold_reason", merged)
         self.assertTrue(merged["pipeline"].get("merged_at"))
 
+    def test_merge_path_records_strategy_outcome(self):
+        task_id = self.task("strategy outcome", complexity=2)
+        with mock.patch.object(daemon.strategy, "record_outcome") as record:
+            daemon.report_merge(task_id, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[0]["id"], task_id)
+        self.assertEqual(record.call_args.kwargs["root"], daemon.STATE)
+
     def test_review_verdict_drives_merge_or_hold(self):
         ok = self.gated_execute("approved")
         r_ok = self.task("review ok", complexity=5, role="review", inputs=[ok])
@@ -3446,8 +3529,24 @@ class Background(unittest.TestCase):
         self.assertIsNotNone(t3)                                   # lock released, a fresh start_background works
 
 
-if __name__ == "__main__":
-    unittest.main()
+class WorkerRegistryReconciliation(unittest.TestCase):
+    def test_tick_reconciles_registry_once_per_tick(self):
+        stop = threading.Event()
+        tasks = [{"id": "T-registry-dead-1", "pid": 4231, "claimed_at": 0},
+                 {"id": "T-registry-dead-2", "pid": 4232, "claimed_at": 0}]
+        pool = mock.Mock()
+        def reconciled(alive_fn):
+            self.assertIs(alive_fn, daemon.alive)
+            self.assertEqual(dead.call_args_list, [mock.call(task, pool) for task in tasks])
+            stop.set()
+        with mock.patch.object(daemon, "_load_review_cfg"), \
+                mock.patch.object(daemon, "sweep_leases"), \
+                mock.patch.object(daemon.bus, "read", return_value=tasks), \
+                mock.patch.object(daemon, "alive", return_value=False), \
+                mock.patch.object(daemon, "reconcile_dead") as dead, \
+                mock.patch.object(daemon.worker_registry, "reconcile", side_effect=reconciled) as reconcile:
+            daemon.tick(pool, stop)
+            reconcile.assert_called_once_with(daemon.alive)
 
 
 class DirtyScopePaths(unittest.TestCase):
@@ -3502,6 +3601,18 @@ class DispatchWorker(unittest.TestCase):
         p = patch.object(daemon.executor, "start")
         self.start = p.start()
         self.addCleanup(p.stop)
+
+    def test_dispatch_worker_skips_exception_writes_after_steer(self):
+        def interrupted(*args, **kwargs):
+            self.state["pipeline"] = {"steer_epoch": 2}
+            raise RuntimeError("interrupted")
+        self.start.side_effect = interrupted
+        with mock.patch.object(daemon.worker_control, "launch_epoch", return_value=1), \
+                mock.patch.object(bus, "post_result") as post:
+            daemon._dispatch_worker(self.task_id, "prompt")
+        post.assert_not_called()
+        self.assertEqual(self.state["status"], "running")
+        self.assertEqual(self.state["pipeline"], {"steer_epoch": 2})
 
     def test_dispatch_worker_posts_codex_done(self):
         usage = {"input_tokens": 100, "output_tokens": 20}
@@ -3581,3 +3692,268 @@ class MergeDecisionEvidence(unittest.TestCase):
             daemon.report_merge("T", {"status": "tests_red"})
         evidence = state["G"]["pipeline"]["last_merge"]
         self.assertEqual((evidence["status"], evidence["head_sha"]), ("tests_red", "head"))
+
+
+class HotMemoryTick(unittest.TestCase):
+    def test_tick_rebuilds_hot_at_most_once_when_stale(self):
+        stop = threading.Event()
+        pool = mock.Mock(cfg={"memory": {"mode": "shadow"}})
+        with mock.patch.object(daemon, "_load_review_cfg"), \
+                mock.patch.object(daemon, "sweep_leases"), \
+                mock.patch.object(daemon.bus, "read", return_value=[]), \
+                mock.patch.object(daemon.worker_registry, "reconcile"), \
+                mock.patch.object(daemon.memory_hot, "fresh", side_effect=[False, False, True]), \
+                mock.patch.object(daemon.memory_hot, "build") as build, \
+                mock.patch.object(daemon, "dispatch", side_effect=lambda pool: stop.set()) as dispatch:
+            for expected in (1, 2, 2):
+                stop.clear()
+                daemon.tick(pool, stop)
+                self.assertEqual(build.call_count, expected)
+            self.assertEqual(dispatch.call_count, 3)
+
+
+class WorkerCancellation(unittest.TestCase):
+    def test_cancelled_hold_is_not_auto_fix_rounded_or_requeued(self):
+        task = {"id": "T-cancel-example", "role": "execute", "status": "held", "hold_reason": "cancelled"}
+        with mock.patch.object(bus, "read", return_value=[task]), \
+                mock.patch.object(daemon, "stale") as stale, \
+                mock.patch.object(bus, "update") as update, \
+                mock.patch.object(bus, "create_task") as create, \
+                mock.patch.object(daemon.worker_registry, "get", return_value={"status": "cancelled"}):
+            daemon.auto_fix_round(P.Pool())
+            self.assertEqual(daemon.reconcile_dead(task), "cancelled")
+        stale.assert_not_called()
+        update.assert_not_called()
+        create.assert_not_called()
+
+    def test_reconcile_dead_leaves_cancelling_registry_entries_alone(self):
+        stale_snapshot = {"id": "T-cancel-example", "role": "execute", "status": "running"}
+        with mock.patch.object(daemon.worker_registry, "get", return_value={"status": "cancelling"}) as get, \
+                mock.patch.object(bus, "update") as update, \
+                mock.patch.object(bus, "post_result") as post:
+            pool = mock.Mock()
+            self.assertEqual(daemon.reconcile_dead(stale_snapshot, pool), "cancelled")
+        get.assert_called_once_with(stale_snapshot["id"])
+        update.assert_not_called()
+        post.assert_not_called()
+        pool.release.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class SteeringPolicyTickTests(unittest.TestCase):
+    def setUp(self):
+        from contextlib import ExitStack
+        from test_steering_policy import stale_fixture
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.task = {"id": "T-steering", "parent": "T-goal", "role": "execute", "status": "running",
+                     "scope": ["app/main.py", "lib/work.py", "orchestrator/work.py"],
+                     "pipeline": {}, "constraints": {}, "complexity": 1}
+        self.ready = {"id": "T-ready", "role": "execute", "status": "queued", "complexity": 1}
+        self.doc = {"last_event_at": 990, "epoch": 1, "status": "running"}
+        self.now = 1000
+        self.pool = mock.Mock(cfg={"steering": {"mode": "shadow"}, "memory": {"mode": "off"}}, accounts=[])
+        self.pool.both_cooling_minutes.return_value = 0
+        self.pool.notification_transition.return_value = False
+        self.pool.codex_available.return_value = True
+        self.stack.enter_context(mock.patch.object(bus, "STATE", self.root))
+        self.stack.enter_context(mock.patch.object(bus, "read", side_effect=lambda **kw: [
+            t for t in (self.task, self.ready) if all(t.get(k) == v for k, v in kw.items())]))
+        for name in ("_load_review_cfg", "sweep_leases", "dispatch", "gate", "merge_reviewed",
+                     "auto_fix_round", "maybe_handover"):
+            self.stack.enter_context(mock.patch.object(daemon, name))
+        self.stack.enter_context(mock.patch.object(daemon.worker_registry, "reconcile"))
+        self.stack.enter_context(mock.patch.object(daemon.worker_registry, "get", side_effect=lambda tid: self.doc))
+        self.begin_depth = self.stack.enter_context(mock.patch.object(daemon.harness_depth, "begin_tick"))
+        self.pool.harness_depth_tick = {"mode": "shadow", "history": {}}
+        self.promotion_collect = self.stack.enter_context(mock.patch.object(daemon.promotion, "collect",
+            return_value={"shadow_n": 20, "active_n": 0}))
+        self.notify = self.stack.enter_context(mock.patch.object(daemon, "notify"))
+        self.stack.enter_context(mock.patch.object(daemon, "eligible", return_value=[self.ready["id"]]))
+        self.stack.enter_context(mock.patch.object(daemon, "_wave_tasks", return_value={
+            t["id"]: t for t in (self.task, self.ready)}))
+        self.stack.enter_context(mock.patch.object(daemon.duration, "durations_for", return_value={}))
+        self.rank = self.stack.enter_context(mock.patch.object(daemon, "_wave_order", return_value=[
+            self.ready["id"], self.task["id"]]))
+        self.stale = self.stack.enter_context(mock.patch.object(daemon, "stale_check", return_value=stale_fixture(["lib/api.py"], "high")))
+        self.stack.enter_context(mock.patch.object(daemon.steering_policy, "changed_paths", return_value=[]))
+        self.stack.enter_context(mock.patch.object(daemon.steering_policy, "no_commits", return_value=True))
+        self.stack.enter_context(mock.patch.object(daemon.time, "time", side_effect=lambda: self.now))
+        self.steer = self.stack.enter_context(mock.patch.object(daemon.worker_control, "steer"))
+        self.cancel = self.stack.enter_context(mock.patch.object(daemon.worker_control, "cancel"))
+
+    def rows(self):
+        return daemon.decision_log.recent(root=self.root)
+
+    def test_tick_records_steering_rows_in_shadow_without_calling_worker_control(self):
+        daemon.tick(self.pool)
+        row = self.rows()[-1]
+        self.assertEqual((row["kind"], row["mode"], row["selected"]), ("steering", "shadow", "steer"))
+        self.assertFalse(row["extra"]["critical"])
+        self.assertEqual(set(self.rank.call_args.args[0]), {self.task["id"], self.ready["id"]})
+        self.stale.return_value["stale_paths"] = ["orchestrator/auth.py"]
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["selected"], "cancel")
+        self.steer.assert_not_called()
+        self.cancel.assert_not_called()
+        # Shadow observations never start the active interval.
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        self.steer.assert_called_once()
+
+    def test_active_steering_calls_once_respects_interval_and_logs_errors(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        self.steer.assert_called_once_with(self.task["id"], "dependency_changed: lib/api.py",
+                                           reason="dependency_changed", source="steering_policy")
+        self.now += 10
+        daemon.tick(self.pool)
+        self.assertEqual(len(self.rows()), 1)
+        self.steer.assert_called_once()
+        # Changed evidence can be observed inside the interval but cannot act.
+        self.stale.return_value["stale_paths"] = ["lib/other.py"]
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "interval")
+        self.steer.assert_called_once()
+        self.now = 2800
+        self.steer.side_effect = RuntimeError("delivery failed")
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "error")
+        self.steer.side_effect = None
+        daemon.tick(self.pool)
+        self.assertEqual(self.steer.call_count, 3)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "applied")
+        self.now += 1800
+        self.steer.side_effect = ProcessLookupError()
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "worker_gone")
+        self.steer.side_effect = None
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["extra"]["outcome"], "applied")
+        self.cancel.assert_not_called()
+
+    def test_active_mode_never_cancels_and_skips_in_flight_steers(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        self.stale.return_value["stale_paths"] = ["orchestrator/auth.py"]
+        for status, epoch in [("steering", 1), ("cancelling", 1), ("running", 2)]:
+            self.doc["status"] = status
+            self.task["pipeline"]["steer_epoch"] = epoch
+            daemon.tick(self.pool)
+        self.assertEqual(self.rows(), [])
+        self.steer.assert_not_called()
+        self.task["pipeline"]["steer_epoch"] = 1
+        daemon.tick(self.pool)
+        self.steer.assert_called_once()
+        row = self.rows()[-1]
+        self.assertEqual(row["extra"]["candidate_action"], "cancel")
+        self.assertEqual(row["selected"], "steer")
+        self.cancel.assert_not_called()
+
+    def test_invalid_mode_records_without_control_and_critical_uses_rank(self):
+        self.pool.cfg["steering"]["mode"] = "invalid"
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["reason"], ["invalid_config"])
+        self.assertEqual(self.rows()[-1]["mode"], "off")
+        self.steer.assert_not_called()
+        self.pool.cfg["steering"]["mode"] = "shadow"
+        self.stale.return_value["stale_paths"] = ["orchestrator/auth.py"]
+        self.rank.return_value = [self.task["id"], self.ready["id"]]
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["selected"], "steer")
+        self.assertTrue(self.rows()[-1]["extra"]["critical"])
+
+    def test_shadow_dedupes_and_active_interval_survives_other_log_traffic(self):
+        daemon.tick(self.pool)
+        daemon.tick(self.pool)
+        self.assertEqual(len(self.rows()), 1)
+        self.stale.return_value.update(stale_paths=[], risk="none")
+        daemon.tick(self.pool)
+        daemon.tick(self.pool)
+        self.assertEqual(len(self.rows()), 2)
+        self.stale.return_value.update(stale_paths=["lib/api.py"], risk="high")
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        for i in range(510):
+            daemon.decision_log.record("routing", "T-other", candidates=[], hard_constraints={},
+                deterministic={}, selected=None, reason="synthetic", root=self.root)
+        self.now += 10
+        daemon.tick(self.pool)
+        self.steer.assert_called_once()
+        own = daemon.decision_log.recent(root=self.root, kind="steering", subject=self.task["id"])
+        self.assertEqual(len(own), 3)
+
+    def test_off_and_shadow_do_not_refresh_harness_state(self):
+        depth = self.pool.harness_depth_tick
+        self.pool.cfg["steering"]["mode"] = "off"
+        with mock.patch.object(bus, "read") as read:
+            daemon.steering_tick(self.pool, depth_tick=depth)
+        read.assert_not_called()
+        self.pool.cfg["steering"]["mode"] = "shadow"
+        daemon.steering_tick(self.pool, depth_tick=depth)
+        self.begin_depth.assert_not_called()
+        self.promotion_collect.assert_not_called()
+        self.assertIs(self.pool.harness_depth_tick, depth)
+        self.notify.assert_not_called()
+
+    def test_active_promotion_refusal_uses_shadow(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        self.promotion_collect.return_value = {"shadow_n": 19}
+        daemon.tick(self.pool)
+        for _ in range(3):
+            self.now += 10
+            daemon.tick(self.pool)
+        self.promotion_collect.assert_called_once_with("steering_policy", root=self.root)
+        self.notify.assert_called_once()
+        self.now += 1800
+        daemon.tick(self.pool)
+        self.assertEqual(self.promotion_collect.call_count, 2)
+        self.notify.assert_called_once()
+        self.promotion_collect.return_value = {"shadow_n": 20, "active_n": 1,
+            "fix_rounds_delta": 0, "accepted_tokens_delta": 1}
+        self.now += 1800
+        daemon.tick(self.pool)
+        self.assertEqual(self.rows()[-1]["mode"], "shadow")
+        self.assertEqual(self.notify.call_count, 2)
+        self.steer.assert_not_called()
+        self.cancel.assert_not_called()
+        self.begin_depth.assert_not_called()
+
+    def test_steering_history_is_grouped_once_for_all_workers(self):
+        other = {**self.task, "id": "T-another"}
+        with mock.patch.object(bus, "read", return_value=[self.task, other]), \
+                mock.patch.object(daemon.decision_log, "recent", wraps=daemon.decision_log.recent) as recent:
+            daemon.steering_tick(self.pool, depth_tick=self.pool.harness_depth_tick)
+        recent.assert_called_once_with(root=self.root, limit=2, kind="steering",
+                                       subjects=[self.task["id"], other["id"]])
+
+    def test_loop_preserves_steering_throttles_across_fresh_pools(self):
+        self.pool.cfg["steering"]["mode"] = "active"
+        self.promotion_collect.return_value = {"shadow_n": 0}
+        fresh = mock.Mock(cfg=self.pool.cfg, harness_depth_tick=self.pool.harness_depth_tick)
+        stop = mock.Mock()
+        stop.wait.side_effect = [False, True]
+        with mock.patch.object(daemon, "Pool", side_effect=[self.pool, fresh]), \
+                mock.patch.object(daemon, "tick", side_effect=lambda pool, event:
+                    daemon.steering_tick(pool, depth_tick=pool.harness_depth_tick)):
+            daemon._loop(30, stop)
+        self.promotion_collect.assert_called_once()
+        self.notify.assert_called_once()
+        self.assertIs(fresh.steering_promotion_cache, self.pool.steering_promotion_cache)
+
+    def test_leaving_active_resets_refusal_notifications(self):
+        self.promotion_collect.return_value = {"shadow_n": 0}
+        self.pool.cfg["steering"]["mode"] = "active"
+        daemon.tick(self.pool)
+        for index, mode in enumerate(("shadow", "off"), start=2):
+            self.pool.cfg["steering"]["mode"] = mode
+            with mock.patch.object(bus, "read", return_value=[]):
+                daemon.steering_tick(self.pool)
+            self.assertIsNone(self.pool.steering_refusal_reasons)
+            self.pool.cfg["steering"]["mode"] = "active"
+            daemon.tick(self.pool)
+            self.assertEqual(self.notify.call_count, index)
+        self.promotion_collect.assert_called_once()

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from orchestrator import skill_discovery, skill_learning, skills_registry
+from orchestrator import memory_hot, memory_store, skill_discovery, skill_learning, skills_registry
 
 
 class SkillLearningTests(unittest.TestCase):
@@ -97,6 +97,47 @@ class SkillLearningTests(unittest.TestCase):
                                   env=env, capture_output=True, text=True)
         self.assertEqual(0, proposed.returncode, proposed.stderr)
         self.assertIn("learned/", proposed.stdout)
+
+    def memory_records(self, count=5, dates=3):
+        (self.root / "pool.toml").write_text("[memory]\nhot_budget_tokens=1000\nhot_recent_days=30\nhot_never_compact=[]\n")
+        for index in range(count):
+            memory_store.add(memory_store.Record(
+                id=f"mem-{index}", kind="gotcha", title=f"Procedure {index}",
+                date=f"2026-09-{20 + index % dates:02d}", components=["parser"],
+                source_tasks=[f"T-mem-{index}"], body="Always check parser output before merge."), self.root.parent)
+
+    def test_candidates_from_memory_groups_recurring_procedural_records(self):
+        self.memory_records(3, 2)
+        candidate, = skill_learning.candidates_from_memory(self.root)
+        self.assertEqual((candidate["source"], candidate["support"]), ("memory", 3))
+        self.assertEqual(candidate["memory_record_ids"], ["mem-0", "mem-1", "mem-2"])
+
+    def test_memory_candidates_confidence_formula_and_roles_from_task_files(self):
+        self.memory_records()
+        for index, role in ((0, "review"), (1, "execute")):
+            (self.root / f"tasks/T-mem-{index}.json").write_text(json.dumps(
+                {"id": f"T-mem-{index}", "role": role}))
+        candidate, = skill_learning.candidates_from_memory(self.root)
+        self.assertEqual(1.0, candidate["confidence"])
+        self.assertEqual(5, candidate["evidence_strength"])
+        self.assertEqual(["execute", "review"], candidate["roles"])
+        proposed = skill_learning.propose(candidate, self.root)
+        self.assertIn("execute", proposed["roles"])
+
+    def test_promoted_skill_tags_source_records_and_hot_view_points_to_skill(self):
+        self.memory_records()
+        record = skill_learning.propose(skill_learning.candidates_from_memory(self.root)[0], self.root)
+        states = skills_registry._state_document(self.root)
+        states[record["id"]]["state"] = "testing"
+        skills_registry._write_json(self.root / "skills/state.json", states)
+        skills_registry._update_registry_state(self.root, record["id"], states[record["id"]])
+        skills_registry.transition(record["id"], "shadow", "observe", self.root)
+        skills_registry.transition(record["id"], "active", "promote", self.root)
+        source = memory_store.get("mem-0", self.root.parent)
+        self.assertIn(f"skill:{record['id']}", source["tags"])
+        view = memory_hot.build(self.root.parent)["view"]
+        self.assertIn(f"learned skill: {record['id']}", view)
+        self.assertNotIn("Always check parser output", view)
 
 
 if __name__ == "__main__":

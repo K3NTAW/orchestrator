@@ -7,10 +7,11 @@ not interpreted as strategy metadata.
 import json
 import statistics
 import tomllib
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from . import STATE, attribution, schedlog, scorecard as scorecard_api
+from . import memory_store
 
 
 STRATEGIES = (
@@ -217,6 +218,34 @@ def observations(root=STATE):
             "accepted": accepted,
         })
     return output
+
+
+def record_outcome(task, root=STATE):
+    """Persist the merged execute lineage's computed strategy outcome."""
+    root = Path(root)
+    tasks = _tasks(root)
+    root_id = _root_id(task, tasks)
+    lineage_root = tasks.get(root_id, task)
+    if lineage_root.get("role") != "execute":
+        return None
+    row = next((value for value in observations(root) if value["task"] == root_id), None)
+    if row is None:
+        return None
+    fixes = int(row.get("fix_rounds") or 0)
+    outcome = "first_pass" if row.get("first_pass") else f"fix_rounds:{fixes}"
+    task_class, band, name = row["task_class"], row["band"], row["strategy"]
+    body = (f"tokens: {row.get('tokens')}\n"
+            f"usd: {row.get('usd')}\n"
+            f"duration: {row.get('time_s')}\n"
+            f"executor: {lineage_root.get('executor') or ''}\nfix rounds: {fixes}")
+    record = memory_store.Record(
+        id=f"strategy-{root_id}", kind="strategy", title=f"{task_class} {band} {name}",
+        date=date.today().isoformat(), repo=root.parent.name,
+        tags=[f"task_class:{task_class}", f"band:{band}", f"strategy:{name}"],
+        provenance="strategy", outcome=outcome, source_tasks=[root_id],
+        source_goal=str(row.get("goal") or ""), body=body)
+    # memory_store takes the repository root; strategy takes the state directory.
+    return memory_store.add(record, root.parent)
 
 
 def scorecard(root=STATE, by=("task_class", "band")):

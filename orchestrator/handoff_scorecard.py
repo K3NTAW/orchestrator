@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from pathlib import Path
+from statistics import median
 
-from . import STATE, attribution, planner_telemetry, scorecard
+from . import STATE, attribution, cache_telemetry, planner_telemetry, scorecard
 
 
 def _tasks(root):
@@ -62,6 +63,116 @@ def _tokens(run):
 
 def _usd(run):
     return float(run.get("usd", run.get("total_cost_usd", 0)) or 0)
+
+
+def _cache_value(run, canonical, *legacy):
+    usage = run.get("usage") if isinstance(run.get("usage"), dict) else {}
+    for key in (canonical, *legacy):
+        value = run.get(key, usage.get(key))
+        if isinstance(value, (int, float)):
+            return value
+    return 0
+
+
+def _packet_meta(row):
+    value = row.get("packet_meta")
+    return value if isinstance(value, dict) else {}
+
+
+def _evidence_ids(row):
+    values = _packet_meta(row).get("evidence_ids") or []
+    return {str(value) for value in values} if isinstance(values, (list, tuple, set)) else set()
+
+
+def _event_time(row, first):
+    keys = (("started_at", "first_event_at", "ts") if first else
+            ("ended_at", "finished_at", "completed_at", "ts"))
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, (int, float)):
+            if first and key == "ts" and isinstance(row.get("duration_s"), (int, float)):
+                return value - row["duration_s"]
+            return value
+    return None
+
+
+def _handoff_metrics(predecessor, successor, cfg=None):
+    retained = _cache_value(successor, "cache_read_tokens", "cache_read_input_tokens", "cached_input_tokens")
+    previous_read = _cache_value(predecessor, "cache_read_tokens", "cache_read_input_tokens", "cached_input_tokens")
+    uncached = _cache_value(successor, "input_uncached_tokens", "input_tokens")
+    chars = _packet_meta(successor).get("chars")
+    packet_tokens = chars / 4 if isinstance(chars, (int, float)) else None
+    duplicated = sorted(_evidence_ids(predecessor) & _evidence_ids(successor))
+    before_end, after_start = _event_time(predecessor, False), _event_time(successor, True)
+    latency = max(0, after_start - before_end) if before_end is not None and after_start is not None else None
+    provider = successor.get("provider") or "claude"
+    ratios = cache_telemetry._cache_cfg(cfg)
+    read_ratio = ratios.get(f"{provider}_read_ratio", ratios["claude_read_ratio"])
+    lost = max(0, previous_read - retained)
+    effective = None if packet_tokens is None else uncached + lost * read_ratio + packet_tokens
+    return {
+        "cached_context_retained": retained,
+        "cache_lost": lost,
+        "uncached_reconstruction": uncached,
+        "handoff_packet_tokens": packet_tokens if packet_tokens is not None else "unmeasured",
+        "duplicated_evidence": duplicated,
+        "latency_s": latency if latency is not None else "unmeasured",
+        "effective_handoff_cost": effective if effective is not None else "unmeasured",
+    }
+
+
+def handoff_rows(root=STATE, cfg=None):
+    """Return measured predecessor/successor pairs without changing routing."""
+    root = Path(root)
+    tasks = _tasks(root)
+    runs_by_task = defaultdict(list)
+    for run in _runs(root):
+        runs_by_task[run["task"]].append(run)
+    rows = []
+    for task_id, task in sorted(tasks.items()):
+        constraints = task.get("constraints") or {}
+        predecessor_id = next((constraints.get(key) for key in
+                               ("fix_round_for", "replacement_for", "refile_for", "re_file_for")
+                               if constraints.get(key)), None)
+        if not predecessor_id or not runs_by_task.get(predecessor_id) or not runs_by_task.get(task_id):
+            continue
+        predecessor, successor = runs_by_task[predecessor_id][-1], runs_by_task[task_id][0]
+        changed = (predecessor.get("executor") or predecessor.get("tier")) != (successor.get("executor") or successor.get("tier"))
+        replacement = not constraints.get("fix_round_for")
+        rows.append({"kind": "worker_replacement" if replacement else ("executor_change" if changed else "fix_round"),
+                     "predecessor": predecessor_id, "successor": task_id,
+                     "predecessor_executor": predecessor.get("executor") or predecessor.get("tier"),
+                     "successor_executor": successor.get("executor") or successor.get("tier"),
+                     **_handoff_metrics(predecessor, successor, cfg)})
+
+    invocations = planner_telemetry.read_invocations(root)
+    shadow_by_goal = defaultdict(list)
+    for shadow in _shadow_rows(root):
+        shadow_by_goal[shadow.get("goal_id")].append(shadow)
+    for launch in invocations:
+        if launch.get("route") != "escalate" or not shadow_by_goal.get(launch.get("goal_id")):
+            continue
+        predecessor = shadow_by_goal[launch["goal_id"]][-1]
+        successor = {**launch, "packet_meta": launch.get("packet_meta") or {
+            "chars": launch.get("packet_chars"), "evidence_ids": launch.get("evidence_ids") or []}}
+        rows.append({"kind": "planner_escalation", "predecessor": predecessor.get("launch_id"),
+                     "successor": launch.get("launch_id"), **_handoff_metrics(predecessor, successor, cfg)})
+    return rows
+
+
+def _handoff_medians(rows):
+    fields = ("cached_context_retained", "cache_lost", "uncached_reconstruction",
+              "handoff_packet_tokens", "latency_s", "effective_handoff_cost")
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row["kind"]].append(row)
+    result = {}
+    for kind, kind_rows in sorted(grouped.items()):
+        result[kind] = {}
+        for field in fields:
+            values = [row[field] for row in kind_rows if isinstance(row.get(field), (int, float))]
+            result[kind][field] = median(values) if values else "unmeasured"
+    return result
 
 
 def _reason(task):
@@ -167,23 +278,29 @@ def expected_route_cost(task_class, executor, root=STATE, cfg=None):
             if row["task_class"] == task_class and row["first_executor"] == executor]
     minimum = ((cfg or {}).get("promotion") or {}).get("min_samples", 20)
     if len(rows) < minimum:
-        return {"insufficient": True, "n": len(rows)}
+        return {"insufficient": True, "n": len(rows), "effective_handoff_cost": "unmeasured"}
     first = [row["tokens_by_round"][0] for row in rows]
     fixes = [sum(row["tokens_by_round"][1:]) for row in rows if row["rounds"] > 1]
     handed = [sum(cost for cost, ex in zip(row["tokens_by_round"][1:], row["executors_by_round"][1:])
                     if ex != executor) for row in rows]
     fix_rows = [row for row in rows if row["rounds"] > 1]
-    handoff_rows = [row for row in rows if any(ex != executor for ex in row["executors_by_round"][1:])]
+    changed_lineages = [row for row in rows if any(ex != executor for ex in row["executors_by_round"][1:])]
     first_term = sum(first) / len(first)
     fix_term = ((len(fix_rows) / len(rows)) *
                 ((sum(fixes) / len(fixes) if fixes else 0) +
                  (sum(row["reconstruction_tokens"] for row in fix_rows) / len(fix_rows) if fix_rows else 0)))
-    destination_term = ((len(handoff_rows) / len(rows)) *
-                        (sum(handed) / len(handoff_rows) if handoff_rows else 0))
+    destination_term = ((len(changed_lineages) / len(rows)) *
+                        (sum(handed) / len(changed_lineages) if changed_lineages else 0))
+    measured_handoffs = [row["effective_handoff_cost"] for row in handoff_rows(root, cfg)
+                         if row["kind"] in ("executor_change", "worker_replacement") and
+                         row.get("successor_executor") == executor and
+                         isinstance(row["effective_handoff_cost"], (int, float))]
+    effective_handoff_cost = median(measured_handoffs) if measured_handoffs else "unmeasured"
     return {"insufficient": False, "n": len(rows), "expected_route_cost": first_term + fix_term + destination_term,
+            "effective_handoff_cost": effective_handoff_cost,
             "terms": {"first_round": {"value": first_term, "n": len(first)},
                       "fix": {"value": fix_term, "n": len(fix_rows)},
-                      "handoff_destination": {"value": destination_term, "n": len(handoff_rows)}}}
+                      "handoff_destination": {"value": destination_term, "n": len(changed_lineages)}}}
 
 
 def recommendation(task_class, root=STATE, cfg=None):
@@ -254,10 +371,26 @@ def planner_handoffs(root=STATE):
 def build(root=STATE, cfg=None):
     starts = by_start(root)
     classes = sorted({key[1] for key in starts})
+    handoffs = handoff_rows(root, cfg)
     return {"by_start": {"/".join(key): value for key, value in starts.items()},
             "recommendations": {name: recommendation(name, root, cfg) for name in classes},
-            "planner_handoffs": planner_handoffs(root)}
+            "planner_handoffs": planner_handoffs(root),
+            "handoffs": {"rows": handoffs, "n": len(handoffs),
+                         "medians_by_kind": _handoff_medians(handoffs)}}
 
 
 def format_report(card):
-    return json.dumps(card, indent=1)
+    handoffs = card.get("handoffs") or {}
+    rows = handoffs.get("rows") or []
+    columns = ("kind", "predecessor", "successor", "cached_context_retained", "cache_lost",
+               "uncached_reconstruction", "handoff_packet_tokens", "duplicated_evidence",
+               "latency_s", "effective_handoff_cost")
+    legacy = {key: value for key, value in card.items() if key != "handoffs"}
+    lines = [json.dumps(legacy, indent=1), "", "\t".join(columns)]
+    for row in rows:
+        lines.append("\t".join(",".join(value) if isinstance(value, list) else str(value)
+                               for value in (row.get(column, "unmeasured") for column in columns)))
+    for kind, values in (handoffs.get("medians_by_kind") or {}).items():
+        lines.append("median:" + kind + "\t" + "\t".join(
+            f"{key}={value}" for key, value in values.items()))
+    return "\n".join(lines)

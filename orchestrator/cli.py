@@ -1,8 +1,8 @@
 """orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
-import argparse, json, os, random, sys
+import argparse, json, os, random, re, sys
 from collections import defaultdict
 from datetime import datetime
-from . import ROOT, bus, scorecard
+from . import ROOT, bus, scorecard, worker_registry
 from .bus import RUNS
 from .pool import Pool
 
@@ -99,6 +99,49 @@ def cost(by):
     return dict(agg)
 
 
+def _disclosure_cache_summary(root, days):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from . import decision_log
+    import time
+    cutoff = time.time() - days * 86400
+    rows = decision_log.read_all(root=root, since_ts=cutoff)
+    latest = {}
+    for row in sorted(rows, key=lambda row: row.get("ts", 0)):
+        data = row.get("deterministic") or {}
+        if (row.get("kind") != "tool_disclosure" or "kept" not in data
+                or row.get("reason") == "hidden_tool_requested"):
+            continue
+        latest[(data.get("role", "unknown"), row.get("subject"))] = row
+    groups = {}
+    for (role, _), row in latest.items():
+        groups.setdefault(role, []).append(row)
+    report = []
+    for role, group in sorted(groups.items()):
+        measured = [row["deterministic"] for row in group
+                    if "stable_catalog_chars" in row["deterministic"]
+                    and "dynamic_chars" in row["deterministic"]]
+        flags = [row["deterministic"].get("changed_since_previous") for row in group]
+        known = sum(flag is True or flag is False for flag in flags)
+        dates = [datetime.fromtimestamp(row["ts"], ZoneInfo("Europe/Zurich")).date().isoformat()
+                 for row in group]
+        report.append({"role": role, "rows": len(group), "measured_rows": len(measured),
+                       "date_range": [min(dates), max(dates)],
+                       "mean_stable_catalog_chars": (sum(d["stable_catalog_chars"] for d in measured)
+                                                     / len(measured) if measured else None),
+                       "mean_dynamic_chars": (sum(d["dynamic_chars"] for d in measured)
+                                              / len(measured) if measured else None),
+                       "changed_share": sum(flag is True for flag in flags) / known if known else None,
+                       "none_count": sum(flag is None for flag in flags)})
+    return report
+
+
+def _format_disclosure_cache(rows):
+    if not rows:
+        return "no tool_disclosure rows in range"
+    return "\n".join(" ".join(f"{key}={value}" for key, value in row.items()) for row in rows)
+
+
 def _scorecard_measurement_totals(card, by):
     totals = {}
     for field in ("calls", "blocked", "turns"):
@@ -121,6 +164,23 @@ def _scorecard_measurement_totals(card, by):
 
 def main():
     ap = argparse.ArgumentParser(prog="orchestrator"); sub = ap.add_subparsers(dest="cmd", required=True)
+    workers = sub.add_parser("workers")
+    workers.add_argument("--task")
+    workers.add_argument("--all", action="store_true")
+    workers.add_argument("--json", action="store_true")
+    worker_sub = workers.add_subparsers(dest="workers_cmd")
+    cancel_worker = worker_sub.add_parser("cancel")
+    cancel_worker.add_argument("task")
+    cancel_worker.add_argument("--reason", required=True)
+    steer_worker = worker_sub.add_parser("steer")
+    steer_worker.add_argument("task")
+    steer_worker.add_argument("--reason", required=True)
+    steer_worker.add_argument("--message", required=True)
+    from . import context_scanner
+    scanner = sub.add_parser("scan")
+    scanner.add_argument("path")
+    scanner.add_argument("--kind", choices=context_scanner.SOURCE_KINDS, default="other")
+    scanner.add_argument("--json", action="store_true")
     st = sub.add_parser("status"); st.add_argument("--plain", action="store_true")
     c = sub.add_parser("cost"); c.add_argument("--by", default="role", choices=["role", "tier", "account", "task"])
     h = sub.add_parser("hold"); h.add_argument("account"); h.add_argument("--minutes", type=int, default=30)
@@ -143,19 +203,27 @@ def main():
     sc.add_argument("--parallelism", action="store_true")
     sc.add_argument("--scheduling", action="store_true")
     sc.add_argument("--strategies", action="store_true")
+    sc.add_argument("--cache", action="store_true")
+    sc.add_argument("--memory", action="store_true")
+    sc.add_argument("--days", type=int, default=7)
+    sc.add_argument("--root")
     sc.add_argument("--goal")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--planner", action="store_true")
     sc.add_argument("--planner-routing", action="store_true")
     sc.add_argument("--context", action="store_true")
+    sc.add_argument("--cache-shadow", action="store_true")
     sc.add_argument("--reads", action="store_true")
     sc.add_argument("--handoffs", action="store_true")
     sc.add_argument("--economy", action="store_true")
+    sc.add_argument("--disclosure-cache", action="store_true")
+    sc.add_argument("--overhead", action="store_true")
     sc.add_argument("--skills", action="store_true")
     sc.add_argument("--group-by")
     sc.add_argument("--marginal")
     sc.add_argument("--redundancy", action="store_true")
     ce = sub.add_parser("context-eval"); ce.add_argument("--json", action="store_true"); ce.add_argument("--root")
+    me = sub.add_parser("memory-eval"); me.add_argument("--json", action="store_true")
     ex = sub.add_parser("explain"); ex.add_argument("task"); ex.add_argument("--json", action="store_true")
     pm = sub.add_parser("promotion"); pm.add_argument("--json", action="store_true")
     pr = sub.add_parser("planner-runs"); pr.add_argument("--summary", action="store_true")
@@ -194,6 +262,18 @@ def main():
     sktransition = sksub.add_parser("transition"); sktransition.add_argument("id"); sktransition.add_argument("state")
     sktransition.add_argument("--reason", required=True)
     skrollback = sksub.add_parser("rollback"); skrollback.add_argument("id")
+    mem = sub.add_parser("memory"); memsub = mem.add_subparsers(dest="memory_cmd", required=True)
+    memsub.add_parser("migrate")
+    memsub.add_parser("rebuild")
+    mh = memsub.add_parser("hot"); mh.add_argument("--json", action="store_true")
+    memsub.add_parser("compact")
+    ms = memsub.add_parser("search"); ms.add_argument("query", nargs="?", default="")
+    ms.add_argument("--kind"); ms.add_argument("--component"); ms.add_argument("--file"); ms.add_argument("--tag")
+    ms.add_argument("--since"); ms.add_argument("--tier"); ms.add_argument("--limit", type=int, default=20)
+    ms.add_argument("--json", action="store_true")
+    msh = memsub.add_parser("show"); msh.add_argument("id")
+    mst = memsub.add_parser("strategies"); mst.add_argument("--task-class"); mst.add_argument("--band")
+    mst.add_argument("--json", action="store_true")
     for command in ("discover", "import"):
         sksource = sksub.add_parser(command); sksource.add_argument("source")
     for command in ("inspect", "check-upstream", "quarantine"):
@@ -201,7 +281,115 @@ def main():
         if command == "quarantine":
             skaction.add_argument("--reason", default="external skill quarantine")
     a = ap.parse_args()
-    if a.cmd == "scorecard":
+    if a.cmd == "scan":
+        from pathlib import Path
+        try:
+            result = context_scanner.scan(Path(a.path).read_text(encoding="utf-8"), source_kind=a.kind)
+        except (OSError, UnicodeError) as error:
+            ap.error(str(error))
+        if a.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print(f"{result['verdict']} (score={result['score']})")
+            for finding in result["findings"]:
+                print(f"{finding['line']}: {finding['pattern']}: {finding['excerpt']}")
+        return
+    if a.cmd == "workers":
+        if a.workers_cmd == "cancel":
+            from . import worker_control
+            print(json.dumps(worker_control.cancel(a.task, a.reason), indent=2))
+        elif a.workers_cmd == "steer":
+            from . import worker_control
+            print(json.dumps(worker_control.steer(a.task, a.message, reason=a.reason), indent=2))
+        elif a.task:
+            doc = worker_registry.get(a.task)
+            if doc is None:
+                raise SystemExit("worker not found")
+            print(json.dumps({**doc, "events": worker_registry.events(a.task)}, indent=2))
+        else:
+            rows = worker_registry.listing(include_finished=a.all)
+            if a.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print("task\trole\tmodel\tprovider\tstatus\tstage\telapsed\ttokens\tworktree")
+                for row in rows:
+                    values = [row.get(key) for key in ("task", "role", "model", "provider", "status", "stage")]
+                    values += [f"{row['elapsed_s']:.0f}s", sum(row["tokens"].values()) if row["tokens"] else "?",
+                               row.get("worktree")]
+                    print("\t".join(str(value) if value is not None else "-" for value in values))
+    elif a.cmd == "memory":
+        from . import memory_store
+        if a.memory_cmd == "migrate":
+            print(json.dumps(memory_store.migrate(ROOT), sort_keys=True))
+        elif a.memory_cmd == "rebuild":
+            result = memory_store.rebuild(ROOT)
+            result["next"] = "run orchestrator memory compact to restore hot tier marks"
+            print(json.dumps(result, sort_keys=True))
+        elif a.memory_cmd in ("hot", "compact"):
+            from . import memory_hot
+            result = memory_hot.compact(ROOT)
+            if a.memory_cmd == "hot":
+                if a.json:
+                    print(json.dumps({key: value for key, value in result.items() if key != "view"},
+                                     indent=2, sort_keys=True))
+                else:
+                    print(result["view"], end="")
+                    print(f"tokens={result['tokens']} pinned={len(result['pinned'])} "
+                          f"dropped={len(result['dropped'])} over_budget={str(result['over_budget']).lower()}")
+            else:
+                print(f"pinned={len(result['pinned'])} dropped={len(result['dropped'])}")
+        elif a.memory_cmd == "show":
+            record = memory_store.get(a.id, ROOT)
+            if record is None:
+                raise SystemExit(1)
+            print(json.dumps(record, indent=2, sort_keys=True))
+        elif a.memory_cmd == "strategies":
+            import statistics
+            rows = memory_store.search("", kind="strategy", limit=100000, root=ROOT)["records"]
+            groups = {}
+            for record in rows:
+                tags = record.get("tags", [])
+                values = {tag.split(":", 1)[0]: tag.split(":", 1)[1] for tag in tags if ":" in tag}
+                if a.task_class and values.get("task_class") != a.task_class:
+                    continue
+                if a.band and values.get("band") != a.band:
+                    continue
+                name = values.get("strategy")
+                if name:
+                    groups.setdefault(name, []).append(record)
+            result = []
+            for name, records in sorted(groups.items()):
+                def number(label):
+                    found = []
+                    for record in records:
+                        match = re.search(rf"(?m)^{label}:\s*([0-9.]+)", record.get("body", ""))
+                        if match:
+                            found.append(float(match.group(1)))
+                    return found
+                first = sum(record.get("outcome") == "first_pass" for record in records)
+                tokens, durations = number("tokens"), number("duration")
+                result.append({"strategy": name, "count": len(records),
+                               "first_pass_rate": first / len(records),
+                               "median_tokens": statistics.median(tokens) if tokens else None,
+                               "median_duration": statistics.median(durations) if durations else None})
+            if a.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print("strategy\tcount\tfirst_pass_rate\tmedian_tokens\tmedian_duration")
+                for row in result:
+                    print("\t".join(str(row[key]) for key in
+                                    ("strategy", "count", "first_pass_rate", "median_tokens", "median_duration")))
+        else:
+            result = memory_store.search(a.query, kind=a.kind, component=a.component, file=a.file,
+                                         tag=a.tag, date_from=a.since, tier=a.tier, limit=a.limit, root=ROOT)
+            if a.json:
+                print(json.dumps(result["records"], indent=2, sort_keys=True))
+            else:
+                for record in result["records"]:
+                    print(f"{record['id']}\t{record['date']}\t{record['kind']}\t{record['title']}")
+                for warning in result["metadata"]["warnings"]:
+                    print(f"warning: {warning}", file=sys.stderr)
+    elif a.cmd == "scorecard":
         if (a.group_by is not None or a.marginal is not None or a.redundancy) and not a.skills:
             ap.error("--group-by, --marginal and --redundancy require --skills")
         skill_group_by = ("role", "task_class")
@@ -213,8 +401,12 @@ def main():
                          else "--group-by requires at least one dimension")
         if a.planner_routing and (a.planner or a.parallelism):
             ap.error("--planner-routing conflicts with --planner and --parallelism")
-        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies)) > 1:
-            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing")
+        if a.disclosure_cache and not a.economy:
+            ap.error("--disclosure-cache requires --economy")
+        if a.cache_shadow and not a.context:
+            ap.error("--cache-shadow requires --context")
+        if sum((a.planner_routing, a.context, a.reads, a.handoffs, a.economy, a.skills, a.overhead, a.economics, a.efficiency, a.routing, a.reviews, a.parallelism, a.scheduling, a.strategies, a.cache, a.memory)) > 1:
+            ap.error("choose one of --economics, --efficiency, --routing, --reviews, --parallelism, --scheduling, --strategies, --planner-routing, --cache, --memory")
         groupings = {
             "default": ("executor", "tier", "task", "goal"),
             "--efficiency": ("goal", "executor", "band", "class", "role"),
@@ -230,6 +422,8 @@ def main():
             "--handoffs": (),
             "--economy": (),
             "--skills": (),
+            "--overhead": (),
+            "--memory": (),
         }
         mode = next(("--" + name for name in ("efficiency", "economics", "routing", "reviews", "parallelism", "scheduling", "strategies")
                      if getattr(a, name)), "default")
@@ -245,10 +439,16 @@ def main():
             mode = "--economy"
         if a.skills:
             mode = "--skills"
-        if a.goal is not None and not a.parallelism:
-            ap.error("--goal requires --parallelism")
+        if a.overhead:
+            mode = "--overhead"
+        if a.memory:
+            mode = "--memory"
+        if a.goal is not None and not (a.parallelism or a.overhead):
+            ap.error("--goal requires --parallelism or --overhead")
         if a.parallelism and a.planner:
             ap.error("--parallelism conflicts with --planner")
+        if a.overhead and a.planner:
+            ap.error("--overhead conflicts with --planner")
         allowed = groupings[mode]
         if a.by is not None and a.by not in allowed:
             choices = "|".join(allowed) if allowed else "none (omit --by)"
@@ -295,10 +495,13 @@ def main():
                 if a.json:
                     print(json.dumps(rows, indent=2))
                 else:
-                    print("id\tstate\ttrust\troles\tl0/l2\tversion\tstale")
+                    print("id\tstate\ttrust\troles\tl0/l2\tversion\tstale\tlevel")
                     for skill_id, record in sorted(rows.items()):
+                        report = skills_registry._read_json(
+                            ROOT / "skills" / "quarantine" / skill_id / "findings.json", {})
+                        level = report.get("risk", {}).get("level", "-")
                         print(f"{skill_id}\t{record['state']}\t{record['trust']}\t{','.join(record['roles'])}\t"
-                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}\t{record.get('stale', False)}")
+                              f"{record['est_tokens_l0']}/{record['est_tokens_l2']}\t{record['version']}\t{record.get('stale', False)}\t{level}")
             elif a.skills_cmd == "show":
                 record = skills_registry.load()["skills"].get(a.id)
                 if record is None:
@@ -307,6 +510,7 @@ def main():
             elif a.skills_cmd == "learn":
                 from . import skill_learning
                 found = skill_learning.patterns(since_s=a.since, min_support=a.min_support)
+                found += skill_learning.candidates_from_memory()
                 if a.propose:
                     for pattern in found:
                         print(skill_learning.propose(pattern)["id"])
@@ -451,8 +655,34 @@ def main():
         print(json.dumps(document, indent=1) if a.json else context_eval.format_report(results))
         if not document["suite_passed"]:
             raise SystemExit(1)
+    elif a.cmd == "memory-eval":
+        from . import memory_eval
+        document = memory_eval.run()
+        real_state = ROOT / ".orchestrator"
+        real_state.mkdir(parents=True, exist_ok=True)
+        (real_state / "memory_eval.json").write_text(json.dumps(document, indent=2) + "\n")
+        print(json.dumps(document, indent=1) if a.json else memory_eval.format_report(document))
+        if document["passed"] != document["total"]:
+            raise SystemExit(1)
     elif a.cmd == "scorecard":
-        if a.skills:
+        if a.disclosure_cache:
+            card = _disclosure_cache_summary(a.root or scorecard.STATE, a.days)
+            print(json.dumps(card, indent=1) if a.json else _format_disclosure_cache(card))
+        elif a.memory:
+            from . import memory_scorecard
+            card = memory_scorecard.build(a.root or scorecard.STATE, a.days)
+            print(json.dumps(card, indent=1) if a.json else memory_scorecard.format_report(card))
+        elif a.cache:
+            from . import cache_telemetry
+            card = cache_telemetry.report(a.root or scorecard.STATE, a.days)
+            print(json.dumps(card, indent=1) if a.json else cache_telemetry.format_report(card))
+        elif a.overhead:
+            from . import overhead
+            card = overhead.report(root=scorecard.STATE)
+            if a.goal:
+                card = [row for row in card if row["goal_id"] == a.goal]
+            print(json.dumps(card, indent=1) if a.json else overhead.format_report(card))
+        elif a.skills:
             from . import skill_scorecard
             card = {"by_skill": skill_scorecard.by_skill(scorecard.STATE, skill_group_by),
                     "jev_by_role": skill_scorecard.jev_metrics(scorecard.STATE),
@@ -508,7 +738,7 @@ def main():
                 print(skill_scorecard.format_report(card["skills"]))
         elif a.handoffs:
             from . import handoff_scorecard
-            card = handoff_scorecard.build(root=scorecard.STATE, cfg=Pool().cfg)
+            card = handoff_scorecard.build(root=a.root or scorecard.STATE, cfg=Pool().cfg)
             print(json.dumps(card, indent=1) if a.json else handoff_scorecard.format_report(card))
         elif a.reads:
             from . import read_economy
@@ -516,8 +746,32 @@ def main():
             print(json.dumps(card, indent=1) if a.json else read_economy.format_summary(card))
         elif a.context:
             from . import context_scorecard
-            card = context_scorecard.build(root=scorecard.STATE)
-            print(json.dumps(card, indent=1) if a.json else context_scorecard.format_report(card))
+            card = context_scorecard.build(root=a.root or scorecard.STATE)
+            if a.cache_shadow:
+                from . import decision_log
+                rows = [row for row in decision_log.read_all(root=a.root or scorecard.STATE)
+                        if row.get("kind") == "context_selection"]
+                changed = total = 0
+                for row in rows:
+                    deterministic = row.get("deterministic") or {}
+                    adjusted = deterministic.get("cache_adjusted_level") or {}
+                    presented = deterministic.get("presented_level") or {}
+                    comparable = adjusted.keys() & presented.keys()
+                    total += len(comparable)
+                    changed += sum(presented[key] != adjusted[key] for key in comparable)
+                dates = sorted(datetime.fromtimestamp(value).date().isoformat() if isinstance(value, (int, float))
+                               else str(value)[:10]
+                               for row in rows if (value := row.get("ts")) is not None)
+                summary = {"rows": len(rows), "date_from": dates[0] if dates else None,
+                           "date_to": dates[-1] if dates else None,
+                           "changed_share": changed / total if total else None}
+                share = f"{summary['changed_share']:.3f}" if total else "unknown"
+                print(json.dumps(summary, indent=1) if a.json else
+                      ("no context_selection rows" if not rows else
+                       f"rows={summary['rows']} date_range={summary['date_from']}..{summary['date_to']} "
+                       f"changed_share={share}"))
+            else:
+                print(json.dumps(card, indent=1) if a.json else context_scorecard.format_report(card))
         elif a.planner_routing:
             from . import planner_scorecard
             card = planner_scorecard.build(root=scorecard.STATE)

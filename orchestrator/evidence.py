@@ -2,23 +2,25 @@
 
 Evidence content is raw in memory.  :class:`EvidencePool` always applies
 ``jev.redact`` before persistence so secrets are never written to its JSONL file.
+``LOCAL_USER`` covers locally produced artifacts, including user memory and
+observed worker outputs; it is not limited to user-authored memory.
 """
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 import hashlib
 import json
 import re
 import time
 from pathlib import Path
 
-from . import STATE, jev
+from . import STATE, jev, context_scanner
 
 
 SOURCE_TYPES = (
     "source_chunk", "test_result", "scout_finding", "memory_entry",
     "graph_finding", "previous_result", "review_finding",
-    "architecture_note", "decision", "external_doc",
+    "architecture_note", "decision", "external_doc", "worker_partial",
 )
-PROVENANCE = ("repo", "bus", "memory", "scout", "external")
+PROVENANCE = ("repo", "bus", "memory", "scout", "external", "worker_partial")
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,14 @@ class Evidence:
     provenance: str
     observed_at: float
     trust: str
+    trust_class: str = ""
+    scan: dict | None = None
+    scope: list = field(default_factory=list)
+
+
+def _trust_class(provenance):
+    return {"repo": "TRUSTED_REPO", "memory": "LOCAL_USER",
+            "worker_partial": "LOCAL_USER"}.get(provenance, "EXTERNAL")
 
 
 def _scope(task):
@@ -74,6 +84,10 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
         raise ValueError(f"invalid provenance: {provenance}")
     content = str(content)
     content_hash = hashlib.sha256(content.encode()).hexdigest()
+    if source_type == "previous_result":
+        match = re.match(r"^task:([^:]+)(?::|$)", str(location))
+        if match:
+            location = f"task:{match.group(1)}:evidence:{content_hash}"
     evidence_id = hashlib.sha256(
         f"{source_type}|{location}|{content_hash}".encode()
     ).hexdigest()[:12]
@@ -83,11 +97,16 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
     relevance_task = task
     if relevance_task is None and scope:
         relevance_task = {"scope": list(scope)}
+    result = context_scanner.scan(content, source_kind="evidence")
+    trust_class = "UNTRUSTED" if result["verdict"] == "blocked" else _trust_class(provenance)
+    scan_summary = dict(verdict=result["verdict"],
+                        patterns=sorted({f["pattern"] for f in result["findings"]}))
     provisional = Evidence(
         evidence_id, source_type, str(location), str(commit), content_hash,
         content, short, long, {}, provenance,
         time.time() if observed_at is None else float(observed_at),
         "trusted" if provenance in ("repo", "memory") else "untrusted",
+        trust_class, scan_summary, list(scope),
     )
     relevance = relevance_for(provisional, relevance_task)
     if section is not None:
@@ -96,7 +115,7 @@ def make(source_type, location, content, *, commit="", provenance, task=None,
 
 
 def fresh(ev, head_sha):
-    return ev.source_type not in ("source_chunk", "test_result") or ev.commit == head_sha
+    return ev.source_type not in ("source_chunk", "test_result", "worker_partial") or ev.commit == head_sha
 
 
 def cache_key(ev, task_class, role, level):
@@ -111,11 +130,59 @@ class EvidencePool:
         self.path = STATE / "evidence" / f"{goal}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._items = {}
+        compacted = False
+        previous_by_task = {}
+        superseded = {}
         if self.path.exists():
             for line in self.path.read_text().splitlines():
                 if line.strip():
                     row = json.loads(line)
-                    self._items[row["id"]] = Evidence(**row)
+                    row.setdefault("trust_class", _trust_class(row.get("provenance")))
+                    row.setdefault("scan", None)
+                    row.setdefault("scope", [])
+                    row = {key: value for key, value in row.items()
+                           if key in {field.name for field in fields(Evidence)}}
+                    item = Evidence(**row)
+                    task_id = self._previous_result_task(item)
+                    if task_id is not None:
+                        if task_id not in superseded:
+                            from . import bus
+                            try:
+                                task = bus.get(task_id)
+                            except KeyError:
+                                task = {}
+                            superseded[task_id] = (task.get("status") == "superseded"
+                                                   or bool(task.get("superseded_by")))
+                        if superseded[task_id]:
+                            compacted = True
+                            continue
+                        location = f"task:{task_id}:evidence:{item.content_hash}"
+                        evidence_id = hashlib.sha256(
+                            f"previous_result|{location}|{item.content_hash}".encode()
+                        ).hexdigest()[:12]
+                        if (item.location, item.id) != (location, evidence_id):
+                            item = replace(item, location=location, id=evidence_id)
+                            compacted = True
+                    if task_id is not None and task_id in previous_by_task:
+                        self._items.pop(previous_by_task[task_id], None)
+                        compacted = True
+                    self._items[item.id] = item
+                    if task_id is not None:
+                        previous_by_task[task_id] = item.id
+        if compacted:
+            self._write()
+
+    @staticmethod
+    def _previous_result_task(ev):
+        if ev.source_type != "previous_result":
+            return None
+        match = re.match(r"^task:([^:]+)(?::|$)", ev.location)
+        return match.group(1) if match else None
+
+    def _write(self):
+        self.path.write_text("".join(
+            json.dumps(asdict(item), sort_keys=True) + "\n"
+            for item in self._items.values()))
 
     def add(self, ev):
         if ev.id in self._items:
@@ -123,9 +190,19 @@ class EvidencePool:
         persisted = replace(ev, content=jev.redact(ev.content),
                             summary_short=jev.redact(ev.summary_short),
                             summary_long=jev.redact(ev.summary_long))
-        self._items[ev.id] = persisted
-        with self.path.open("a") as handle:
-            handle.write(json.dumps(asdict(persisted), sort_keys=True) + "\n")
+        task_id = self._previous_result_task(persisted)
+        replaced = False
+        if task_id is not None:
+            for evidence_id, item in list(self._items.items()):
+                if self._previous_result_task(item) == task_id:
+                    del self._items[evidence_id]
+                    replaced = True
+        self._items[persisted.id] = persisted
+        if replaced:
+            self._write()
+        else:
+            with self.path.open("a") as handle:
+                handle.write(json.dumps(asdict(persisted), sort_keys=True) + "\n")
         return persisted
 
     def get(self, evidence_id):

@@ -9,6 +9,20 @@ from . import STATE, decision_log
 
 
 FEATURES = OrderedDict((
+    ("steering_policy", {"table": "steering", "key": "mode", "modes": ("off", "shadow", "active"),
+                         "default": "shadow", "evidence": "steering_policy",
+                         "criteria": {"min_shadow_samples": 20, "fix_rounds_delta": "<0",
+                                      "accepted_tokens_delta": "<=0"}}),
+    ("memory_tiers", {"table": "memory", "key": "mode",
+                      "modes": ("off", "shadow", "active"),
+                      "default": "shadow", "evidence": "retrieval"}),
+    ("contracts", {"table": "contracts", "key": "mode", "modes": ("off", "shadow", "active"),
+                   "default": "shadow", "evidence": "contracts",
+                   "criteria": {"min_shadow_samples": 30, "repair_success_rate": .9,
+                                "failed_results_delta": 0}}),
+    ("fast_path", {"table": "harness", "key": "depth_mode",
+                   "modes": ("off", "shadow", "active"),
+                   "default": "shadow", "evidence": "fast_path"}),
     ("jev_routing", {"table": "jev.routing", "key": "mode", "modes": ("off", "shadow", "active"),
                       "default": "shadow", "evidence": "jev_routing"}),
     ("scheduler", {"table": "scheduler", "key": "mode", "modes": ("off", "shadow", "active"),
@@ -71,7 +85,7 @@ def current_mode(feature, cfg):
     spec = FEATURES[feature]
     value = _table(cfg, spec["table"]).get(spec["key"], spec["default"])
     if value not in spec["modes"]:
-        return spec["default"], ["invalid_config"]
+        return ("off" if feature == "steering_policy" else spec["default"]), ["invalid_config"]
     return value, []
 
 
@@ -102,9 +116,53 @@ def evaluate(feature, evidence, cfg=None):
     criteria = _criteria(cfg)
     n = evidence.get("n", 0) or 0
     reasons = list(mode_flags)
+    if feature == "steering_policy":
+        if evidence.get("shadow_n", 0) < 20:
+            reasons.append("insufficient_evidence")
+        if mode == "active" and evidence.get("active_n", 0):
+            fixes, tokens = evidence.get("fix_rounds_delta"), evidence.get("accepted_tokens_delta")
+            if fixes is None or fixes >= 0:
+                reasons.append("fix_rounds_not_lower_than_shadow")
+            if tokens is None or tokens > 0:
+                reasons.append("token_cost_unmeasured_or_increased")
+        return {"feature": feature, "mode": mode, "n": n,
+                "recommendation": "stay" if reasons else "promote", "reasons": reasons,
+                "criteria": FEATURES[feature]["criteria"], "evidence": evidence}
+    if feature == "contracts":
+        contract_criteria = FEATURES[feature]["criteria"]
+        if evidence.get("shadow_n", n) < contract_criteria["min_shadow_samples"]:
+            reasons.append("insufficient_evidence")
+        if evidence.get("repair_success_rate") is None or evidence["repair_success_rate"] < .9:
+            reasons.append("repair_success_unmeasured_or_low")
+        delta = evidence.get("failed_results_delta")
+        if delta is None or delta > 0:
+            reasons.append("failed_results_unmeasured_or_increased")
+        return {"feature": feature, "mode": mode, "n": n,
+                "recommendation": "demote" if mode == "active" and delta is not None and delta > 0
+                                  else "stay" if reasons else "promote",
+                "reasons": reasons, "criteria": contract_criteria, "evidence": evidence}
+    if feature == "fast_path":
+        if evidence.get("two_fix_rounds"):
+            reasons.append("fast_path_two_fix_rounds")
+        elif n < 20:
+            reasons.append("insufficient_evidence")
+        elif evidence.get("active_n", 0):
+            if evidence.get("first_pass_delta") is None or evidence["first_pass_delta"] < 0:
+                reasons.append("first_pass_below_shadow_or_unknown")
+            if evidence.get("accepted_tokens_delta") is None or evidence["accepted_tokens_delta"] >= 0:
+                reasons.append("tokens_not_lower_than_shadow")
+        return {"feature": feature, "mode": mode, "n": n,
+                "recommendation": ("demote" if mode == "active" and evidence.get("two_fix_rounds")
+                                   else "stay") if reasons else "promote",
+                "reasons": reasons, "criteria": {"min_shadow_samples": 20,
+                    "first_pass_delta": 0, "accepted_tokens_delta": "<0", "max_fix_rounds": 1}}
     shadow_features = {"context_router", "tool_disclosure", "conditional_instructions", "handoff_routing"}
     if n < criteria["min_samples"]:
         reasons.append("insufficient_evidence")
+        return {"feature": feature, "mode": mode, "n": n, "recommendation": "stay",
+                "reasons": reasons, "criteria": criteria}
+    if feature == "memory_tiers" and evidence.get("fix_rounds_delta") is None:
+        reasons.append("shadow_quality_unmeasured")
         return {"feature": feature, "mode": mode, "n": n, "recommendation": "stay",
                 "reasons": reasons, "criteria": criteria}
     if feature in shadow_features:
@@ -176,6 +234,68 @@ def _jsonl(path):
 def collect(feature, root=STATE):
     """Collect available telemetry, tolerating missing and malformed state."""
     root = Path(root)
+    if feature == "steering_policy":
+        return _collect_steering(root)
+    if feature == "memory_tiers":
+        rows = [row for row in decision_log.read_all(root=root)
+                if row.get("kind") == "retrieval"]
+        legacy = sum((row.get("extra") or {}).get("tokens_legacy", 0) for row in rows)
+        tiered = sum((row.get("extra") or {}).get("tokens_tiered", 0) for row in rows)
+        # A task contributes once, in its most recently observed mode.
+        modes = {row["subject"]: row.get("mode") for row in rows if row.get("subject")}
+        tasks = []
+        for path in (root / "tasks").glob("*.json"):
+            try:
+                task = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(task, dict):
+                tasks.append(task)
+        fixes = {}
+        for task in tasks:
+            parent = (task.get("constraints") or {}).get("fix_round_for")
+            if parent:
+                fixes[parent] = fixes.get(parent, 0) + 1
+        cohorts = {mode: [fixes.get(task_id, 0) for task_id, observed in modes.items()
+                          if observed == mode] for mode in ("active", "shadow")}
+        delta = None
+        if all(len(values) >= 5 for values in cohorts.values()):
+            delta = (sum(cohorts["active"]) / len(cohorts["active"])
+                     - sum(cohorts["shadow"]) / len(cohorts["shadow"]))
+        return {"n": len(rows), "tokens_legacy": legacy, "tokens_tiered": tiered,
+                "accepted_tokens_delta": (tiered - legacy) / legacy if legacy else None,
+                "fix_rounds_delta": delta}
+    if feature == "contracts":
+        rows = [row for row in decision_log.read_all(root=root)
+                if row.get("kind") == "output_contract"]
+        n = len(rows)
+        repairs = [row for row in rows if not (row.get("extra") or {}).get("raw_ok", True)]
+        # Compare actual task outcomes across recorded modes, never schema failures.
+        rates = {}
+        for mode_name in ("shadow", "active"):
+            ids = {row.get("subject") for row in rows if row.get("mode") == mode_name}
+            statuses = []
+            for tid in ids:
+                if not isinstance(tid, str) or Path(tid).name != tid:
+                    continue
+                try:
+                    task = json.loads((root / "tasks" / (tid + ".json")).read_text())
+                except (OSError, ValueError):
+                    continue
+                if task.get("status") in ("done", "failed"):
+                    statuses.append(task["status"])
+            rates[mode_name] = statuses.count("failed") / len(statuses) if statuses else None
+        return {"n": n, "shadow_n": sum(row.get("mode") == "shadow" for row in rows),
+                "ok_rate": sum(bool((row.get("extra") or {}).get("raw_ok")) for row in rows) / n if n else None,
+                "repair_rate": sum(row.get("selected") == "repair" for row in rows) / n if n else None,
+                "repair_success_rate": sum(bool((row.get("deterministic") or {}).get("ok")) or
+                    (row.get("extra") or {}).get("repaired_by") == "model" for row in repairs) / len(repairs)
+                    if repairs else None,
+                "failed_results_delta": rates["active"] - rates["shadow"]
+                    if all(value is not None for value in rates.values()) else None}
+    if feature == "fast_path":
+        from . import harness_depth
+        return harness_depth.promotion_evidence(root)
     if feature == "jev_skill_routing":
         rows = [row for row in decision_log.read_all(root=Path(root))
                 if row.get("kind") == "skill_selection" and isinstance(row.get("jev"), dict)]
@@ -325,3 +445,53 @@ def format_report(rows):
         **{key: value for key, value in row.items() if key != "reasons"},
         reasons=(" — " + ", ".join(row.get("reasons", [])) if row.get("reasons") else ""))
         for row in rows)
+
+
+def _collect_steering(root):
+    """Compare observed lineages over the decision log's retained window."""
+    from . import scorecard
+    rows = [r for r in decision_log.read_all(root=root) if r.get("kind") == "steering"]
+    tasks = {}
+    for path in (root / "tasks").glob("*.json"):
+        try:
+            task = json.loads(path.read_text())
+            tasks[task["id"]] = task
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    def root_id(tid):
+        seen = set()
+        while tid in tasks and tid not in seen:
+            seen.add(tid)
+            parent = (tasks[tid].get("constraints") or {}).get("fix_round_for")
+            if not parent:
+                break
+            tid = parent
+        return tid
+    fixes = {}
+    for tid, task in tasks.items():
+        if (task.get("constraints") or {}).get("fix_round_for"):
+            ancestor = root_id(tid)
+            fixes[ancestor] = fixes.get(ancestor, 0) + 1
+    active = {root_id(r["subject"]) for r in rows if r.get("mode") == "active"
+              and (r.get("extra") or {}).get("outcome") == "applied"}
+    shadow = {root_id(r["subject"]) for r in rows if r.get("mode") == "shadow"} - active
+    observed = {root_id(r["subject"]) for r in rows}
+    def mean(ids):
+        values = [fixes.get(tid, 0) for tid in ids if tid in tasks]
+        return sum(values) / len(values) if values else None
+    card = scorecard.efficiency(root=root)["tasks"]
+    def tokens(ids):
+        values = [card[tid]["tokens"] for tid in ids if tid in card and card[tid].get("calls", 0)]
+        return sum(values) / len(values) if values else None
+    current, baseline = mean(active), mean(shadow)
+    current_tokens, baseline_tokens = tokens(active), tokens(shadow)
+    candidates = [(r.get("extra") or {}).get("candidate_action", r.get("selected")) for r in rows]
+    return {"n": len(rows), "steer": candidates.count("steer"), "cancel": candidates.count("cancel"),
+            "shadow_n": sum(r.get("mode") == "shadow" and action in ("steer", "cancel")
+                            for r, action in zip(rows, candidates)),
+            "active_n": len(active), "mean_fix_rounds_steered": current,
+            "mean_fix_rounds_non_steered": mean(observed - active),
+            "mean_fix_rounds_shadow": baseline,
+            "fix_rounds_delta": current - baseline if None not in (current, baseline) else None,
+            "accepted_tokens_delta": current_tokens - baseline_tokens
+                if None not in (current_tokens, baseline_tokens) else None}

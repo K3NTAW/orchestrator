@@ -48,6 +48,9 @@ _MCP = {
 }
 
 
+_SCHEMAS = {}
+
+
 def _mcp_measurements():
     root = Path(__file__).parent
     measured = {}
@@ -56,6 +59,7 @@ def _mcp_measurements():
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in _MCP:
                 signature = ast.unparse(node.args)
+                _SCHEMAS[node.name] = f"{node.name}({signature})\n{ast.get_docstring(node) or chr(32)}"
                 measured[node.name] = (len(signature) + len(ast.get_docstring(node) or "")) // 4
     return measured
 
@@ -145,3 +149,40 @@ def recovery_events(root):
                 events.append(row)
     return {"events": events, "note": None if events else
             "permission-denial/tool-request signal is not yet recorded in structured run rows"}
+
+
+def level2(ids):
+    """Render repository signatures; provider-owned schemas remain external."""
+    parts = []
+    for tool_id in ids:
+        name = tool_id.removeprefix("mcp__bus__")
+        definition = _SCHEMAS.get(name)
+        if definition is None:
+            definition = (CATALOG[tool_id]["line"] +
+                          "; schema supplied by the worker harness")
+        parts.append(f"### {tool_id}\n{definition}")
+    return "\n\n".join(parts)
+
+
+def cache_view(role, keep, previous_row):
+    """Measure the static role catalog and selected definitions without I/O."""
+    return {
+        "stable_catalog_chars": len(level0(disclosed(role))),
+        "dynamic_chars": len(level2(keep)),
+        "changed_since_previous": (None if previous_row is None else
+            set(keep) != set(previous_row["deterministic"]["kept"])),
+    }
+
+
+def cache_fields(task, role, keep, cfg):
+    """Attach optional cache measurements to either disclosure writer."""
+    from . import context_router, decision_log
+    try:
+        mode = context_router.cache_mode(cfg, "tool_disclosure")
+    except ValueError:
+        return {"cache_mode": "off", "invalid_config": True}
+    if mode == "off":
+        return {}
+    previous = decision_log.last_row("tool_disclosure", role=role,
+        exclude_subject=task.get("id"), require_key="deterministic.kept")
+    return {**cache_view(role, keep, previous), "cache_mode": mode, "invalid_config": False}

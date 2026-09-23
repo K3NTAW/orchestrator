@@ -5,7 +5,9 @@ catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under
 stage runs at most once no matter how often tick() runs."""
 import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
-from . import STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge, planner_runs, spawn
+from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
+from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
+               planner_runs, spawn, strategy, worker_control)
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier
@@ -146,6 +148,8 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
 def auto_fix_round(pool):
     cap = pool.cfg.get("daemon", {}).get("auto_fix_rounds", 2)
     for held in bus.read(status="held", role="execute"):
+        if held.get("hold_reason") == "cancelled":
+            continue
         if is_goal(held):
             continue
         if held.get("hold_reason", "").startswith("render_error"):
@@ -353,6 +357,9 @@ def reconcile_dead(t, pool=None):
     before. Returns "requeued" | "regated" | "held" so this is unit-testable without a live pid."""
     if is_goal(t):
         return None
+    worker = worker_registry.get(t["id"])
+    if worker and worker.get("status") in ("cancelling", "cancelled", "steering"):
+        return "steering" if worker["status"] == "steering" else "cancelled"
     tid, worktree = t["id"], t.get("worktree")
     (pool or Pool()).release(tid, t.get("result") or {})
     if t.get("role") != "execute" or not worktree or not Path(worktree).is_dir():
@@ -372,6 +379,7 @@ def reconcile_dead(t, pool=None):
     status = _git_in(worktree, "status", "--porcelain")
     sha = _git_in(worktree, "rev-parse", "HEAD").stdout.strip()
     if status.stdout.strip():
+        worker_control.preserve_partial(t)
         bus.update(tid, status="held", hold_reason="orphaned_dirty_worktree", pid=None,
                    resume_hint={"commit": sha, "dirty": status.stdout.splitlines()[:20]})
         notify(f"{tid}: dead worker left a dirty worktree with commit {sha[:8]} ahead of {base[:8]}; held")
@@ -529,10 +537,11 @@ def hold_render_error(task_id, exc):
 
 
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
+    epoch = worker_control.launch_epoch(task_id)
     routing = None
     try:
         task = bus.get(task_id)
-        routing = jev_route.shadow_context(task, Pool())
+        routing = None if harness_depth.active(task) else jev_route.shadow_context(task, Pool())
     except Exception:
         routing = None
     try:
@@ -551,36 +560,41 @@ def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
         if packet_meta is not None and accepts_meta:
             kwargs["packet_meta"] = packet_meta
         r = executor.start(task_id, prompt, **kwargs)
-        if routing is not None:
-            jev_route.record_shadow(task_id, routing)
-        if r["status"] == "done":
-            bus.post_result(task_id, spawn.fit_result({
-                "summary": r["message"][:3000],
-                "executed_by": "codex:" + bus.get(task_id)["executor"],
-                "thread": r["thread"],
-                "usage": r.get("usage"),
-            }), "done")
-        elif r["status"] == "failed":
-            bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
-        elif r["status"] in ("held", "budget"):
-            with bus.locked():
-                task = bus.get(task_id)
-                pipeline = dict(task.get("pipeline") or {})
-                pipeline.pop("dispatched_at", None)
-                pipeline["hold_note"] = r.get("reason", r["status"])
-                bus.update(task_id, status="queued", pipeline=pipeline)
-        elif r["status"] in ("refused", "incompatible"):
-            reason = r.get("reason", r["status"])
-            bus.post_result(task_id, spawn.fit_result({"reason": reason[:3000]}), "failed")
-        elif r["status"] == "fallback":
-            pass
+        with bus.locked():
+            if not worker_control.is_current(task_id, epoch):
+                return
+            if routing is not None:
+                jev_route.record_shadow(task_id, routing)
+            if r["status"] == "done":
+                bus.post_result(task_id, spawn.fit_result({
+                    "summary": r["message"][:3000],
+                    "executed_by": "codex:" + bus.get(task_id)["executor"],
+                    "thread": r["thread"],
+                    "usage": r.get("usage"),
+                }), "done")
+            elif r["status"] == "failed":
+                bus.post_result(task_id, spawn.fit_result({"reason": r["reason"][:3000]}), "failed")
+            elif r["status"] in ("held", "budget"):
+                with bus.locked():
+                    task = bus.get(task_id)
+                    pipeline = dict(task.get("pipeline") or {})
+                    pipeline.pop("dispatched_at", None)
+                    pipeline["hold_note"] = r.get("reason", r["status"])
+                    bus.update(task_id, status="queued", pipeline=pipeline)
+            elif r["status"] in ("refused", "incompatible"):
+                reason = r.get("reason", r["status"])
+                bus.post_result(task_id, spawn.fit_result({"reason": reason[:3000]}), "failed")
+            elif r["status"] == "fallback":
+                pass
     except Exception as e:
         with bus.locked():
+            if not worker_control.is_current(task_id, epoch):
+                return
             t = bus.get(task_id)
             pipeline = dict(t.get("pipeline") or {})
             pipeline["dispatch_error"] = str(e)[:300]
             bus.update(task_id, pipeline=pipeline)
-        bus.post_result(task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
+        worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, spawn.fit_result({"reason": f"dispatch error: {e}"[:3000]}), "failed")
 
 
 def _fix_round_delta(parent, fix):
@@ -670,17 +684,21 @@ def _load_scheduler_cfg(pool):
     return cfg
 
 
-def eligible(pool, candidates):
+def eligible(pool, candidates, *, depth_tick=None):
     """Filter candidates in their supplied order without changing bus state.
 
     A dispatched task is already owned, even while queued before its worker claims it;
     it belongs to the wave's running set, never its ready candidates.
     """
+    depth_tick = depth_tick if depth_tick is not None else getattr(pool, "harness_depth_tick", {})
     fallback = _fallback_mode(pool)
     return [t["id"] for t in candidates
             if not stale({**t, "status": "queued"}) and bus.ready(t)
             and not (t.get("pipeline") or {}).get("dispatched_at")
-            and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve")
+            and (t["complexity"] < SPEC_REVIEW_MIN or t.get("spec_review_verdict") == "approve"
+                 or (depth_tick.get("mode") == "active"
+                     and harness_depth.level(t, tasks=candidates, cfg=pool.cfg,
+                         history=depth_tick["history"])["eligible_fast_path"]))
             and (not fallback or fallback_tier(t["complexity"]) is not None)]
 
 
@@ -743,6 +761,7 @@ def _dispatch_deferrals(result, capacity_reason):
 
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
+    depth_tick = harness_depth.begin_tick(pool, notify, root=bus.STATE)
     scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)
     fallback = _fallback_mode(pool)
@@ -874,8 +893,11 @@ def dispatch(pool):
                 if "first_ready_at" not in pipeline:
                     pipeline["first_ready_at"] = time.time()
                     bus.update(t["id"], pipeline=pipeline)
+        depth = (harness_depth.level(t, tasks=candidates, cfg=pool.cfg, history=depth_tick["history"])
+                 if depth_tick["mode"] != "off" else None)
+        fast = bool(depth and depth_tick["mode"] == "active" and depth["eligible_fast_path"])
         verdict = t.get("spec_review_verdict")
-        if t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
+        if fast or t["complexity"] < SPEC_REVIEW_MIN or verdict == "approve":
             if fallback and fallback_tier(t["complexity"]) is None:
                 entry["reason"] = "fallback_no_tier"
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
@@ -884,6 +906,19 @@ def dispatch(pool):
                     (t.get("pipeline") or {}).get("dispatched_at") else capacity_reason)
                 continue
             if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
+                if depth is not None:
+                    harness_depth.record(t, depth, depth_tick["mode"])
+                with bus.locked():
+                    current = bus.get(t["id"])
+                    pipeline = dict(current.get("pipeline") or {})
+                    pipeline.pop("harness_level", None)
+                    pipeline.pop("harness_mode", None)
+                    if depth_tick["mode"] == "active":
+                        pipeline.update(harness_level=depth["level"], harness_mode="active")
+                    bus.update(t["id"], pipeline=pipeline)
+                    t = bus.get(t["id"])
+                if fast:
+                    harness_depth.record_skips(t)
                 entry["action"] = "dispatched"
                 entry.pop("reason")
                 if fallback:
@@ -1406,6 +1441,7 @@ def report_merge(task_id, r):
                 bus.update(task_id, status="done", merged_into=r["target"],
                            merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
         notify(f"{task_id} merged into {r['target']} ({r['sha'][:8]})")
+        strategy.record_outcome(bus.get(task_id), root=STATE)
     else:                                  # merge.merge already set the task failed with a resume_hint
         notify(f"{task_id} merge failed: {r.get('status')} {r.get('reason', '')}".strip())
     return r
@@ -1615,6 +1651,107 @@ def maybe_handover(reason, now=None):
     return True
 
 
+def _steering_decisions(pool, running, tasks, ranked, now, recent_by_task):
+    """Persist proposals; only active steering can affect a worker."""
+    cfg = pool.cfg
+    mode = steering_policy.mode(cfg)
+    if mode != "active":
+        pool.steering_refusal_reasons = None
+    section = cfg.get("steering", {})
+    invalid = not isinstance(section, dict) or section.get("mode", "shadow") not in ("off", "shadow", "active")
+    if mode == "off" and not invalid:
+        return
+    interval = section.get("min_interval_s", 1800) if isinstance(section, dict) else 1800
+    if mode == "active":
+        cache = getattr(pool, "steering_promotion_cache", None)
+        if not isinstance(cache, dict) or now - cache["at"] >= interval:
+            recommendation = promotion.evaluate("steering_policy",
+                promotion.collect("steering_policy", root=bus.STATE), cfg)
+            cache = {"at": now, "recommendation": recommendation}
+            pool.steering_promotion_cache = cache
+        recommendation = cache["recommendation"]
+        reasons = tuple(sorted(recommendation["reasons"])) if recommendation["recommendation"] != "promote" else ()
+        if recommendation["recommendation"] != "promote":
+            mode = "shadow"
+            if getattr(pool, "steering_refusal_reasons", None) != reasons:
+                notify("active steering policy refused; using shadow: " + ", ".join(reasons))
+        pool.steering_refusal_reasons = reasons
+    for task in running:
+        doc = worker_registry.get(task["id"])
+        if mode == "active" and doc and (doc.get("status") in ("steering", "cancelling") or
+                (task.get("pipeline") or {}).get("steer_epoch", 1) > doc.get("epoch", 1)):
+            continue
+        critical = bool(ranked and ranked[0] == task["id"])
+        try:
+            result = steering_policy.evaluate(task, tasks=tasks, registry_doc=doc,
+                stale_evidence=stale_check(task), gate_history=steering_policy.gate_history(task, tasks),
+                cfg=cfg, critical=critical, now=now)
+        except Exception:
+            result = {"action": "continue", "trigger": None, "reasons": ["evaluation_error"],
+                      "message": None, "evidence": {}, "severity": "none"}
+        if invalid:
+            result.update(action="continue", message=None, reasons=["invalid_config"])
+        digest = steering_policy.evidence_hash(result)
+        previous = recent_by_task.get(task["id"], [])
+        applied = [r for r in previous if r.get("mode") == "active" and
+                   (r.get("extra") or {}).get("outcome") == "applied"]
+        in_interval = bool(applied and now - applied[-1]["ts"] < interval)
+        if (previous and (in_interval or mode != "active" or result["action"] == "continue")
+                and previous[-1].get("mode") == mode
+                and (previous[-1].get("extra") or {}).get("trigger") == result["trigger"]
+                and (previous[-1].get("extra") or {}).get("evidence_hash") == digest):
+            continue
+        action = result["action"]
+        outcome = "shadow" if mode == "shadow" else "observed"
+        if in_interval:
+            action, outcome = "continue", "interval"
+        elif mode == "active" and action in ("steer", "cancel"):
+            # Cancellation remains a proposal until a later promotion enables it.
+            action = "steer"
+            try:
+                worker_control.steer(task["id"], result["message"],
+                                     reason=result["trigger"], source="steering_policy")
+                outcome = "applied"
+            except Exception as exc:
+                gone = isinstance(exc, (ProcessLookupError, KeyError)) or any(text in str(exc) for text in
+                    ("worker is not running", "worker not found", "not alive", "already finished"))
+                outcome = "worker_gone" if gone else "error"
+        decision_log.record("steering", task["id"], candidates=["continue", "steer", "cancel"],
+            hard_constraints={"critical": critical, "cancel_shadow_only": True,
+                              "min_interval_s": interval, "in_interval": in_interval},
+            deterministic=result["evidence"], selected=action, reason=result["reasons"], mode=mode,
+            extra={"trigger": result["trigger"], "severity": result["severity"], "critical": critical,
+                   "action": action, "candidate_action": result["action"], "evidence_hash": digest,
+                   "message_chars": len(result["message"] or ""), "outcome": outcome}, root=bus.STATE)
+
+
+def steering_tick(pool, *, depth_tick=None):
+    if steering_policy.mode(pool.cfg) != "active":
+        pool.steering_refusal_reasons = None
+    section = pool.cfg.get("steering", {})
+    if isinstance(section, dict) and section.get("mode") == "off":
+        return
+    running = [t for t in bus.read(status="running", role="execute") if not is_goal(t)]
+    if not running:
+        return
+    # Match scheduler eligibility, ancestry/descendants, and duration estimates.
+    candidates = [t for t in bus.read(role="execute") if not is_goal(t) and
+                  (t["status"] == "queued" or (t["status"] == "held" and
+                   t.get("hold_reason") == "budget" and not (t.get("pipeline") or {}).get("dispatched_at")))]
+    ready = set(eligible(pool, candidates, depth_tick=depth_tick))
+    candidates = [t for t in candidates if t["id"] in ready]
+    wave_tasks = _wave_tasks(candidates, running)
+    try:
+        durations = duration.durations_for(list(wave_tasks.values()))
+    except Exception:
+        durations = None
+    ranked = _wave_order([t["id"] for t in running + candidates], wave_tasks, durations)
+    tasks = {t["id"]: t for t in bus.read()}
+    recent_by_task = decision_log.recent(root=bus.STATE, limit=2, kind="steering",
+                                         subjects=[task["id"] for task in running])
+    _steering_decisions(pool, running, tasks, ranked, time.time(), recent_by_task)
+
+
 def tick(pool=None, stop_event=None):
     pool = pool or Pool()
     try:
@@ -1628,18 +1765,27 @@ def tick(pool=None, stop_event=None):
         print(f"[daemon] sweep_leases failed: {e}", file=sys.stderr)
     for t in bus.read(status="running"):
         if stop_event and stop_event.is_set():
-            return
+            break
         if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
             try:
                 reconcile_dead(t, pool)
             except Exception as e:
                 print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
                 continue
-    for stage in (dispatch, gate, merge_reviewed):
+    worker_registry.reconcile(alive)
+    try:
+        if pool.cfg.get("memory", {}).get("mode", "shadow") != "off" and not memory_hot.fresh(STATE.parent):
+            memory_hot.build(STATE.parent)
+    except Exception:
+        print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
+    for stage in (dispatch, steering_tick, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return
         try:
-            stage(pool)
+            if stage is steering_tick:
+                stage(pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
+            else:
+                stage(pool)
         except Exception as e:
             print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
     try:
@@ -1684,9 +1830,17 @@ def _loop(interval, stop_event):
     """A fresh Pool() per tick: cooldowns and running counts are written by the spawned workers, so a long-lived
     Pool would dispatch against minutes-old state. stop_event.wait as the sleep so a caller can interrupt it
     instead of blocking for a full interval."""
+    steering_state = {}
     while True:
         try:
-            tick(Pool(), stop_event)
+            pool = Pool()
+            vars(pool).update(steering_state)
+            try:
+                tick(pool, stop_event)
+            finally:
+                # Preserve only policy throttles; refresh all scheduling state.
+                steering_state = {key: vars(pool)[key] for key in
+                    ("steering_promotion_cache", "steering_refusal_reasons") if key in vars(pool)}
         except Exception as e:
             print(f"[daemon] tick failed: {e}", file=sys.stderr)
         if stop_event.wait(interval):

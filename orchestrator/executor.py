@@ -7,9 +7,9 @@ Observed ``codex exec resume --help`` options (2026-09-19): ``--config``, ``--la
 Notably, resume accepts ``--json`` and the access flags, but not ``-C``; its process cwd selects the worktree.
 Usage-limit errors cool Codex down and hold the task (§4.10).
 """
-import inspect, json, re, subprocess, time
+import inspect, json, os, re, subprocess, time
 from pathlib import Path
-from . import ROOT, bus
+from . import ROOT, bus, contracts, worker_registry, env_policy, worker_control
 import threading
 from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
@@ -137,6 +137,7 @@ def _codex_skill_meta(message=""):
 
 
 def _run(pool, task, args, cwd, timeout, ex=None):
+    epoch = task.get("_launch_epoch", worker_control.launch_epoch(_state_target(task)))
     cfg = pool.cfg["codex"]
     # dangerous_full_access (pool.toml): user decision 2026-09-16; otherwise workspace-write sandbox (container-safe default)
     access = ["--dangerously-bypass-approvals-and-sandbox"] if cfg.get("dangerous_full_access") else ["-s", "workspace-write"]
@@ -152,56 +153,93 @@ def _run(pool, task, args, cwd, timeout, ex=None):
     from .spawn import packet_run_meta
     log["packet_meta"] = task.get("packet_meta") or packet_run_meta(packet_span(args[-1]))
     t0 = time.time()
+
+    from .spawn import resolve_secrets
+    extra = resolve_secrets(pool.cfg.get("secrets", {}).get("execute", {}))
+    extra.update({name: os.environ[name] for name in ("CODEX_HOME", "HOME") if name in os.environ})
+    extra["ORCH_TASK_ID"] = log_task
+    env, _ = env_policy.worker_env("execute", base=os.environ, extra=extra,
+                                   cfg=pool.cfg, task_id=log_task)
     try:
-        run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+        run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "env": env}
         if kind == "resume":
             run_kwargs["cwd"] = cwd
-        r = subprocess.run(cmd, **run_kwargs)
+        with bus.locked():
+            if not worker_control.is_current(log_task, epoch):
+                return {"status": "superseded"}
+            worker_registry.upsert(log_task, status="starting", role=task.get("role", "execute"),
+                                   provider="codex", account="codex", model=ex.model if ex else cfg.get("model"),
+                                   worktree=str(cwd), branch=task.get("branch") or f"task/{task['id']}",
+                                   parent=task.get("parent"), started_at=t0, epoch=epoch,
+                                   thread=task.get("codex_thread"))
+            p = subprocess.Popen(cmd, **run_kwargs)
+            worker_registry.event(log_task, "spawned", pid=p.pid)
+            if task.get("_steering"):
+                bus.update(log_task, pid=p.pid)
+                worker_registry.event(log_task, "steered", status="running")
+        stdout, stderr = p.communicate(timeout=timeout)
+        r = subprocess.CompletedProcess(cmd, p.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        worker_registry.finish(log_task, "failed", "timeout", epoch=epoch)
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
-    if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
-        reason = f"codex argv error: {r.stderr[-800:]}"
-        bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex",
-                    duration_s=round(time.time() - t0, 1), outcome="failed", reason=reason, **log)
-        bus.update(_state_target(task), resume_hint={"argv_error": reason[:300]})
-        return {"status": "failed", "reason": reason}
-    ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
-    if ev["thread_id"]:
-        # The head is a resume boundary, not merely result metadata: later replies must not
-        # expose an old conversation to unrelated worktree changes.
-        fields = {"codex_thread": ev["thread_id"]}
-        head = _thread_head(cwd)
-        if head:
-            fields["codex_thread_head"] = head
-        bus.update(task["id"], **fields)
-    if ev["error"] and is_rate_limited(ev["error"]):
-        secs = parse_reset_hint(ev["error"], pool.cfg["limits"]["cooldown_default_s"])
-        if ex:
-            pool.cooldown_executor(ex.id, secs, "codex usage limit")   # a usage limit is the quota group's, not one model's
-        pool.codex.cooldown_until = time.time() + secs; pool.save()
-        bus.update(_state_target(task), status="held", hold_reason=f"codex usage limit; resets in {secs // 60} min",
-                   resume_hint={"thread": ev["thread_id"], "diff_stat": _diff_stat(cwd)})
-        bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
-                    cooldown_s=secs, **log)
-        return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
-    u = ev["usage"]
-    try:
-        skill_meta = _codex_skill_meta(ev["message"])
-        log["packet_meta"].update(skill_meta)
-        pipeline = dict(bus.get(log_task).get("pipeline") or {})
-        pipeline["skills_used"] = skill_meta["skills_used"]
-        bus.update(log_task, packet_meta=log["packet_meta"], pipeline=pipeline)
-        decision_log.outcome(log_task, "skill_selection", skills_used=skill_meta["skills_used"],
-                             skill_tokens_l2=skill_meta["skill_tokens_l2"],
-                             skill_recovery=sorted(set(skill_meta["skills_used"]) -
-                                                   set(log["packet_meta"].get("skills_selected") or [])))
-    except Exception:
-        pass
-    bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
-                outcome="error" if ev["error"] else "done", usage=u, **log, **(_tokens(u) if u else {}))
-    if ev["error"] or r.returncode:
-        return {"status": "failed", "reason": ev["error"] or r.stderr[-800:], "thread": ev["thread_id"]}
-    return {"status": "done", "thread": ev["thread_id"], "message": ev["message"][:6000], "usage": u}
+    except OSError:
+        worker_registry.finish(log_task, "failed", "launch_error", epoch=epoch)
+        raise
+    with bus.locked():
+        if not worker_control.is_current(log_task, epoch):
+            return {"status": "superseded"}
+        if r.returncode == 2 and ("unexpected argument" in r.stderr or "Usage:" in r.stderr):
+            worker_registry.finish(log_task, "failed", "argv_error", epoch=epoch)
+            reason = f"codex argv error: {r.stderr[-800:]}"
+            bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex",
+                        duration_s=round(time.time() - t0, 1), outcome="failed", reason=reason, **log)
+            bus.update(_state_target(task), resume_hint={"argv_error": reason[:300]})
+            return {"status": "failed", "reason": reason}
+        ev = parse_events(r.stdout.splitlines() + r.stderr.splitlines())
+        worker_registry.usage(log_task, "codex", ev["usage"],
+                              pool.usd_of({"usage": ev["usage"]}, ex) if ev["usage"] else None)
+        if ev["thread_id"]:
+            worker_registry.event(log_task, "claimed", thread=ev["thread_id"])
+            # The head is a resume boundary, not merely result metadata: later replies must not
+            # expose an old conversation to unrelated worktree changes.
+            fields = {"codex_thread": ev["thread_id"]}
+            head = _thread_head(cwd)
+            if head:
+                fields["codex_thread_head"] = head
+            bus.update(task["id"], **fields)
+        if ev["error"] and is_rate_limited(ev["error"]):
+            secs = parse_reset_hint(ev["error"], pool.cfg["limits"]["cooldown_default_s"])
+            if ex:
+                pool.cooldown_executor(ex.id, secs, "codex usage limit")   # a usage limit is the quota group's, not one model's
+            pool.codex.cooldown_until = time.time() + secs; pool.save()
+            bus.update(_state_target(task), status="held", hold_reason=f"codex usage limit; resets in {secs // 60} min",
+                       resume_hint={"thread": ev["thread_id"], "diff_stat": _diff_stat(cwd)})
+            bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", outcome="usage_limit",
+                        cooldown_s=secs, **log)
+            worker_registry.finish(log_task, "held", "usage_limit", epoch=epoch)
+            return {"status": "held", "reason": ev["error"], "resets_in_s": secs}
+        u = ev["usage"]
+        try:
+            skill_meta = _codex_skill_meta(ev["message"])
+            log["packet_meta"].update(skill_meta)
+            pipeline = dict(bus.get(log_task).get("pipeline") or {})
+            pipeline["skills_used"] = skill_meta["skills_used"]
+            bus.update(log_task, packet_meta=log["packet_meta"], pipeline=pipeline)
+            decision_log.outcome(log_task, "skill_selection", skills_used=skill_meta["skills_used"],
+                                 skill_tokens_l2=skill_meta["skill_tokens_l2"],
+                                 skill_recovery=sorted(set(skill_meta["skills_used"]) -
+                                                       set(log["packet_meta"].get("skills_selected") or [])))
+        except Exception:
+            pass
+        bus.log_run(task=log_task, role="execute", tier=log["executor"], account="codex", provider="codex", duration_s=round(time.time() - t0, 1),
+                    outcome="error" if ev["error"] else "done", usage=u, **log, **(_tokens(u) if u else {}))
+        if ev["error"] or r.returncode:
+            worker_registry.finish(log_task, "failed", "process_error", epoch=epoch)
+            return {"status": "failed", "reason": ev["error"] or r.stderr[-800:], "thread": ev["thread_id"]}
+        worker_registry.finish(log_task, "done", epoch=epoch)
+        return {"status": "done", "thread": ev["thread_id"], "message": ev["message"][:6000], "usage": u, "epoch": epoch}
 
 
 def _diff_stat(cwd):
@@ -291,7 +329,10 @@ def post_tool_result(task_id, result, replace_result=False):
     }
     if replace_result and previous:
         posted["previous_commits"] = [*previous.get("previous_commits", []), previous.get("commit")]
+    posted = contracts.process(task_id, "execute", posted, cfg=Pool().cfg)
     with bus.locked():
+        if not worker_control.is_current(task_id, result.get("epoch", 1)):
+            return False, "worker was superseded by steering"
         if replace_result:
             pipeline = dict(bus.get(task_id).get("pipeline") or {})
             for key in list(pipeline):
@@ -308,6 +349,7 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
     Held (not failed) when every executor in the task's complexity band is cooling, busy or over its daily budget.
     scores() is B3's ranking input; absent, every executor scores 1.0."""
     pool = Pool()
+    epoch = worker_control.launch_epoch(task_id)
     result = None
     handed_off = False
     allocation_mode = pool.cfg.get("allocation", {}).get("mode", "shadow")
@@ -480,14 +522,14 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
         bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
         ex.roll_day(); ex.day_tasks += 1
         pool.codex.day_tasks += 1; pool.save()       # legacy mirror, until B3 drops pool.codex
-        result = _run(pool, t, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
+        result = _run(pool, {**t, "_launch_epoch": epoch}, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
         return result
     finally:
         # A Claude fallback inherits this run key's existing dispatch reservation.
         # Its run_worker() finally owns the matching release, so do not create the
         # gap where start() has returned but the worker has not yet claimed it.
         if not handed_off:
-            pool.release(task_id, (result or {}).get("usage", {}))
+            worker_control.release_if_current(task_id, epoch, pool, (result or {}).get("usage", {}))
 
 
 def _exhausted(pool, t, run=None):
@@ -584,8 +626,35 @@ def reply(task_id, delta, packet_meta=None, fix_round_task_id=None, plan=None):
         args = ["-m", ex.model, repair]
     if t.get("packet_meta"):
         bus.update(_state_target(t), packet_meta=t["packet_meta"])
-    result = _run(pool, t, args, t["worktree"],
+    epoch = worker_control.launch_epoch(_state_target(t))
+    result = _run(pool, {**t, "_launch_epoch": epoch}, args, t["worktree"],
                   t["constraints"].get("timeout_s", 1800), ex=ex)
     if not result.get("reason", "").startswith("codex argv error:"):
-        bus.update(task_id, rounds=rounds)
+        worker_control.write_if_current(_state_target(t), epoch, bus.update, task_id, rounds=rounds)
     return {"round": rounds, **result}
+
+
+def steer_resume(task, thread, message):
+    """Resume the recorded conversation directly, without entering the fix loop."""
+    pool = Pool()
+    epoch = task.get("_launch_epoch", worker_control.launch_epoch(task["id"]))
+    task = {**task, "_launch_epoch": epoch, "codex_thread": thread}
+    worker = worker_registry.get(task["id"]) or {}
+    cwd = task.get("worktree") or worker.get("worktree")
+    ex = pool.executors.get(task.get("executor"))
+    result = None
+    try:
+        result = _run(pool, task, ["resume", thread, message], Path(cwd),
+                      (task.get("constraints") or {}).get("timeout_s", 1800), ex=ex)
+        with bus.locked():
+            if worker_control.is_current(task["id"], epoch):
+                if result["status"] == "done":
+                    from .spawn import fit_result
+                    bus.post_result(task["id"], fit_result({"summary": result["message"][:3000],
+                        "thread": thread, "usage": result.get("usage"),
+                        "executed_by": "codex:" + (task.get("executor") or "codex")}), "done")
+                elif result["status"] == "failed":
+                    bus.post_result(task["id"], {"reason": result.get("reason", "resume failed")[:3000]}, "failed")
+        return result
+    finally:
+        worker_control.release_if_current(task["id"], epoch, pool, (result or {}).get("usage", {}))

@@ -1,11 +1,24 @@
 import _harness
 """orchestrator.executor: event-stream parsing, reply round caps, fallback-to-Claude routing, run logging."""
-import json, sys, time, unittest
+import json, subprocess, sys, time, unittest
+from unittest import mock
 from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_executor.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, codex_stream  # noqa: F401
-from orchestrator import bus, daemon, executor, pool as P, spawn
+from orchestrator import bus, daemon, executor, pool as P, spawn, worker_registry as registry
+
+
+class FakeCodexPopen(FakeProc):
+    """Buffered Codex process; git commands keep their independent run mock."""
+    pid = 4242
+
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        super().__init__(stdout, returncode)
+        self.stderr = stderr
+
+    def communicate(self, timeout=None):
+        return self.stdout, self.stderr
 
 
 class Executor(unittest.TestCase):
@@ -108,9 +121,10 @@ class Executor(unittest.TestCase):
             self.assertEqual(cmd[:2], ["codex", "exec"])
             calls.append(cmd)
             thread = "old-thread" if cmd[2] == "resume" else "fresh-thread"
-            return FakeProc(codex_stream({"type": "thread.started", "thread_id": thread},
+            return FakeCodexPopen(codex_stream({"type": "thread.started", "thread_id": thread},
                 {"type": "turn.completed", "usage": {}}), 0)
         with patch.object(executor.subprocess, "run", side_effect=run), \
+                patch.object(executor.subprocess, "Popen", side_effect=run), \
                 patch.object(spawn, "packet", return_value="compact task packet") as packet:
             result = executor.reply(tid, "repair failing assertion")
         self.assertEqual(result["status"], "done")
@@ -151,9 +165,11 @@ class Executor(unittest.TestCase):
 
     def fake_codex(self, stdout, returncode=0):
         P.PERSIST.unlink(missing_ok=True)
-        orig = executor.subprocess.run
-        executor.subprocess.run = lambda *a, **k: FakeProc(stdout, returncode)
-        self.addCleanup(lambda: setattr(executor.subprocess, "run", orig))
+        popen = patch.object(executor.subprocess, "Popen", side_effect=lambda *a, **k: FakeCodexPopen(stdout, returncode))
+        popen.start(); self.addCleanup(popen.stop)
+        # Git observations are irrelevant to these provider-result tests.
+        run = patch.object(executor.subprocess, "run", return_value=FakeProc("", 0))
+        run.start(); self.addCleanup(run.stop)
         self.addCleanup(P.PERSIST.unlink, True)
 
     def test_parse_observed_stream(self):
@@ -204,15 +220,14 @@ class Executor(unittest.TestCase):
         tid = self.exec_task(title="argv-error")
         bus.update(tid, codex_thread="thread-1", rounds=0, executor="astra")
         seen = {}
-        orig = executor.subprocess.run
+        orig = executor.subprocess.Popen
 
         def usage_error(cmd, **kwargs):
             seen.update(cmd=cmd, kwargs=kwargs)
-            return type("Proc", (), {"stdout": "", "stderr": "error: unexpected argument '-C' found\nUsage: codex exec resume",
-                                      "returncode": 2})()
+            return FakeCodexPopen(returncode=2, stderr="error: unexpected argument '-C' found\nUsage: codex exec resume")
 
-        executor.subprocess.run = usage_error
-        self.addCleanup(lambda: setattr(executor.subprocess, "run", orig))
+        executor.subprocess.Popen = usage_error
+        self.addCleanup(lambda: setattr(executor.subprocess, "Popen", orig))
         result = executor.reply(tid, "fix it")
         self.assertEqual(result["status"], "failed")
         self.assertTrue(result["reason"].startswith("codex argv error:"))
@@ -224,14 +239,13 @@ class Executor(unittest.TestCase):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)
         tid = self.exec_task(title="argv-error-visible")
         bus.update(tid, codex_thread="thread-1", rounds=0, executor="astra")
-        orig = executor.subprocess.run
+        orig = executor.subprocess.Popen
 
         def argv_error(cmd, **kwargs):
-            return type("Proc", (), {"stdout": "", "stderr": "error: unexpected argument '-s' found\nUsage: codex exec resume",
-                                      "returncode": 2})()
+            return FakeCodexPopen(returncode=2, stderr="error: unexpected argument '-s' found\nUsage: codex exec resume")
 
-        executor.subprocess.run = argv_error
-        self.addCleanup(lambda: setattr(executor.subprocess, "run", orig))
+        executor.subprocess.Popen = argv_error
+        self.addCleanup(lambda: setattr(executor.subprocess, "Popen", orig))
         result = executor.reply(tid, "fix it")
         reason = result["reason"]
         task = bus.get(tid)
@@ -277,12 +291,11 @@ class Executor(unittest.TestCase):
                    rounds=0, executor="astra")
         fix = bus.create_task("argv fix", "repair", ["a"], ["x.py"], role="execute",
                               constraints={"fix_round_for": parent})
-        original = executor.subprocess.run
+        original = executor.subprocess.Popen
         def argv_error(cmd, **kwargs):
-            return type("Proc", (), {"stdout": "", "stderr": "error: unexpected argument '-s' found\nUsage: codex exec resume",
-                                      "returncode": 2})()
-        executor.subprocess.run = argv_error
-        self.addCleanup(lambda: setattr(executor.subprocess, "run", original))
+            return FakeCodexPopen(returncode=2, stderr="error: unexpected argument '-s' found\nUsage: codex exec resume")
+        executor.subprocess.Popen = argv_error
+        self.addCleanup(lambda: setattr(executor.subprocess, "Popen", original))
         result = executor.reply(parent, "repair", fix_round_task_id=fix["id"])
         self.assertTrue(result["reason"].startswith("codex argv error:"))
         self.assertEqual(bus.get(fix["id"])["resume_hint"], {"argv_error": result["reason"][:300]})
@@ -465,6 +478,53 @@ class ContextFallback(unittest.TestCase):
 
     def test_bare_delta_yields_unmeasured_context(self):
         self.assertIsNone(spawn.packet_run_meta(executor.packet_span("fix only"))["hash"])
+
+
+class WorkerRegistryIntegration(unittest.TestCase):
+    def setUp(self):
+        self.task = bus.create_task("registry", "s", ["a"], ["x.py"], role="execute")
+        self.tid = self.task["id"]
+        self.addCleanup(self.clean_registry)
+
+    def clean_registry(self):
+        registry._path(self.tid).unlink(missing_ok=True)
+        registry._path(self.tid, events=True).unlink(missing_ok=True)
+
+    def test_codex_registry_entry_is_live_before_exit(self):
+        process = mock.Mock(pid=4231, returncode=0)
+        def communicate(timeout):
+            doc = registry.get(self.tid)
+            self.assertEqual((doc["status"], doc["pid"], doc["provider"]), ("running", 4231, "codex"))
+            self.assertIn(self.tid, [row["task"] for row in registry.active()])
+            return '\n'.join(json.dumps(e) for e in [
+                {"type": "thread.started", "thread_id": "thread-1"},
+                {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}}
+            ]), ""
+        process.communicate.side_effect = communicate
+        def launch(*args, **kwargs):
+            self.assertEqual(registry.get(self.tid)["status"], "starting")
+            return process
+        with mock.patch.object(executor.subprocess, "Popen", side_effect=launch), \
+                mock.patch.object(executor, "_thread_head", return_value=None):
+            result = executor._run(P.Pool(), self.task, ["private prompt"], TMP, 30)
+        self.assertEqual(result["status"], "done")
+        doc = registry.get(self.tid)
+        self.assertEqual(doc["status"], "done")
+        self.assertEqual(doc["thread"], "thread-1")
+        self.assertEqual(doc["tokens"], {"input_uncached": 8, "cache_read": 2, "output": 3})
+        self.assertEqual([e["kind"] for e in registry.events(self.tid)], ["spawned", "usage", "claimed", "exit"])
+        self.assertNotIn("private prompt", registry._path(self.tid).read_text())
+
+    def test_codex_timeout_kills_process(self):
+        process = mock.Mock(pid=4232)
+        process.communicate.side_effect = [subprocess.TimeoutExpired("codex", 1), ("", "")]
+        with mock.patch.object(executor.subprocess, "Popen", return_value=process):
+            result = executor._run(P.Pool(), self.task, ["prompt"], TMP, 1)
+        self.assertEqual(process.mock_calls, [mock.call.communicate(timeout=1),
+                                              mock.call.kill(), mock.call.communicate()])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(registry.get(self.tid)["status"], "failed")
+        self.assertEqual(registry.events(self.tid)[-1]["kind"], "exit")
 
 
 if __name__ == "__main__":
@@ -694,3 +754,22 @@ class JevExecutorSkillRoutingTests(unittest.TestCase):
             result = executor._route_skills({"id": "T-jev"}, {}, {}, choice)
         self.assertEqual(result["skills_selected"], ["executor/implement-spec"])
         self.assertIs(record.call_args.kwargs["jev"], choice["jev"])
+
+
+class ExecuteOutputContracts(unittest.TestCase):
+    def test_post_tool_result_validates_execute_contract_in_shadow(self):
+        task = bus.create_task("execute contract", "spec", ["valid"], ["a.py"], role="execute")
+        tid = task["id"]
+        bus.claim(tid, "codex", str(TMP))
+        bus.update(tid, executor="example")
+        incoming = {"status": "done", "message": "commit abcdef1", "thread": "example-thread", "usage": None}
+        pool = mock.Mock(cfg={"contracts": {"mode": "shadow"}})
+        with patch.object(executor, "Pool", return_value=pool):
+            self.assertTrue(executor.post_tool_result(tid, incoming)[0])
+        self.assertEqual(bus.get(tid)["result"], {"summary": "commit abcdef1", "commit": "abcdef1",
+            "executed_by": "codex:example", "provenance": ["repo"], "usage": None,
+            "thread": "example-thread", "rounds": 1, "confidence": 0.0})
+        row = executor.decision_log.explain(tid, kinds=["output_contract"])[0]
+        self.assertEqual(row["role"], "execute")
+        self.assertEqual(row["mode"], "shadow")
+        self.assertTrue(row["deterministic"]["ok"])

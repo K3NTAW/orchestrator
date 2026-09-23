@@ -92,3 +92,13 @@ def select(task, role, cfg=None, history=None, jev=True):
         "mandatory": mandatory,
         "jev": jev_result,
     }
+
+
+def catalog_block(role, registry):
+    """Stable catalog of all active skills eligible for this role."""
+    role = {"codex_execute": "execute", "security_review": "review"}.get(role, role)
+    records = registry.get("skills", registry)
+    return "\n".join(
+        f"- {skill_id} — triggers: " + ", ".join(sorted(record.get("triggers") or []))
+        for skill_id, record in sorted(records.items())
+        if record.get("state") == "active" and role in (record.get("roles") or []))

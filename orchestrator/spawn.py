@@ -1,8 +1,11 @@
 """Spawner: one `claude -p` subprocess per job, bound to one account via CLAUDE_CONFIG_DIR, in its own worktree,
 with the role's .mcp.json and role-scoped secrets. Never shares or extracts credentials (Anthropic ToS: Claude Code is the harness)."""
+import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
+from . import contracts, worker_registry, env_policy, worker_control
+from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
 
@@ -36,6 +39,8 @@ def _skill_exposure(task, role):
 
 def _prepare_skills(task, role, cfg):
     """Select once, apply the active safety gate, and prepare bounded rendering."""
+    if harness_depth.active(task):
+        return None
     mode = promotion.mode("skill_routing", cfg)
     if mode not in ("shadow", "active"):
         return None
@@ -55,6 +60,23 @@ def _prepare_skills(task, role, cfg):
                           f"(role={role}, rows={rows}, recovery={recovery:.3f})")
     choice.update(_skills_section(choice) if choice["mode"] == "active"
                   else {"section": "", "presented": [], "demoted": [], "skill_tokens_presented_l2": 0})
+    catalog = skill_router.catalog_block(role, _skill_records())
+    choice["catalog_chars"] = len(catalog)
+    choice["selected_chars"] = 0
+    for item in choice["selected"]:
+        try:
+            choice["selected_chars"] += len(skills_registry.render(item, 2))
+        except (KeyError, OSError):
+            # Missing registry bodies must not make shadow telemetry block dispatch.
+            continue
+    try:
+        cache_mode = context_router.cache_mode(cfg, "skills")
+        choice["invalid_config"] = False
+    except ValueError:
+        cache_mode, choice["invalid_config"] = "off", True
+    choice["cache_mode"] = cache_mode
+    if cache_mode == "active" and catalog:
+        choice["section"] = "## skills\n" + catalog + "\n\n" + choice["section"].removeprefix("## skills\n")
     return choice
 
 
@@ -92,6 +114,8 @@ def _skills_section(choice):
 
 
 def _skill_routing(task, role, cfg, exposure, choice=None):
+    if harness_depth.active(task):
+        return {"skills_selected": [], "skill_routing_mode": "fast_path"}
     choice = choice or _prepare_skills(task, role, cfg)
     if choice is None:
         return {}
@@ -99,7 +123,9 @@ def _skill_routing(task, role, cfg, exposure, choice=None):
     decision_log.record("skill_selection", task["id"], role=role, candidates=choice["candidates"],
                         hard_constraints=choice["mandatory"],
                         deterministic={"triggers": choice["triggers"], "task_class": choice["task_class"],
-                                       "mandatory": choice["mandatory"]},
+                                       "mandatory": choice["mandatory"], "role": role,
+                                       **{key: choice[key] for key in ("catalog_chars", "selected_chars",
+                                                                      "cache_mode", "invalid_config") if key in choice}},
                         selected=presented, rejected=choice["rejected"],
                         reason=choice["reason"], mode=choice["mode"],
                         jev=choice.get("jev"),
@@ -275,16 +301,38 @@ def render(name, *, task=None, signals=None, **kw):
         _INSTRUCTION_RENDER_META[result] = {"instruction_tokens_modular": len(modular) // 4}
         while len(_INSTRUCTION_RENDER_META) > _PACKET_BUILD_META_MAX:
             _INSTRUCTION_RENDER_META.popitem(last=False)
-        return result
+        return _record_prefix_identity(result, task)
     placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
     missing = next((match.group(1) for match in placeholder.finditer(t) if match.group(1) not in kw), None)
     if missing is not None:
         raise ValueError(f"unfilled_placeholder: {missing}")
-    return placeholder.sub(
+    result = placeholder.sub(
         lambda match: kw[match.group(1)] if isinstance(kw[match.group(1)], str)
         else json.dumps(kw[match.group(1)], indent=0),
         t,
     )
+    return _record_prefix_identity(result, task)
+
+
+def _record_prefix_identity(rendered, task=None):
+    """Record the stable wrapper before the task-specific packet header."""
+    header = re.search(r"(?m)^packet v([0-9a-f]+)\b", rendered)
+    if not header:
+        return rendered
+    version = header.group(1)
+    prefix, suffix = rendered[:header.start()], rendered[header.start():]
+    values = {"prefix_sha": hashlib.sha256(prefix.encode()).hexdigest()[:12],
+              "prefix_chars": len(prefix), "suffix_chars": len(suffix),
+              "dynamic_sections": re.findall(r"(?m)^## ([^\n]+)", suffix)}
+    _remember_packet_meta(version, {**_PACKET_BUILD_META.get(version, {}), **values})
+    if task is not None and task.get("id"):
+        try:
+            current = bus.get(task["id"])
+            meta = {**(current.get("packet_meta") or {}), **values}
+            bus.update(task["id"], packet_meta=meta)
+        except (KeyError, OSError, ValueError):
+            pass
+    return rendered
 
 
 def hold_render_error(task_id, exc):
@@ -364,9 +412,14 @@ def _memory_entries(path):
 
 
 def _context_mode(cfg):
+    invalid_config = False
+    try:
+        cache_mode = context_router.cache_mode(cfg)
+    except ValueError:
+        cache_mode, invalid_config = "off", True
     mode = promotion.mode("context_router", cfg)
     if mode != "active":
-        return mode
+        return mode, cache_mode, invalid_config
     try:
         from datetime import datetime, timezone
         report = json.loads((STATE / "context_eval.json").read_text())
@@ -374,35 +427,52 @@ def _context_mode(cfg):
             raise ValueError("invalid context evaluation")
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(report["ran_at"])).total_seconds()
         if report.get("suite_passed") is True and 0 <= age <= 7 * 86400:
-            return "active"
+            return "active", cache_mode, invalid_config
     except (OSError, ValueError, KeyError, TypeError):
         pass
     notify.notify("context_router active refused; running shadow: context_eval missing, stale, or failed")
-    return "shadow"
+    return "shadow", cache_mode, invalid_config
 
-def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None):
+def _shadow_route(task, candidates, *, role, head_sha, cfg, skills=None, provider=None):
     """Persist routing telemetry and return section items for guarded active mode."""
-    mode = _context_mode(cfg)
+    mode, cache_mode, invalid_config = _context_mode(cfg)
     if mode == "off" or not task.get("id"):
         return {}
     try:
         pool = evidence.EvidencePool(task.get("parent") or task["id"])
         candidates = [pool.add(candidate) for candidate in candidates]
+        # Input occurrences describe the packet's uncompressed baseline. Stable
+        # storage identities must not erase occurrences from routing telemetry.
+        seen = {item.id for item in candidates}
+        for item in pool.by_type("worker_partial"):
+            if item.id not in seen:
+                candidates.append(item)
+                seen.add(item.id)
         composition = (skills or {}).get("_specialist")
         if composition:
-            candidates = list({item.id: item for item in
-                               [*candidates, *composition.shared_evidence(task)]}.values())
+            for item in composition.shared_evidence(task):
+                if item.id not in seen:
+                    candidates.append(item)
+                    seen.add(item.id)
             candidates = composition.filter_evidence(candidates)
         routed = context_router.route(task, candidates, role=role, head_sha=head_sha, cfg=cfg,
-                                      required_types=composition.context_requirements if composition else ())
+                                      required_types=composition.context_requirements if composition else (),
+                                      provider=provider, effective_mode=mode,
+                                      cache_mode=cache_mode, invalid_config=invalid_config)
         row = context_router.decision_row(task, routed, mode=mode)
-        row["extra"] = {"head_sha": head_sha}
+        partial_items = context_router.section_items(
+            routed, {ev.id: ev for ev in candidates}, "prior_worker")
+        row["extra"] = {"head_sha": head_sha,
+                        "prior_worker_ids": [ev.id for ev in candidates
+                                             if ev.source_type == "worker_partial" and
+                                             any(item.evidence_id == ev.id and item.level != "HIDE" for item in routed.items)],
+                        "prior_worker_chars": sum(len(text) for _, text in partial_items)}
         decision_log.record(**row)
         return {
             "routed_mode": mode,
             "_routed_sections": {section: context_router.section_items(
                 routed, {ev.id: ev for ev in candidates}, section)
-                for section in ("gotchas", "decisions", "evidence", "read_scope", "routed-findings")}
+                for section in ("gotchas", "decisions", "evidence", "prior_worker", "read_scope", "routed-findings")}
                 if mode == "active" else {},
             "routed_tokens": routed.routed_tokens,
             "routed_reduction_ratio": routed.reduction_ratio,
@@ -443,8 +513,9 @@ def _shadow_tool_disclosure(task, role, cfg, skills=None):
         hard_constraints=choice["mandatory"],
         selected=selected if mode == "active" else "allowlist unchanged (shadow)",
         deterministic={"task_class": tool_catalog._task_class(task), "role": role,
-                       "kept": choice["keep"], "dropped": choice["drop"],
-                       "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens},
+                       "kept": selected, "dropped": [tool for tool in offered if tool not in selected],
+                       "tokens_disclosed": disclosed_tokens, "tokens_minimal": minimal_tokens,
+                       **tool_catalog.cache_fields(task, role, selected, cfg)},
         reason=reason, mode=mode, extra=extra)
     return {"tool_tokens_disclosed": disclosed_tokens, "tool_tokens_minimal": minimal_tokens,
             "tool_allowlist": ",".join(selected) if mode == "active" else TOOLS.get(role, TOOLS["scout"]),
@@ -475,17 +546,65 @@ def _trim_routed_item(by_name, routed_sections):
             for index in range(len(items) - 1, -1, -1):
                 if items[index][0] == level:
                     items.pop(index)
-                    by_name[name].pop(index)
+                    if name in by_name:
+                        by_name[name].pop(index)
                     return True
     return False
 
-def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
+
+def _tiered_memory(task, cfg):
+    """Read the existing HOT projection; packet builders never refresh it."""
+    fresh = memory_hot.fresh(ROOT)
+    hot_path = ROOT / ".orchestrator" / "memory" / "HOT.md"
+    hot_lines = hot_path.read_text().splitlines() if hot_path.exists() else []
+    indexed = {memory_hot._line(record): record for record in memory_store.all_records(ROOT)}
+    candidates = []
+    records = {}
+    for line in hot_lines:
+        record = indexed.get(line)
+        if (record and record["id"] not in records
+                and record["kind"] in ("gotcha", "decision", "architecture")):
+            records[record["id"]] = record
+            candidates.append({"id": record["id"], "tier": "hot", "score": 1.0})
+    # Quote individual words for FTS syntax; punctuation in titles is data.
+    words = re.findall(r"\w+", " ".join([task.get("title", ""),
+                       *(Path(path).stem for path in task.get("scope", []))]))
+    query = " OR ".join('"' + word + '"' for word in dict.fromkeys(words))
+    for kind in ("gotcha", "decision", "architecture"):
+        result = memory_store.search(query, kind=kind, tier="warm", limit=8, root=ROOT)
+        for rank, record in enumerate(result["records"], 1):
+            if record["id"] not in records:
+                records[record["id"]] = record
+                candidates.append({"id": record["id"], "tier": "warm", "score": 1.0 / rank})
+    sections = {"gotchas": [], "decisions": []}
+    selected = {}
+    remaining = max(0, int(cfg.get("memory", {}).get("packet_hot_tokens", 1200))) * 4
+    for record in records.values():
+        line = " ".join(memory_hot._line(record).splitlines())
+        cost = len(line) + 1
+        if cost > remaining:
+            continue
+        remaining -= cost
+        section = "gotchas" if record["kind"] == "gotcha" else "decisions"
+        sections[section].append(line)
+        selected[record["id"]] = (section, line)
+    return sections, {"candidates": candidates, "selected_lines": selected, "hot_fresh": fresh}
+
+
+def _memory_tokens(sections):
+    return (sum(len(line) + 1 for name in ("gotchas", "decisions")
+                for line in sections.get(name, []) if line != "- (none)") + 3) // 4
+
+
+def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
+    from .steering_policy import read_scope as derive_read_scope, safe_scope
     wt = Path(worktree)
-    scope = [str(p) for p in task.get("scope", [])]
+    cfg = Pool().cfg if cfg is None else cfg
+    scope = safe_scope(task, worktree)
     scope_files = [wt / p for p in scope if (wt / p).is_file()]
     py_files = [p for p in scope_files if p.suffix == ".py"]
-    symbols, symbol_names, imported_paths = [], set(), set()
+    symbols, symbol_names = [], set()
     for path in py_files:
         try:
             tree = ast.parse(path.read_text(errors="replace"))
@@ -496,18 +615,8 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 symbols.append(f"- {rel}:{node.lineno} {node.name}")
                 symbol_names.add(node.name)
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-                for name in names:
-                    if not name:
-                        continue
-                    stem = Path(*name.split("."))
-                    for candidate in (wt / stem.with_suffix(".py"), wt / stem / "__init__.py"):
-                        if candidate.is_file():
-                            imported_paths.add(str(candidate.relative_to(wt)))
 
-    read_scope = {"tests/", *imported_paths}
-    read_scope.update(str(Path(p).parent) + ("/" if str(Path(p).parent) != "." else "") for p in scope)
+    read_scope = set(derive_read_scope(task, worktree))
     # Scope-owned test files are the most useful starting point for an executor.
     # Keep them first and outside the discovery cap: a broad symbol such as
     # ``get`` must never hide a test explicitly named in a task's scope.
@@ -566,12 +675,31 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
                if hit["id"].startswith("mem:gotchas.md:")]
     matched_gotchas = list(gotchas)
     decisions = []
+    legacy_ids = [hit["id"] for hit in memory["hits"]
+                  if hit["id"].startswith("mem:gotchas.md:")]
     for candidate in (wt / ".orchestrator/memory/decisions.md", wt / "decisions.md"):
-        decisions = [f"- {title}" for _, title, body in _memory_entries(candidate)
-                     if parent != "(none)" and parent.lower() in f"{title}\n{body}".lower()][:3]
+        entries = [(line, title) for line, title, body in _memory_entries(candidate)
+                   if parent != "(none)" and parent.lower() in f"{title}\n{body}".lower()][:3]
+        decisions = [f"- {title}" for _, title in entries]
+        legacy_ids.extend(f"mem:{candidate.name}:{line}" for line, _ in entries)
         if candidate.exists():
             break
-    evidence_lines = []
+    memory_mode = promotion.mode("memory_tiers", cfg)
+    legacy_sections = {"gotchas": gotchas[:5], "decisions": decisions}
+    legacy_lines = dict(zip(legacy_ids, [(name, line) for name, lines in legacy_sections.items()
+                                       for line in lines]))
+    tiered_sections, retrieval = None, None
+    if memory_mode != "off":
+        try:
+            tiered_sections, retrieval = _tiered_memory(task, cfg)
+        except Exception:
+            logging.getLogger(__name__).warning("packet memory retrieval failed")
+        if memory_mode == "active" and tiered_sections is not None:
+            gotchas, decisions = tiered_sections["gotchas"], tiered_sections["decisions"]
+    # 2026-09-23: bound legacy evidence while old, oversized pools age out.
+    legacy_evidence_chars = max(0, int((cfg.get("context_router") or {}).get(
+        "legacy_evidence_chars", 6000)))
+    input_evidence_lines = []
     for item in task.get("inputs", []):
         value = item
         if isinstance(item, str):
@@ -580,12 +708,28 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
             except KeyError:
                 value = {}
         summary = value.get("summary", value) if isinstance(value, dict) else value
-        evidence_lines.append(f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
+        input_evidence_lines.append(
+            f"- {item if isinstance(item, str) else 'input'}: {str(summary)[:200]}")
+
+    def capped_lines(lines, limit):
+        kept, used = [], 0
+        for line in lines:
+            available = limit - used
+            if available <= 0:
+                break
+            value = str(line)[:available]
+            kept.append(value)
+            used += len(value) + 1
+        return kept
+
+    evidence_lines = capped_lines(input_evidence_lines, legacy_evidence_chars)
 
     composition = (skills or {}).get("_specialist")
     if composition and skills.get("mode") == "active":
-        evidence_lines.extend(f"- {item.id} {item.location}: {item.summary_short}"
-                              for item in composition.shared_evidence(task))
+        shared_lines = capped_lines(
+            (f"- {item.id} {item.location}: {item.summary_short}"
+             for item in composition.shared_evidence(task)), legacy_evidence_chars)
+        evidence_lines = capped_lines([*evidence_lines, *shared_lines], legacy_evidence_chars)
     objective = [str(task.get("title", ""))]
     if task.get("spec"):
         objective.append(f"- discovery: {task['spec']}")
@@ -599,14 +743,24 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
                          for key, value in sorted((task.get("constraints") or {}).items())] or ["- (none)"]),
         ("relevant_tests", [f"- {p}" for p in tests] or ["- (none found)"]),
         ("symbols", symbols[:40] or ["- (none)"]),
-        ("gotchas", gotchas[:5] or ["- (none)"]),
+        ("gotchas", gotchas or ["- (none)"]),
         ("decisions", decisions or ["- (none)"]),
         ("verify", ["- .claude/hooks/tests-green.sh .", "- On failure, report only scripts/failures_only.sh output."]),
-        ("evidence", evidence_lines or ["- (none)"]),
+        ("evidence", evidence_lines or capped_lines(["- (none)"], legacy_evidence_chars)),
     ]
     if skills and skills.get("section"):
         sections.insert(0, ("skills", skills["section"].removeprefix("## skills\n").splitlines()))
-    cfg = Pool().cfg if cfg is None else cfg
+    try:
+        tool_cache_mode = context_router.cache_mode(cfg, "tool_disclosure")
+    except ValueError:
+        tool_cache_mode = "off"
+    if tool_cache_mode == "active" and promotion.mode("tool_disclosure", cfg) != "off":
+        tool_role = "codex_execute" if provider == "codex" else task.get("role", "execute")
+        kept = tool_catalog.minimal_set(task, tool_role)["keep"]
+        if (skills or {}).get("mode") == "active" and promotion.mode("tool_disclosure", cfg) == "active":
+            kept = ((skills or {}).get("specialist") or {}).get("tools", kept)
+        sections.insert(0, ("tools", [tool_catalog.level0(tool_catalog.disclosed(tool_role)),
+                                      tool_catalog.level2(kept)]))
     candidates = []
     task_id = task.get("id", "(none)")
     if task.get("spec"):
@@ -630,9 +784,11 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
     candidates.extend(evidence.make(
         "decision", f"task:{task_id}:decision:{index}", value,
         provenance="memory", task=task, section="decisions") for index, value in enumerate(decisions, 1))
-    candidates.extend(evidence.make(
-        "previous_result", f"task:{task_id}:evidence:{index}", value,
-        provenance="bus", task=task, section="evidence") for index, value in enumerate(evidence_lines, 1))
+    for previous_result in capped_lines(input_evidence_lines, legacy_evidence_chars):
+        content_hash = hashlib.sha256(previous_result.encode()).hexdigest()
+        candidates.append(evidence.make(
+            "previous_result", f"task:{task_id}:evidence:{content_hash}", previous_result,
+            provenance="bus", task=task, section="evidence"))
     candidates.extend(evidence.make(
         "test_result", value, value, commit=merge_base, provenance="repo", task=task)
         for value in tests)
@@ -641,10 +797,26 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
         candidates.append(evidence.make(
             "test_result", f"task:{task_id}:failures", failure_match.group(1),
             commit=merge_base, provenance="repo", task=task))
-    shadow_meta = _shadow_route(task, candidates, role="execute", head_sha=merge_base, cfg=cfg, skills=skills)
+    routing_task = {**task, "packet_read_scope": sorted(read_scope)}
+    shadow_meta = _shadow_route(routing_task, candidates, role="execute", head_sha=merge_base, cfg=cfg,
+                                skills=skills, provider=provider)
     routed_sections = shadow_meta.pop("_routed_sections", {})
+    if "evidence" in routed_sections:
+        # Keep routed items whole (including fences) under the same cap.
+        items = routed_sections["evidence"]
+        size = sum(len(text) + 1 for _, text in items)
+        while items and size > legacy_evidence_chars:
+            _, text = items.pop()
+            size -= len(text) + 1
+    if memory_mode == "active" and retrieval is not None:
+        routed_sections = {name: items for name, items in routed_sections.items()
+                           if name not in tiered_sections}
     sections = [(name, [text for _, text in routed_sections[name]] if name in routed_sections else lines)
                 for name, lines in sections]
+    if "prior_worker" in routed_sections and routed_sections["prior_worker"]:
+        evidence_index = next(i for i, (name, _) in enumerate(sections) if name == "evidence")
+        sections.insert(evidence_index + 1,
+                        ("prior_worker", [text for _, text in routed_sections["prior_worker"]]))
     dependencies = []
     for dependency_id in task.get("depends_on", []):
         try:
@@ -672,32 +844,69 @@ def _packet_body(task, worktree, *, cfg=None, skills=None) -> tuple[str, dict]:
     header_chars = len(f"packet v{'0' * 12} base {merge_base[:12]} sources "
                        f"pool.toml@{policy_version} gotchas@{gotchas_sha} memory@{','.join(memory['layers_consulted'])}"
                        " routed=active") + 1
-    def build():
-        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in sections
+    def build(values):
+        return "\n".join(f"## {name}\n" + "\n".join(lines) for name, lines in values
                          if name != "dependencies" or lines)
-    candidate_tokens = len(build()) // 4
-    # The task contract is more valuable than discovery hints.  In particular,
-    # acceptance criteria are never summarized: an over-cap packet says so in
-    # its provenance header instead.
+    candidate_tokens = len(build(sections)) // 4
+    # Memory remains in the existing body trim order; acceptance stays whole.
     trimmable = ("dependencies", "evidence", "decisions", "gotchas", "symbols", "relevant_tests")
-    by_name = {name: lines for name, lines in sections}
-    while len(build()) >= (4800 - header_chars if routed_sections else 4800):
-        changed = False
-        if _trim_routed_item(by_name, routed_sections):
-            continue
-        for name in trimmable:
-            lines = [] if name in routed_sections else by_name.get(name, [])
-            if lines:
-                lines.pop()
-                changed = True
+    def trim(values, routed):
+        by_name = dict(values)
+        while len(build(values)) >= (4800 - header_chars if routed else 4800):
+            if _trim_routed_item(by_name, routed):
+                continue
+            for name in trimmable:
+                lines = [] if name in routed else by_name.get(name, [])
+                if lines:
+                    lines.pop()
+                    break
+            else:
                 break
-        if changed:
-            continue
-        break
-    body = build()
+        return by_name
+
+    hot_fresh = memory_hot.fresh(ROOT)
+    if retrieval is not None:
+        import copy
+        comparisons = []
+        for alternative in (legacy_sections, tiered_sections):
+            values = [(name, list(alternative[name]) if name in alternative else list(lines))
+                      for name, lines in sections]
+            routed = copy.deepcopy({name: items for name, items in routed_sections.items()
+                                    if name not in alternative})
+            comparisons.append(trim(values, routed))
+        legacy_view, tiered_view = comparisons
+        presented = trim(sections, routed_sections)
+        if memory_mode == "active":
+            tiered_view = presented
+        else:
+            legacy_view = presented
+        legacy_ids = [record_id for record_id, (section, line) in legacy_lines.items()
+                      if line in legacy_view[section]]
+        selected = [record_id for record_id, (section, line) in retrieval["selected_lines"].items()
+                    if line in tiered_view[section]]
+        hot_fresh = retrieval["hot_fresh"]
+        try:
+            decision_log.record(
+                kind="retrieval", subject=task.get("id", "(none)"), candidates=retrieval["candidates"],
+                hard_constraints={"packet_hot_tokens": cfg.get("memory", {}).get("packet_hot_tokens", 1200)},
+                deterministic={"query_source": "title and scope basenames"}, selected=selected,
+                mode=memory_mode, reason="HOT plus WARM packet comparison",
+                extra={"legacy_ids": legacy_ids, "tokens_legacy": _memory_tokens(legacy_view),
+                       "tokens_tiered": _memory_tokens(tiered_view), "hot_fresh": hot_fresh})
+        except Exception:
+            logging.getLogger(__name__).warning("packet memory retrieval logging failed")
+    if retrieval is None:
+        presented = trim(sections, routed_sections)
+    memory_ids = [record_id for record_id, (section, line) in legacy_lines.items()
+                  if line in presented[section]]
+    if memory_mode == "active" and retrieval is not None:
+        memory_ids = [record_id for record_id, (section, line) in retrieval["selected_lines"].items()
+                      if line in presented[section]]
+    body = build(sections)
     return body, {"hash": hashlib.sha256(body.encode()).hexdigest()[:12], "base": merge_base[:12],
                   "policy_version": str(policy_version), "gotchas": gotchas_sha,
                   "memory_layers": ",".join(memory["layers_consulted"]),
+                  "memory_mode": memory_mode, "memory_ids": memory_ids, "hot_fresh": hot_fresh,
                   "candidate_tokens": candidate_tokens, "candidate_known": True,
                   "skill_tokens_presented_l2": (skills or {}).get("skill_tokens_presented_l2", 0),
                   **shadow_meta}
@@ -747,9 +956,9 @@ def with_instruction_tokens(meta, rendered_prompt, packet):
     return {**meta, "instruction_tokens": len(rendered_prompt) // 4 - len(packet) // 4, **extra}
 
 
-def packet(task, worktree, *, cfg=None, skills=None) -> str:
-    """Build a bounded executor briefing with a verifiable provenance header."""
-    body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills)
+def packet(task, worktree, *, cfg=None, skills=None, provider="codex") -> str:
+    """Build the Codex dispatch briefing; Claude fallback supplies its provider explicitly."""
+    body, meta = _packet_body(task, worktree, cfg=cfg, skills=skills, provider=provider)
     header = (f"packet v{meta['hash']} base {meta['base']} sources "
               f"pool.toml@{meta['policy_version']} gotchas@{meta['gotchas']} memory@{meta['memory_layers']}")
     if skills and skills.get("mode") == "active" and skills.get("specialist"):
@@ -797,7 +1006,7 @@ def _acceptance_test_ids(acceptance):
                                  "\n".join(map(str, acceptance)))))
 
 
-def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
+def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude") -> str:
     from .daemon import SECURITY_CHECKLIST_COMPLEXITY
 
     src = reviewed or task
@@ -913,7 +1122,7 @@ def review_packet(task, reviewed, *, cfg=None, skills=None) -> str:
     shadow_meta = _shadow_route({**src, "id": task["id"], "parent": task.get("parent") or src.get("parent")}, candidates,
                                 role="security_review" if any(section.startswith("## security\n")
                                                                for section in sections) else "review",
-                                head_sha=_base_sha(src, wt), cfg=cfg, skills=skills)
+                                head_sha=_base_sha(src, wt), cfg=cfg, skills=skills, provider=provider)
     if skills and skills.get("mode") == "active" and skills.get("specialist"):
         role_source += f" specialist: {skills['specialist']['name']}"
     routed_sections = shadow_meta.pop("_routed_sections", {})
@@ -1009,7 +1218,9 @@ def trust_workspace(config_dir, wt):
         cfg.parent.mkdir(parents=True, exist_ok=True); cfg.write_text(json.dumps(data, indent=2))
 
 
-def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
+def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, *, resume_session=None):
+    log_run = (lambda **fields: None) if resume_session else bus.log_run
+    epoch = task.get("_launch_epoch", worker_control.launch_epoch(task["id"]))
     wt = Path(task.get("worktree") or ensure_worktree(task["id"]))
     trust_workspace(acct.config_dir, wt)
     # Explicit --mcp-config + --strict-mcp-config means workers never auto-load the project/user configs
@@ -1017,18 +1228,25 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
     # override (.mcp.<role>.json) wins when present; every other role gets the bus-only worker config.
     role_cfg = ROOT / f".mcp.{task['role']}.json"
     mcp_config = role_cfg if role_cfg.exists() else ROOT / ".mcp.worker.json"
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
+    extra = {"CLAUDE_CONFIG_DIR": os.path.expanduser(acct.config_dir), "ORCH_TASK_ID": task["id"],
            "ORCH_ROOT": str(ROOT), **secrets_for_role(task["role"])}
     # Headless hosts: `claude setup-token` issues a long-lived CLAUDE_CODE_OAUTH_TOKEN per CLAUDE_CONFIG_DIR,
     # set in this process's environment under the name pool.toml's oauth_token_env points at. Never logged.
     if acct.oauth_token_env and os.environ.get(acct.oauth_token_env):
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[acct.oauth_token_env]
+        extra["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ[acct.oauth_token_env]
+    env, _ = env_policy.worker_env(task["role"], base=os.environ, extra=extra,
+                                   cfg=pool.cfg, task_id=task["id"])
     # claude 2.1.273 has no turn-cap flag; --max-budget-usd + subprocess timeout are the hard stops (§6.5)
     # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
     # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.
     cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
            "--dangerously-skip-permissions", "--allowedTools", tools,
            "--strict-mcp-config", "--mcp-config", str(mcp_config)]
+    if resume_session:
+        cmd += ["--resume", resume_session, "--tools", ""]
+        cmd[cmd.index("--mcp-config") + 1] = '{"mcpServers": {}}'
+    elif task.get("_resume_session"):
+        cmd += ["--resume", task["_resume_session"]]
     if (task.get("packet_meta") or {}).get("skill_routing_mode") == "active":
         cmd.append("--disable-slash-commands")
     if task["role"] != "execute":
@@ -1038,68 +1256,95 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout):
         log["prompt_chars"] = len(prompt)
     if task.get("packet_meta"):
         log["packet_meta"] = task["packet_meta"]
-    if shutil.which("claude") is None:
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
-        return {"status": "held", "reason": "claude CLI not found on PATH"}
     t0 = time.time()
+
+    if shutil.which("claude") is None:
+        worker_registry.finish(task["id"], "held", "no_cli", epoch=epoch)
+        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
+        return {"status": "held", "reason": "claude CLI not found on PATH"}
     try:
-        p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        bus.update(task["id"], pid=p.pid, account=acct.id)
+        with bus.locked():
+            if not worker_control.is_current(task["id"], epoch):
+                return {"status": "superseded"}
+            worker_registry.upsert(task["id"], status="starting", role=task["role"], provider="claude",
+                                   model=model, account=acct.id, worktree=str(wt),
+                                   branch=task.get("branch") or f"task/{task['id']}",
+                                   parent=task.get("parent"), started_at=t0, epoch=epoch, tools=tools.split(",") if tools else [])
+            p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            worker_registry.event(task["id"], "spawned", pid=p.pid, account=acct.id,
+                                  model=model, worktree=str(wt), branch=task.get("branch") or f"task/{task['id']}")
+            if task.get("_steering"):
+                worker_registry.event(task["id"], "steered", status="running")
+            worker_control.write_if_current(task["id"], epoch, bus.update, task["id"], pid=p.pid, account=acct.id)
         stdout, stderr = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         p.kill()
+        p.communicate()
+        worker_registry.finish(task["id"], "failed", "timeout", epoch=epoch)
         return {"status": "failed", "reason": f"timeout after {timeout}s"}
     except FileNotFoundError:
+        worker_registry.finish(task["id"], "held", "no_cli", epoch=epoch)
         # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never
         # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
+        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
         return {"status": "held", "reason": "claude CLI not found on PATH"}
-    text = stdout + stderr
-    if p.returncode != 0 and is_rate_limited(text):
-        secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
-        pool.cooldown(acct, secs)
-        bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
-                    cooldown_s=secs, **log)
-        return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
-    try:
-        out = json.loads(stdout)
-    except json.JSONDecodeError:
-        return {"status": "failed", "reason": f"non-JSON output (rc={p.returncode}): {text[-500:]}"}
-    session_id = out.get("session_id")
-    if session_id is not None:
-        task.setdefault("packet_meta", {})["session_id"] = session_id
-        bus.update(task["id"], packet_meta=task["packet_meta"])
-    try:
-        skills_used, skill_tokens_l2 = _skills_from_gate(task["id"], session_id)
-        task.setdefault("packet_meta", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)
-        pipeline = dict(bus.get(task["id"]).get("pipeline") or {})
-        pipeline["skills_used"] = skills_used
-        bus.update(task["id"], packet_meta=task["packet_meta"], pipeline=pipeline)
-        decision_log.outcome(task["id"], "skill_selection", skills_used=skills_used,
-                             skill_tokens_l2=skill_tokens_l2,
-                             skill_recovery=sorted(set(skills_used) - set(task["packet_meta"].get("skills_selected") or [])))
-        log["packet_meta"] = task["packet_meta"]
-    except Exception as exc:
-        notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
-    used = out.get("usage", {})
-    n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
-    pool.record(acct, n)
-    review_log = {}
-    if task.get("role") == "review":
-        parsed = extract_json(out.get("result", ""))
-        if not parsed.get("verdict"):
-            parsed = (bus.get(task["id"]).get("result") or parsed)
-        parsed["packet_version"] = (task.get("packet_meta") or {}).get("version")
-        facts = attribution.review_facts({**task, "result": parsed})
-        review_log = {key: facts[key] for key in ("verdict", "findings_count", "findings_by_severity",
-                      "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
-    bus.log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
-                outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
-                provider="claude", usage=used, session_id=session_id, **log, **review_log, **used)
-    if not out.get("is_error") and p.returncode == 0:
-        return {"status": "done", "output": out}
-    reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
-    return {"status": "failed", "output": out, "reason": reason}
+    except OSError:
+        worker_registry.finish(task["id"], "failed", "launch_error", epoch=epoch)
+        raise
+    with bus.locked():
+        if not worker_control.is_current(task["id"], epoch):
+            return {"status": "superseded"}
+        text = stdout + stderr
+        if p.returncode != 0 and is_rate_limited(text):
+            secs = parse_reset_hint(text, pool.cfg["limits"]["cooldown_default_s"])
+            pool.cooldown(acct, secs)
+            log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="rate_limit",
+                        cooldown_s=secs, **log)
+            worker_registry.finish(task["id"], "held", "rate_limit", epoch=epoch)
+            return {"status": "held", "reason": f"rate_limit on {acct.id}, cooling {secs}s"}
+        try:
+            out = json.loads(stdout)
+        except json.JSONDecodeError:
+            worker_registry.finish(task["id"], "failed", "non_json", epoch=epoch)
+            return {"status": "failed", "reason": f"non-JSON output (rc={p.returncode}): {text[-500:]}"}
+        session_id = out.get("session_id")
+        if session_id is not None:
+            task.setdefault("packet_meta", {})["session_id"] = session_id
+            bus.update(task["id"], packet_meta=task["packet_meta"])
+        try:
+            skills_used, skill_tokens_l2 = _skills_from_gate(task["id"], session_id)
+            task.setdefault("packet_meta", {}).update(skills_used=skills_used, skill_tokens_l2=skill_tokens_l2)
+            pipeline = dict(bus.get(task["id"]).get("pipeline") or {})
+            pipeline["skills_used"] = skills_used
+            bus.update(task["id"], packet_meta=task["packet_meta"], pipeline=pipeline)
+            decision_log.outcome(task["id"], "skill_selection", skills_used=skills_used,
+                                 skill_tokens_l2=skill_tokens_l2,
+                                 skill_recovery=sorted(set(skills_used) - set(task["packet_meta"].get("skills_selected") or [])))
+            log["packet_meta"] = task["packet_meta"]
+        except Exception as exc:
+            notify.notify(f"{task['id']}: skill telemetry unavailable: {exc}")
+        used = out.get("usage", {})
+        worker_registry.usage(task["id"], "claude", used, out.get("total_cost_usd"))
+        worker_registry.finish(task["id"], "done" if not out.get("is_error") and p.returncode == 0 else "failed",
+                               None if not out.get("is_error") and p.returncode == 0 else "process_error", epoch=epoch)
+        n = used.get("input_tokens", 0) + used.get("output_tokens", 0) + used.get("cache_read_input_tokens", 0) // 10
+        pool.record(acct, n)
+        review_log = {}
+        if task.get("role") == "review":
+            parsed = extract_json(out.get("result", ""))
+            if not parsed.get("verdict"):
+                parsed = (bus.get(task["id"]).get("result") or parsed)
+            parsed["packet_version"] = (task.get("packet_meta") or {}).get("version")
+            facts = attribution.review_facts({**task, "result": parsed})
+            review_log = {key: facts[key] for key in ("verdict", "findings_count", "findings_by_severity",
+                          "reviewer_role", "checklist_used", "reviewed_sha", "packet_version", "review_pass_index")}
+        log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, duration_s=round(time.time() - t0, 1),
+                    outcome="done" if p.returncode == 0 else "error", **({"usd": out.get("total_cost_usd")} if used else {}), turns=out.get("num_turns", 0),
+                    provider="claude", usage=used, session_id=session_id, **log, **review_log, **used)
+        if not out.get("is_error") and p.returncode == 0:
+            return {"status": "done", "output": out}
+        reason = f"budget or error exit (rc={p.returncode}): " + (out.get("result") or "")[:500]
+        return {"status": "failed", "output": out, "reason": reason}
 
 
 def extract_json(text):
@@ -1190,9 +1435,12 @@ def _account_from_assigned_to(assigned_to):
     return None
 
 
-def run_worker(task_id, account_id=None):
+def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None, session_id=None):
     """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
-    pool = Pool(); t = bus.get(task_id); role = t["role"]
+    pool = Pool(); t = dict(resume_task or bus.get(task_id)); role = t["role"]
+    epoch = t.get("_launch_epoch", worker_control.launch_epoch(task_id))
+    t["_launch_epoch"] = epoch
+    recorded = worker_registry.get(task_id) if resume_task else None
     if (t.get("constraints") or {}).get("goal"):
         return {"status": "refused", "reason": "goal container"}
     avoid = None
@@ -1209,67 +1457,75 @@ def run_worker(task_id, account_id=None):
             avoid = reviewed.get("account") or _account_from_assigned_to(reviewed.get("assigned_to"))
     acct = next((a for a in pool.accounts if a.id == account_id), None) if account_id else pool.pick(role, avoid=avoid)
     if acct is None:
-        bus.update(task_id, status="held", hold_reason="no account with headroom")
+        worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason="no account with headroom")
         return {"status": "held"}
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
-    try:
-        skill_choice = _prepare_skills(t, role, pool.cfg)
-        if role == "review":
-            src = reviewed if reviewed is not None else t
-            role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice)
-            security_signals = {"security": "## security\n" in role_packet}
-            prompt = render("review", packet=role_packet, task=t, signals=security_signals)
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-        elif role == "challenge":
-            prompt = render("challenge", task=t, **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
-                                            for k in ("claim", "evidence", "confidence")})
-        elif role == "spec_review":
-            src = bus.get(t["inputs"][0])
-            role_packet = spec_review_packet(src)
-            prompt = render("spec-review", packet=role_packet, task=t)
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-        elif role == "execute":
-            t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
-            bus.update(task_id, executor=t["executor"])
-            packet_worktree = t.get("worktree") or ROOT
-            role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice)
-            prompt = render("execute", packet=role_packet, task=t) + \
-                "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
-                "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-        else:
-            role_packet = scout_packet(t)
-            prompt = render("scout", packet=role_packet, task=t)
-            t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
-    except Exception as exc:
-        hold_render_error(task_id, exc)
-        return {"status": "held", "reason": "render_error"}
-    disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg, skill_choice)
-    allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
-    disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
-    t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
-    try:
-        exposure = _skill_exposure(t, role) if promotion.mode("skill_routing", pool.cfg) == "off" else None
-        if exposure is None:
-            records = _skill_records()
-            exposed = sorted(skill_id for skill_id, record in records.items()
-                             if record.get("state") == "active" and record.get("provenance") == "builtin")
-            exposure = {"skills_exposed": exposed,
-                        "skill_tokens_l0": sum(int(records[item].get("est_tokens_l0") or 0) for item in exposed)}
-        t["packet_meta"].update(exposure)
-        t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure, skill_choice))
-        bus.update(task_id, packet_meta=t["packet_meta"])
-    except Exception as exc:
-        notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")
-    if pool.reserve(task_id, acct.id, role, t) is None:
-        pipeline = dict(t.get("pipeline") or {})
-        pipeline["hold_note"] = "budget"
-        pipeline.pop("dispatched_at", None)
-        bus.update(task_id, status="queued", pipeline=pipeline)
-        return {"status": "budget"}
-    bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
-    bus.update(task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
+    if resume_task:
+        prompt = resume_prompt
+        t["_resume_session"] = session_id
+        model = recorded["model"]
+        allowlist = ",".join(recorded["tools"])
+        disclosure_mode = "off"
+    else:
+        try:
+            skill_choice = None if harness_depth.active(t) else _prepare_skills(t, role, pool.cfg)
+            if role == "review":
+                src = reviewed if reviewed is not None else t
+                role_packet = review_packet(t, src, cfg=pool.cfg, skills=skill_choice, provider="claude")
+                security_signals = {"security": "## security\n" in role_packet}
+                prompt = render("review", packet=role_packet, task=t, signals=security_signals)
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+            elif role == "challenge":
+                prompt = render("challenge", task=t, **{k: t["inputs"][0].get(k, "") if t["inputs"] and isinstance(t["inputs"][0], dict) else t["spec"]
+                                                for k in ("claim", "evidence", "confidence")})
+            elif role == "spec_review":
+                src = bus.get(t["inputs"][0])
+                role_packet = spec_review_packet(src)
+                prompt = render("spec-review", packet=role_packet, task=t)
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+            elif role == "execute":
+                t["executor"] = f"claude:{t['tier']}"          # Codex was unavailable; the run log says which tier took it
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, executor=t["executor"])
+                packet_worktree = t.get("worktree") or ROOT
+                role_packet = packet(t, packet_worktree, cfg=pool.cfg, skills=skill_choice, provider="claude")
+                prompt = render("execute", packet=role_packet, task=t) + \
+                    "\nYou are a Claude fallback executor (Codex is unavailable); a human reviews merges. Commit on the task branch when green." \
+                    "\nIf you need a tool outside your allowlist, post bus_post_result with status held and result reason needs_tool:<tool id>."
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+            else:
+                role_packet = scout_packet(t)
+                prompt = render("scout", packet=role_packet, task=t)
+                t["packet_meta"] = {**with_instruction_tokens(packet_run_meta(role_packet), prompt, role_packet), "role": role}
+        except Exception as exc:
+            hold_render_error(task_id, exc)
+            return {"status": "held", "reason": "render_error"}
+        disclosure_meta = _shadow_tool_disclosure(t, role, pool.cfg, skill_choice)
+        allowlist = disclosure_meta.pop("tool_allowlist", TOOLS.get(role, TOOLS["scout"]))
+        disclosure_mode = disclosure_meta.pop("tool_disclosure_mode", "off")
+        t["packet_meta"] = {**(t.get("packet_meta") or {}), **disclosure_meta}
+        try:
+            exposure = (_skill_exposure(t, role) if not harness_depth.active(t)
+                        and promotion.mode("skill_routing", pool.cfg) == "off" else None)
+            if exposure is None:
+                records = _skill_records()
+                exposed = sorted(skill_id for skill_id, record in records.items()
+                                 if record.get("state") == "active" and record.get("provenance") == "builtin")
+                exposure = {"skills_exposed": exposed,
+                            "skill_tokens_l0": sum(int(records[item].get("est_tokens_l0") or 0) for item in exposed)}
+            t["packet_meta"].update(exposure)
+            t["packet_meta"].update(_skill_routing(t, role, pool.cfg, exposure, skill_choice))
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, packet_meta=t["packet_meta"])
+        except Exception as exc:
+            notify.notify(f"{task_id}: skill telemetry unavailable: {exc}")
+        if pool.reserve(task_id, acct.id, role, t) is None:
+            pipeline = dict(t.get("pipeline") or {})
+            pipeline["hold_note"] = "budget"
+            pipeline.pop("dispatched_at", None)
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="queued", pipeline=pipeline)
+            return {"status": "budget"}
+        bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
+        worker_control.write_if_current(task_id, epoch, bus.update, task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = None
     release_usage = None
     try:
@@ -1278,6 +1534,8 @@ def run_worker(task_id, account_id=None):
         started = time.monotonic()
         first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)
         r = first
+        if not worker_control.is_current(task_id, epoch):
+            return {"status": "superseded"}
         tool_id = _hidden_tool_request(task_id)
         if (disclosure_mode == "active" and tool_id
                 and not (bus.get(task_id).get("pipeline") or {}).get("tool_escalation_used")):
@@ -1286,7 +1544,7 @@ def run_worker(task_id, account_id=None):
             timeout_left = timeout - (time.monotonic() - started)
             if budget_left < budget * .1 or timeout_left < timeout * .1:
                 reason = f"{NEEDS_TOOL_PREFIX}{tool_id} (no budget for respawn)"
-                bus.update(task_id, status="held", hold_reason=reason, result={"reason": reason})
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason=reason, result={"reason": reason})
                 r = {"status": "held", "reason": reason, "output": first.get("output", {})}
             else:
                 decision_log.record(kind="tool_disclosure", subject=task_id,
@@ -1295,13 +1553,35 @@ def run_worker(task_id, account_id=None):
                     reason="hidden_tool_requested", mode="active")
                 pipeline = dict(bus.get(task_id).get("pipeline") or {})
                 pipeline["tool_escalation_used"] = True
-                bus.update(task_id, status="running", result=None, pipeline=pipeline)
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="running", result=None, pipeline=pipeline)
                 r = run_claude(pool, acct, t, prompt, model, TOOLS.get(role, TOOLS["scout"]),
                                budget_left, timeout_left)
                 release_usage = _combined_usage(first, r)
+        session_id = r.get("output", {}).get("session_id")
+        def resume_output(prompt, repair_budget):
+            nonlocal release_usage
+            reply = {}
+            began = time.monotonic()
+            try:
+                reply = run_claude(pool, acct, t, prompt, model, "", repair_budget,
+                                   min(timeout, 120), resume_session=session_id)
+            finally:
+                output = reply.get("output") or {}
+                usage = output.get("usage") or {}
+                release_usage = _combined_usage(release_usage or r, reply)
+                bus.log_run(task=task_id, role="output_repair", provider="claude",
+                            account=acct.id, tier=t["tier"], session_id=session_id,
+                            outcome="done" if reply.get("status") == "done" else "failed",
+                            usage=usage, usd=output.get("total_cost_usd"), budget_usd=repair_budget,
+                            duration_s=round(time.monotonic() - began, 1), **usage)
+            return {"result": extract_json(output.get("result", "")) if reply["status"] == "done" else {},
+                    "tokens": usage, "usd": output.get("total_cost_usd", 0)}
+        repair_session = resume_output if session_id else None
         if r["status"] == "done" and role == "execute":
-            bus.post_result(task_id, fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
-                                      "review": "other account, different model; label PR same-family-review"}), "done")
+            posted = fit_result({"summary": r["output"].get("result", "")[:3000], "executed_by": f"claude:{t['tier']}",
+                                 "review": "other account, different model; label PR same-family-review"})
+            posted = contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session)
+            worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, posted, "done")
         elif r["status"] == "done":
             text = r["output"].get("result", "")
             result = extract_json(text)
@@ -1313,47 +1593,57 @@ def run_worker(task_id, account_id=None):
             # treat it as a failed parse for review roles so we never silently drop an already-posted verdict
             # (T-0139: an approve sat unmerged after a second, verdict-less post overwrote the first).
             parse_failed = bool(result.get("parse_error")) or (review_role and not result.get("verdict"))
-            existing_result = (bus.get(task_id).get("result") or {}) if parse_failed else {}
-            if parse_failed and existing_result.get("verdict"):
-                result = existing_result  # keep the worker's own posted result; do not overwrite it
+            existing_result = (bus.get(task_id).get("result") or {}) if parse_failed or review_role else {}
+            if existing_result.get("verdict"):
+                # Validate the authoritative posted result without offering a repair session
+                # or replacing it with a deterministic candidate.
+                contracts.process(task_id, role, existing_result, cfg=pool.cfg, preserve=True)
+                result = existing_result
                 if role == "review":
                     result["packet_version"] = (t.get("packet_meta") or {}).get("version")
-                    bus.post_result(task_id, fit_result(result), "done")
-            elif parse_failed and review_role:
-                bus.update(task_id, status="failed", reason="review returned no parseable verdict",
-                          resume_hint={"raw": text[-2000:]})
-                result = None
+                    worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, fit_result(result), "done")
             else:
-                bus.post_result(task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
+                # A model repair may supply a verdict only when neither output has one.
+                session = repair_session if not review_role or not result.get("verdict") else None
+                result = contracts.process(task_id, role, result, cfg=pool.cfg, session=session)
+                if role == "review":
+                    result["packet_version"] = (t.get("packet_meta") or {}).get("version")
+                parse_failed = bool(result.get("parse_error")) or (review_role and not result.get("verdict"))
+                if parse_failed and review_role:
+                    worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="failed", reason="review returned no parseable verdict",
+                              resume_hint={"raw": text[-2000:]})
+                    result = None
+                else:
+                    worker_control.write_if_current(task_id, epoch, bus.post_result, task_id, fit_result({"summary": result.get("summary", ""), **result}), "done")
             if result and review_role and result.get("verdict"):
                 verdict_fields = {"spec_review_verdict": result["verdict"], "spec_review_risks": result.get("risks", [])} \
                     if role == "spec_review" else {"review_verdict": result["verdict"]}
-                bus.update(task_id, **verdict_fields)
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, **verdict_fields)
                 if role == "review":
                     completed_task = bus.get(task_id)
                     facts = attribution.review_facts(completed_task)
                     fact_fields = {key: value for key, value in facts.items()
                                    if value is not None or completed_task.get(key) is None}
-                    bus.update(task_id, review_facts=facts, **fact_fields)
+                    worker_control.write_if_current(task_id, epoch, bus.update, task_id, review_facts=facts, **fact_fields)
                 if t.get("inputs") and isinstance(t["inputs"][0], str):
                     try:
-                        bus.update(t["inputs"][0], **verdict_fields)
+                        worker_control.write_if_current(task_id, epoch, bus.update, t["inputs"][0], **verdict_fields)
                     except KeyError:
                         pass
         elif r["status"] == "held":
-            bus.update(task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
         else:
             update_fields = {"status": "failed", "reason": r.get("reason", "unknown failure")}
             result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
             if isinstance(result, str):
                 update_fields["resume_hint"] = {"partial_output": result[:2000]}
-            bus.update(task_id, **update_fields)
+            worker_control.write_if_current(task_id, epoch, bus.update, task_id, **update_fields)
     except Exception as e:
         bus.log_run(task=task_id, role=role, outcome="post_failed",
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])
-        bus.update(task_id, status="failed", reason=f"post_result failed: {e}"[:500])
+        worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="failed", reason=f"post_result failed: {e}"[:500])
     finally:
-        pool.release(task_id, release_usage or r or {})
+        worker_control.release_if_current(task_id, epoch, pool, release_usage or r or {})
     return r
 
 
@@ -1384,3 +1674,10 @@ def scoped_diff(src):
     base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
     r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"
+
+
+def resume_worker(task, prompt, session_id):
+    """Use the original role, account, model, tools, and environment policy."""
+    recorded = worker_registry.get(task["id"])
+    return run_worker(task["id"], recorded["account"], resume_task=task,
+                      resume_prompt=prompt, session_id=session_id)

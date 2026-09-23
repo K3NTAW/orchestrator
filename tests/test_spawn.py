@@ -7,7 +7,7 @@ from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_spawn.py` doesn't add this dir itself
 from _harness import TMP, g, scratch_repo
-from orchestrator import bus, pool as P, spawn
+from orchestrator import bus, evidence, pool as P, spawn
 
 
 class FakePopen:
@@ -25,6 +25,73 @@ class FakePopen:
 
 
 class ReviewVerdict(unittest.TestCase):
+    def test_spawn_uses_env_policy(self):
+        pl = P.Pool()
+        acct = mock.Mock(config_dir="/example", oauth_token_env="SYNTHETIC_SOURCE", id="A")
+        task = {"id": "T-env", "role": "execute", "tier": "sonnet", "complexity": 1, "worktree": str(TMP)}
+        marker = {"RESULT": "blue"}
+        with mock.patch.object(spawn.env_policy, "worker_env", return_value=(marker, [])) as policy, \
+                mock.patch.object(spawn.subprocess, "Popen", side_effect=RuntimeError("stop")) as popen, \
+                mock.patch.object(spawn, "worker_registry"), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={"SERVICE_TOKEN": "orange"}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                mock.patch.dict(os.environ, {"SYNTHETIC_SOURCE": "green"}):
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                spawn.run_claude(pl, acct, task, "p", "m", "Read", 1, 10)
+        self.assertIs(popen.call_args.kwargs["env"], marker)
+        self.assertEqual(policy.call_args.kwargs["extra"]["CLAUDE_CODE_OAUTH_TOKEN"], "green")
+        self.assertEqual(policy.call_args.kwargs["extra"]["SERVICE_TOKEN"], "orange")
+        self.assertEqual(policy.call_args.kwargs["task_id"], task["id"])
+
+    def test_spawn_records_worker_registry_entry(self):
+        from orchestrator import worker_registry as registry
+        task = bus.create_task("registry spawn", "s", ["a"], ["x.py"], role="execute")
+        task["worktree"] = str(TMP)
+        self.addCleanup(registry._path(task["id"]).unlink, missing_ok=True)
+        self.addCleanup(registry._path(task["id"], events=True).unlink, missing_ok=True)
+        process = mock.Mock(pid=4242, returncode=0)
+        def communicate(timeout):
+            self.assertEqual(registry.get(task["id"])["status"], "running")
+            return json.dumps({"result": "private result", "usage": {"input_tokens": 5, "output_tokens": 2},
+                               "total_cost_usd": .01}), ""
+        process.communicate.side_effect = communicate
+        pl = P.Pool()
+        with mock.patch.object(spawn.subprocess, "Popen", return_value=process), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"):
+            result = spawn.run_claude(pl, pl.get("A"), task, "private prompt", "model", "Read", 1, 30)
+        self.assertEqual(result["status"], "done")
+        self.assertEqual([e["kind"] for e in registry.events(task["id"])], ["spawned", "usage", "exit"])
+        self.assertEqual(registry.get(task["id"])["usd"], .01)
+        self.assertNotIn("private", registry._path(task["id"], events=True).read_text())
+
+    def test_packet_meta_carries_prefix_identity(self):
+        first = Render().packet_fixture(); second = Render().packet_fixture()
+        second["spec"] = "different task-specific objective"
+        first_packet = spawn.packet(first, TMP)
+        second_packet = spawn.packet(second, TMP)
+        spawn.render("execute", packet=first_packet, task=first)
+        spawn.render("execute", packet=second_packet, task=second)
+        first_meta = spawn.packet_run_meta(first_packet)
+        second_meta = spawn.packet_run_meta(second_packet)
+        self.assertEqual(first_meta["prefix_sha"], second_meta["prefix_sha"])
+
+    def test_render_records_prefix_identity_before_packet_header(self):
+        first = Render().packet_fixture(); second = Render().packet_fixture()
+        second["acceptance"] = ["a longer criterion that changes the packet suffix"]
+        packets = [spawn.packet(task, TMP) for task in (first, second)]
+        prompts = [spawn.render("execute", packet=packet, task=task)
+                   for packet, task in zip(packets, (first, second))]
+        metas = [spawn.packet_run_meta(packet) for packet in packets]
+        self.assertEqual(metas[0]["prefix_sha"], metas[1]["prefix_sha"])
+        self.assertNotEqual(metas[0]["suffix_chars"], metas[1]["suffix_chars"])
+        for prompt, packet, meta in zip(prompts, packets, metas):
+            boundary = prompt.index(packet.splitlines()[0])
+            self.assertEqual(meta["prefix_chars"], boundary)
+            self.assertIn("objective", meta["dynamic_sections"])
+
     def test_render_bytes_identical_in_shadow(self):
         task = {"id": "T-shadow", "scope": ["x.py"]}
         with mock.patch.object(spawn.instructions, "mode", return_value="shadow"), \
@@ -532,6 +599,31 @@ class SpecReview(unittest.TestCase):
 
 
 class Render(unittest.TestCase):
+    PRE_CHANGE_EXECUTE_PREFIX_CHARS = 0
+
+    def test_templates_with_packet_placeholder_put_rules_before_it(self):
+        import hashlib
+        # SHA-256 of the full rule text, stripped, before T-1172's template move.
+        original_rules = {
+            "execute": "29766ef48a700fd953e5e478f3c100c717ede45fe7c48f59be11d0647d143b3a",
+            "review": "70478706c75c8f28ba934828b48fda936c1e50106b2e930fc4f43fffa7c8c441",
+            "scout": "9b100cc1172ed403faf0ef156df48993238f1dbf4e2c8294b604ec7120cc75cc",
+            "spec-review": "2315aa294cf56a5601c21c8905f3ba9c97c575beafc24b01fa8c3086c2e122b6",
+        }
+        for role, original_digest in original_rules.items():
+            packet = "packet vabcdef base deadbeef sources fixture"
+            rendered = spawn.render(role, packet=packet)
+            prefix, suffix = rendered.split(packet, 1)
+            self.assertEqual(hashlib.sha256(prefix.strip().encode()).hexdigest(), original_digest, role)
+            self.assertEqual(suffix.strip(), "", role)
+
+    def test_prefix_chars_grow_after_template_move(self):
+        task = self.packet_fixture()
+        packet = spawn.packet(task, TMP)
+        spawn.render("execute", packet=packet, task=task)
+        self.assertGreater(spawn.packet_run_meta(packet)["prefix_chars"],
+                           self.PRE_CHANGE_EXECUTE_PREFIX_CHARS)
+
     def active_eval(self):
         from datetime import datetime, timezone
         path = spawn.STATE / "context_eval.json"
@@ -671,6 +763,18 @@ class Render(unittest.TestCase):
         self.assertNotIn("long item", text)
         self.assertEqual(text.count("```"), 2)
 
+    def test_trim_routed_item_handles_routed_findings_section(self):
+        self.active_eval()
+        task = {**self.packet_fixture(), "acceptance": ["criterion " + "x" * 4200]}
+        items = [("FULL", "first finding\n```\ncomplete fence\n```"),
+                 ("FULL", "last finding\n```\ncomplete fence\n```")]
+        meta = {"routed_mode": "active", "_routed_sections": {"routed-findings": items}}
+        with mock.patch.object(spawn, "_shadow_route", return_value=meta):
+            text = spawn.packet(task, TMP)
+        self.assertIn("routed=active", text.splitlines()[0])
+        self.assertLessEqual(len(text), 4800)
+        self.assertEqual(items, [])
+
     def packet_fixture(self):
         scratch_repo(TMP)
         (TMP / "widget.py").write_text("import json\n\ndef build_widget():\n    return json.dumps({})\n")
@@ -688,6 +792,63 @@ class Render(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("tests/test_widget.py", text)
         self.assertIn("widget.py:3 build_widget", text)
+
+    def test_packet_prior_worker_section_lists_partial_facts(self):
+        self.active_eval()
+        task = self.packet_fixture()
+        head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
+        item = spawn.evidence.make("worker_partial", "T-old:" + head, "file: widget.py\ntest: OK",
+                                   commit=head, provenance="worker_partial", scope=["widget.py"])
+        spawn.evidence.EvidencePool("G").add(item)
+        text = spawn.packet(task, TMP, cfg={"context_router": {"mode": "active"}})
+        self.assertIn("## prior_worker", text)
+        self.assertIn("T-old:" + head, text)
+        self.assertIn("file: widget.py", text)
+        self.assertGreater(text.index("## prior_worker"), text.index("## evidence"))
+
+    def test_three_packet_builds_do_not_grow_the_pool_and_evidence_section_capped(self):
+        task = {**self.packet_fixture(), "id": "T-bounded", "parent": "G-bounded",
+                "inputs": [{"summary": "task result"}]}
+        pool = evidence.EvidencePool("G-bounded")
+        self.addCleanup(pool.path.unlink, missing_ok=True)
+        for index in range(5000):
+            pool.add(evidence.make("external_doc", f"legacy:{index}", "x" * 80,
+                                   provenance="external"))
+        composition = spawn.specialist.Specialist(
+            "execute", [], [], [], None, "execute", [], {})
+        skills = {"mode": "active", "_specialist": composition}
+        self.active_eval()
+        with mock.patch.object(spawn, "memory_recall", return_value={
+                "hits": [], "layers_consulted": []}):
+            cfg = {"context_router": {"mode": "shadow", "legacy_evidence_chars": 512}}
+            spawn.packet(task, TMP, cfg=cfg, skills=skills)
+            before = pool.path.read_bytes()
+            for mode in ("off", "shadow", "active"):
+                cfg["context_router"]["mode"] = mode
+                for _ in range(3):
+                    packet = spawn.packet(task, TMP, cfg=cfg, skills=skills)
+                    section = packet.split("## evidence\n", 1)[1].split("\n## ", 1)[0]
+                    self.assertLessEqual(len(section), 512)
+                    self.assertEqual(before, pool.path.read_bytes())
+            previous = evidence.EvidencePool("G-bounded").by_type("previous_result")
+            self.assertEqual(len(previous), 1)
+            self.assertEqual(previous[0].content, "- input: task result")
+            self.assertEqual(previous[0].location,
+                             "task:T-bounded:evidence:" + previous[0].content_hash)
+
+    def test_prior_worker_section_inert_in_shadow_mode(self):
+        task = self.packet_fixture()
+        head = spawn.git("merge-base", "HEAD", "goal/G", cwd=TMP).stdout.strip()
+        item = spawn.evidence.make("worker_partial", "T-shadow:" + head, "file: widget.py",
+                                   commit=head, provenance="worker_partial", scope=["widget.py"])
+        spawn.evidence.EvidencePool("G").add(item)
+        with mock.patch.object(spawn.decision_log, "record") as record:
+            text = spawn.packet(task, TMP, cfg={"context_router": {"mode": "shadow"}})
+        self.assertNotIn("## prior_worker", text)
+        route_row = next(call.kwargs for call in record.call_args_list
+                         if call.kwargs.get("kind") == "context_selection")
+        self.assertIn(item.id, route_row["extra"]["prior_worker_ids"])
+        self.assertGreater(route_row["extra"]["prior_worker_chars"], 0)
 
     def test_packet_accepts_cfg_override(self):
         task = self.packet_fixture()
@@ -911,7 +1072,8 @@ class Render(unittest.TestCase):
     def test_execute_prompt_contains_packet(self):
         p = spawn.packet(self.packet_fixture(), TMP)
         text = spawn.render("execute", packet=p)
-        self.assertTrue(text.startswith("packet v"))
+        self.assertIn("\n" + p, text)
+        self.assertTrue(text.rstrip().endswith(p.rstrip()))
         self.assertIn("Build widget", text)
 
     def test_execute_prompt_names_gate_and_commit(self):
@@ -1112,7 +1274,9 @@ class SpawnBase(unittest.TestCase):
         packet = spawn.scout_packet(task)
         prompt = spawn.render("scout", packet=packet, id="T-1", title="scout", turns="20",
                               base_branch="goal/G", base_sha="abc123")
-        self.assertEqual(prompt.splitlines()[0], packet.splitlines()[0])
+        headers = [line for line in prompt.splitlines() if line.startswith("packet v")]
+        self.assertEqual(headers, [packet.splitlines()[0]])
+        self.assertTrue(prompt.rstrip().endswith(packet.rstrip()))
 
     def test_base_for_prefers_fix_round_parent(self):
         """A fix-round execute task (constraints.fix_round_for names the task it's fixing) must cut its worktree
@@ -1230,6 +1394,52 @@ class OauthTokenInjection(unittest.TestCase):
 
 
 class ContextTelemetry(unittest.TestCase):
+    def test_route_receives_effective_mode_and_provider(self):
+        task = {"id": "T-cache", "title": "cache", "scope": []}
+        item = evidence.make("external_doc", "doc", "body", provenance="bus", task=task)
+        with mock.patch.object(spawn, "_context_mode", return_value=("active", "shadow", False)), \
+                mock.patch.object(spawn.context_router, "route", wraps=spawn.context_router.route) as route, \
+                mock.patch.object(spawn.decision_log, "record"):
+            spawn._shadow_route(task, [item], role="execute", head_sha="head", cfg={}, provider="codex")
+        self.assertEqual(route.call_args.kwargs["effective_mode"], "active")
+        self.assertEqual(route.call_args.kwargs["provider"], "codex")
+        self.assertEqual(route.call_args.kwargs["cache_mode"], "shadow")
+        self.assertFalse(route.call_args.kwargs["invalid_config"])
+        with mock.patch.object(spawn, "_packet_body", side_effect=RuntimeError("stop after provider")) as body:
+            with self.assertRaisesRegex(RuntimeError, "stop after provider"):
+                spawn.packet(task, TMP)
+        self.assertEqual(body.call_args.kwargs["provider"], "codex")
+
+    def test_scout_packet_does_not_route_or_record_context(self):
+        task = {"id": "T-cache-scout", "title": "cache", "scope": []}
+        with mock.patch.object(spawn, "_shadow_route") as shadow, \
+                mock.patch.object(spawn.decision_log, "record") as record, \
+                mock.patch.object(spawn, "_role_packet", wraps=spawn._role_packet) as role_packet, \
+                mock.patch.object(spawn, "_base_sha", return_value="head"), \
+                mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}):
+            spawn.scout_packet(task)
+        shadow.assert_not_called()
+        record.assert_not_called()
+        self.assertEqual(role_packet.call_args.kwargs, {})
+
+    def test_cache_mode_validated_once_without_mutating_config(self):
+        task = {"id": "T-cache-invalid", "scope": []}
+        item = evidence.make("test_result", "test_ok", "x" * 4000, provenance="repo")
+        for configured, expected, invalid in (("invalid", "off", True), ("active", "active", False)):
+            cfg = {"context_router": {"cache_mode": configured}}
+            before = json.dumps(cfg, sort_keys=True)
+            with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
+                    mock.patch.object(spawn.context_router, "cache_mode",
+                                      wraps=spawn.context_router.cache_mode) as validate, \
+                    mock.patch.object(spawn.context_router, "route", wraps=spawn.context_router.route) as route, \
+                    mock.patch.object(spawn.decision_log, "record") as record:
+                spawn._shadow_route(task, [item], role="execute", head_sha=None, cfg=cfg, provider="codex")
+            validate.assert_called_once_with(cfg)
+            self.assertEqual(json.dumps(cfg, sort_keys=True), before)
+            self.assertEqual(route.call_args.kwargs["cache_mode"], expected)
+            self.assertEqual(route.call_args.kwargs["invalid_config"], invalid)
+            self.assertEqual(record.call_args.kwargs["deterministic"]["invalid_config"], invalid)
+
     def _active_review(self):
         reviewed = bus.create_task("active target", "s", ["a"], ["x.py"], role="execute")
         review = bus.create_task("active review", "s", ["a"], ["x.py"], role="review", inputs=[reviewed["id"]])
@@ -1474,7 +1684,8 @@ class ContextTelemetry(unittest.TestCase):
         with mock.patch.object(spawn.promotion, "mode", return_value="shadow"), \
                 mock.patch.object(spawn.decision_log, "record") as record:
             spawn.packet(task, TMP)
-        row = record.call_args.kwargs
+        row = next(call.kwargs for call in record.call_args_list
+                   if call.kwargs.get("kind") == "context_selection")
         self.assertEqual((row["kind"], row["subject"]), ("context_selection", task["id"]))
         self.assertNotIn("content", row)
 
@@ -1810,3 +2021,350 @@ class JevSkillRoutingCallSiteTests(unittest.TestCase):
             result = spawn._skill_routing({"id": "T-jev"}, "execute", {}, {}, choice)
         self.assertEqual(result["skills_selected"], ["executor/implement-spec"])
         self.assertIs(record.call_args.kwargs["jev"], choice["jev"])
+
+
+class PacketMemoryTiers(unittest.TestCase):
+    def setUp(self):
+        from orchestrator import memory_hot
+        self.task = {"id": "T-memory", "title": "Packet wiring", "scope": ["src/spawn.py"],
+                     "parent": "T-goal", "acceptance": ["works"]}
+        self.hot = {"id": "hot-one", "kind": "gotcha", "title": "HOT packet hint",
+                    "date": "2026-09-23", "body": "Keep it bounded."}
+        self.warm = {"id": "warm-one", "kind": "decision", "title": "Warm packet decision",
+                     "date": "2026-09-23"}
+        directory = TMP / ".orchestrator" / "memory"
+        directory.mkdir(parents=True, exist_ok=True)
+        self.hot_path = directory / "HOT.md"
+        previous = self.hot_path.read_bytes() if self.hot_path.exists() else None
+        self.addCleanup(lambda: self.hot_path.write_bytes(previous) if previous is not None
+                        else self.hot_path.unlink(missing_ok=True))
+        self.hot_path.write_text(memory_hot.HEADER + "\n" + memory_hot._line(self.hot) + "\n")
+        for target, name, kwargs in (
+            (spawn, "ROOT", {"new": TMP}),
+            (spawn, "git", {"return_value": mock.Mock(stdout="base\n")}),
+            (spawn, "_shadow_route", {"return_value": {}}),
+            (spawn, "memory_recall", {"return_value": {"hits": [
+                {"id": "mem:gotchas.md:1", "title": "Legacy hint"}], "layers_consulted": ["notes"]}}),
+            (spawn, "_memory_entries", {"return_value": [(1, "Legacy decision", "T-goal")]}),
+            (spawn.memory_store, "all_records", {"return_value": [self.hot]}),
+            (spawn.memory_store, "search", {"side_effect": lambda query, **kw: {
+                "records": [self.warm] if kw["kind"] == "decision" else []}}),
+            (spawn.memory_hot, "build", {}),
+            (spawn.decision_log, "record", {}),
+        ):
+            patcher = mock.patch.object(target, name, **kwargs)
+            value = patcher.start()
+            self.addCleanup(patcher.stop)
+            if name in ("search", "build", "record"):
+                setattr(self, name, value)
+
+    def packet(self, mode, budget=1200):
+        return spawn._packet_body(self.task, TMP, cfg={"memory": {
+            "mode": mode, "packet_hot_tokens": budget}})
+
+    def test_packet_memory_shadow_keeps_legacy_sections_and_logs_row(self):
+        legacy, _ = self.packet("off")
+        self.record.assert_not_called()
+        self.search.assert_not_called()
+        shadow, meta = self.packet("shadow")
+        self.assertEqual(shadow, legacy)
+        row = self.record.call_args
+        self.assertEqual((row.kwargs["kind"], row.kwargs["subject"]), ("retrieval", "T-memory"))
+        self.assertEqual(row.kwargs["mode"], "shadow")
+        self.assertEqual(row.kwargs["selected"], ["hot-one", "warm-one"])
+        self.assertIn("mem:gotchas.md:1", row.kwargs["extra"]["legacy_ids"])
+        self.assertGreater(row.kwargs["extra"]["tokens_legacy"], 0)
+        self.assertGreater(row.kwargs["extra"]["tokens_tiered"], 0)
+        self.assertEqual(meta["memory_mode"], "shadow")
+        self.assertEqual(self.search.call_count, 3)
+        self.assertEqual([c.kwargs["kind"] for c in self.search.call_args_list],
+                         ["gotcha", "decision", "architecture"])
+        for call in self.search.call_args_list:
+            self.assertNotIn("file", call.kwargs)
+            self.assertIn('"spawn"', call.args[0])
+            self.assertEqual(call.kwargs["limit"], 8)
+        self.build.assert_not_called()
+        self.record.side_effect = RuntimeError("unavailable")
+        with self.assertLogs(spawn.__name__, level="WARNING"):
+            self.assertEqual(self.packet("shadow")[0], legacy)
+
+    def test_packet_memory_active_presents_tiered_sections(self):
+        body, meta = self.packet("active")
+        self.assertIn("HOT packet hint", body)
+        self.assertIn("Warm packet decision", body)
+        self.assertNotIn("Legacy hint", body)
+        self.assertEqual(meta["memory_ids"], ["hot-one", "warm-one"])
+        body, meta = self.packet("active", budget=20)
+        self.assertLessEqual(self.record.call_args.kwargs["extra"]["tokens_tiered"], 20)
+        self.assertNotIn("Warm packet decision", body)
+        self.assertEqual(meta["memory_ids"], ["hot-one"])
+        self.build.assert_not_called()
+        self.search.side_effect = lambda query, **kw: {"records": [self.hot, self.warm]}
+        body, meta = self.packet("active")
+        self.assertEqual(meta["memory_ids"], ["hot-one", "warm-one"])
+        self.assertEqual(len(self.record.call_args.kwargs["candidates"]), 2)
+        self.task["spec"] = "required contract " * 400
+        body, meta = self.packet("active")
+        self.assertEqual(meta["memory_ids"], [])
+        self.assertEqual(self.record.call_args.kwargs["selected"], [])
+        self.assertEqual(self.record.call_args.kwargs["extra"]["tokens_tiered"], 0)
+
+    def test_hot_freshness_uses_index_and_hot_mtimes(self):
+        index = self.hot_path.with_name("index.sqlite")
+        # Patch stat rather than changing the suite's shared database.
+        original = Path.stat
+        def stat(path, *args, **kwargs):
+            if path == index:
+                return mock.Mock(st_mtime_ns=200)
+            if path == self.hot_path:
+                return mock.Mock(st_mtime_ns=hot_time[0])
+            return original(path, *args, **kwargs)
+        hot_time = [200]
+        with mock.patch.object(Path, "stat", stat):
+            self.assertTrue(spawn.memory_hot.fresh(TMP))
+            hot_time[0] = 199
+            self.assertFalse(spawn.memory_hot.fresh(TMP))
+            hot_time[0] = 201
+            self.assertTrue(spawn.memory_hot.fresh(TMP))
+        with mock.patch.object(spawn.memory_hot, "fresh", return_value=False):
+            _, meta = self.packet("shadow")
+            self.assertFalse(meta["hot_fresh"])
+            self.assertFalse(self.record.call_args.kwargs["extra"]["hot_fresh"])
+        self.build.assert_not_called()
+
+
+class OutputContracts(unittest.TestCase):
+    def worker(self, mode, output, *, role="review", repaired=None, posted=None):
+        from orchestrator import contracts
+        source = bus.create_task("contract source", "spec", ["valid"], ["a.py"], role="execute")
+        task = bus.create_task("contract review", "spec", ["valid"], ["a.py"], role=role,
+                               inputs=[source["id"]])
+        task_id = task["id"]
+        pool = P.Pool()
+        pool.cfg["contracts"] = {"mode": mode, "repair_budget_usd": .2}
+        original_run = spawn.run_claude
+        calls = []
+        def run(*args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                if posted is not None:
+                    bus.post_result(task_id, dict(posted))
+                return {"status": "done", "output": {"result": output if isinstance(output, str) else json.dumps(output),
+                                                      "session_id": "contract-session"}}
+            return original_run(*args, **kwargs)
+        process = mock.Mock(pid=4242, returncode=0)
+        process.communicate.return_value = (json.dumps({"result": json.dumps(repaired if repaired is not None else {"verdict": "approve", "comments": []}),
+            "usage": {"input_tokens": 3, "output_tokens": 4}, "total_cost_usd": .01}), "")
+        with mock.patch.object(spawn, "Pool", return_value=pool), \
+                mock.patch.object(pool, "pick", return_value=pool.get("A")), \
+                mock.patch.object(pool, "reserve", return_value={}), \
+                mock.patch.object(pool, "release"), mock.patch.object(pool, "record"), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                mock.patch.object(spawn, "spec_review_packet", return_value="packet"), \
+                mock.patch.object(spawn, "review_packet", return_value="packet"), \
+                mock.patch.object(spawn, "packet", return_value="packet"), \
+                mock.patch.object(spawn, "run_claude", side_effect=run), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                mock.patch.object(spawn.subprocess, "Popen", return_value=process) as popen:
+            spawn.run_worker(task_id)
+        return bus.get(task_id), calls, popen
+
+    def test_output_contract_shadow_logs_row_and_keeps_legacy_behaviour(self):
+        task, calls, popen = self.worker("shadow", {"verdict": "LGTM", "comments": []})
+        self.assertEqual(task["result"]["verdict"], "LGTM")
+        self.assertEqual(len(calls), 1)
+        popen.assert_not_called()
+        row = spawn.decision_log.explain(task["id"], kinds=["output_contract"])[0]
+        self.assertEqual(row["selected"], "repair")
+        self.assertEqual(row["deterministic"]["repaired_keys"], ["verdict"])
+        self.assertEqual(row["mode"], "shadow")
+        task, _, _ = self.worker("shadow", {"summary": "no verdict"})
+        self.assertEqual(task["status"], "failed")
+
+    def test_output_contract_active_repair_resume_once_within_budget(self):
+        task, calls, popen = self.worker("active", {"summary": "no verdict"})
+        self.assertEqual(task["result"]["verdict"], "approve")
+        self.assertEqual(len(calls), 2)
+        cmd = popen.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--resume") + 1], "contract-session")
+        self.assertEqual(float(cmd[cmd.index("--max-budget-usd") + 1]), .2)
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "")
+        rows = [json.loads(line) for path in bus.RUNS.glob("*.jsonl") for line in path.read_text().splitlines()]
+        row = next(row for row in rows if row.get("task") == task["id"] and row.get("role") == "output_repair")
+        self.assertEqual(row["usage"]["output_tokens"], 4)
+
+    def test_contract_fallback_execute_shadow_preserves_envelope(self):
+        task, calls, popen = self.worker("shadow", {"summary": "done"}, role="execute")
+        self.assertEqual(task["status"], "done")
+        self.assertEqual(task["result"]["summary"], json.dumps({"summary": "done"}))
+        self.assertNotIn("commit", task["result"])
+        row = spawn.decision_log.explain(task["id"], kinds=["output_contract"])[0]
+        self.assertFalse(row["deterministic"]["ok"])
+        self.assertEqual(len(calls), 1)
+        popen.assert_not_called()
+
+    def test_active_contract_invalid_repair_falls_through_once(self):
+        task, calls, _ = self.worker("active", {"summary": "no verdict"}, repaired={"summary": "still invalid"})
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(len(calls), 2)
+        row = spawn.decision_log.explain(task["id"], kinds=["output_contract"])[0]
+        self.assertEqual(row["selected"], "rerun")
+
+    def test_active_contract_deterministic_repair_does_not_resume(self):
+        task, calls, popen = self.worker("active", {"verdict": "approved", "comments": []})
+        self.assertEqual(task["result"]["verdict"], "approve")
+        self.assertEqual(len(calls), 1)
+        popen.assert_not_called()
+
+    def test_active_contract_preserves_mid_run_verdict_without_recovery(self):
+        for role in ("review", "spec_review"):
+            posted = ({"verdict": "approve", "comments": []} if role == "review" else
+                      {"verdict": "approve", "risks": [], "suggested_spec_changes": []})
+            for final in ({"summary": "finished"}, "Finished; see the posted verdict.",
+                          {"verdict": "request_changes"}):
+                with self.subTest(role=role, final=final):
+                    with mock.patch.object(spawn.contracts, "recover") as recover:
+                        task, calls, popen = self.worker("active", final, role=role, posted=posted,
+                            repaired={**posted, "verdict": "request_changes"})
+                    recover.assert_not_called()
+                    self.assertEqual(task["status"], "done")
+                    expected = {**posted, "confidence": 0.0, "provenance": ["repo"]}
+                    actual = dict(task["result"])
+                    actual.pop("packet_version", None)
+                    self.assertEqual(actual, expected)
+                    field = "review_verdict" if role == "review" else "spec_review_verdict"
+                    self.assertEqual(task[field], "approve")
+                    self.assertEqual(bus.get(task["inputs"][0])[field], "approve")
+                    self.assertEqual(len(calls), 1)
+                    popen.assert_not_called()
+                    rows = spawn.decision_log.explain(task["id"], kinds=["output_contract"])
+                    self.assertEqual(len(rows), 1)
+                    self.assertTrue(rows[0]["deterministic"]["ok"])
+
+    def test_active_contract_does_not_resume_when_final_verdict_exists(self):
+        for role in ("review", "spec_review"):
+            with self.subTest(role=role):
+                task, calls, popen = self.worker("active", {"verdict": "approve"}, role=role)
+                self.assertEqual(task["result"]["verdict"], "approve")
+                self.assertEqual(len(calls), 1)
+                popen.assert_not_called()
+
+
+class SteeringResume(unittest.TestCase):
+    def test_resume_reuses_recorded_tool_allowlist(self):
+        from orchestrator import worker_registry as registry
+        task = bus.create_task("resume tools", "s", ["a"], ["x.py"], role="execute")
+        tid = task["id"]
+        self.addCleanup(registry._path(tid).unlink, missing_ok=True)
+        self.addCleanup(registry._path(tid, events=True).unlink, missing_ok=True)
+        registry.upsert(tid, status="running", provider="claude", account="A", model="recorded-model",
+                        tools=["Read", "Bash(rg *)"], epoch=2)
+        task = bus.update(tid, status="running", pipeline={"steer_epoch": 2})
+        with mock.patch.object(spawn, "run_claude", return_value={"status": "done", "output": {"result": "done"}}) as run, \
+                mock.patch.object(spawn, "_shadow_tool_disclosure") as disclosure, \
+                mock.patch.object(spawn, "render") as render:
+            spawn.resume_worker(task, "steering", "session-example")
+        args = run.call_args.args
+        self.assertEqual(args[3:6], ("steering", "recorded-model", "Read,Bash(rg *)"))
+        self.assertEqual(args[2]["_resume_session"], "session-example")
+        self.assertEqual(args[2]["_launch_epoch"], 2)
+        disclosure.assert_not_called()
+        render.assert_not_called()
+
+
+    def test_interrupted_claude_cleanup_cannot_publish_or_release(self):
+        from orchestrator import worker_registry as registry
+        task = bus.create_task("stale Claude", "s", ["a"], ["x.py"], role="execute")
+        tid = task["id"]
+        self.addCleanup(registry._path(tid).unlink, missing_ok=True)
+        self.addCleanup(registry._path(tid, events=True).unlink, missing_ok=True)
+        task = bus.update(tid, status="running", worktree=str(TMP))
+        registry.upsert(tid, status="running", provider="claude", account="A", model="model", tools=["Read"])
+        process = mock.Mock(pid=43211, returncode=-15)
+        def communicate(timeout):
+            registry.event(tid, "steer", epoch=2, status="running")
+            bus.update(tid, pipeline={"steer_epoch": 2}, packet_meta={"steering_count": 1})
+            return json.dumps({"is_error": True, "result": "interrupted", "session_id": "old-session"}), ""
+        process.communicate.side_effect = communicate
+        with mock.patch.object(spawn.subprocess, "Popen", return_value=process), \
+                mock.patch.object(spawn, "trust_workspace"), \
+                mock.patch.object(spawn, "secrets_for_role", return_value={}), \
+                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                mock.patch.object(P.Pool, "release") as release, \
+                mock.patch.object(bus, "post_result") as post:
+            result = spawn.resume_worker(task, "steering", "session-example")
+        self.assertEqual(result["status"], "superseded")
+        release.assert_not_called()
+        post.assert_not_called()
+        self.assertEqual(bus.get(tid)["status"], "running")
+        self.assertEqual(bus.get(tid)["packet_meta"], {"steering_count": 1})
+        self.assertEqual(registry.get(tid)["status"], "running")
+        self.assertEqual(registry.get(tid)["epoch"], 2)
+
+
+class DisclosureCachePresentation(unittest.TestCase):
+    def test_skill_catalog_block_only_in_active_cache_mode_and_chars_recorded(self):
+        import copy
+        from types import SimpleNamespace
+        from unittest import mock
+        from orchestrator import spawn, skill_router, decision_log
+        records = {"sample": {"state": "active", "roles": ["execute"], "triggers": ["example"]}}
+        decision = {"selected": ["sample"], "mandatory": ["sample"], "candidates": ["sample"],
+                    "triggers": {}, "task_class": "feature", "rejected": [], "reason": "fixture",
+                    "tokens_exposed_l0": 1, "tokens_selected_l0": 1, "tokens_selected_l2": 2, "ambiguous": []}
+        task = {"id": "cache-skills"}
+        catalog = skill_router.catalog_block("execute", records)
+        for mode in ("shadow", "active", "off", "invalid"):
+            cfg = {"skills": {"mode": "active", "cache_mode": mode}}
+            with mock.patch.object(spawn.harness_depth, "active", return_value=False), \
+                 mock.patch.object(spawn.specialist, "compose", return_value=SimpleNamespace(decision=copy.deepcopy(decision))), \
+                 mock.patch.object(spawn, "_skill_records", return_value=records), \
+                 mock.patch.object(spawn.skills_registry, "render", return_value="selected body"), \
+                 mock.patch.object(spawn.skill_scorecard, "selection_rows", return_value=30), \
+                 mock.patch.object(spawn.skill_scorecard, "recovery_rate", return_value=0), \
+                 mock.patch.object(decision_log, "record") as record:
+                choice = spawn._prepare_skills(task, "execute", cfg)
+                spawn._skill_routing(task, "execute", cfg, {}, choice)
+            self.assertEqual(catalog in choice["section"], mode == "active")
+            if mode == "active":
+                self.assertLess(choice["section"].index(catalog), choice["section"].index("selected body"))
+            data = record.call_args.kwargs["deterministic"]
+            self.assertEqual(data["catalog_chars"], len(catalog))
+            self.assertEqual(data["selected_chars"], len("selected body"))
+            self.assertEqual(data["invalid_config"], mode == "invalid")
+        with mock.patch.object(spawn.specialist, "compose") as compose:
+            self.assertIsNone(spawn._prepare_skills(task, "execute", {"skills": {"mode": "off", "cache_mode": "active"}}))
+            compose.assert_not_called()
+
+    def test_active_tool_cache_mode_puts_stable_catalog_before_schemas_only_in_active(self):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+        from orchestrator import spawn, tool_catalog, decision_log
+        task = {"id": "cache-tools", "title": "Example", "role": "execute", "scope": [], "acceptance": []}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(spawn, "memory_recall", return_value={"hits": [], "layers_consulted": []}), \
+             mock.patch.object(spawn, "git", return_value=SimpleNamespace(stdout="example")), \
+             mock.patch.object(spawn, "_shadow_route", return_value={}), \
+             mock.patch.object(decision_log, "record") as record, \
+             mock.patch.object(decision_log, "last_row", return_value=None):
+            for mode in ("active", "shadow", "off", "invalid"):
+                cfg = {"tool_disclosure": {"mode": "shadow", "cache_mode": mode}, "memory": {"mode": "off"}}
+                body, _ = spawn._packet_body(task, directory, cfg=cfg, provider="claude")
+                self.assertEqual("## tools\n" in body, mode == "active")
+                if mode == "active":
+                    stable = tool_catalog.level0(tool_catalog.disclosed("execute"))
+                    dynamic = tool_catalog.level2(tool_catalog.minimal_set(task, "execute")["keep"])
+                    self.assertLess(body.index(stable), body.index(dynamic))
+                spawn._shadow_tool_disclosure(task, "execute", cfg)
+                data = record.call_args.kwargs["deterministic"]
+                if mode in ("active", "shadow"):
+                    self.assertEqual(data["stable_catalog_chars"], len(tool_catalog.level0(tool_catalog.disclosed("execute"))))
+                    self.assertIsNone(data["changed_since_previous"])
+                elif mode == "invalid":
+                    self.assertTrue(data["invalid_config"])
+            cfg["tool_disclosure"] = {"mode": "off", "cache_mode": "active"}
+            body, _ = spawn._packet_body(task, directory, cfg=cfg, provider="claude")
+            self.assertNotIn("## tools\n", body)
