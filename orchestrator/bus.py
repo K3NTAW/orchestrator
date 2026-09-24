@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import atexit, contextlib, fcntl, hashlib, json, sqlite3, subprocess, threading, time
+import atexit, contextlib, fcntl, hashlib, json, sqlite3, subprocess, sys, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -39,39 +39,38 @@ def locked():
             _held.depth = 0
 
 
-_connection = None
-_connection_path = None
+_connections = threading.local()
 _connection_lock = threading.Lock()
 
 
 def _close_db():
-    global _connection, _connection_path
-    if _connection is not None:
-        _connection.close()
-        _connection = None
-        _connection_path = None
+    connections = getattr(_connections, "by_path", {})
+    for connection in connections.values():
+        connection.close()
+    connections.clear()
 
 
 atexit.register(_close_db)
 
 
 def db():
-    global _connection, _connection_path
+    path = STATE / "bus.sqlite"
+    connections = getattr(_connections, "by_path", None)
+    if connections is None:
+        connections = _connections.by_path = {}
+    if path in connections:
+        return connections[path]
     with _connection_lock:
-        path = STATE / "bus.sqlite"
-        if _connection is None or _connection_path != path:
-            _close_db()
-            STATE.mkdir(exist_ok=True); TASKS.mkdir(exist_ok=True)
-            # The daemon and its worker threads share the cache; writes use locked().
-            c = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-            try:
-                c.execute("create table if not exists tasks(id text primary key, status, role, tier, assigned_to, updated real)")
-                c.execute("create table if not exists events(seq integer primary key autoincrement, task_id, ts real, kind, data)")
-            except BaseException:
-                c.close()
-                raise
-            _connection, _connection_path = c, path
-        return _connection
+        STATE.mkdir(exist_ok=True); TASKS.mkdir(exist_ok=True)
+        c = sqlite3.connect(path, isolation_level=None)
+        try:
+            c.execute("create table if not exists tasks(id text primary key, status, role, tier, assigned_to, updated real)")
+            c.execute("create table if not exists events(seq integer primary key autoincrement, task_id, ts real, kind, data)")
+        except BaseException:
+            c.close()
+            raise
+        connections[path] = c
+        return c
 
 
 def _save(t):
@@ -87,10 +86,11 @@ def _event(tid, kind, data=None):
 
 
 def get(tid):
-    p = TASKS / f"{tid}.json"
-    if not p.exists():
-        raise KeyError(tid)
-    return json.loads(p.read_text())
+    with locked():
+        p = TASKS / f"{tid}.json"
+        if not p.exists():
+            raise KeyError(tid)
+        return json.loads(p.read_text())
 
 
 def next_id():
@@ -198,7 +198,19 @@ def read(tid=None, status=None, status_not=None, role=None, compact=False):
     if tid:
         return get(tid)
     rows = db().execute("select id from tasks order by id").fetchall()
-    out = [get(r[0]) for r in rows]
+    out = []
+    skipped = 0
+    for row in rows:
+        task_id = row[0]
+        if not isinstance(task_id, str) or not task_id:
+            skipped += 1
+            continue
+        try:
+            out.append(get(task_id))
+        except KeyError:
+            skipped += 1
+    if skipped:
+        print(f"bus.read: skipped {skipped} unreadable rows", file=sys.stderr)
     filtered = [t for t in out if (status is None or t["status"] == status)
                 and (status_not is None or t["status"] != status_not) and (role is None or t["role"] == role)]
     return [_compact_row(t) for t in filtered] if compact else filtered

@@ -1,5 +1,5 @@
 """Bus rules: acceptance is required, immutable fields, oversize results rejected, events, id sequencing."""
-import gc, json, sys, tempfile, unittest, warnings
+import contextlib, gc, io, json, sys, tempfile, threading, unittest, warnings
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_bus.py` doesn't add this dir itself
@@ -21,6 +21,63 @@ class BusSandbox(unittest.TestCase):
 
 
 class Bus(BusSandbox):
+
+    def test_db_connection_is_per_thread(self):
+        connections = []
+
+        def connect_twice():
+            first = bus.db()
+            connections.append((first, bus.db()))
+            bus._close_db()
+
+        threads = [threading.Thread(target=connect_twice) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(connections), 2)
+        self.assertIs(connections[0][0], connections[0][1])
+        self.assertIs(connections[1][0], connections[1][1])
+        self.assertIsNot(connections[0][0], connections[1][0])
+
+    def test_read_skips_rows_without_task_file(self):
+        task = bus.create_task("Readable", "spec", ["ok"], ["src/**"])
+        bus.db().execute("insert into tasks values(?,?,?,?,?,?)",
+                         ("T-missing", "queued", "scout", "sonnet", None, 0))
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rows = bus.read()
+
+        self.assertEqual([row["id"] for row in rows], [task["id"]])
+        self.assertEqual(stderr.getvalue(), "bus.read: skipped 1 unreadable rows\n")
+
+    def test_concurrent_reads_and_writes_never_raise(self):
+        tasks = [bus.create_task(f"Task {i}", "spec", ["ok"], ["src/**"])
+                 for i in range(8)]
+        errors = []
+
+        def exercise(task):
+            try:
+                for iteration in range(200):
+                    bus.update(task["id"], assigned_to=f"worker-{iteration % 2}")
+                    rows = bus.read()
+                    if not all(isinstance(row, dict) and isinstance(row.get("id"), str)
+                               and row["id"] for row in rows):
+                        raise AssertionError("read returned a malformed task")
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                bus._close_db()
+
+        threads = [threading.Thread(target=exercise, args=(task,)) for task in tasks]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
 
     def test_log_run_annotates_cache_fields(self):
         row = self.written_row(provider="claude", usage={"input_tokens": 10,
