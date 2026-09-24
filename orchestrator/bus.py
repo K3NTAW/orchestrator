@@ -114,12 +114,18 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
             get(dep)
         except KeyError:
             raise ValueError(f"depends_on references unknown task: {dep}")
+    fix_round_for = (constraints or {}).get("fix_round_for")
+    normalized_dep = fix_round_for if fix_round_for in deps else None
+    if normalized_dep:
+        deps = [dep for dep in deps if dep != normalized_dep]
     t = {"id": tid, "created_at": time.time(), "parent": parent, "role": role, "tier": tier, "complexity": complexity,
          "title": title, "spec": spec, "inputs": inputs or [], "acceptance": list(acceptance), "scope": list(scope),
          "depends_on": deps,
          "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
          "status": "queued", "assigned_to": None, "worktree": None, "codex_thread": None, "result": None, "events": []}
     _save(t); _event(t["id"], "created")
+    if normalized_dep:
+        _event(t["id"], "depends_on_normalized", {"dropped": normalized_dep})
     return t
 
 
