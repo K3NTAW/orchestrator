@@ -11,9 +11,9 @@ from orchestrator import STATE, bus, merge, spawn
 
 class MergeQueue(unittest.TestCase):
     def test_diff_hash_failure_blocks_merge(self):
-        for option in ("--stat", "--binary"):
+        for failed_command in ("diff", "patch-id"):
             for phase in ("before", "after"):
-                with self.subTest(option=option, phase=phase), \
+                with self.subTest(command=failed_command, phase=phase), \
                         tempfile.TemporaryDirectory(prefix="orch-diff-failure-") as directory:
                     repo = Path(directory)
                     scratch_repo(repo)
@@ -21,30 +21,46 @@ class MergeQueue(unittest.TestCase):
                     state.mkdir(exist_ok=True)
                     calls = []
                     failed_calls = []
+                    gate_calls = []
+                    command_calls = 0
 
                     def git(*args, **kwargs):
+                        nonlocal command_calls
                         calls.append(args)
-                        rebased = ("rebase", "goal/reviewed") in calls
-                        if args[:2] == ("diff", option) and rebased == (phase == "after"):
-                            failed_calls.append(args)
-                            return subprocess.CompletedProcess(args, 1, "", "git diff failed")
+                        if args[:2] == ("diff", "--binary") and failed_command == "diff":
+                            command_calls += 1
+                            if command_calls == (1 if phase == "before" else 2):
+                                failed_calls.append(args)
+                                return subprocess.CompletedProcess(args, 1, "", "git diff failed")
                         return subprocess.CompletedProcess(args, 0, "unchanged", "")
 
+                    real_run = subprocess.run
+                    def run(*args, **kwargs):
+                        nonlocal command_calls
+                        if tuple(args[0][:3]) == ("git", "patch-id", "--stable") and failed_command == "patch-id":
+                            command_calls += 1
+                            if command_calls == (1 if phase == "before" else 2):
+                                failed_calls.append(tuple(args[0][1:]))
+                                return subprocess.CompletedProcess(args[0], 1, "", "git patch-id failed")
+                        if args[0][:1] == [str(merge.TESTS_GREEN)]:
+                            gate_calls.append(args[0])
+                            return subprocess.CompletedProcess(args[0], 0, "", "")
+                        return real_run(*args, **kwargs)
+
                     with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
-                            patch.multiple(merge, ROOT=repo, git=git):
+                            patch.multiple(merge, ROOT=repo, git=git), patch.object(merge.subprocess, "run", side_effect=run):
                         task = bus.create_task("diff failure", "s", ["a"], ["feature.py"], role="execute")
                         bus.update(task["id"], worktree=str(repo), pipeline={"reviewed_sha": "reviewed"})
-                        with patch.object(merge.subprocess, "run") as gate:
-                            result = merge.merge(task["id"], target="goal/reviewed", refresh_repomap=False)
+                        result = merge.merge(task["id"], target="goal/reviewed", refresh_repomap=False)
                         self.assertEqual(len(failed_calls), 1)
                         self.assertEqual(result["status"], "failed", result)
                         self.assertIn("git diff", result["reason"])
-                        self.assertIn(option, result["reason"])
+                        self.assertIn(failed_command, result["reason"])
                         self.assertIn(phase, result["reason"])
                         self.assertEqual(bus.get(task["id"])["status"], "failed")
                         self.assertFalse(bus.get(task["id"]).get("merged_into"))
                         self.assertFalse(any(call[0] in ("merge", "update-ref") for call in calls))
-                        gate.assert_not_called()
+                        self.assertEqual(gate_calls, [])
 
     def reviewed_rebase(self, changed):
         """Real local rebase: an upstream duplicate drops a reviewed hunk; an unrelated commit does not."""
@@ -111,6 +127,60 @@ class MergeQueue(unittest.TestCase):
 
     def test_clean_rebase_keeps_approval(self):
         self.reviewed_rebase(changed=False)
+
+    def reviewed_same_file_rebase(self, upstream_lines):
+        with tempfile.TemporaryDirectory(prefix="orch-same-file-rebase-") as directory:
+            repo = Path(directory)
+            scratch_repo(repo)
+            state = repo / ".orchestrator"
+            state.mkdir(exist_ok=True)
+            def git(*args, cwd=repo, check=True):
+                result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+                if check:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                return result
+            with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
+                    patch.multiple(merge, ROOT=repo, git=git):
+                base_lines = [f"line {number}\n" for number in range(20)]
+                (repo / "feature.py").write_text("".join(base_lines))
+                git("add", "feature.py")
+                git("commit", "-qm", "feature baseline")
+                git("branch", "goal/reviewed")
+                wt = repo / "task-worktree"
+                git("worktree", "add", "-b", "task/reviewed", str(wt), "HEAD")
+                task_lines = list(base_lines)
+                task_lines[5] = "task first change\n"
+                task_lines[15] = "task second change\n"
+                (wt / "feature.py").write_text("".join(task_lines))
+                git("add", "feature.py", cwd=wt)
+                git("commit", "-qm", "reviewed feature", cwd=wt)
+                reviewed_sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+                task = bus.create_task("reviewed rebase", "s", ["a"], ["feature.py"], role="execute", parent="G")
+                bus.update(task["id"], worktree=str(wt), pipeline={"reviewed_sha": reviewed_sha})
+                git("checkout", "goal/reviewed")
+                (repo / "feature.py").write_text("".join(upstream_lines(base_lines)))
+                git("add", "feature.py")
+                git("commit", "-qm", "upstream same-file change")
+                gate = repo / "passing-gate.sh"
+                gate.write_text("#!/bin/sh\nexit 0\n")
+                gate.chmod(0o755)
+                with patch.object(merge, "TESTS_GREEN", gate), patch.object(bus, "commit_state"), \
+                        patch.object(merge.scorecard, "write"), patch.object(merge.scorecard, "build", return_value={}):
+                    return merge.merge(task["id"], target="goal/reviewed", refresh_repomap=False)
+
+    def test_context_only_rebase_merges(self):
+        def insert_at_top(lines):
+            return ["upstream insertion\n", *lines]
+        result = self.reviewed_same_file_rebase(insert_at_top)
+        self.assertEqual(result["status"], "merged", result)
+
+    def test_patch_content_change_after_rebase_holds(self):
+        def duplicate_one_task_hunk(lines):
+            changed = list(lines)
+            changed[5] = "task first change\n"
+            return changed
+        result = self.reviewed_same_file_rebase(duplicate_one_task_hunk)
+        self.assertEqual(result["status"], "rebase_changed_diff", result)
 
     def _ensure_ci_fixture(self):
         """pyproject.toml + a passing test, committed on whatever branch TMP currently has checked out, so

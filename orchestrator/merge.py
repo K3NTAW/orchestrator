@@ -1,6 +1,6 @@
 """Serial merge queue: one at a time, rebase onto target -> tests-green -> fast-forward the target branch.
 Target defaults to goal/<parent> (or 'integration'); main only ever moves via a human-approved PR."""
-import fcntl, hashlib, subprocess, sys, time
+import fcntl, subprocess, sys, time
 from . import ROOT, bus, scorecard
 from .repomap import build
 from .spawn import git
@@ -9,12 +9,15 @@ TESTS_GREEN = ROOT / ".claude" / "hooks" / "tests-green.sh"
 
 
 def _diff_hash(target, wt):
-    """Hash the patch (including its stat) relative to the common base, so a clean rebase preserves approval."""
-    stat = git("diff", "--stat", f"{target}...HEAD", cwd=wt, check=False)
+    """Return a context-insensitive identity for the patch relative to the common base."""
     content = git("diff", "--binary", f"{target}...HEAD", cwd=wt, check=False)
-    if stat.returncode or content.returncode:
+    if content.returncode:
         return None
-    return hashlib.sha256((stat.stdout + "\0" + content.stdout).encode()).hexdigest()
+    patch_id = subprocess.run(["git", "patch-id", "--stable"], cwd=wt, input=content.stdout,
+                              capture_output=True, text=True)
+    if patch_id.returncode:
+        return None
+    return patch_id.stdout.strip() or "empty-diff"
 
 
 def _can_refresh_repomap(root, refresh_repomap):
@@ -34,7 +37,7 @@ def merge(task_id, target=None, *, refresh_repomap=True):
         reviewed = (t.get("pipeline") or {}).get("reviewed_sha")
         before_diff = _diff_hash(target, wt) if reviewed else None
         if reviewed and before_diff is None:
-            reason = "diff_unavailable: git diff --stat/--binary failed before rebase"
+            reason = "diff_unavailable: git diff --binary or git patch-id --stable failed before rebase"
             bus.update(task_id, status="failed", reason=reason)
             return {"status": "failed", "reason": reason}
         r = git("rebase", target, cwd=wt, check=False)
@@ -46,7 +49,7 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             return {"status": "conflict", "files": conflicts, "hunks": hunks}
         after_diff = _diff_hash(target, wt) if reviewed else None
         if reviewed and after_diff is None:
-            reason = "diff_unavailable: git diff --stat/--binary failed after rebase"
+            reason = "diff_unavailable: git diff --binary or git patch-id --stable failed after rebase"
             bus.update(task_id, status="failed", reason=reason)
             return {"status": "failed", "reason": reason}
         if reviewed and before_diff != after_diff:
