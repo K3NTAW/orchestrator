@@ -294,6 +294,30 @@ class Bus(BusSandbox):
             bus.update(b["id"], depends_on=[])
         self.assertEqual(bus.dependents(a["id"]), [b])
 
+    def test_fix_round_drops_own_parent_from_depends_on(self):
+        parent = bus.create_task("Parent", "spec", ["ok"], ["src/**"], role="execute")
+        other = bus.create_task("Other", "spec", ["ok"], ["src/**"], role="execute")
+        fix = bus.create_task("Fix", "spec", ["ok"], ["src/**"], role="execute",
+                              constraints={"fix_round_for": parent["id"]},
+                              depends_on=[parent["id"], other["id"]])
+
+        self.assertEqual(fix["depends_on"], [other["id"]])
+        self.assertFalse(bus.ready(fix))
+        bus.update(other["id"], merged_into="goal/x", sha="abc")
+        self.assertTrue(bus.ready(fix))
+        events = [event for event in bus.events() if event["task"] == fix["id"]]
+        self.assertEqual(events[-1]["kind"], "depends_on_normalized")
+        self.assertEqual(events[-1]["data"], {"dropped": parent["id"]})
+
+    def test_non_fix_round_depends_on_unchanged(self):
+        dependency = bus.create_task("Dependency", "spec", ["ok"], ["src/**"])
+        task = bus.create_task("Normal", "spec", ["ok"], ["src/**"],
+                               depends_on=[dependency["id"]])
+
+        self.assertEqual(task["depends_on"], [dependency["id"]])
+        self.assertEqual([event["kind"] for event in bus.events()
+                          if event["task"] == task["id"]], ["created"])
+
     def test_read_compact_rows(self):
         t = bus.create_task("A" * 200, "spec " * 1000, ["ok"], ["src/**"])  # 200-char title, ~5,000-char spec
         bus.claim(t["id"], "claude:B")
