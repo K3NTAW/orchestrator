@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests._harness import REPO  # noqa: F401 - initializes ORCH_ROOT before orchestrator imports
+import _harness  # noqa: F401 - use the suite's single shared ORCH_ROOT
 from orchestrator import gate
 
 
