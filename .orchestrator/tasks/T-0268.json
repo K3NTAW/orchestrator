@@ -1,0 +1,128 @@
+{
+  "id": "T-0268",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "G6: stage stamps become claimed/completed pairs with a lease \u2014 a crash between a stamp and its action is re-run on a later tick, reconciled against process and git state",
+  "spec": "Scout T-0263 (semantics confirmed on goal/T-0260 by the Planner, line numbers may differ): daemon.stamp() claims pipeline.<stage>_at under bus.locked() before the stage acts and nothing ever clears it, so a crash between stamp and action wedges the task: dispatched_at set but executor never started (recovered only if the task also went running and its pid died), spec_review_at set but no spec_review task created, gated_at set but neither review spawned nor merge run, merged_at set but merge.merge never ran (already_merged() heals only when the branch is already an ancestor). Ranked risk: merged_at, gated_at, spec_review_at, dispatched_at.\nChange daemon.py (keep stamp()'s single lock claim and its field names so old task json stays readable):\n1. stamp(tid, stage, ...) records pipeline.<stage>_at as today (the claim) and the new pipeline.<stage>_lease = now + [daemon].stage_lease_s (pool.toml, default 900). A new complete(tid, stage) sets pipeline.<stage>_done = now under the lock. Each stage calls complete() right after its action succeeds: dispatch after spawn_async is called (the executor thread then owns the task), spec_review after bus.create_task returns, gate after the review task exists or the merge returned, merge_reviewed after merge.merge returns.\n2. tick() runs sweep_leases() first: for every task with a stage whose _at is set, _done unset and lease expired, reconcile before re-running: dispatch: if status running with a live pid or a codex_thread, mark done and skip; else clear the stamp so dispatch() re-runs. spec_review: if a spec_review task with inputs[0] == id exists, mark done; else clear. gate: if a review task with inputs[0] == id exists or already_merged(), mark done; else clear gated_at so gate() re-runs (tests-green is idempotent). merge: if already_merged(), mark done and set merged_into; else clear merged_at so merge_reviewed() retries once more (a second expiry holds the task with hold_reason 'merge lease expired twice').\n3. Hold stamps (review_held_at, spec_review_held_at) stay terminal as today. notify() once per re-run.\n4. pool.toml [daemon] stage_lease_s = 900 with a comment; README Pipeline paragraph updated (the sentence that says a crash-and-retry never re-runs a stage becomes: a stage is re-run after its lease expires and reconciliation says it never completed).\n5. Tests in tests/test_daemon.py, one per window, each simulating a crash by making the action raise after the stamp and then advancing time past the lease: test_lease_dispatch_rerun, test_lease_spec_review_rerun, test_lease_gate_rerun, test_lease_merge_retry_then_hold, test_lease_reconciles_already_merged. Keep every existing test green; the harness runs spawn_async synchronously.",
+  "inputs": [
+    "T-0263"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_lease_dispatch_rerun, ::test_lease_spec_review_rerun, ::test_lease_gate_rerun, ::test_lease_merge_retry_then_hold, ::test_lease_reconciles_already_merged pass",
+    "every existing test_daemon test passes unchanged in intent",
+    "pool.toml documents [daemon].stage_lease_s and README describes the lease and reconciliation",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789844765.4872372,
+      "pipeline": {
+        "spec_review_at": 1789844765.4872031
+      }
+    },
+    {
+      "ts": 1789844981.129714,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "sweep_leases isn't scoped to skip already-'held' tasks. A real merge conflict leaves merged_at stamped and status='held' with a descriptive hold_reason (line 662); no complete() ever fires for that path. Once its lease expires, sweep_leases' merge-branch treats it as a crashed stamp: clears merged_at for a 'retry' (inert since merge_reviewed() only scans status='done'), then on the next expiry overwrites the real hold_reason with the generic 'merge lease expired twice', destroying the Planner's only record of why it's actually held.",
+          "severity": "high",
+          "line": 662
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec protects review_held_at/spec_review_held_at as 'terminal' but says nothing about gate()'s own three held branches (worktree missing L496, dirty scope L501, gate_red L509), which reuse the same 'gated_at' field as the real gate claim -- they can't be told apart by field name. No complete() is specified for them, so their lease will eventually expire and sweep_leases' gate-branch (no review task, not already_merged) silently clears gated_at on a task that is correctly held for a human, not crashed.",
+          "severity": "med",
+          "line": 496
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Item 1's generic '<stage>_lease'/'<stage>_done' notation and item 2's bare stage keys (dispatch/spec_review/gate/merge) don't match the actual `stage` strings callers pass to stamp() today (dispatched_at, spec_review_at, gated_at, merged_at). No mapping is defined, so field names for the lease/done markers (e.g. gated_at_lease vs gate_lease/gate_done) are left for the implementer to invent, risking a stamp()/sweep_leases mismatch.",
+          "severity": "med",
+          "line": 98
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "'a second expiry holds the task ... merge lease expired twice' needs a counter or second timestamp to distinguish first vs second expiry, but item 1 only adds _lease/_done fields -- no field is specified to hold this count, and its overlap with the existing tests_red retry path (which already pops merged_at, line 661) is undefined.",
+          "severity": "med",
+          "line": 653
+        }
+      ]
+    },
+    {
+      "ts": 1789845006.554658,
+      "pipeline": {
+        "spec_review_at": 1789844765.4872031,
+        "spec_review_held_at": 1789845006.554614
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789845254.114608,
+      "reason": "superseded by G6 v2 T-0281 after spec review T-0269; mark done+merged_into when T-0281 merges so T-0272 (G7) becomes ready"
+    },
+    {
+      "ts": 1789847297.820727,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "merged_via": "superseded by G6 v4 T-0290 6105987",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789844765.4872031,
+    "spec_review_held_at": 1789845006.554614
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "sweep_leases isn't scoped to skip already-'held' tasks. A real merge conflict leaves merged_at stamped and status='held' with a descriptive hold_reason (line 662); no complete() ever fires for that path. Once its lease expires, sweep_leases' merge-branch treats it as a crashed stamp: clears merged_at for a 'retry' (inert since merge_reviewed() only scans status='done'), then on the next expiry overwrites the real hold_reason with the generic 'merge lease expired twice', destroying the Planner's only record of why it's actually held.",
+      "severity": "high",
+      "line": 662
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec protects review_held_at/spec_review_held_at as 'terminal' but says nothing about gate()'s own three held branches (worktree missing L496, dirty scope L501, gate_red L509), which reuse the same 'gated_at' field as the real gate claim -- they can't be told apart by field name. No complete() is specified for them, so their lease will eventually expire and sweep_leases' gate-branch (no review task, not already_merged) silently clears gated_at on a task that is correctly held for a human, not crashed.",
+      "severity": "med",
+      "line": 496
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Item 1's generic '<stage>_lease'/'<stage>_done' notation and item 2's bare stage keys (dispatch/spec_review/gate/merge) don't match the actual `stage` strings callers pass to stamp() today (dispatched_at, spec_review_at, gated_at, merged_at). No mapping is defined, so field names for the lease/done markers (e.g. gated_at_lease vs gate_lease/gate_done) are left for the implementer to invent, risking a stamp()/sweep_leases mismatch.",
+      "severity": "med",
+      "line": 98
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "'a second expiry holds the task ... merge lease expired twice' needs a counter or second timestamp to distinguish first vs second expiry, but item 1 only adds _lease/_done fields -- no field is specified to hold this count, and its overlap with the existing tests_red retry path (which already pops merged_at, line 661) is undefined.",
+      "severity": "med",
+      "line": 653
+    }
+  ],
+  "hold_reason": null,
+  "reason": "superseded by G6 v2 T-0281 after spec review T-0269; mark done+merged_into when T-0281 merges so T-0272 (G7) becomes ready",
+  "merged_into": "goal/T-0260",
+  "merged_via": "superseded by G6 v4 T-0290 6105987"
+}

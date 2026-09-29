@@ -590,3 +590,22 @@ type: decision · goal: config · provenance: repo
 - Local commit 147cbb2 ("Planner state after PR 25 ... pool config") had committed an older live pool.toml, dropping 65 lines PR 25/26 added: [cache], memory HOT/packet settings, cache_mode keys, legacy_evidence_chars, [secrets].env_mode/env_passthrough, [harness], [contracts], [steering]. The daemon ran those features on code defaults.
 - Rebuilt from 737c7a5's pool.toml with every live value applied on top (18 overrides: window cap, budgets, B affinity, planner autonomous off, active modes, [models].opus = claude-opus-5-5); no live key dropped; restored sections stay shadow as shipped.
 outcome: revert path: restore .orchestrator/pool.toml.bak-20260923-reconcile (the pre-reconcile live file) or git revert this commit
+
+## 2026-09-24 GOAL T-1375 pipeline follow-ups: failed spec reviews retried; Claude dispatch requeues at no-headroom or worker cap
+type: decision · goal: T-1375 · provenance: repo
+- Merged into goal/T-1375 (goal gate tests-green OK 1517 at 0951311): T-1379 (daemon retries a spec review whose children all failed, up to [daemon].respawn_max, then holds spec_review_failed), T-1380 (_exhausted requeues with hold_note claude_capacity when no account has headroom or running Claude workers reach max_parallel_claude_workers; policy holds unchanged). Replaces the parked S2b scheduler accounting with a dispatch-time cap.
+- First attempts T-1376/T-1377 were built on main while PR 28 had turned it red (committed live pool.toml); PR 29 restored shipped defaults and the work landed by cherry-pick.
+outcome: revert path: git revert -m 1 <PR merge sha> on main
+
+## 2026-09-24 GOAL T-1383 pipeline friction fixes: fix rounds drop their own parent from depends_on; merge compares patch-ids across rebase
+type: decision · goal: T-1383 · provenance: repo
+- Merged into goal/T-1383 (goal gate tests-green OK 1521 at 024fbf1): T-1384 (bus.create_task normalizes depends_on for fix rounds, records a depends_on_normalized event), T-1385 (merge._diff_hash uses git patch-id --stable, so a clean rebase that only shifts context no longer holds a reviewed task).
+- Motivated by luna-inbox M1: four deadlocked fix rounds (T-0051, T-0052, T-0063, T-0064) and two context-only rebase holds (T-0047, T-0057), each unblocked by hand.
+- T-1384/T-1385 first sat queued ~20 min with dispatched_at_done and no claim (dispatch result dropped; suspected second daemon thread in the unreconnected MCP server); clearing dispatched_at re-dispatched them.
+outcome: revert path: git revert -m 1 <PR merge sha> on main
+
+## 2026-09-24 GOAL T-1388 bus uses one sqlite connection per thread; read() skips unreadable rows
+type: decision · goal: T-1388 · provenance: repo
+- Merged into goal/T-1388 (goal gate tests-green OK 1524 at 704ac81): T-1389 (bus.db() keeps connections in a threading.local keyed by path; read() skips rows with a non-str/empty id or a missing task file and logs one stderr line).
+- Cause: worker threads in the luna-inbox daemon died with KeyError('') and KeyError(None) from bus.read -> get(r[0]) while the table never held such rows; the single shared connection (check_same_thread=False) let concurrent statements interleave.
+outcome: revert path: git revert -m 1 <PR merge sha> on main

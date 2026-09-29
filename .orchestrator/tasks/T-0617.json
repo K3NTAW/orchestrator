@@ -1,0 +1,196 @@
+{
+  "id": "T-0617",
+  "created_at": 1789975982.4467258,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: R9: orchestrator/allocation.py \u2014 critical-path-aware executor allocation by expected value over accepted cost, first-pass success and latency, with hard eligibility and evidence thresholds (AP P16)",
+  "spec": "Why: pool.pick_executor (orchestrator/pool.py:538-559) picks the cheapest proven-safe executor by class economics and ignores scheduling importance; AP P16 / brief P11 want executor choice that weighs expected accepted-task cost, first-pass success, fix-round cost, duration and critical-path importance, never \"critical path = strongest model\".\nWhat: new pure module orchestrator/allocation.py; the hook into executor.start/pool.pick_executor is a later integration task.\n- cfg [allocation]: mode off|shadow|active (default shadow), min_samples 5, latency_weight_usd_per_hour 2.0, critical_factor 1.0, non_critical_factor 0.25.\n- evidence_for(executor_ids, task_class, *, economics=None, root=STATE) -> {id: {\"cost_to_accepted_usd\", \"first_pass_p\" (1 - fix_round_probability), \"fix_round_cost_usd\", \"n\"}} from scorecard.executor_economics rows (keys as produced there; missing -> None) plus scorecard.class_success/expected_cost fallbacks.\n- choose(task, eligible_ids, *, baseline, priority, ready_priorities, evidence, durations=None, snapshot=None, cfg=None) -> {\"executor\", \"mode\", \"reason\", \"candidates\": [{id, score_usd, cost_to_accepted_usd, first_pass_p, est_duration_s, n, measured}], \"rejected\": {id: reason}, \"baseline\"}. Score per measured candidate = cost_to_accepted_usd + latency_weight * est_duration_s/3600 * factor, factor = critical_factor when priority['critical_path_s'] equals the max over ready_priorities else non_critical_factor; est_duration_s from durations (per executor when available) else critical_path.est_duration_s. Candidate counted measured only when n >= min_samples; if fewer than two measured candidates -> executor = baseline, reason \"sparse_evidence\". Ties within 5 percent -> the cheaper cost_to_accepted wins, then baseline, then id. Never returns an id outside eligible_ids (raises ValueError if baseline is not eligible and eligible_ids is empty -> returns None). mode off -> baseline with reason mode_off; shadow -> executor = baseline, \"would_pick\" = EV choice; active -> executor = EV choice.\n- record(task_id, result) -> decision_log.record(kind=\"allocation\", subject=task_id, candidates=ids, hard_constraints=[\"eligibility\", \"capacity\", \"budget\"], deterministic={\"baseline\": baseline}, historical=evidence, selected=result[\"executor\"], rejected=result[\"rejected\"], reason, n=min n, mode).",
+  "inputs": [
+    "T-0578"
+  ],
+  "acceptance": [
+    "tests/test_allocation.py::test_cheap_executor_preferred_when_outcomes_equivalent \u2014 two measured executors with equal first-pass and duration but costs 0.5 and 1.5 USD: active mode picks the cheaper one",
+    "tests/test_allocation.py::test_stronger_executor_only_when_downstream_value_justifies \u2014 on a critical-path task the executor with first-pass 0.9, duration 600 s and cost 1.2 beats first-pass 0.4, duration 2400 s, cost 0.8; on a non-critical task with non_critical_factor the cheaper one wins",
+    "tests/test_allocation.py::test_hard_eligibility_always_wins \u2014 the best-scoring executor absent from eligible_ids is never returned; empty eligible_ids returns None",
+    "tests/test_allocation.py::test_sparse_evidence_falls_back_to_baseline \u2014 only one candidate meets min_samples: executor is baseline with reason sparse_evidence",
+    "tests/test_allocation.py::test_modes_and_decision_row \u2014 off returns baseline with mode_off; shadow returns baseline and would_pick; record writes an allocation decision row with candidates, selected and rejected"
+  ],
+  "scope": [
+    "orchestrator/allocation.py",
+    "tests/test_allocation.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0617",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/allocation.py",
+        "issue": "evidence_for's primary source is 'scorecard.executor_economics rows' but the spec never pins which `by=` grouping to call it with. executor_economics(by=\"executor\") (the shape implied by 'keys as produced there' -> {id: {...}}) aggregates cost_to_accepted/fix_round_probability across ALL task classes, silently discarding the task_class argument evidence_for is supposed to take. by=\"class\" would return the correct (executor, task_class) tuple-keyed rows but doesn't match the flat {id: ...} return shape the spec describes. None of the five acceptance tests exercise evidence_for() at all (they all hand-feed `evidence` directly to choose()/record()), so a class-blind implementation would ship and pass every test while quietly cross-contaminating cost/first-pass evidence between unrelated task classes -- exactly the kind of routing bug this module exists to prevent.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/allocation.py",
+        "issue": "choose()'s critical-path factor selection depends on `priority['critical_path_s']` and `ready_priorities`, but the spec never states whether `ready_priorities` is a list of raw critical_path_s floats or a list of priority dicts (each presumably also needing ['critical_path_s'] indexing). Since this module is pure and its only tests supply synthetic evidence/priority fixtures, an implementer and a later integrator (the deferred pool.pick_executor hook) can easily diverge on this shape with no test to catch it before wiring happens.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/allocation.py",
+        "issue": "`durations` is described only as 'per executor when available' with no key shape given. duration.py's own estimate()/durations_for() have no notion of 'the same task under a hypothetical different executor' -- they estimate off task.get('executor'), a fixed field -- so there is no existing helper this spec's phrase maps onto. Leaving the shape unstated risks an implementation (e.g. flat {executor_id: seconds}) that the later integration task can't actually populate from duration.py without new glue that isn't in either spec.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/allocation.py",
+        "issue": "Spec directs first_pass_p = 1 - fix_round_probability rather than executor_economics' own first_pass_green_rate, which already measures the same concept more precisely (requires green-stamp + zero gate reds) but over a possibly smaller defined-count. The tradeoff (wider sample coverage vs. precision) is never stated as intentional, so a reviewer is likely to flag the substitution as a bug and request it be swapped to first_pass_green_rate, contradicting the spec.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "State explicitly which scorecard.executor_economics `by=` grouping evidence_for must call (recommend by=\"class\", keyed by (executor_id, task_class) tuples) and how missing tuple keys map to None, so cost/first-pass figures are always scoped to the task's own class.",
+      "Add at least one acceptance test for evidence_for() itself (e.g. against a scratch STATE root with synthesized tasks/runs fixtures) so the task_class-scoping behavior is actually verified, not just choose()'s consumption of hand-fed evidence.",
+      "Pin the exact type of `ready_priorities` (e.g. 'list[float] of each ready task's critical_path_s') and of `durations` (e.g. 'dict[executor_id, float] of this task's estimated seconds under that executor, precomputed by the caller') so the pure module's contract is unambiguous ahead of the later pool.pick_executor integration task.",
+      "Note explicitly that first_pass_p is deliberately 1 - fix_round_probability (not first_pass_green_rate) because it has broader sample coverage, so this isn't 'corrected' back during review."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789975988.109546,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0617",
+      "claimed_at": 1789975988.091239
+    },
+    {
+      "ts": 1789975988.134816,
+      "account": "B"
+    },
+    {
+      "ts": 1789975994.386215,
+      "pid": 20781,
+      "account": "B"
+    },
+    {
+      "ts": 1789976103.265158,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/allocation.py",
+            "issue": "evidence_for's primary source is 'scorecard.executor_economics rows' but the spec never pins which `by=` grouping to call it with. executor_economics(by=\"executor\") (the shape implied by 'keys as produced there' -> {id: {...}}) aggregates cost_to_accepted/fix_round_probability across ALL task classes, silently discarding the task_class argument evidence_for is supposed to take. by=\"class\" would return the correct (executor, task_class) tuple-keyed rows but doesn't match the flat {id: ...} return shape the spec describes. None of the five acceptance tests exercise evidence_for() at all (they all hand-feed `evidence` directly to choose()/record()), so a class-blind implementation would ship and pass every test while quietly cross-contaminating cost/first-pass evidence between unrelated task classes -- exactly the kind of routing bug this module exists to prevent.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/allocation.py",
+            "issue": "choose()'s critical-path factor selection depends on `priority['critical_path_s']` and `ready_priorities`, but the spec never states whether `ready_priorities` is a list of raw critical_path_s floats or a list of priority dicts (each presumably also needing ['critical_path_s'] indexing). Since this module is pure and its only tests supply synthetic evidence/priority fixtures, an implementer and a later integrator (the deferred pool.pick_executor hook) can easily diverge on this shape with no test to catch it before wiring happens.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/allocation.py",
+            "issue": "`durations` is described only as 'per executor when available' with no key shape given. duration.py's own estimate()/durations_for() have no notion of 'the same task under a hypothetical different executor' -- they estimate off task.get('executor'), a fixed field -- so there is no existing helper this spec's phrase maps onto. Leaving the shape unstated risks an implementation (e.g. flat {executor_id: seconds}) that the later integration task can't actually populate from duration.py without new glue that isn't in either spec.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/allocation.py",
+            "issue": "Spec directs first_pass_p = 1 - fix_round_probability rather than executor_economics' own first_pass_green_rate, which already measures the same concept more precisely (requires green-stamp + zero gate reds) but over a possibly smaller defined-count. The tradeoff (wider sample coverage vs. precision) is never stated as intentional, so a reviewer is likely to flag the substitution as a bug and request it be swapped to first_pass_green_rate, contradicting the spec.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "State explicitly which scorecard.executor_economics `by=` grouping evidence_for must call (recommend by=\"class\", keyed by (executor_id, task_class) tuples) and how missing tuple keys map to None, so cost/first-pass figures are always scoped to the task's own class.",
+          "Add at least one acceptance test for evidence_for() itself (e.g. against a scratch STATE root with synthesized tasks/runs fixtures) so the task_class-scoping behavior is actually verified, not just choose()'s consumption of hand-fed evidence.",
+          "Pin the exact type of `ready_priorities` (e.g. 'list[float] of each ready task's critical_path_s') and of `durations` (e.g. 'dict[executor_id, float] of this task's estimated seconds under that executor, precomputed by the caller') so the pure module's contract is unambiguous ahead of the later pool.pick_executor integration task.",
+          "Note explicitly that first_pass_p is deliberately 1 - fix_round_probability (not first_pass_green_rate) because it has broader sample coverage, so this isn't 'corrected' back during review."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789976103.267144,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/allocation.py",
+          "issue": "evidence_for's primary source is 'scorecard.executor_economics rows' but the spec never pins which `by=` grouping to call it with. executor_economics(by=\"executor\") (the shape implied by 'keys as produced there' -> {id: {...}}) aggregates cost_to_accepted/fix_round_probability across ALL task classes, silently discarding the task_class argument evidence_for is supposed to take. by=\"class\" would return the correct (executor, task_class) tuple-keyed rows but doesn't match the flat {id: ...} return shape the spec describes. None of the five acceptance tests exercise evidence_for() at all (they all hand-feed `evidence` directly to choose()/record()), so a class-blind implementation would ship and pass every test while quietly cross-contaminating cost/first-pass evidence between unrelated task classes -- exactly the kind of routing bug this module exists to prevent.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/allocation.py",
+          "issue": "choose()'s critical-path factor selection depends on `priority['critical_path_s']` and `ready_priorities`, but the spec never states whether `ready_priorities` is a list of raw critical_path_s floats or a list of priority dicts (each presumably also needing ['critical_path_s'] indexing). Since this module is pure and its only tests supply synthetic evidence/priority fixtures, an implementer and a later integrator (the deferred pool.pick_executor hook) can easily diverge on this shape with no test to catch it before wiring happens.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/allocation.py",
+          "issue": "`durations` is described only as 'per executor when available' with no key shape given. duration.py's own estimate()/durations_for() have no notion of 'the same task under a hypothetical different executor' -- they estimate off task.get('executor'), a fixed field -- so there is no existing helper this spec's phrase maps onto. Leaving the shape unstated risks an implementation (e.g. flat {executor_id: seconds}) that the later integration task can't actually populate from duration.py without new glue that isn't in either spec.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/allocation.py",
+          "issue": "Spec directs first_pass_p = 1 - fix_round_probability rather than executor_economics' own first_pass_green_rate, which already measures the same concept more precisely (requires green-stamp + zero gate reds) but over a possibly smaller defined-count. The tradeoff (wider sample coverage vs. precision) is never stated as intentional, so a reviewer is likely to flag the substitution as a bug and request it be swapped to first_pass_green_rate, contradicting the spec.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789975988.091239,
+  "account": "B",
+  "pid": 20781,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/allocation.py",
+      "issue": "evidence_for's primary source is 'scorecard.executor_economics rows' but the spec never pins which `by=` grouping to call it with. executor_economics(by=\"executor\") (the shape implied by 'keys as produced there' -> {id: {...}}) aggregates cost_to_accepted/fix_round_probability across ALL task classes, silently discarding the task_class argument evidence_for is supposed to take. by=\"class\" would return the correct (executor, task_class) tuple-keyed rows but doesn't match the flat {id: ...} return shape the spec describes. None of the five acceptance tests exercise evidence_for() at all (they all hand-feed `evidence` directly to choose()/record()), so a class-blind implementation would ship and pass every test while quietly cross-contaminating cost/first-pass evidence between unrelated task classes -- exactly the kind of routing bug this module exists to prevent.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/allocation.py",
+      "issue": "choose()'s critical-path factor selection depends on `priority['critical_path_s']` and `ready_priorities`, but the spec never states whether `ready_priorities` is a list of raw critical_path_s floats or a list of priority dicts (each presumably also needing ['critical_path_s'] indexing). Since this module is pure and its only tests supply synthetic evidence/priority fixtures, an implementer and a later integrator (the deferred pool.pick_executor hook) can easily diverge on this shape with no test to catch it before wiring happens.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/allocation.py",
+      "issue": "`durations` is described only as 'per executor when available' with no key shape given. duration.py's own estimate()/durations_for() have no notion of 'the same task under a hypothetical different executor' -- they estimate off task.get('executor'), a fixed field -- so there is no existing helper this spec's phrase maps onto. Leaving the shape unstated risks an implementation (e.g. flat {executor_id: seconds}) that the later integration task can't actually populate from duration.py without new glue that isn't in either spec.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/allocation.py",
+      "issue": "Spec directs first_pass_p = 1 - fix_round_probability rather than executor_economics' own first_pass_green_rate, which already measures the same concept more precisely (requires green-stamp + zero gate reds) but over a possibly smaller defined-count. The tradeoff (wider sample coverage vs. precision) is never stated as intentional, so a reviewer is likely to flag the substitution as a bug and request it be swapped to first_pass_green_rate, contradicting the spec.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,195 @@
+{
+  "id": "T-0219",
+  "parent": "T-0201",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "spec review: E1: review policy \u2014 no code review by default, one cheap review only for security-touching diffs, spec review stays",
+  "spec": "User decision 2026-09-19: code reviews cost 44-45 percent of the last two goals and the human reviews every PR; keep spec review (from complexity 6) and drop code review except when the merged diff touches a security-sensitive path. Change orchestrator/daemon.py (goal/T-0109 version, after P4 T-0205) and .orchestrator/pool.toml [review]:\n1. pool.toml [review] gains code_review = \"security_paths\" (allowed: never | security_paths | always; always = today's behaviour) and security_paths = [globs]. Default list: orchestrator/serve.py, orchestrator/goals.py, orchestrator/spawn.py, orchestrator/pool.py, orchestrator/install.py, orchestrator/planner_runs.py, orchestrator/jev*.py, .claude/hooks/**, .claude/settings.json, .orchestrator/pool.toml, .orchestrator/protected-paths.txt, .mcp*.json, Dockerfile, docker-compose*.yml, pyproject.toml, uv.lock. Also security_review_tier = \"sonnet\".\n2. gate(): after a green gate compute the task's changed paths (git diff --name-only <merge-base of goal branch>..HEAD in the worktree). With code_review=never or security_paths and no path matching security_paths: merge directly whatever the complexity (reviews_expected returns 0). With a match: open exactly one review on security_review_tier, switched to the other Claude tier when the executor was that same model (never self-review); the review prompt gets the security checklist regardless of complexity. code_review=always keeps the current D1 behaviour untouched. Orphaned results still get exactly one review.\n3. merge_reviewed(): honour reviews_expected == 0 (already merged at gate; nothing to wait for) and 1.\n4. _load_review_cfg() loads the three new keys with type checks (P4 pattern). Stamp pipeline.review_reason = 'none' | 'security_paths:<first match>' | 'always' | 'orphaned' at gate time so the scorecard and handover can show why a review ran.\nTests in tests/test_daemon.py: complexity-5 task with a non-security diff merges with zero review tasks; a diff touching orchestrator/serve.py opens one sonnet review with the checklist; a sonnet-executed security diff gets an opus review; code_review=always reproduces the existing two-review test; orphaned still one review. Keep every existing test green, adjusting only those that assert the old default (state which in the summary).",
+  "inputs": [
+    "T-0210"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_no_review_for_non_security_diff, ::test_one_review_for_security_path, ::test_security_review_never_self_model, ::test_code_review_always_keeps_two_reviews, ::test_orphaned_still_one_review pass",
+    "pool.toml [review] carries code_review, security_paths, security_review_tier with a comment naming the 2026-09-19 decision",
+    "pipeline.review_reason is stamped on every gated task in the tests",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0219",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "tests/test_daemon.py",
+        "issue": "gate() must diff each task's worktree (git diff --name-only <merge-base>..HEAD) once code_review defaults to security_paths, but most existing gate/review tests (test_green_gate_merges_cheap_task_and_reviews_the_rest, test_one_review_only_for_mid_complexity, test_two_reviews_for_high_complexity_merge_waits_for_both, test_gate_review_tier_*, etc.) use worktree=str(TMP), a plain tempdir with no git repo and a parent branch (goal/T-0043) that never exists. The diff call has nothing to resolve against, so these tests break; the spec's claim that only a few tests need 'adjusting for the old default' vastly understates the fixture rework needed (real git repos/commits or explicit code_review='always' overrides for every complexity-ladder test).",
+        "severity": "high",
+        "line": 219
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "No specified behavior when the new diff computation itself fails (non-git worktree, no goal/<parent> branch yet for the first task of a goal, unresolvable merge-base). If a failed diff is treated as 'no security-path match', arbitrary-complexity work merges with zero review purely because a plumbing call errored -- a silent fail-open on an unguarded external git call. reconcile_dead's existing 3-tier merge-base fallback (goal/parent -> origin/main -> main) isn't referenced or reused here.",
+        "severity": "high",
+        "line": 316
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "issue": "Default security_paths list omits orchestrator/daemon.py, merge.py, bus.py, executor.py -- the pipeline this very spec changes -- so a future high-complexity edit to the code that decides whether anything gets reviewed would itself get zero review under the new default.",
+        "severity": "med",
+        "line": 34
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "_load_review_cfg's 'type checks (P4 pattern)' for the three new keys isn't specified to validate the code_review enum itself; an invalid/typo'd value has no defined fallback.",
+        "severity": "low",
+        "line": 23
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify the git-diff fallback chain explicitly: reuse reconcile_dead's goal/parent -> origin/main -> main merge-base resolution, and require holding the task (not merging) when the diff can't be computed.",
+      "Call out that essentially all existing complexity-ladder gate/review tests need real git fixtures (scratch_repo) or an explicit code_review='always' pool override to keep exercising two_reviews_from behavior -- not just a couple of tests.",
+      "Add orchestrator/daemon.py, merge.py, bus.py, executor.py to the default security_paths list, or state explicitly why the pipeline's own code is excluded.",
+      "Define fallback for an unrecognized code_review value (e.g. default to 'security_paths', matching the existing missing-key convention) as part of _load_review_cfg's type checks."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789811483.586557,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0219",
+      "claimed_at": 1789811483.5861871
+    },
+    {
+      "ts": 1789811483.588316,
+      "account": "B"
+    },
+    {
+      "ts": 1789811483.596297,
+      "pid": 50766,
+      "account": "B"
+    },
+    {
+      "ts": 1789811669.460031,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "tests/test_daemon.py",
+            "issue": "gate() must diff each task's worktree (git diff --name-only <merge-base>..HEAD) once code_review defaults to security_paths, but most existing gate/review tests (test_green_gate_merges_cheap_task_and_reviews_the_rest, test_one_review_only_for_mid_complexity, test_two_reviews_for_high_complexity_merge_waits_for_both, test_gate_review_tier_*, etc.) use worktree=str(TMP), a plain tempdir with no git repo and a parent branch (goal/T-0043) that never exists. The diff call has nothing to resolve against, so these tests break; the spec's claim that only a few tests need 'adjusting for the old default' vastly understates the fixture rework needed (real git repos/commits or explicit code_review='always' overrides for every complexity-ladder test).",
+            "severity": "high",
+            "line": 219
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "No specified behavior when the new diff computation itself fails (non-git worktree, no goal/<parent> branch yet for the first task of a goal, unresolvable merge-base). If a failed diff is treated as 'no security-path match', arbitrary-complexity work merges with zero review purely because a plumbing call errored -- a silent fail-open on an unguarded external git call. reconcile_dead's existing 3-tier merge-base fallback (goal/parent -> origin/main -> main) isn't referenced or reused here.",
+            "severity": "high",
+            "line": 316
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "issue": "Default security_paths list omits orchestrator/daemon.py, merge.py, bus.py, executor.py -- the pipeline this very spec changes -- so a future high-complexity edit to the code that decides whether anything gets reviewed would itself get zero review under the new default.",
+            "severity": "med",
+            "line": 34
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "_load_review_cfg's 'type checks (P4 pattern)' for the three new keys isn't specified to validate the code_review enum itself; an invalid/typo'd value has no defined fallback.",
+            "severity": "low",
+            "line": 23
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify the git-diff fallback chain explicitly: reuse reconcile_dead's goal/parent -> origin/main -> main merge-base resolution, and require holding the task (not merging) when the diff can't be computed.",
+          "Call out that essentially all existing complexity-ladder gate/review tests need real git fixtures (scratch_repo) or an explicit code_review='always' pool override to keep exercising two_reviews_from behavior -- not just a couple of tests.",
+          "Add orchestrator/daemon.py, merge.py, bus.py, executor.py to the default security_paths list, or state explicitly why the pipeline's own code is excluded.",
+          "Define fallback for an unrecognized code_review value (e.g. default to 'security_paths', matching the existing missing-key convention) as part of _load_review_cfg's type checks."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789811669.46359,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "gate() must diff each task's worktree (git diff --name-only <merge-base>..HEAD) once code_review defaults to security_paths, but most existing gate/review tests (test_green_gate_merges_cheap_task_and_reviews_the_rest, test_one_review_only_for_mid_complexity, test_two_reviews_for_high_complexity_merge_waits_for_both, test_gate_review_tier_*, etc.) use worktree=str(TMP), a plain tempdir with no git repo and a parent branch (goal/T-0043) that never exists. The diff call has nothing to resolve against, so these tests break; the spec's claim that only a few tests need 'adjusting for the old default' vastly understates the fixture rework needed (real git repos/commits or explicit code_review='always' overrides for every complexity-ladder test).",
+          "severity": "high",
+          "line": 219
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "No specified behavior when the new diff computation itself fails (non-git worktree, no goal/<parent> branch yet for the first task of a goal, unresolvable merge-base). If a failed diff is treated as 'no security-path match', arbitrary-complexity work merges with zero review purely because a plumbing call errored -- a silent fail-open on an unguarded external git call. reconcile_dead's existing 3-tier merge-base fallback (goal/parent -> origin/main -> main) isn't referenced or reused here.",
+          "severity": "high",
+          "line": 316
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Default security_paths list omits orchestrator/daemon.py, merge.py, bus.py, executor.py -- the pipeline this very spec changes -- so a future high-complexity edit to the code that decides whether anything gets reviewed would itself get zero review under the new default.",
+          "severity": "med",
+          "line": 34
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_load_review_cfg's 'type checks (P4 pattern)' for the three new keys isn't specified to validate the code_review enum itself; an invalid/typo'd value has no defined fallback.",
+          "severity": "low",
+          "line": 23
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789811483.5861871,
+  "account": "B",
+  "pid": 50766,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "gate() must diff each task's worktree (git diff --name-only <merge-base>..HEAD) once code_review defaults to security_paths, but most existing gate/review tests (test_green_gate_merges_cheap_task_and_reviews_the_rest, test_one_review_only_for_mid_complexity, test_two_reviews_for_high_complexity_merge_waits_for_both, test_gate_review_tier_*, etc.) use worktree=str(TMP), a plain tempdir with no git repo and a parent branch (goal/T-0043) that never exists. The diff call has nothing to resolve against, so these tests break; the spec's claim that only a few tests need 'adjusting for the old default' vastly understates the fixture rework needed (real git repos/commits or explicit code_review='always' overrides for every complexity-ladder test).",
+      "severity": "high",
+      "line": 219
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "No specified behavior when the new diff computation itself fails (non-git worktree, no goal/<parent> branch yet for the first task of a goal, unresolvable merge-base). If a failed diff is treated as 'no security-path match', arbitrary-complexity work merges with zero review purely because a plumbing call errored -- a silent fail-open on an unguarded external git call. reconcile_dead's existing 3-tier merge-base fallback (goal/parent -> origin/main -> main) isn't referenced or reused here.",
+      "severity": "high",
+      "line": 316
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Default security_paths list omits orchestrator/daemon.py, merge.py, bus.py, executor.py -- the pipeline this very spec changes -- so a future high-complexity edit to the code that decides whether anything gets reviewed would itself get zero review under the new default.",
+      "severity": "med",
+      "line": 34
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_load_review_cfg's 'type checks (P4 pattern)' for the three new keys isn't specified to validate the code_review enum itself; an invalid/typo'd value has no defined fallback.",
+      "severity": "low",
+      "line": 23
+    }
+  ]
+}

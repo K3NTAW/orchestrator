@@ -1,0 +1,82 @@
+{
+  "id": "T-0003",
+  "parent": "T-0001",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 1,
+  "title": "Make Guardrails.test_edit_protected_path worktree-safe",
+  "spec": "Why: tests/test_orchestrator.py:177 asserts that Edit on `REPO / \".claude/settings.json\"` is blocked. REPO is the checkout that contains the test, so in a task worktree (wt/T-xxxx) that path is `wt/T-xxxx/.claude/settings.json`, which is not in .orchestrator/protected-paths.txt (the list names `~/code/orchestrator/.claude/settings.json`). Result: the test passes in the main checkout and fails in every worktree, so the merge queue's tests-green gate fails for every task. Found 2026-09-17 on the first fallback execute run (T-0002).\n\nWhat (1 file): in tests/test_orchestrator.py, class Guardrails.test_edit_protected_path, replace the second assertion's path with the protected entry itself, derived from the list so it stays correct if the repo moves:\n    protected = [l.strip() for l in (REPO / \".orchestrator\" / \"protected-paths.txt\").read_text().splitlines() if l.strip().endswith(\".claude/settings.json\")][0]\n    self.assertEqual(hook(\"guardrails.sh\", {\"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": os.path.expanduser(protected)}}, cwd=REPO).returncode, 2)\nAdd a one-line comment: \"# not REPO-relative: a worktree's .claude/ is not protected; the list names the main checkout\". Keep the other two assertions. Change nothing else.\n\nRun `uv run python -m unittest tests/test_orchestrator.py` (must be run under uv: system python3 is 3.9 and lacks tomllib). Commit on the task branch: \"tests: make guardrails protected-path check worktree-safe\" with a body naming the revert path (git revert this sha).",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 when run inside the task worktree wt/T-0003",
+    "git diff --stat HEAD~1 shows only tests/test_orchestrator.py changed",
+    "the assertion for the protected Edit no longer contains 'REPO / \".claude/settings.json\"'"
+  ],
+  "scope": [
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0003",
+  "codex_thread": null,
+  "result": {
+    "summary": "Summary: fixed `tests/test_orchestrator.py::Guardrails.test_edit_protected_path` \u2014 the second assertion now derives its path from `.orchestrator/protected-paths.txt` instead of hardcoding `REPO / \".claude/settings.json\"`, which was never actually the protected entry (main checkout `~/code/orchestrator/.claude/settings.json` is). Added the requested one-line comment explaining why. All other assertions untouched.\n\nFiles changed: `tests/test_orchestrator.py` (only file, 3 insertions/1 deletion). Committed as `6f6d8cb` on `task/T-0003`.\n\nTest output: `uv run python -m unittest tests/test_orchestrator.py` \u2192 `Ran 21 tests in 5.774s / OK` (no failures). `.claude/hooks/tests-green.sh .` also exits 0.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789655484.92578,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789655484.930235,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0003",
+      "claimed_at": 1789655484.930033
+    },
+    {
+      "ts": 1789655484.940276,
+      "pid": 70209,
+      "account": "B"
+    },
+    {
+      "ts": 1789655560.246434,
+      "status": "done",
+      "result": {
+        "summary": "Summary: fixed `tests/test_orchestrator.py::Guardrails.test_edit_protected_path` \u2014 the second assertion now derives its path from `.orchestrator/protected-paths.txt` instead of hardcoding `REPO / \".claude/settings.json\"`, which was never actually the protected entry (main checkout `~/code/orchestrator/.claude/settings.json` is). Added the requested one-line comment explaining why. All other assertions untouched.\n\nFiles changed: `tests/test_orchestrator.py` (only file, 3 insertions/1 deletion). Committed as `6f6d8cb` on `task/T-0003`.\n\nTest output: `uv run python -m unittest tests/test_orchestrator.py` \u2192 `Ran 21 tests in 5.774s / OK` (no failures). `.claude/hooks/tests-green.sh .` also exits 0.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789655588.2076259,
+      "status": "done",
+      "merged_into": "planner-mode",
+      "sha": "6f6d8cbc25bea2823b99fe481da85232138f91e2"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789655484.930033,
+  "pid": 70209,
+  "account": "B",
+  "merged_into": "planner-mode",
+  "sha": "6f6d8cbc25bea2823b99fe481da85232138f91e2"
+}

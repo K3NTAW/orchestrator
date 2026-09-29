@@ -1,0 +1,321 @@
+{
+  "id": "T-0097",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "spec review: C-O3 v2 headless goal entry point (T-0095)",
+  "spec": "Review the spec of execute task T-0095, the rewrite of T-0080 after your colleague's review T-0081. Check each of T-0081's twelve suggested changes is reflected: --append-system-prompt with file contents (not -file), --strict-mcp-config, no bus.*/Pool()/ROOT for the target (own flock, tomllib, direct json), trust_workspace before Popen, CLAUDE_CODE_OAUTH_TOKEN and [secrets.planner] injection, explicit planner model in pool.toml, always install and commit the scaffold or refuse, goals.json under runs/, mkdir runs, list_goals naming and pid+started_at liveness, goal stop, acceptance lines for the no-launch and ORCH_ROOT cases. Then judge anything new the rewrite introduced (committing scaffold paths inside the target repo on the current branch: is that acceptable for a repo with unrelated uncommitted changes; is `git add` of exactly those paths safe when .gitignore is itself modified). Verdict approve or request_changes with concrete spec edits.",
+  "inputs": [
+    "T-0095"
+  ],
+  "acceptance": [
+    "Verdict posted; each of the twelve prior changes marked reflected or missing",
+    "Any new concern stated with a concrete spec edit"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/cli.py",
+    "tests/test_goals.py",
+    ".orchestrator/prompts/planner.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0097",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "The GOAL task id is created in step (c) but never given to the launched Planner: the prompt is only \"Skill(orchestrate) with the goal: <text>\". The orchestrate skill says \"Complete the GOAL task\" and parents its tasks under a goal it picks itself, so nothing the headless session creates will have parent == goal_id, and nothing will ever post a result to it. status()'s \"child tasks (parent == goal_id)\" is therefore empty for every real run, and \"pr_url if the GOAL result names one\" can never be populated. The feature's whole observability half is dead by construction.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "Step (b) detects the scaffold with `git status --porcelain -- .orchestrator .claude skills ...`, which reports nothing for ignored paths. Target repos commonly gitignore `.orchestrator/` and `.claude` \u2014 tests/_harness.py scratch_repo writes exactly `.orchestrator/\\nwt/\\n.claude\\n`, and install.py only appends its own narrower IGNORE_LINES, it never removes those. Result: status is empty, no commit is made, start() launches happily, and every worktree the target then cuts has no scaffold. A silent no-op in the one place the spec says must refuse. It also makes start_always_installs_and_commits_scaffold vacuous: against a real scratch_repo there is nothing to add, and with subprocess.run patched the assertion only checks the mock's own argv.",
+        "severity": "high",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Pass the GOAL id to the Planner: prompt = \"Skill(orchestrate) with the goal: <text>\\nThe GOAL task is <id>; use it as the parent of every task you create and post the PR url as its result before you finish.\" Add the same instruction to planner.md, and add a test asserting the goal id appears in the launched argv.",
+      "Replace the bare `git status --porcelain -- <paths>` check with one that sees ignored files (`git status --porcelain --ignored -- <paths>` or `git check-ignore`): add with `git add -f` for the scaffold paths, or refuse with {\"launched\": false, \"reason\": \"<path> is gitignored in the target\"}. Add exactly those paths that the status output names, so a missing `skills` or `.mcp.*.json` cannot fail the whole add. Give one named test a real (unpatched) git scratch repo whose .gitignore covers `.orchestrator/`, and assert Popen is not called.",
+      "Define the lookup failures: target pool.toml with no [models].planner -> fall back to a named constant and say so in the return dict, or refuse with a one-line reason; no [[claude_accounts]] row with account_id -> refuse with {\"launched\": false, \"reason\": ...}. Do both checks before install/commit/GOAL-task creation, so a refusal leaves the target untouched.",
+      "stop(): apply the same pid+start-time identity check as status() before signalling, and signal the process group (os.killpg(os.getpgid(pid), SIGTERM)) so the Planner's children die with it. State the behaviour when the pid is alive but fails the identity check (mark stopped, do not signal).",
+      "Reconcile the record status: status() and list_goals() mark a record \"exited\" (with exited_at) when the pid is not alive and the record still says \"running\", under the same flock as the append. `goal list` must not report finished goals as running.",
+      "Do not run the full install on every start. Either run it only when the scaffold is absent or its version marker is stale, or take an explicit --reinstall flag; when it does overwrite files, put the changed paths (install's report) into the commit message body.",
+      "Pin the start-time reader: a module-level helper `_proc_start(pid)` returning an epoch or None, reading /proc/<pid>/stat on linux and `ps -o lstart= -p <pid>` with env LC_ALL=C parsed as \"%a %b %e %H:%M:%S %Y\" in local time on darwin, None elsewhere. Tests patch `_proc_start`; None -> alive None with the note.",
+      "Resolve the config split: read [secrets.planner] from the target's pool.toml with tomllib inside goals.py (same file the account and model come from) rather than calling spawn.secrets_for_role, and inline a three-line `_alive(pid)` instead of importing daemon. Then the grep acceptance criterion actually means what it claims.",
+      "Record the launch: append usd/usage to the target's .orchestrator/runs/*.jsonl when status() finds the final JSON in the log, or state explicitly in the spec and in the return dict that goal-Planner spend is not counted against any account budget.",
+      "Return and store the scaffold commit sha (`commit`) in both the start() dict and the goals.json record, and refuse to commit when HEAD is detached or a rebase/merge is in progress. Add the revert path (`git revert <sha>`) to the printed CLI output.",
+      "Specify failure handling for the GOAL-task subprocess: run it with check=False, and on a non-zero exit or unparseable id return {\"launched\": false, \"reason\": ...} without launching. Have start() catch install's SystemExit and return the same shape, so the library contract is a dict in every non-exceptional case and cli.py owns the exit code.",
+      "Update cli.py's `install` next-step line to point at `orchestrator goal start <target> \"<goal>\"`.",
+      "Add a seventh test (or fold into an existing one) asserting planner.md's Never and Always lists match the corresponding CLAUDE.md sections, so the duplication fails the build when it drifts; adjust acceptance criterion 4 to name that test.",
+      "Pass an os.path.realpath'd repo_path to trust_workspace (and to cwd/ORCH_ROOT), so the trust key matches the cwd claude reports on darwin."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 11756,
+      "trimmed": {
+        "risks": 12
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789734039.754996,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0097",
+      "claimed_at": 1789734039.7545311
+    },
+    {
+      "ts": 1789734039.762995,
+      "pid": 45997,
+      "account": "B"
+    },
+    {
+      "ts": 1789734267.1940491,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "The GOAL task id is created in step (c) but never given to the launched Planner: the prompt is only \"Skill(orchestrate) with the goal: <text>\". The orchestrate skill says \"Complete the GOAL task\" and parents its tasks under a goal it picks itself, so nothing the headless session creates will have parent == goal_id, and nothing will ever post a result to it. status()'s \"child tasks (parent == goal_id)\" is therefore empty for every real run, and \"pr_url if the GOAL result names one\" can never be populated. The feature's whole observability half is dead by construction.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "Step (b) detects the scaffold with `git status --porcelain -- .orchestrator .claude skills ...`, which reports nothing for ignored paths. Target repos commonly gitignore `.orchestrator/` and `.claude` \u2014 tests/_harness.py scratch_repo writes exactly `.orchestrator/\\nwt/\\n.claude\\n`, and install.py only appends its own narrower IGNORE_LINES, it never removes those. Result: status is empty, no commit is made, start() launches happily, and every worktree the target then cuts has no scaffold. A silent no-op in the one place the spec says must refuse. It also makes start_always_installs_and_commits_scaffold vacuous: against a real scratch_repo there is nothing to add, and with subprocess.run patched the assertion only checks the mock's own argv.",
+            "severity": "high",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Pass the GOAL id to the Planner: prompt = \"Skill(orchestrate) with the goal: <text>\\nThe GOAL task is <id>; use it as the parent of every task you create and post the PR url as its result before you finish.\" Add the same instruction to planner.md, and add a test asserting the goal id appears in the launched argv.",
+          "Replace the bare `git status --porcelain -- <paths>` check with one that sees ignored files (`git status --porcelain --ignored -- <paths>` or `git check-ignore`): add with `git add -f` for the scaffold paths, or refuse with {\"launched\": false, \"reason\": \"<path> is gitignored in the target\"}. Add exactly those paths that the status output names, so a missing `skills` or `.mcp.*.json` cannot fail the whole add. Give one named test a real (unpatched) git scratch repo whose .gitignore covers `.orchestrator/`, and assert Popen is not called.",
+          "Define the lookup failures: target pool.toml with no [models].planner -> fall back to a named constant and say so in the return dict, or refuse with a one-line reason; no [[claude_accounts]] row with account_id -> refuse with {\"launched\": false, \"reason\": ...}. Do both checks before install/commit/GOAL-task creation, so a refusal leaves the target untouched.",
+          "stop(): apply the same pid+start-time identity check as status() before signalling, and signal the process group (os.killpg(os.getpgid(pid), SIGTERM)) so the Planner's children die with it. State the behaviour when the pid is alive but fails the identity check (mark stopped, do not signal).",
+          "Reconcile the record status: status() and list_goals() mark a record \"exited\" (with exited_at) when the pid is not alive and the record still says \"running\", under the same flock as the append. `goal list` must not report finished goals as running.",
+          "Do not run the full install on every start. Either run it only when the scaffold is absent or its version marker is stale, or take an explicit --reinstall flag; when it does overwrite files, put the changed paths (install's report) into the commit message body.",
+          "Pin the start-time reader: a module-level helper `_proc_start(pid)` returning an epoch or None, reading /proc/<pid>/stat on linux and `ps -o lstart= -p <pid>` with env LC_ALL=C parsed as \"%a %b %e %H:%M:%S %Y\" in local time on darwin, None elsewhere. Tests patch `_proc_start`; None -> alive None with the note.",
+          "Resolve the config split: read [secrets.planner] from the target's pool.toml with tomllib inside goals.py (same file the account and model come from) rather than calling spawn.secrets_for_role, and inline a three-line `_alive(pid)` instead of importing daemon. Then the grep acceptance criterion actually means what it claims.",
+          "Record the launch: append usd/usage to the target's .orchestrator/runs/*.jsonl when status() finds the final JSON in the log, or state explicitly in the spec and in the return dict that goal-Planner spend is not counted against any account budget.",
+          "Return and store the scaffold commit sha (`commit`) in both the start() dict and the goals.json record, and refuse to commit when HEAD is detached or a rebase/merge is in progress. Add the revert path (`git revert <sha>`) to the printed CLI output.",
+          "Specify failure handling for the GOAL-task subprocess: run it with check=False, and on a non-zero exit or unparseable id return {\"launched\": false, \"reason\": ...} without launching. Have start() catch install's SystemExit and return the same shape, so the library contract is a dict in every non-exceptional case and cli.py owns the exit code.",
+          "Update cli.py's `install` next-step line to point at `orchestrator goal start <target> \"<goal>\"`.",
+          "Add a seventh test (or fold into an existing one) asserting planner.md's Never and Always lists match the corresponding CLAUDE.md sections, so the duplication fails the build when it drifts; adjust acceptance criterion 4 to name that test.",
+          "Pass an os.path.realpath'd repo_path to trust_workspace (and to cwd/ORCH_ROOT), so the trust key matches the cwd claude reports on darwin."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 11756,
+          "trimmed": {
+            "risks": 12
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789734267.198323,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "The GOAL task id is created in step (c) but never given to the launched Planner: the prompt is only \"Skill(orchestrate) with the goal: <text>\". The orchestrate skill says \"Complete the GOAL task\" and parents its tasks under a goal it picks itself, so nothing the headless session creates will have parent == goal_id, and nothing will ever post a result to it. status()'s \"child tasks (parent == goal_id)\" is therefore empty for every real run, and \"pr_url if the GOAL result names one\" can never be populated. The feature's whole observability half is dead by construction.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Step (b) detects the scaffold with `git status --porcelain -- .orchestrator .claude skills ...`, which reports nothing for ignored paths. Target repos commonly gitignore `.orchestrator/` and `.claude` \u2014 tests/_harness.py scratch_repo writes exactly `.orchestrator/\\nwt/\\n.claude\\n`, and install.py only appends its own narrower IGNORE_LINES, it never removes those. Result: status is empty, no commit is made, start() launches happily, and every worktree the target then cuts has no scaffold. A silent no-op in the one place the spec says must refuse. It also makes start_always_installs_and_commits_scaffold vacuous: against a real scratch_repo there is nothing to add, and with subprocess.run patched the assertion only checks the mock's own argv.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Model and account are read from the *target's* pool.toml, but install.py writes pool.toml with create_if_absent (\"kept\" when present). Every already-installed target keeps a pool.toml with no [models].planner and possibly no account row with the requested id, so start() dies on a bare KeyError / StopIteration after it has already committed to the target repo and created the GOAL task. The spec defines no default and no error path for either lookup.",
+          "severity": "high",
+          "line": 129
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "stop() SIGTERMs the recorded pid \"when alive\" using only daemon.alive(pid), without the start-time check the spec carefully specifies for status(). After a reboot or pid wrap that signals an unrelated process. Separately, the Planner is launched with start_new_session=True, so it leads its own process group; SIGTERM to the pid alone leaves its scouts, executors and codex children running and re-parented.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "The goals.json record's status is written \"running\" and only ever changed by an explicit stop(). Nothing reconciles it when the Planner exits normally or crashes, so `goal list` reports every past goal as running forever \u2014 state that never decreases. status() computes planner_alive but is not specified to write it back or to derive a display status from it.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "\"always run install.install(repo_path)\" plus an unconditional commit of the result means every `goal start` overwrites the target's .claude/hooks/**, .orchestrator/prompts/**, .claude/skills/**, skills/**, protected-paths.txt and all .mcp*.json (install uses copy_tree_always/write_always) and then commits the overwrite under a message that names none of it. A target that tuned its own prompts or hooks loses them silently on the next goal.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "The pid start-time check is unimplementable as specified on darwin without more detail: `ps -o lstart= -p` prints locale-dependent month/day names in local time at 1 s granularity, so parsing needs a pinned LC_ALL=C and a local-time->epoch conversion, and the 5 s tolerance interacts with the truncation. The spec also names a test case (\"reused pid with earlier start -> False\") with no seam to inject a start time, so the test can only be written by patching an unspecified internal.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Split source of truth for configuration: models, accounts and limits come from the target's pool.toml (read with tomllib), but spawn.secrets_for_role(\"planner\") internally builds Pool(), which reads this repo's STATE/pool.toml via the process-global ROOT. So the planner's secrets come from a different file than its model and account, and the acceptance criterion \"goals.py contains no reference to orchestrator.bus, Pool or ROOT (grep)\" passes while the coupling is still there through spawn. The same applies to `from .daemon import alive`, which transitively imports bus.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "No accounting for the launched Planner. run_claude records tokens with pool.record and writes a bus.log_run row; the detached goal Planner \u2014 the single largest consumer in a goal \u2014 records nothing, so the chosen account's window/day budget, `orchestrator cost` and the cooldown logic never see it. The --output-format json result (with usage and total_cost_usd) lands in the log file and is thrown away.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "No rollback record for the commit start() makes in someone else's repo. The created sha is neither returned nor written into the goals.json record, so there is no `git revert <sha>` path recorded anywhere (CLAUDE.md rule 11). The spec also does not refuse on a detached HEAD, a mid-rebase/merge state, or a target sitting on main where the commit would land directly.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "The GOAL-task subprocess (`uv run --project ... python -c ...`) has no specified failure handling \u2014 only \"parse the printed id\". If uv is missing, the project env is stale or bus.create_task raises, the parse fails after the target has already been committed to, and the spec does not say whether start() refuses or launches a Planner with no GOAL task. Likewise install.install() raises SystemExit(2) on a non-toplevel path, so start() never returns the {\"launched\": false, ...} shape for that case \u2014 an odd contract for a function the MCP server will later call.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "`install` still prints \"Next: commit the scaffold in the target repo, then start the Planner there with ORCH_ROOT=...\" \u2014 stale the moment `goal start` exists and does both. cli.py is in scope; the spec does not mention updating it.",
+          "severity": "low",
+          "line": 60
+        },
+        {
+          "path": ".orchestrator/prompts/planner.md",
+          "issue": "planner.md is a verbatim copy of CLAUDE.md's Never/Always lists with no mechanism keeping them in sync, and install.py's copy_tree_always pushes this repo's copy into every target on every goal start. The acceptance criterion (\"contains the Never and Always lists\") is only checkable as a substring today and will silently go stale after the first CLAUDE.md edit.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "trust_workspace keys on the string passed in, while claude resolves its cwd: on darwin a target under /var/... (or any symlinked path) is stored as /var/... but looked up as /private/var/..., so the workspace is not actually trusted and project hooks \u2014 including planner-mode.sh, the only thing stopping the headless Planner from editing source under --dangerously-skip-permissions \u2014 do not load. The named test asserts the key the code wrote, so it cannot catch this.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789734039.7545311,
+  "pid": 45997,
+  "account": "B",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "The GOAL task id is created in step (c) but never given to the launched Planner: the prompt is only \"Skill(orchestrate) with the goal: <text>\". The orchestrate skill says \"Complete the GOAL task\" and parents its tasks under a goal it picks itself, so nothing the headless session creates will have parent == goal_id, and nothing will ever post a result to it. status()'s \"child tasks (parent == goal_id)\" is therefore empty for every real run, and \"pr_url if the GOAL result names one\" can never be populated. The feature's whole observability half is dead by construction.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Step (b) detects the scaffold with `git status --porcelain -- .orchestrator .claude skills ...`, which reports nothing for ignored paths. Target repos commonly gitignore `.orchestrator/` and `.claude` \u2014 tests/_harness.py scratch_repo writes exactly `.orchestrator/\\nwt/\\n.claude\\n`, and install.py only appends its own narrower IGNORE_LINES, it never removes those. Result: status is empty, no commit is made, start() launches happily, and every worktree the target then cuts has no scaffold. A silent no-op in the one place the spec says must refuse. It also makes start_always_installs_and_commits_scaffold vacuous: against a real scratch_repo there is nothing to add, and with subprocess.run patched the assertion only checks the mock's own argv.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Model and account are read from the *target's* pool.toml, but install.py writes pool.toml with create_if_absent (\"kept\" when present). Every already-installed target keeps a pool.toml with no [models].planner and possibly no account row with the requested id, so start() dies on a bare KeyError / StopIteration after it has already committed to the target repo and created the GOAL task. The spec defines no default and no error path for either lookup.",
+      "severity": "high",
+      "line": 129
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "stop() SIGTERMs the recorded pid \"when alive\" using only daemon.alive(pid), without the start-time check the spec carefully specifies for status(). After a reboot or pid wrap that signals an unrelated process. Separately, the Planner is launched with start_new_session=True, so it leads its own process group; SIGTERM to the pid alone leaves its scouts, executors and codex children running and re-parented.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "The goals.json record's status is written \"running\" and only ever changed by an explicit stop(). Nothing reconciles it when the Planner exits normally or crashes, so `goal list` reports every past goal as running forever \u2014 state that never decreases. status() computes planner_alive but is not specified to write it back or to derive a display status from it.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "\"always run install.install(repo_path)\" plus an unconditional commit of the result means every `goal start` overwrites the target's .claude/hooks/**, .orchestrator/prompts/**, .claude/skills/**, skills/**, protected-paths.txt and all .mcp*.json (install uses copy_tree_always/write_always) and then commits the overwrite under a message that names none of it. A target that tuned its own prompts or hooks loses them silently on the next goal.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "The pid start-time check is unimplementable as specified on darwin without more detail: `ps -o lstart= -p` prints locale-dependent month/day names in local time at 1 s granularity, so parsing needs a pinned LC_ALL=C and a local-time->epoch conversion, and the 5 s tolerance interacts with the truncation. The spec also names a test case (\"reused pid with earlier start -> False\") with no seam to inject a start time, so the test can only be written by patching an unspecified internal.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Split source of truth for configuration: models, accounts and limits come from the target's pool.toml (read with tomllib), but spawn.secrets_for_role(\"planner\") internally builds Pool(), which reads this repo's STATE/pool.toml via the process-global ROOT. So the planner's secrets come from a different file than its model and account, and the acceptance criterion \"goals.py contains no reference to orchestrator.bus, Pool or ROOT (grep)\" passes while the coupling is still there through spawn. The same applies to `from .daemon import alive`, which transitively imports bus.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "No accounting for the launched Planner. run_claude records tokens with pool.record and writes a bus.log_run row; the detached goal Planner \u2014 the single largest consumer in a goal \u2014 records nothing, so the chosen account's window/day budget, `orchestrator cost` and the cooldown logic never see it. The --output-format json result (with usage and total_cost_usd) lands in the log file and is thrown away.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "No rollback record for the commit start() makes in someone else's repo. The created sha is neither returned nor written into the goals.json record, so there is no `git revert <sha>` path recorded anywhere (CLAUDE.md rule 11). The spec also does not refuse on a detached HEAD, a mid-rebase/merge state, or a target sitting on main where the commit would land directly.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "The GOAL-task subprocess (`uv run --project ... python -c ...`) has no specified failure handling \u2014 only \"parse the printed id\". If uv is missing, the project env is stale or bus.create_task raises, the parse fails after the target has already been committed to, and the spec does not say whether start() refuses or launches a Planner with no GOAL task. Likewise install.install() raises SystemExit(2) on a non-toplevel path, so start() never returns the {\"launched\": false, ...} shape for that case \u2014 an odd contract for a function the MCP server will later call.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "`install` still prints \"Next: commit the scaffold in the target repo, then start the Planner there with ORCH_ROOT=...\" \u2014 stale the moment `goal start` exists and does both. cli.py is in scope; the spec does not mention updating it.",
+      "severity": "low",
+      "line": 60
+    },
+    {
+      "path": ".orchestrator/prompts/planner.md",
+      "issue": "planner.md is a verbatim copy of CLAUDE.md's Never/Always lists with no mechanism keeping them in sync, and install.py's copy_tree_always pushes this repo's copy into every target on every goal start. The acceptance criterion (\"contains the Never and Always lists\") is only checkable as a substring today and will silently go stale after the first CLAUDE.md edit.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "trust_workspace keys on the string passed in, while claude resolves its cwd: on darwin a target under /var/... (or any symlinked path) is stored as /var/... but looked up as /private/var/..., so the workspace is not actually trusted and project hooks \u2014 including planner-mode.sh, the only thing stopping the headless Planner from editing source under --dangerously-skip-permissions \u2014 do not load. The named test asserts the key the code wrote, so it cannot catch this.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,179 @@
+{
+  "id": "T-0848",
+  "created_at": 1790104405.939467,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "Active path 4: read suppression in the Jev gate returns a structured \"already read\" reply for unchanged repeated reads and identical searches, bounded and reversible",
+  "spec": "Today (T-0809) read_economy classifies Read/Grep/Glob calls in the Jev gate and logs would_suppress without acting. Build the active branch behind a new [jev] read_suppression = \"off\" | \"shadow\" | \"active\" key (default shadow; add to promotion.FEATURES as read_suppression with an evidence loader over gate.jsonl). Facts: the gate is a PreToolUse hook (.claude/hooks/jev-gate.sh \u2192 jev_gate.run) that can deny a call with a message; guardrails.sh remains the only destructive-command blocker; block_repeats stays as is.\nDo:\n1. Active: for kind repeated_read_unchanged (same path, mtime and size unchanged) and repeated_search (identical pattern+path+flags), deny the call with a structured reply: \"already read at call N in this session; file unchanged (mtime, size); use your earlier result or pass a different range\". A narrower_search or a read with a different offset/limit is never suppressed. At most [jev] max_suppressions_per_session (default 20) and never twice in a row for the same path (the second identical attempt is allowed and logged \"suppression_override\"), so a worker can always recover.\n2. Every suppression records an action_gate decision row with selected \"suppress\" and the tokens_estimate; read_economy.summary adds suppressed, overrides, and the false-suppression proxy computed from overrides + later edits of the path.\n3. Safety: refuse active (fall back to shadow with one notify line) when read_economy.summary over the last 7 days shows a false-suppression proxy above [jev] max_false_suppression (default 0.02) or fewer than 50 would_suppress rows.\nTests: tests/test_jev_gate.py::test_active_suppresses_unchanged_repeated_read_with_structured_reply, ::test_active_allows_second_identical_attempt_and_logs_override, ::test_active_never_suppresses_narrower_search_or_different_range, ::test_active_refused_without_evidence; tests/test_read_economy.py::test_summary_counts_suppressions_and_overrides; docs/context-economy/09-read-economy.md Active section with the revert path.\nDo not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_active_suppresses_unchanged_repeated_read_with_structured_reply passes",
+    "tests/test_jev_gate.py::test_active_allows_second_identical_attempt_and_logs_override passes",
+    "tests/test_jev_gate.py::test_active_never_suppresses_narrower_search_or_different_range passes",
+    "tests/test_jev_gate.py::test_active_refused_without_evidence passes",
+    "tests/test_read_economy.py::test_summary_counts_suppressions_and_overrides passes",
+    "pool.toml has [jev] read_suppression and promotion.FEATURES has read_suppression; docs/context-economy/09-read-economy.md has an Active section; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/jev_gate.py",
+    "orchestrator/read_economy.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_gate.py",
+    "tests/test_read_economy.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/09-read-economy.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790104434.923102,
+      "pipeline": {
+        "first_ready_at": 1790104434.922936
+      }
+    },
+    {
+      "ts": 1790104435.1233568,
+      "pipeline": {
+        "first_ready_at": 1790104434.922936,
+        "spec_review_at": 1790104435.123188,
+        "spec_review_at_lease": 1790105335.123188
+      }
+    },
+    {
+      "ts": 1790104435.131627,
+      "pipeline": {
+        "first_ready_at": 1790104434.922936,
+        "spec_review_at": 1790104435.123188,
+        "spec_review_at_lease": 1790105335.123188,
+        "spec_review_at_done": 1790104435.131213
+      }
+    },
+    {
+      "ts": 1790104566.402957,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/read_economy.py",
+          "issue": "classify() only compares path+mtime+size for Read calls, never offset/limit, so a legitimate different-range read on the same unchanged file is indistinguishable from an exact repeat. The active gate keyed on kind alone would wrongly deny it, directly violating the spec's own 'different offset/limit is never suppressed' rule.",
+          "severity": "high",
+          "line": 88
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "Spec doesn't say how read_suppression=active interacts with the existing gate_mode state machine. Today deterministic repeats bypass gate_mode entirely (always allowed at line 415-416), and every other deny path requires gate_mode=='block'. Production pool.toml ships gate_mode='sample', so if active suppression is wired the same way as existing deny paths it will never fire in production; if it's wired independent of gate_mode that's an undocumented new precedent.",
+          "severity": "high",
+          "line": 415
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "The required deny message cites 'call N' but no existing state tracks a stable index for the earlier matching call: _history() is an unindexed 20-call ring buffer, and _record_call()'s call_index is a counter for the current call, not the prior one being referenced.",
+          "severity": "med",
+          "line": 306
+        },
+        {
+          "path": "orchestrator/read_economy.py",
+          "issue": "summary() has no time filter and buckets only by role/task_class with row overlap between groups; the safety check needs a single 7-day false-suppression proxy and would_suppress count, which isn't derivable from the current output without double-counting.",
+          "severity": "med",
+          "line": 147
+        }
+      ]
+    },
+    {
+      "ts": 1790104574.0716548,
+      "pipeline": {
+        "first_ready_at": 1790104434.922936,
+        "spec_review_at": 1790104435.123188,
+        "spec_review_at_lease": 1790105335.123188,
+        "spec_review_at_done": 1790104435.131213,
+        "spec_review_held_at": 1790104574.071611
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790104575.102546,
+      "pipeline": {
+        "first_ready_at": 1790104434.922936,
+        "spec_review_at": 1790104435.123188,
+        "spec_review_at_lease": 1790105335.123188,
+        "spec_review_at_done": 1790104435.131213,
+        "spec_review_held_at": 1790104574.071611,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790104575.404493,
+      "pipeline": {
+        "first_ready_at": 1790104434.922936,
+        "spec_review_at": 1790104435.123188,
+        "spec_review_at_lease": 1790105335.123188,
+        "spec_review_at_done": 1790104435.131213,
+        "spec_review_held_at": 1790104574.071611,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790104574.0716548": true
+        }
+      }
+    },
+    {
+      "ts": 1790104632.29498,
+      "status": "failed",
+      "reason": "superseded 22:45 by T-0853 (spec v2 after T-0852: range-aware classification, gate_mode independence, call index, summary total/since)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790104434.922936,
+    "spec_review_at": 1790104435.123188,
+    "spec_review_at_lease": 1790105335.123188,
+    "spec_review_at_done": 1790104435.131213,
+    "spec_review_held_at": 1790104574.071611,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790104574.0716548": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/read_economy.py",
+      "issue": "classify() only compares path+mtime+size for Read calls, never offset/limit, so a legitimate different-range read on the same unchanged file is indistinguishable from an exact repeat. The active gate keyed on kind alone would wrongly deny it, directly violating the spec's own 'different offset/limit is never suppressed' rule.",
+      "severity": "high",
+      "line": 88
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "Spec doesn't say how read_suppression=active interacts with the existing gate_mode state machine. Today deterministic repeats bypass gate_mode entirely (always allowed at line 415-416), and every other deny path requires gate_mode=='block'. Production pool.toml ships gate_mode='sample', so if active suppression is wired the same way as existing deny paths it will never fire in production; if it's wired independent of gate_mode that's an undocumented new precedent.",
+      "severity": "high",
+      "line": 415
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "The required deny message cites 'call N' but no existing state tracks a stable index for the earlier matching call: _history() is an unindexed 20-call ring buffer, and _record_call()'s call_index is a counter for the current call, not the prior one being referenced.",
+      "severity": "med",
+      "line": 306
+    },
+    {
+      "path": "orchestrator/read_economy.py",
+      "issue": "summary() has no time filter and buckets only by role/task_class with row overlap between groups; the safety check needs a single 7-day false-suppression proxy and would_suppress count, which isn't derivable from the current output without double-counting.",
+      "severity": "med",
+      "line": 147
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 22:45 by T-0853 (spec v2 after T-0852: range-aware classification, gate_mode independence, call index, summary total/since)"
+}

@@ -1,0 +1,109 @@
+{
+  "id": "T-0368",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H5a: executor running counters derived from bus state at Pool load (no persisted increments, legacy codex mirror dropped); codex and codex_reply MCP tools post their result to the bus",
+  "spec": "Build on goal/T-0353. Evidence (gotchas 2026-09-19 23:24 and 23:38): pool_state.json persists executors[*].running and codex.running, incremented in executor.py:83-84 and decremented only in the normal finally path (executor.py:94-95), so every process killed by a session restart leaks a slot; pool._sync_legacy_codex mirrors codex.running onto the legacy executor (astra), and daemon.free_slots then reports zero slots (two ready tasks sat queued five minutes on 2026-09-19). Separately, mcp.py codex and codex_reply return the Codex result dict without posting it, so the task stays running until the Planner posts by hand (T-0326, T-0331, T-0273, T-0277, T-0348).\n1. Pool load computes each executor's running count from bus tasks: status running, role execute, and executor == that id (fall back to tier == id for rows without executor). Remove the persisted running increments and decrements from executor.py and the running key from EXEC_STATE_FIELDS; keep cooldown and day_tasks persisted. Drop the running mirror in _sync_legacy_codex (keep the cooldown and day_tasks bridging). status() and free_slots keep their shapes.\n2. mcp.codex and mcp.codex_reply: when the tool returns a result for a task whose status is running and assigned_to is codex, post it with bus.post_result(task_id, {summary from the final message, commit sha parsed from the message when present else the worktree HEAD, executed_by codex:<executor>, provenance [repo], usage}, \"done\") exactly as executor._dispatch_worker's normal path does (reuse that function; do not duplicate the mapping). A result that already exists is not overwritten. The tool reply says posted: true or false and why.\nTests: tests/test_pool.py::test_running_counts_come_from_bus_not_state_file (state file says 7 running, bus has one running task -> 1), ::test_restart_killed_process_leaks_no_slot; tests/test_mcp.py::test_codex_tool_posts_result_for_running_codex_task, ::test_codex_reply_does_not_overwrite_existing_result. Keep every existing test green (adjust tests that asserted persisted running); .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0358"
+  ],
+  "acceptance": [
+    "tests/test_pool.py::test_running_counts_come_from_bus_not_state_file and ::test_restart_killed_process_leaks_no_slot pass",
+    "tests/test_mcp.py::test_codex_tool_posts_result_for_running_codex_task and ::test_codex_reply_does_not_overwrite_existing_result pass",
+    "grep shows no 'running +=' or 'running -=' in orchestrator/executor.py and 'running' is absent from EXEC_STATE_FIELDS",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/executor.py",
+    "orchestrator/mcp.py",
+    "tests/test_pool.py",
+    "tests/test_mcp.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0368",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/mcp.py",
+        "line": 96,
+        "issue": "post_tool_result() only posts when the task's bus status is still \"running\". The first codex() call already flips status to \"done\" as soon as _run() returns status=\"done\" (Codex responded without a hard error, even if the diff is wrong/incomplete). If the Planner then calls codex_reply() per executor.reply()'s documented purpose (\"resume ... with a delta (failing tests + assertion lines)\"), the second round's improved result finds task status==\"done\" and post_tool_result silently returns posted=False \u2014 the corrected commit/summary is never written to the bus, and the stale round-1 result (wrong commit sha, wrong summary) becomes the permanent record used for review/merge and CLAUDE.md rule 11's git-revert rollback trail.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "line": 133,
+        "issue": "The commit regex `r\"\\b(?:commit(?:ted)?(?:\\s+sha)?[:\\s]+)?([0-9a-f]{7,40})\\b\"` has an optional non-capturing prefix, so it matches the first bare 7+ char run of [0-9a-f] anywhere in the free-form agent message, not just text explicitly labeled as a commit. E.g. a message like \"Refactored the 1234567-row migration\" has no commit mention, but \"1234567\" (all digits are valid hex) matches and gets recorded as the commit sha instead of falling through to `git rev-parse HEAD`, corrupting the audit/rollback record with a bogus ref.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789901714.172519,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0368",
+      "claimed_at": 1789901714.172234
+    },
+    {
+      "ts": 1789901714.174021,
+      "account": "B"
+    },
+    {
+      "ts": 1789901714.214609,
+      "pid": 47006,
+      "account": "B"
+    },
+    {
+      "ts": 1789901999.828104,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/mcp.py",
+            "line": 96,
+            "issue": "post_tool_result() only posts when the task's bus status is still \"running\". The first codex() call already flips status to \"done\" as soon as _run() returns status=\"done\" (Codex responded without a hard error, even if the diff is wrong/incomplete). If the Planner then calls codex_reply() per executor.reply()'s documented purpose (\"resume ... with a delta (failing tests + assertion lines)\"), the second round's improved result finds task status==\"done\" and post_tool_result silently returns posted=False \u2014 the corrected commit/summary is never written to the bus, and the stale round-1 result (wrong commit sha, wrong summary) becomes the permanent record used for review/merge and CLAUDE.md rule 11's git-revert rollback trail.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "line": 133,
+            "issue": "The commit regex `r\"\\b(?:commit(?:ted)?(?:\\s+sha)?[:\\s]+)?([0-9a-f]{7,40})\\b\"` has an optional non-capturing prefix, so it matches the first bare 7+ char run of [0-9a-f] anywhere in the free-form agent message, not just text explicitly labeled as a commit. E.g. a message like \"Refactored the 1234567-row migration\" has no commit mention, but \"1234567\" (all digits are valid hex) matches and gets recorded as the commit sha instead of falling through to `git rev-parse HEAD`, corrupting the audit/rollback record with a bogus ref.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789901999.829857,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789901714.172234,
+  "account": "B",
+  "pid": 47006,
+  "review_verdict": "request_changes"
+}

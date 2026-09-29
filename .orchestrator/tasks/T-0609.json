@@ -1,0 +1,153 @@
+{
+  "id": "T-0609",
+  "created_at": 1789973199.926167,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R2 v3: orchestrator/capacity.py \u2014 read-only capacity snapshot and deterministic admission with reservation only for imminent higher-priority demand (AP P6)",
+  "spec": "Why: daemon.free_slots (orchestrator/daemon.py:449-465) reduces capacity to one integer, so waves ignore per-task executor eligibility and premium capacity can go to low-impact work while a critical-path task is about to become ready (AP P6; brief P3). v3 after spec reviews T-0566 and T-0588.\nWhat: new pure module orchestrator/capacity.py; never mutates the pool; no daemon edits. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in that file; no pytest fixtures.\n- snapshot(pool, running_claude=0, inflight_claude=0, now=None) -> {\"executors\": {id: {\"free\": max(0, max_parallel - running), \"cooling_s\": max(0, cooldown_until - now), \"enabled\", \"roles\", \"complexity\": [complexity_min, complexity_max], \"day_tasks_left\", \"weight\"}}, \"claude_workers_free\": max(0, limits.max_parallel_claude_workers - running_claude - inflight_claude), \"accounts\": {id: {\"utilization\", \"cooling_s\"}}, \"fallback\": every enabled execute executor is cooling, \"ts\": now}.\n  day_tasks_left = None if daily_budget_tasks == 0 (0 means unlimited, pool.py:533 convention) else daily_budget_tasks - effective_day_tasks, where effective_day_tasks = ex.day_tasks if ex.day == today (today = datetime.fromtimestamp(now).astimezone().date().isoformat(), the same comparison Executor.roll_day uses) else 0.\n  utilization = (acct.window_tokens + acct.planner_window_tokens) / cap if now - acct.window_started <= pool.WINDOW_S else 0.0, with cap = the account's window_cap_tokens from pool cfg; day tokens play no role (they only matter for the rollover Account.utilization performs as a side effect, which snapshot must never trigger). Account and Executor objects are read, never called for utilization/roll_day, never written.\n- eligible_executors_from_snapshot(task, snapshot) -> executor ids with 'execute' in roles, enabled, cooling_s == 0, complexity_min <= task complexity <= complexity_max, free > 0, day_tasks_left None or > 0. In fallback mode returns ['claude'] when pool.fallback_tier(task complexity) is not None, else [].\n- admit(ranked_ids, tasks, snapshot, priorities, imminent=None, cfg=None) -> {\"admit\": [ids], \"deferred\": {id: reason}, \"assignments\": {id: executor_id}, \"reasons\": {id: text}}. Two phases. Phase 1 (imminent demand): imminent is a list of task ids that are NOT ready yet but whose every depends_on is merged or is status done with pipeline.gated_at set (the caller computes this from the bus; the daemon integration will pass it); for each imminent task Z with priority['critical_path_s'] greater than that of a ranked candidate, compute Z's eligible executor set from the snapshot. Phase 2 walks ranked_ids in order: pick the eligible executor with the most free capacity, then lowest weight; before assigning candidate X to executor E, if some imminent Z with higher priority has E as its ONLY eligible executor and E has exactly one free slot left, defer X with reason reserved_for_critical:<Z> unless X has no other eligible executor and no imminent task is blocked... (rule: X is deferred only when an alternative executor exists for neither X nor Z; if X has another eligible executor, assign that one instead). Decrement a local copy of free. With imminent empty or None, phase 1 is skipped and nothing is ever reserved.\n  Reasons: executor_capacity (eligible set non-empty but no free slot), cooldown (only cooling executors would match), account_capacity (fallback mode, claude_workers_free exhausted), budget (only day_tasks_left == 0 executors would match), reserved_for_critical:<id>, no_eligible_executor (complexity range or role excludes every executor). cfg [scheduler] reserve_imminent = true (default; false disables phase 1).\n- priorities: {task_id: critical_path.explain dict}; ranked_ids already ordered by the caller (critical path first).",
+  "inputs": [
+    "T-0598"
+  ],
+  "acceptance": [
+    "tests/test_capacity.py::test_snapshot_is_read_only_across_day_and_window_rollover \u2014 an executor whose day is yesterday with day_tasks 5 and daily_budget_tasks 5 reports day_tasks_left 5; an account whose window_started is older than WINDOW_S reports utilization 0.0; no attribute of the pool, accounts or executors changes across the call",
+    "tests/test_capacity.py::test_unlimited_daily_budget_reports_none \u2014 daily_budget_tasks 0 with day_tasks 7 today reports day_tasks_left None and stays eligible",
+    "tests/test_capacity.py::test_executor_full_defers_with_executor_capacity_reason \u2014 every eligible executor at max_parallel yields deferred reason executor_capacity",
+    "tests/test_capacity.py::test_quota_cooling_executor_is_not_eligible \u2014 a cooling executor is excluded and a task only it could run is deferred with reason cooldown",
+    "tests/test_capacity.py::test_account_fallback_uses_claude_worker_headroom \u2014 fallback snapshot admits at most claude_workers_free tasks and defers the rest with account_capacity",
+    "tests/test_capacity.py::test_imminent_critical_task_reserves_last_slot \u2014 an imminent higher-priority task whose only eligible executor has one free slot causes a lower-priority candidate with no alternative executor to be deferred with reserved_for_critical naming it, while a candidate that has an alternative executor is assigned there instead",
+    "tests/test_capacity.py::test_idle_capacity_admits_everything_and_no_unnecessary_reservation \u2014 with spare capacity and imminent None every ready task is admitted and no reserved_for_critical reason appears"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "tests/test_capacity.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0609",
+  "codex_thread": null,
+  "result": {
+    "summary": "orchestrator/capacity.py implements snapshot(), eligible_executors_from_snapshot(), and admit() as specified. Verified against pool.py: WINDOW_S comparison matches Account.utilization's rollover semantics, fallback_tier thresholds match, roll_day/utilization are never invoked (pool state genuinely untouched \u2014 confirmed by the read-only test). Reason precedence (no_eligible_executor > cooldown > budget > executor_capacity, plus account_capacity/reserved_for_critical in fallback and reservation paths) matches the spec's stated ordering. Traced test_imminent_critical_task_reserves_last_slot by hand: the reservation loop correctly skips an executor that is a higher-priority imminent task's sole eligible option with exactly one free slot, falls back to an alternative executor when one exists, and defers only when none does. All 7 new tests pass (`python3 -m unittest tests.test_capacity -v`). Diff is scoped exactly to orchestrator/capacity.py and tests/test_capacity.py, no daemon changes. No correctness issues found; nothing security-sensitive in this pure computation module.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "b4b71dcc949b",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789973199.927358,
+      "reviewed_sha": "008bfe72b75d19d1e63902773667b88bc33425be"
+    },
+    {
+      "ts": 1789973202.406549,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0609",
+      "claimed_at": 1789973202.40624
+    },
+    {
+      "ts": 1789973202.4074812,
+      "account": "B"
+    },
+    {
+      "ts": 1789973202.821292,
+      "pid": 86563,
+      "account": "B"
+    },
+    {
+      "ts": 1789973318.4640331,
+      "status": "done",
+      "result": {
+        "summary": "orchestrator/capacity.py implements snapshot(), eligible_executors_from_snapshot(), and admit() as specified. Verified against pool.py: WINDOW_S comparison matches Account.utilization's rollover semantics, fallback_tier thresholds match, roll_day/utilization are never invoked (pool state genuinely untouched \u2014 confirmed by the read-only test). Reason precedence (no_eligible_executor > cooldown > budget > executor_capacity, plus account_capacity/reserved_for_critical in fallback and reservation paths) matches the spec's stated ordering. Traced test_imminent_critical_task_reserves_last_slot by hand: the reservation loop correctly skips an executor that is a higher-priority imminent task's sole eligible option with exactly one free slot, falls back to an alternative executor when one exists, and defers only when none does. All 7 new tests pass (`python3 -m unittest tests.test_capacity -v`). Diff is scoped exactly to orchestrator/capacity.py and tests/test_capacity.py, no daemon changes. No correctness issues found; nothing security-sensitive in this pure computation module.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "b4b71dcc949b",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789973318.4650931,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789973318.498785,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "008bfe72b75d19d1e63902773667b88bc33425be",
+        "packet_version": "b4b71dcc949b",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "008bfe72b75d19d1e63902773667b88bc33425be",
+      "packet_version": "b4b71dcc949b",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "008bfe72b75d19d1e63902773667b88bc33425be",
+  "claimed_at": 1789973202.40624,
+  "account": "B",
+  "pid": 86563,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "008bfe72b75d19d1e63902773667b88bc33425be",
+    "packet_version": "b4b71dcc949b",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "b4b71dcc949b",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

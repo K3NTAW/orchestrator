@@ -1,0 +1,425 @@
+# ponytail: TOML instead of YAML so stdlib tomllib parses it, no pyyaml dependency.
+# window_cap_tokens is a calibration knob: set from observed 5h-window resets (§13).
+window_cap_tokens = 80_000_000  # 2026-09-24 00:15 raised from 40M: account A alone carries reviews and its window (Planner tokens included) hit the 0.65 headroom ceiling, stalling every review; revert path: 40_000_000 (then 10_000_000)
+
+[[claude_accounts]]
+id = "A"
+config_dir = "~/.claude-a"
+role_affinity = ["planner", "scout", "triage", "execute", "review", "spec_review"]
+reserve_for_planner = 0.35
+daily_budget_tokens = 200_000_000  # 2026-09-23 16:20: raised from 30M on the user's word so account A can carry reviews while B is provider rate-limited; revert path: set back to 30_000_000
+
+[[claude_accounts]]
+id = "B"
+config_dir = "~/.claude-b"
+role_affinity = ["planner", "scout", "triage", "challenge", "execute"]  # 2026-09-23 (real 20:10): review and spec_review removed on the user's "do reviews now on A" while B answers 429 on every review spawn (least-utilization kept picking B first, costing a 30-min cooldown each time); revert path: add "review", "spec_review" back  # 2026-09-21 18:40 user: planner added so headless launches have headroom while A is over budget
+reserve_for_planner = 0.0
+daily_budget_tokens = 40_000_000  # 2026-09-18: was 8M; see window_cap_tokens note
+
+[daemon]
+autostart = true   # the orchestrator MCP server starts the pipeline loop in a background thread; ORCH_DAEMON=0 overrides
+interval_s = 30
+respawn_after_s = 120  # wait before retrying an unclaimed review or spec_review worker spawn
+respawn_max = 3  # hold a review after this many respawns without a claim
+stage_lease_s = 900  # retry a claimed-but-unfinished pipeline side effect after this lease expires
+auto_fix_rounds = 2
+close_retry_s = 900  # minimum delay between failed automatic PR attempts
+close_max_attempts = 3  # then escalate close_failed; never charge gave_up
+flaky_rerun_max = 1  # Default 1; rerun a held gate's named failures at most this many times to classify flakiness.
+flaky_rerun_timeout_s = 600  # Default 600s; bound each held-test rerun so a hung test cannot block a daemon tick.
+
+[planner]
+autonomous = false  # 2026-09-23 17:25: off while the interactive Planner runs without an MCP host (the attached-session check cannot see it): headless launches re-filed S2a1 as a duplicate v2 (T-1078) and burned account A; revert path: autonomous = true
+                     # interactive session running -- off by default (interactive Planner is a human's proxy);
+                     # turn on only in the executor container, where no human session ever attaches
+# Context at which the interactive Planner should hand over; decision packets are sized separately for each run.
+handover_context_tokens = 150000
+decision_packet_chars = 6000
+
+[planner.routes]
+# Default true; enabled = false restores the previous behaviour: every point escalates.
+enabled = true
+auto_open_pr = false  # Default false; close posts PR pending for the Planner instead of opening it automatically.
+# Default fable; the caller resolves this alias through [models].planner, not a model ID here.
+escalate_tier = "fable"
+# Default sonnet; tier used to investigate small goals without review triggers.
+investigate_tier = "sonnet"
+# Default 4; inclusive complexity ceiling for the investigate route.
+investigate_max_complexity = 4
+# Default 2; exceeding this records a justified exception, never blocks a launch.
+premium_launches_soft_per_goal = 2
+
+[planner.routing]
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+default_tier = "opus" # planner_router.load_cfg: candidate tier used for ordinary Planner decisions.
+escalation_tier = "fable" # planner_router.load_cfg: premium tier reserved for hard or escalated decisions.
+hard_complexity_min = 9 # planner_router.load_cfg: complexity at or above this value is a hard escalation.
+hard_security = true # planner_router.load_cfg: security-sensitive work is a hard escalation.
+hard_spec_review_request_changes_min = 2 # planner_router.load_cfg: repeated spec-review changes trigger hard escalation.
+hard_ambiguous = true # planner_router.load_cfg: ambiguous classifications trigger hard escalation.
+min_samples = 20 # planner_router.load_cfg: observations required per class before evidence can route.
+shadow_sample_rate = 1.0 # planner_router.load_cfg: share of eligible shadow decisions sampled.
+fable_reserve_share = 0.2 # planner_router.load_cfg: minimum Fable headroom retained for escalations.
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+soft_threshold = 0.5 # planner_router.load_cfg: minimum soft escalation score.
+
+# Review policy. Measurement 2026-09-18: every fallback-executed task got two reviews (daemon's sonnet one plus
+# a hand-added opus one) and spec reviews ran on opus at 1.26 USD each -- reviews were costing as much as
+# execution. complexity 1-3: hooks only, no review (CLAUDE.md step 7, unchanged). 4-6: exactly one review, on
+# whichever model did not execute the task. 7-10: two reviews -- both reviews may run on the same account; the
+# model differs from the executor. Spec review (before an executor ever sees the spec) only fires at
+# complexity >= spec_review_min, and always runs on spec_review_tier. direct_merge_max/two_reviews_from/the
+# complexity split above apply only when code_review = "always" below.
+#
+# User decision 2026-09-19: code reviews cost 44-45% of the last two goals and the human reviews every merged
+# PR anyway, so code review is dropped except when the merged diff touches a security-sensitive path -- spec
+# review (above) is unchanged and still gates complexity >= spec_review_min before an executor ever sees the
+# spec. code_review: "never" (no code review, ever) | "security_paths" (review only a diff matching one of the
+# globs below, or one changed_paths() could not determine -- fails closed) | "always" (today's pre-2026-09-19
+# D1 behaviour, complexity-driven, unchanged). A security-path (or diff-unavailable) review always gets exactly
+# one reviewer, on security_review_tier, swapped to the other Claude tier when the executor was that tier.
+[review]
+complementary = false # when true, two-review tasks get role-specialised packets; default false keeps one prompt for both reviewers; measured with scorecard --reviews --by role before any default change
+spec_review_min = 6
+direct_merge_max = 3
+two_reviews_from = 7
+spec_review_tier = "sonnet"
+code_review = "security_paths"   # never | security_paths | always
+security_review_tier = "sonnet"
+security_paths = [
+    "orchestrator/*.py",
+    ".claude/hooks/**", ".claude/settings.json", ".orchestrator/pool.toml", ".orchestrator/protected-paths.txt",
+    ".orchestrator/prompts/**", "skills/**", ".claude/skills/**",
+    ".mcp*.json", ".mcp.worker.json", "Dockerfile", "docker-compose*.yml", "pyproject.toml", "uv.lock",
+]
+# Semantic triggers use the same security-tier checklist: paths cover high-impact configuration and interfaces;
+# patterns inspect added diff lines for authorization, schema, export, and tool/CLI changes.
+semantic_paths = [
+    "pyproject.toml", "uv.lock", "Dockerfile*", "docker/**", "**/migrations/**",
+    "orchestrator/serve.py", "orchestrator/mcp.py", "orchestrator/bus_mcp.py", "orchestrator/cli.py",
+]
+semantic_patterns = { authorization = "(?i)\\b(?:bearer|token|authenticate|authorize|permission)\\b", database = "(?i)\\b(?:ALTER TABLE|CREATE TABLE)\\b", exports = "^\\s*__all__\\s*=", mcp_or_cli = "@mcp\\.tool|add_parser\\(" }
+
+# Held-task risk areas: paths match changed files, patterns match added diff lines.
+# Missing diff evidence sets all four areas true (fail closed).
+[review.areas.auth]
+paths = ["**/auth*", "auth*", "**/permissions*"]
+patterns = ['(?i)\b(?:bearer|authenticate|authorize|permission)\b']
+[review.areas.migrations]
+paths = ["**/migrations/**", "migrations/**"]
+patterns = ['(?i)\b(?:ALTER|CREATE|DROP) TABLE\b']
+[review.areas.interfaces]
+paths = ["**/api/**", "orchestrator/mcp.py", "orchestrator/cli.py"]
+patterns = ['^\s*__all__\s*=', '@mcp\.tool|add_parser\(']
+[review.areas.data_deletion]
+paths = []
+patterns = ['(?i)\b(?:DELETE FROM|TRUNCATE|DROP TABLE)\b', '\b(?:rmtree|unlink)\(']
+
+[codex]
+home = "~/.codex"
+model = "gpt-6-astra"            # confirmed 2026-09-16, Codex CLI 0.154.0
+max_parallel = 2
+daily_budget_tasks = 40
+on_exhausted = "fallback_claude" # hold | fallback_claude | overflow_api
+dangerous_full_access = true     # --dangerously-bypass-approvals-and-sandbox; guardrails do not cover Codex, git + PR review do
+
+
+# Executor pool: one row per routable model. pick_executor(role, complexity, scores) ranks the enabled rows.
+# quota_group: a usage-limit hit on one member cools the whole group; limit scope per account vs per model
+# is unconfirmed (2026-09-17).
+
+[[executors]]
+id = "astra"
+provider = "codex"
+model = "gpt-6-astra"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 10
+max_parallel = 2
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = true          # confirmed in models_cache.json 2026-09-17
+
+[[executors]]
+id = "luna"
+provider = "codex"
+model = "gpt-5.6-luna"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 6
+max_parallel = 2
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = true          # confirmed in models_cache.json 2026-09-17
+
+[[executors]]
+id = "terra"
+provider = "codex"
+model = "gpt-5.6-terra"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 6
+max_parallel = 2
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = true          # confirmed in models_cache.json 2026-09-17
+
+[[executors]]
+id = "sol"
+provider = "codex"
+model = "gpt-5.6-sol"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 6
+max_parallel = 2
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = true          # confirmed in models_cache.json 2026-09-17
+
+# Disabled placeholders for the 6.x generation: flip enabled = true once the id shows up in
+# ~/.codex/models_cache.json (README "Executors and routing").
+[[executors]]
+id = "luna6"
+provider = "codex"
+model = "gpt-6-luna"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 10
+max_parallel = 2
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = false          # enable when the id appears in models_cache.json
+
+[[executors]]
+id = "terra6"
+provider = "codex"
+model = "gpt-6-terra"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 10
+max_parallel = 2
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = false          # enable when the id appears in models_cache.json
+
+[[executors]]
+id = "sol6"
+provider = "codex"
+model = "gpt-6-sol"
+roles = ["execute"]
+complexity_min = 1
+complexity_max = 10
+max_parallel = 2
+daily_budget_tasks = 40
+quota_group = "chatgpt"
+weight = 1.0
+enabled = false          # enable when the id appears in models_cache.json
+
+[models]
+# Keep success ranking as the default; cost_to_accepted is the measured alternative and P4 evidence decides a switch.
+rank_by = "success"
+# A locally measured per-class success rate must meet this floor before cost routing may select it;
+# the rate requires min_samples tasks of that class.
+success_floor = 0.6
+# Cold classes keep the weighted benchmark/live-score routing until this many merged tasks exist.
+min_samples = 3
+haiku   = "claude-haiku-4-5-20251001"
+sonnet  = "claude-sonnet-5"
+opus    = "claude-opus-5-5"  # 2026-09-23 user: Opus 5.5 for the opus tier (Planner default, fallback executor 6-8, cross-tier review); revert: "claude-opus-5"
+planner = "claude-fable-5-1"
+
+[limits]
+# Default true; budget reservations prevent same-tick launches from oversubscribing daily/goal limits. Set false
+# for rollback. Estimates use median tokens and USD from the role's last 20 runs once 5 exist; until then the
+# per-run max_budget_usd ceiling is used. default_tokens_per_usd is a conservative Sonnet-class estimate until
+# history exists. Optional goal_budget_usd role entries impose cumulative goal caps.
+reservations = true
+default_tokens_per_usd = 250000  # Default 250000; converts the cold-start USD ceiling to reserved tokens.
+max_parallel_claude_workers = 4
+cooldown_default_s = 1800
+# scout turns/budget/timeout cut 2026-09-18: 8 sonnet scouts cost $4.59 (~720k cache-read tokens each over 20
+# turns), several re-derived what memory or a grep would have answered. Recall-first prompt + tighter caps.
+max_turns = { triage = 5, scout = 12, review = 10, challenge = 15, execute = 40, planner = 400 }        # soft: stated in prompts
+max_budget_usd = { triage = 0.5, scout = 1.0, review = 3.0, challenge = 1.5, execute = 6.0, planner = 10.0, planner_decision = 3.0, planner_shadow = 1.5 } # hard: --max-budget-usd
+timeout_s = { triage = 300, scout = 600, review = 900, challenge = 900, execute = 1800, planner = 7200 }
+review_diff_chars = 12000
+spec_review_code_chars = 8000
+recall_hits = 30
+
+[memory]
+# Progressive recall stops after enough useful hits or the character cap; packets only use the two cheapest layers.
+budget_hits = 8
+min_score = 0.5
+budget_chars = 6000
+packet_layers = ["notes", "bus"]
+
+# Jev (TypeSafe AI): typed questions about a state answered with calibrated probabilities instead of text
+# (orchestrator/jev.py). Off by default -- flip enabled = true only once daily_budget_tokens has been sized
+# against real usage, same caution as bench.py's MIN_INTERVAL_S. See README's Pipeline section for the note on
+# what leaves the machine.
+[jev]
+# P19/P20, 2026-09-22: outbound Jev data-class ceiling; unknown classes fail closed.
+max_data_class = "INTERNAL"
+# Repeat each question in one request and average probabilities (default: 1).
+votes = 1
+# Block thresholds with confidence >= 0.6 (defaults: 0.85 / 0.15).
+block_redundant_p = 0.85
+block_needed_p = 0.15
+# Stricter block thresholds when confidence is absent (defaults: 0.92 / 0.08).
+block_redundant_p_noconf = 0.92
+block_needed_p_noconf = 0.08
+enabled = true  # 2026-09-19 user decision: key in the Keychain, Phase E (T-0201)
+model = "jev-latest"
+timeout_s = 5
+daily_budget_tokens = 20_000_000
+max_state_chars = 100_000
+gate_mode = "sample"  # E3 gate: "sample" scores a deterministic 10% sample; "log" all; "block" may deny
+sample_rate = 0.1  # Fraction of calls scored in sample mode; keep labels gathered before enabling block
+block_repeats = false  # In block mode, deny unchanged repeated reads only after labelling confirms the rule
+read_suppression = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+max_suppressions_per_session = 20
+max_false_suppression = 0.02
+
+[jev.routing]
+# Questions: localized_simple, substantial_reasoning, large_context, debugging_reproduction, architectural,
+# elevated_risk, stronger_executor_helps. Hard pool constraints stay authoritative; shadow never changes routing.
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+cache_ttl_s = 86400
+cache_max_entries = 500
+# Default 0.25; caps each evidence-backed routing score adjustment.
+max_adjustment = 0.25
+# Default 10; minimum evidence count before a routing adjustment applies.
+evidence_floor_n = 10
+
+[jev.points]
+# Default shadow; log scout-necessity Jev decisions without changing dispatch.
+scout_necessity = "shadow"
+# Default shadow; log context-escalation Jev decisions without changing dispatch.
+context_escalation = "shadow"
+# Default shadow; log review-escalation Jev decisions without changing dispatch.
+review_escalation = "shadow"
+# Default shadow; log planner-relaunch Jev decisions without changing dispatch.
+planner_relaunch = "shadow"
+
+[allocation]
+# Default shadow; record allocation recommendations without applying them.
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+# Default 5; samples required before allocation evidence is used.
+min_samples = 5
+# Default 2.0; hourly latency cost used in allocation comparisons.
+latency_weight_usd_per_hour = 2.0
+# Default 1.0; allocation multiplier for critical-path work.
+critical_factor = 1.0
+# Default 0.25; allocation multiplier for non-critical work.
+non_critical_factor = 0.25
+
+[strategy]
+# Default shadow; record strategy recommendations without applying them.
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+# Default 10; samples required before strategy evidence is used.
+min_samples = 10
+
+[speculation]
+# Default off; disable speculative retries.
+mode = "off"
+# Default 0.5; minimum fix-round probability for speculation.
+min_fix_round_p = 0.5
+# Default 5; samples required before speculative retry evidence is used.
+min_samples = 5
+# Default 1.0 USD; minimum retry cost before speculation is considered.
+min_retry_cost_usd = 1.0
+
+[context_router]
+# P23, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; back to active real 22:00 after a 15-minute shadow: the legacy evidence section is unbounded (a 2.3 MB review packet, argv too long); the routed-findings trim KeyError (T-1280) is worked around by pruning the evidence pool instead. revert: set back to "shadow"
+
+[tool_disclosure]
+# P24, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+
+[instructions]
+# P25, 2026-09-22: conditional modules; safety rules are never conditional; revert by setting mode back to "off".
+mode = "active"  # 2026-09-22 22:20 user: flipped to active (was shadow); revert: set back to "shadow"
+
+[promotion]
+# Default 20; samples required before a feature promotion recommendation.
+min_samples = 20
+
+[handoff]
+# P16/T-0858: shadow measures only; active may select the lowest sufficient expected route cost.
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+min_gain = 0.15
+max_active_share = 0.5
+
+# Secrets: env var name -> shell command that prints the value (Keychain-backed), e.g. the laptop's `f tok get`
+# wrapper below. On a headless host with no Keychain, use the form ENV_NAME = "env:OTHER_NAME" instead, which
+# reads OTHER_NAME straight from this process's environment (e.g. set by systemd/CI, not by a shell command).
+# Never store values here.
+[secrets.scout]
+GH_READ_TOKEN = "source ~/.config/f/f.sh && f tok get gh-read --reveal"
+# Headless equivalent: GH_READ_TOKEN = "env:GH_READ_TOKEN"
+[secrets.review]
+GH_READ_TOKEN = "source ~/.config/f/f.sh && f tok get gh-read --reveal"
+[secrets.triage]
+[secrets.planner]
+GH_WRITE_TOKEN = "env:GH_WRITE_TOKEN"
+[secrets.jev]
+TYPESAFE_API_KEY = "source ~/.config/f/f.sh && f tok get typesafe --reveal"
+# Headless equivalent: TYPESAFE_API_KEY = "env:TYPESAFE_API_KEY"
+
+[scheduler]
+# shadow keeps first-come dispatch and only logs proposed waves (default).
+# active dispatches the selected wave; off disables wave selection and logging.
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+# Default empirical; estimate execution duration from completed-task evidence.
+duration_mode = "empirical"
+# Default 5; samples required before an empirical duration estimate is used.
+duration_min_samples = 5
+# Default 0.1; fraction trimmed from each tail of large duration samples.
+duration_trim = 0.1
+# Default true; reserve capacity for tasks on the critical path.
+reserve_imminent = true
+# Default adaptive; adjust concurrency to current executor capacity.
+concurrency_mode = "adaptive"
+# Default observe; log merge-pressure recommendations without acting on them.
+merge_pressure_mode = "observe"
+# Default 3; queued merges at which merge pressure becomes elevated.
+merge_queue_elevated = 3
+# Default 5; queued merges at which merge pressure is saturated.
+merge_queue_saturated = 5
+# Default 2; merge conflicts at which merge pressure is saturated.
+merge_conflicts_saturated = 2
+# Default shadow; record Jev scheduler recommendations without applying them.
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+# Default 8; candidate task pairs considered by the Jev scheduler.
+jev_max_pairs = 8
+# Default 3600 seconds; Jev scheduler cache lifetime.
+jev_cache_ttl_s = 3600
+# Default 200; maximum retained Jev scheduler cache entries.
+jev_cache_max_entries = 200
+soft_conflict_policy = "defer"
+max_wave = 0 # 0 uses all available dispatch capacity
+# Rebase high-risk stale work before review; false records evidence only.
+stale_rebase = false
+
+[skills]
+# 2026-09-23: shadow records minimal routing without changing exposure; revert: off.
+mode = "active"  # 2026-09-24 01:40: back to active after PR 25 merged the evidence feedback-loop fix (T-1286) and the trim fix (T-1280); revert: set back to "shadow"
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
+jev_max_batch = 8
+max_selected = 3
+max_recovery = 0.10
+
+[jev.skills]
+cache_ttl_s = 86400
+cache_max_entries = 500
+# Origin owner/repo identities; repository provenance still has untrusted intake.
+trusted_repos = []
+# Exact hostnames accepted by static endpoint inspection.
+allowed_domains = []

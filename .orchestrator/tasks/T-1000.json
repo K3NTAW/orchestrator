@@ -1,0 +1,522 @@
+{
+  "id": "T-1000",
+  "created_at": 1790153740.35319,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S1c worker_registry: durable runtime registry of running workers with structured events, reconciliation and read-only inspection CLI (P11, P12)",
+  "spec": "Create orchestrator/worker_registry.py. STATUSES = (\"starting\",\"running\",\"waiting\",\"steering\",\"cancelling\",\"cancelled\",\"done\",\"failed\",\"held\"). Files: .orchestrator/workers/<task>.json (one document: task, role, model, provider, account, pid, worktree, branch, started_at, last_event_at, stage, current_tool (only if the event stream reports it), tokens (input_uncached, cache_read, output so far when known), usd, elapsed_s (computed on read), parent, children (task ids created with constraints.fix_round_for or parent equal to this task while it runs), status, status_reason) and .orchestrator/workers/<task>.events.jsonl (append-only: ts, kind, data; kinds at least spawned, claimed, stage, tool, usage, exit, reconciled, held). Writes are atomic (temp file + rename) under the existing bus lock helper if one is exposed, else a registry-local fcntl lock. API: upsert(task_id, **fields), get(task_id), active(), event(task_id, kind, **data), finish(task_id, status, reason=None), reconcile(alive_fn=daemon.alive) marks entries whose pid is dead and status is running/starting as failed with reason process_dead and emits a reconciled event (no bus changes; daemon.reconcile_dead stays the authority for task status).\nWire producers with minimal edits: spawn.py where the claude -p Popen is created (around line 1046: spawned with pid, account, model, worktree, branch) and where the json result is parsed (around line 1084-1090: usage event + finish done/failed); executor.py where a codex exec thread starts and ends (provider codex, thread id as pid substitute in field thread, plus usage and finish); daemon.reconcile_dead calls worker_registry.reconcile at the end of its handling. Never store packet text, prompts, transcripts or secrets in the registry; only identifiers, numbers and event kinds. Never expose hidden reasoning: only observable runtime events.\nCLI: `orchestrator workers [--task T-dddd] [--all] [--json]`: table of active workers (task, role, model, provider, status, stage, elapsed, tokens, worktree) and with --task the full document plus the last 20 events; --all includes finished ones from the last 24 h. Docs: docs/hermes-hardening/03-worker-registry.md (document shape, event kinds, what is deliberately not recorded).\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [
+    "T-0994"
+  ],
+  "acceptance": [
+    "tests/test_worker_registry.py::test_upsert_event_finish_roundtrip (document and event file shapes, atomic write, elapsed computed)",
+    "tests/test_worker_registry.py::test_reconcile_marks_dead_pids (alive_fn false marks failed process_dead and appends reconciled event; alive entries untouched)",
+    "tests/test_worker_registry.py::test_registry_never_stores_prompt_text (upsert with a packet or prompt kwarg raises ValueError)",
+    "tests/test_spawn.py::test_spawn_records_worker_registry_entry (patched Popen and json output produce spawned, usage and exit events)",
+    "tests/test_cli.py::test_workers_cli_lists_active (workers --json lists an active entry; --task shows events)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/worker_registry.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_worker_registry.py",
+    "tests/test_spawn.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/03-worker-registry.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1000",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "codex runs via a single blocking subprocess.run (line 159) and thread_id is only known after parsing stdout once the process exits (line 99). If the executor records the worker_registry 'spawned'/'running' entry only after thread_id is known (the natural reading of 'where a codex exec thread starts and ends'), a codex worker \u2014 the long-running provider this registry exists to make observable \u2014 will show no live entry for the entire duration of its run, defeating `orchestrator workers`'s purpose for exactly the case that needs it most. No acceptance test covers this (only test_spawn_records_worker_registry_entry, which is claude-only), so the gap could ship unnoticed.",
+        "severity": "high",
+        "line": 159
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "reconcile_dead(t, pool) runs once per already-dead task inside the tick() loop at daemon.py:1629-1637 (bus.read(status='running') can return multiple dead entries in one tick). Putting worker_registry.reconcile(alive_fn=...) 'at the end of its handling' means a full scan of every active registry entry re-runs once per dead task in the same tick \u2014 redundant, and worth doing once in tick() instead. Separately: worker_registry.py must not import daemon.py to get alive_fn (daemon.py will import worker_registry, so the reverse import is circular) \u2014 the call site in daemon.py should pass its own local alive function as an argument, not have worker_registry default to it.",
+        "severity": "med",
+        "line": 1634
+      },
+      {
+        "path": "orchestrator/worker_registry.py",
+        "issue": "the 'children' definition ('parent equal to this task') doesn't match how the `parent` field is actually used elsewhere (bus_mcp.bus_create_task's parent, daemon.py:212's parent=current.get('parent')): it generally carries the owning goal container id, propagated unchanged to children, not the id of the specific worker task that spawned a sub-task. Only the constraints.fix_round_for half of the definition matches an established convention (spawn.py:210-212, daemon.py:893). No acceptance test exercises 'children', so this half of the field will likely always be empty rather than doing anything wrong, but it's dead/misleading as specified.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "executor.py: upsert the worker_registry entry with status starting/running immediately before the subprocess.run(cmd, **run_kwargs) call, not after ev['thread_id'] is parsed, so a concurrent `orchestrator workers` read sees the codex task while it is actually running; only backfill the thread id once parsed.",
+      "daemon.py: call worker_registry.reconcile(alive_fn=alive) once per tick() (e.g. alongside sweep_leases), not inside reconcile_dead(t) per dead task, and pass daemon's own alive function as an explicit argument rather than having worker_registry.py import daemon.py for a default.",
+      "worker_registry.py: drop or redefine the 'parent equal to this task' half of the children definition (rely on constraints.fix_round_for only, or clarify a different field is meant), since existing code does not set a child task's parent to its spawning worker's task id.",
+      "spawn.py/executor.py: reuse bus.normalize_usage(provider, usage) to populate the tokens dict (it already returns input_uncached_tokens/cache_read_tokens/output_tokens) instead of re-deriving the same buckets, to avoid drifting from bus.log_run's existing accounting."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790153746.7282481,
+      "packet_meta": {
+        "chars": 4591,
+        "est_tokens": 1147,
+        "presented_tokens": 1147,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "0bcc1d07777543d7682f66374f4ecd237670c9201534cd6e28bfbfefe74288c4"
+          },
+          "spec": {
+            "chars": 2880,
+            "est_tokens": 720,
+            "sha256": "3b492f085d89cfcb1d471dc857baf166756fe3c1e3e989e720c8f09dd0ae87d6"
+          },
+          "acceptance": {
+            "chars": 722,
+            "est_tokens": 180,
+            "sha256": "340611d51bd033ef276241cde973b3eec9b68c84477e37f23f9c1152ae1d99b3"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "1f7eb31aa193",
+        "version": "1f7eb31aa193",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0994 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790153749.260878,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1000",
+      "claimed_at": 1790153749.259587
+    },
+    {
+      "ts": 1790153749.264259,
+      "account": "B"
+    },
+    {
+      "ts": 1790153760.860147,
+      "pid": 90570,
+      "account": "B"
+    },
+    {
+      "ts": 1790153976.3388789,
+      "packet_meta": {
+        "chars": 4591,
+        "est_tokens": 1147,
+        "presented_tokens": 1147,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "0bcc1d07777543d7682f66374f4ecd237670c9201534cd6e28bfbfefe74288c4"
+          },
+          "spec": {
+            "chars": 2880,
+            "est_tokens": 720,
+            "sha256": "3b492f085d89cfcb1d471dc857baf166756fe3c1e3e989e720c8f09dd0ae87d6"
+          },
+          "acceptance": {
+            "chars": 722,
+            "est_tokens": 180,
+            "sha256": "340611d51bd033ef276241cde973b3eec9b68c84477e37f23f9c1152ae1d99b3"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "1f7eb31aa193",
+        "version": "1f7eb31aa193",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0994 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "53b531d0-59f3-4ded-affd-f6566fe3323a"
+      }
+    },
+    {
+      "ts": 1790153976.357177,
+      "packet_meta": {
+        "chars": 4591,
+        "est_tokens": 1147,
+        "presented_tokens": 1147,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "0bcc1d07777543d7682f66374f4ecd237670c9201534cd6e28bfbfefe74288c4"
+          },
+          "spec": {
+            "chars": 2880,
+            "est_tokens": 720,
+            "sha256": "3b492f085d89cfcb1d471dc857baf166756fe3c1e3e989e720c8f09dd0ae87d6"
+          },
+          "acceptance": {
+            "chars": 722,
+            "est_tokens": 180,
+            "sha256": "340611d51bd033ef276241cde973b3eec9b68c84477e37f23f9c1152ae1d99b3"
+          },
+          "scope": {
+            "chars": 261,
+            "est_tokens": 65,
+            "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 606,
+            "est_tokens": 151,
+            "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "1f7eb31aa193",
+        "version": "1f7eb31aa193",
+        "candidate_known": false,
+        "base": "6b7a41246767",
+        "sources": "task@T-0994 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "53b531d0-59f3-4ded-affd-f6566fe3323a",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790153976.362912,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "codex runs via a single blocking subprocess.run (line 159) and thread_id is only known after parsing stdout once the process exits (line 99). If the executor records the worker_registry 'spawned'/'running' entry only after thread_id is known (the natural reading of 'where a codex exec thread starts and ends'), a codex worker \u2014 the long-running provider this registry exists to make observable \u2014 will show no live entry for the entire duration of its run, defeating `orchestrator workers`'s purpose for exactly the case that needs it most. No acceptance test covers this (only test_spawn_records_worker_registry_entry, which is claude-only), so the gap could ship unnoticed.",
+            "severity": "high",
+            "line": 159
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "reconcile_dead(t, pool) runs once per already-dead task inside the tick() loop at daemon.py:1629-1637 (bus.read(status='running') can return multiple dead entries in one tick). Putting worker_registry.reconcile(alive_fn=...) 'at the end of its handling' means a full scan of every active registry entry re-runs once per dead task in the same tick \u2014 redundant, and worth doing once in tick() instead. Separately: worker_registry.py must not import daemon.py to get alive_fn (daemon.py will import worker_registry, so the reverse import is circular) \u2014 the call site in daemon.py should pass its own local alive function as an argument, not have worker_registry default to it.",
+            "severity": "med",
+            "line": 1634
+          },
+          {
+            "path": "orchestrator/worker_registry.py",
+            "issue": "the 'children' definition ('parent equal to this task') doesn't match how the `parent` field is actually used elsewhere (bus_mcp.bus_create_task's parent, daemon.py:212's parent=current.get('parent')): it generally carries the owning goal container id, propagated unchanged to children, not the id of the specific worker task that spawned a sub-task. Only the constraints.fix_round_for half of the definition matches an established convention (spawn.py:210-212, daemon.py:893). No acceptance test exercises 'children', so this half of the field will likely always be empty rather than doing anything wrong, but it's dead/misleading as specified.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "executor.py: upsert the worker_registry entry with status starting/running immediately before the subprocess.run(cmd, **run_kwargs) call, not after ev['thread_id'] is parsed, so a concurrent `orchestrator workers` read sees the codex task while it is actually running; only backfill the thread id once parsed.",
+          "daemon.py: call worker_registry.reconcile(alive_fn=alive) once per tick() (e.g. alongside sweep_leases), not inside reconcile_dead(t) per dead task, and pass daemon's own alive function as an explicit argument rather than having worker_registry.py import daemon.py for a default.",
+          "worker_registry.py: drop or redefine the 'parent equal to this task' half of the children definition (rely on constraints.fix_round_for only, or clarify a different field is meant), since existing code does not set a child task's parent to its spawning worker's task id.",
+          "spawn.py/executor.py: reuse bus.normalize_usage(provider, usage) to populate the tokens dict (it already returns input_uncached_tokens/cache_read_tokens/output_tokens) instead of re-deriving the same buckets, to avoid drifting from bus.log_run's existing accounting."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790153976.364131,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "codex runs via a single blocking subprocess.run (line 159) and thread_id is only known after parsing stdout once the process exits (line 99). If the executor records the worker_registry 'spawned'/'running' entry only after thread_id is known (the natural reading of 'where a codex exec thread starts and ends'), a codex worker \u2014 the long-running provider this registry exists to make observable \u2014 will show no live entry for the entire duration of its run, defeating `orchestrator workers`'s purpose for exactly the case that needs it most. No acceptance test covers this (only test_spawn_records_worker_registry_entry, which is claude-only), so the gap could ship unnoticed.",
+          "severity": "high",
+          "line": 159
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "reconcile_dead(t, pool) runs once per already-dead task inside the tick() loop at daemon.py:1629-1637 (bus.read(status='running') can return multiple dead entries in one tick). Putting worker_registry.reconcile(alive_fn=...) 'at the end of its handling' means a full scan of every active registry entry re-runs once per dead task in the same tick \u2014 redundant, and worth doing once in tick() instead. Separately: worker_registry.py must not import daemon.py to get alive_fn (daemon.py will import worker_registry, so the reverse import is circular) \u2014 the call site in daemon.py should pass its own local alive function as an argument, not have worker_registry default to it.",
+          "severity": "med",
+          "line": 1634
+        },
+        {
+          "path": "orchestrator/worker_registry.py",
+          "issue": "the 'children' definition ('parent equal to this task') doesn't match how the `parent` field is actually used elsewhere (bus_mcp.bus_create_task's parent, daemon.py:212's parent=current.get('parent')): it generally carries the owning goal container id, propagated unchanged to children, not the id of the specific worker task that spawned a sub-task. Only the constraints.fix_round_for half of the definition matches an established convention (spawn.py:210-212, daemon.py:893). No acceptance test exercises 'children', so this half of the field will likely always be empty rather than doing anything wrong, but it's dead/misleading as specified.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 4591,
+    "est_tokens": 1147,
+    "presented_tokens": 1147,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "0bcc1d07777543d7682f66374f4ecd237670c9201534cd6e28bfbfefe74288c4"
+      },
+      "spec": {
+        "chars": 2880,
+        "est_tokens": 720,
+        "sha256": "3b492f085d89cfcb1d471dc857baf166756fe3c1e3e989e720c8f09dd0ae87d6"
+      },
+      "acceptance": {
+        "chars": 722,
+        "est_tokens": 180,
+        "sha256": "340611d51bd033ef276241cde973b3eec9b68c84477e37f23f9c1152ae1d99b3"
+      },
+      "scope": {
+        "chars": 261,
+        "est_tokens": 65,
+        "sha256": "5fe362018969fdcbeebfe48e3d3029253d1c6733b544f2a31ec2d780b8da4129"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 606,
+        "est_tokens": 151,
+        "sha256": "ef2d4c76b2fb504bad6d255eb0e656a57383414d3d02f4f50346856514dd40e5"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "1f7eb31aa193",
+    "version": "1f7eb31aa193",
+    "candidate_known": false,
+    "base": "6b7a41246767",
+    "sources": "task@T-0994 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "53b531d0-59f3-4ded-affd-f6566fe3323a",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790153749.259587,
+  "account": "B",
+  "pid": 90570,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "codex runs via a single blocking subprocess.run (line 159) and thread_id is only known after parsing stdout once the process exits (line 99). If the executor records the worker_registry 'spawned'/'running' entry only after thread_id is known (the natural reading of 'where a codex exec thread starts and ends'), a codex worker \u2014 the long-running provider this registry exists to make observable \u2014 will show no live entry for the entire duration of its run, defeating `orchestrator workers`'s purpose for exactly the case that needs it most. No acceptance test covers this (only test_spawn_records_worker_registry_entry, which is claude-only), so the gap could ship unnoticed.",
+      "severity": "high",
+      "line": 159
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "reconcile_dead(t, pool) runs once per already-dead task inside the tick() loop at daemon.py:1629-1637 (bus.read(status='running') can return multiple dead entries in one tick). Putting worker_registry.reconcile(alive_fn=...) 'at the end of its handling' means a full scan of every active registry entry re-runs once per dead task in the same tick \u2014 redundant, and worth doing once in tick() instead. Separately: worker_registry.py must not import daemon.py to get alive_fn (daemon.py will import worker_registry, so the reverse import is circular) \u2014 the call site in daemon.py should pass its own local alive function as an argument, not have worker_registry default to it.",
+      "severity": "med",
+      "line": 1634
+    },
+    {
+      "path": "orchestrator/worker_registry.py",
+      "issue": "the 'children' definition ('parent equal to this task') doesn't match how the `parent` field is actually used elsewhere (bus_mcp.bus_create_task's parent, daemon.py:212's parent=current.get('parent')): it generally carries the owning goal container id, propagated unchanged to children, not the id of the specific worker task that spawned a sub-task. Only the constraints.fix_round_for half of the definition matches an established convention (spawn.py:210-212, daemon.py:893). No acceptance test exercises 'children', so this half of the field will likely always be empty rather than doing anything wrong, but it's dead/misleading as specified.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # ponytail: TOML instead of YAML so stdlib tomllib parses it, no pyyaml dependency.
 # window_cap_tokens is a calibration knob: set from observed 5h-window resets (§13).
-window_cap_tokens = 10_000_000  # raised 2026-09-17 by user decision: 2M was hit in 2.2 h with zero real rate limits
+window_cap_tokens = 80_000_000  # 2026-09-24 00:15 raised from 40M: account A alone carries reviews and its window (Planner tokens included) hit the 0.65 headroom ceiling, stalling every review; revert path: 40_000_000 (then 10_000_000)
 
 [cache]
 # 2026-09-23: provider cache prices expressed as input-token equivalents for telemetry.
@@ -15,12 +15,12 @@ id = "A"
 config_dir = "~/.claude-a"
 role_affinity = ["planner", "scout", "triage", "execute", "review", "spec_review"]
 reserve_for_planner = 0.35
-daily_budget_tokens = 30_000_000  # 2026-09-18: was 6M, below the 10M 5h window; sized to ~3 windows/day
+daily_budget_tokens = 200_000_000  # 2026-09-23 16:20: raised from 30M on the user's word so account A can carry reviews while B is provider rate-limited; revert path: set back to 30_000_000
 
 [[claude_accounts]]
 id = "B"
 config_dir = "~/.claude-b"
-role_affinity = ["planner", "scout", "triage", "review", "challenge", "execute", "spec_review"]  # 2026-09-21 18:40 user: planner added so headless launches have headroom while A is over budget
+role_affinity = ["planner", "scout", "triage", "challenge", "execute"]  # 2026-09-23 (real 20:10): review and spec_review removed on the user's "do reviews now on A" while B answers 429 on every review spawn (least-utilization kept picking B first, costing a 30-min cooldown each time); revert path: add "review", "spec_review" back  # 2026-09-21 18:40 user: planner added so headless launches have headroom while A is over budget
 reserve_for_planner = 0.0
 daily_budget_tokens = 40_000_000  # 2026-09-18: was 8M; see window_cap_tokens note
 
@@ -37,7 +37,7 @@ flaky_rerun_max = 1  # Default 1; rerun a held gate's named failures at most thi
 flaky_rerun_timeout_s = 600  # Default 600s; bound each held-test rerun so a hung test cannot block a daemon tick.
 
 [planner]
-autonomous = true   # 2026-09-21 18:30 user: flipped on for shadow evidence (was false). 2026-09-18: launch a headless Planner to act on scouts_done/held/closable decisions with no
+autonomous = false  # 2026-09-23 17:25: off while the interactive Planner runs without an MCP host (the attached-session check cannot see it): headless launches re-filed S2a1 as a duplicate v2 (T-1078) and burned account A; revert path: autonomous = true
                      # interactive session running -- off by default (interactive Planner is a human's proxy);
                      # turn on only in the executor container, where no human session ever attaches
 # Context at which the interactive Planner should hand over; decision packets are sized separately for each run.
@@ -58,7 +58,7 @@ investigate_max_complexity = 4
 premium_launches_soft_per_goal = 2
 
 [planner.routing]
-mode = "shadow" # planner_router.load_cfg: off = today's Fable-only behaviour; shadow records Opus evidence; active routes eligible decisions.
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 default_tier = "opus" # planner_router.load_cfg: candidate tier used for ordinary Planner decisions.
 escalation_tier = "fable" # planner_router.load_cfg: premium tier reserved for hard or escalated decisions.
 hard_complexity_min = 9 # planner_router.load_cfg: complexity at or above this value is a hard escalation.
@@ -68,7 +68,7 @@ hard_ambiguous = true # planner_router.load_cfg: ambiguous classifications trigg
 min_samples = 20 # planner_router.load_cfg: observations required per class before evidence can route.
 shadow_sample_rate = 1.0 # planner_router.load_cfg: share of eligible shadow decisions sampled.
 fable_reserve_share = 0.2 # planner_router.load_cfg: minimum Fable headroom retained for escalations.
-jev_mode = "shadow" # planner_router.load_cfg: Jev advice is observed without changing routing.
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 soft_threshold = 0.5 # planner_router.load_cfg: minimum soft escalation score.
 
 # Review policy. Measurement 2026-09-18: every fallback-executed task got two reviews (daemon's sonnet one plus
@@ -312,14 +312,14 @@ max_state_chars = 100_000
 gate_mode = "sample"  # E3 gate: "sample" scores a deterministic 10% sample; "log" all; "block" may deny
 sample_rate = 0.1  # Fraction of calls scored in sample mode; keep labels gathered before enabling block
 block_repeats = false  # In block mode, deny unchanged repeated reads only after labelling confirms the rule
-read_suppression = "shadow"  # "active" deterministically denies safe exact repeats after evidence checks
+read_suppression = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 max_suppressions_per_session = 20
 max_false_suppression = 0.02
 
 [jev.routing]
 # Questions: localized_simple, substantial_reasoning, large_context, debugging_reproduction, architectural,
 # elevated_risk, stronger_executor_helps. Hard pool constraints stay authoritative; shadow never changes routing.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 cache_ttl_s = 86400
 cache_max_entries = 500
 # Default 0.25; caps each evidence-backed routing score adjustment.
@@ -339,7 +339,7 @@ planner_relaunch = "shadow"
 
 [allocation]
 # Default shadow; record allocation recommendations without applying them.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default 5; samples required before allocation evidence is used.
 min_samples = 5
 # Default 2.0; hourly latency cost used in allocation comparisons.
@@ -351,7 +351,7 @@ non_critical_factor = 0.25
 
 [strategy]
 # Default shadow; record strategy recommendations without applying them.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default 10; samples required before strategy evidence is used.
 min_samples = 10
 
@@ -367,7 +367,7 @@ min_retry_cost_usd = 1.0
 
 [context_router]
 # P23, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
-mode = "shadow" # shadow computes and logs the routed packet without changing what the model sees
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; back to active real 22:00 after a 15-minute shadow: the legacy evidence section is unbounded (a 2.3 MB review packet, argv too long); the routed-findings trim KeyError (T-1280) is worked around by pruning the evidence pool instead. revert: set back to "shadow"
 # 2026-09-23: record cache-adjusted disclosure decisions; revert: set cache_mode = "off".
 cache_mode = "shadow"
 # 2026-09-23: cap legacy/shared evidence while oversized legacy pools age out.
@@ -377,7 +377,7 @@ legacy_evidence_chars = 6000
 # 2026-09-23: measure stable disclosure in shadow; revert: cache_mode = "off".
 cache_mode = "shadow"
 # P24, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 
 [instructions]
 # P25, 2026-09-22: conditional modules; safety rules are never conditional; revert by setting mode back to "off".
@@ -389,7 +389,7 @@ min_samples = 20
 
 [handoff]
 # P16/T-0858: shadow measures only; active may select the lowest sufficient expected route cost.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 min_gain = 0.15
 max_active_share = 0.5
 
@@ -417,7 +417,7 @@ TYPESAFE_API_KEY = "source ~/.config/f/f.sh && f tok get typesafe --reveal"
 [scheduler]
 # shadow keeps first-come dispatch and only logs proposed waves (default).
 # active dispatches the selected wave; off disables wave selection and logging.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default empirical; estimate execution duration from completed-task evidence.
 duration_mode = "empirical"
 # Default 5; samples required before an empirical duration estimate is used.
@@ -437,7 +437,7 @@ merge_queue_saturated = 5
 # Default 2; merge conflicts at which merge pressure is saturated.
 merge_conflicts_saturated = 2
 # Default shadow; record Jev scheduler recommendations without applying them.
-jev_mode = "shadow"
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default 8; candidate task pairs considered by the Jev scheduler.
 jev_max_pairs = 8
 # Default 3600 seconds; Jev scheduler cache lifetime.
@@ -453,8 +453,8 @@ stale_rebase = false
 # 2026-09-23: measure stable disclosure in shadow; revert: cache_mode = "off".
 cache_mode = "shadow"
 # 2026-09-23: shadow records minimal routing without changing exposure; revert: off.
-mode = "shadow"
-jev_mode = "shadow" # Jev classifies only ambiguous weak matches; revert: off.
+mode = "active"  # 2026-09-24 01:40: back to active after PR 25 merged the evidence feedback-loop fix (T-1286) and the trim fix (T-1280); revert: set back to "shadow"
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 jev_max_batch = 8
 max_selected = 3
 max_recovery = 0.10

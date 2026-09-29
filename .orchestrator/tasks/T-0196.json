@@ -1,0 +1,171 @@
+{
+  "id": "T-0196",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review (other model, opus, security checklist): D3 v4 autonomous Planner decisions (T-0192, executed by claude:sonnet)",
+  "spec": "Review the T-0192 delta: `git diff d921a63 97ed164` in worktree wt/T-0192 (orchestrator/planner_runs.py new, orchestrator/goals.py, orchestrator/daemon.py, orchestrator/mcp.py, .orchestrator/prompts/planner-decision.md, tests/test_planner_runs.py, tests/test_goals.py, .orchestrator/pool.toml, README.md). This feature can launch a headless Planner with bypassed permissions on its own, so apply the security checklist. Acceptance: (1) goals.launch_planner extracted with the target-secrets filter preserved, start() routed through it, identity_of exposed, existing goals tests green plus start_uses_launch_planner; (2) mcp.py registers the interactive session: ORCH_DAEMON_HOST=mcp and an atomic planner_session.json {pid, pid_start, started_at, host} at start, removed at exit only when the pid is ours; helper tested without starting the server; (3) planner_runs.py: dedup keys per kind (scouts_done/closable = goal_id; held = task:reason:full-float held_at), decision_points() yields only when no blocking run exists (running, exited_ok, gave_up block; exited_early with attempts < 2 retries); run() guards: env flag OR live session file \u2192 skip \"planner session attached\" (stale file ignored), Pool().pick(\"planner\") None \u2192 skip; then handover.write, prompt from planner-decision.md, launch_planner with planner_decision budget, record under bus.locked() incl. pid_start and attempts; reconcile() marks exited_ok / exited_early / gave_up (+ one notify) correctly; (4) daemon.tick() autonomous block after the stages, default off, at most one launch per tick, wrapped; pool.toml [planner] autonomous=false and planner_decision budget; (5) the eight named tests plus the goals and mcp tests exist and are meaningful; (6) security: the decision prompt embeds only kind/goal_id/payload_key (no task text from the bus), argv lists only, no shell strings; the session file cannot be spoofed into a launch (a forged file with a live foreign pid only blocks launches, never enables them); nothing writes outside .orchestrator; (7) no regression to reconcile_dead, handover throttle, tally_planner in tick(); no new dependency. Run `uv run python -m unittest tests.test_planner_runs tests.test_goals -q` once. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0192"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the seven points confirmed with evidence from the delta",
+    "Security checklist applied to the launch path and the session file"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/goals.py",
+    "orchestrator/daemon.py",
+    "orchestrator/mcp.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0196",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 195,
+        "issue": "The `held` branch of `_condition_resolved` treats a SUCCESSFUL decision as an early exit. README (new text, line ~80) and CLAUDE.md step 6 both state the Planner clears a hold by writing a new spec with depends_on=[held_task_id], NEVER by editing the held task; nothing in daemon.py or merge.py ever moves a task out of status=held (verified: the only `status=\"held\"` writes are daemon.py:134/242/275/331/336/453/479, spawn.py:227/285, executor.py:73/116/136 \u2014 no transition out). So after the decision Planner does exactly the right thing, the task is still held with the same hold_reason and the same `pipeline.review_held_at`, `_held_key` returns the identical payload_key, `_condition_resolved` returns False, and reconcile() stamps `exited_early`. Next tick launches a SECOND $3 Planner for the same hold, which writes a duplicate fix-round spec, then reconcile stamps `gave_up` and fires a false 'gave up after 2 attempts' notify. The diff's own test (tests/test_planner_runs.py, Reconcile) encodes this as expected behaviour, so it passes while being wrong. Resolution for `held` needs a different signal \u2014 e.g. a child task whose depends_on contains the held task id, created after the record's started_at.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 163,
+        "issue": "TOCTOU: `_blocked()` reads planner_runs.json outside any lock, and `_record_running()` writes it in a separate `bus.locked()` block. The daemon's single-instance flock does not close this \u2014 daemon.py:634 `main(once=True)` calls `tick(Pool())` with NO lock at all, and CLAUDE.md step 6 tells the Planner to run `daemon --once` per pass alongside the long-running daemon. Two concurrent ticks both see no blocking record and both launch a headless Planner for the same (goal_id, kind, payload_key), doubling spend and producing two conflicting spec sets. Take `bus.locked()` around the check-and-record, or claim the key by writing the `running` record before launching.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 36,
+        "issue": "`_save_records` uses a bare `path.write_text()` \u2014 non-atomic, unlike every sibling writer in this codebase (handover.write uses mkstemp+os.replace at handover.py:198-202, and register_planner_session in this very diff does the same at mcp.py:33-37). Combined with `_load_records` swallowing JSONDecodeError into `[]` (line 28), a crash mid-write or an unlocked concurrent read (`_blocked`, `_existing_attempts` and `decision_points` all read without the lock) silently erases the whole dedup ledger: every `gave_up` and `running` key becomes unblocked and gets relaunched. Use mkstemp + os.replace, and make the JSONDecodeError path fail closed (or back the file up) rather than returning an empty ledger.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 133,
+        "issue": "`_record_skip` unconditionally APPENDS a new record and skip records never block, so every tick that hits a guard adds another row forever. With an interactive session attached (the intended steady state on a laptop) and one standing decision point, a 30s daemon interval writes ~2880 records/day into planner_runs.json, and every `_blocked()` / `decision_points()` call rescans all of them. Skips are also indistinguishable in the file from real attempts. Either don't persist guard skips, update one skip row in place per key, or prune them.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/mcp.py",
+        "line": 60,
+        "issue": "Guard ordering: `daemon.start_background()` runs at line 14, but `register_planner_session()` (which sets ORCH_DAEMON_HOST and writes planner_session.json) only runs at line 60. `_loop` calls `tick(Pool())` immediately with no initial sleep, and tick does plenty of blocking file I/O that releases the GIL, so with `[planner] autonomous = true` the first tick can reach the autonomous block at daemon.py:548 while neither guard exists yet \u2014 the exact 'never runs alongside a human' invariant the feature is built on. Move `register_planner_session()` and the atexit hook above the `daemon.start_background` call.",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_planner_runs.py",
+        "line": 251,
+        "issue": "`import orchestrator.mcp` runs that module's import-time `register_planner_session()` BEFORE the test swaps `mcp_mod.STATE`, so it writes a real planner_session.json into the shared main-repo state dir and sets ORCH_DAEMON_HOST=mcp process-wide. Verified by running it: STATE at import resolves to /Users/k3ntaw/code/orchestrator/.orchestrator and the file exists there for the life of the process (only atexit removes it). A real autonomous daemon ticking against that repo during a test run will see 'planner session attached' and skip every decision, and the leaked env var affects any later test in the same process that exercises the autonomous path (test_daemon only happens to sort earlier). Set the sandbox STATE before importing, or move register/deregister behind an explicit entrypoint that import does not call.",
+        "severity": "med"
+      }
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 7671,
+      "trimmed": {
+        "comments": 4
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789765864.419608,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0196",
+      "claimed_at": 1789765864.419022
+    },
+    {
+      "ts": 1789765864.507522,
+      "pid": 97530,
+      "account": "B"
+    },
+    {
+      "ts": 1789766178.298933,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 195,
+            "issue": "The `held` branch of `_condition_resolved` treats a SUCCESSFUL decision as an early exit. README (new text, line ~80) and CLAUDE.md step 6 both state the Planner clears a hold by writing a new spec with depends_on=[held_task_id], NEVER by editing the held task; nothing in daemon.py or merge.py ever moves a task out of status=held (verified: the only `status=\"held\"` writes are daemon.py:134/242/275/331/336/453/479, spawn.py:227/285, executor.py:73/116/136 \u2014 no transition out). So after the decision Planner does exactly the right thing, the task is still held with the same hold_reason and the same `pipeline.review_held_at`, `_held_key` returns the identical payload_key, `_condition_resolved` returns False, and reconcile() stamps `exited_early`. Next tick launches a SECOND $3 Planner for the same hold, which writes a duplicate fix-round spec, then reconcile stamps `gave_up` and fires a false 'gave up after 2 attempts' notify. The diff's own test (tests/test_planner_runs.py, Reconcile) encodes this as expected behaviour, so it passes while being wrong. Resolution for `held` needs a different signal \u2014 e.g. a child task whose depends_on contains the held task id, created after the record's started_at.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 163,
+            "issue": "TOCTOU: `_blocked()` reads planner_runs.json outside any lock, and `_record_running()` writes it in a separate `bus.locked()` block. The daemon's single-instance flock does not close this \u2014 daemon.py:634 `main(once=True)` calls `tick(Pool())` with NO lock at all, and CLAUDE.md step 6 tells the Planner to run `daemon --once` per pass alongside the long-running daemon. Two concurrent ticks both see no blocking record and both launch a headless Planner for the same (goal_id, kind, payload_key), doubling spend and producing two conflicting spec sets. Take `bus.locked()` around the check-and-record, or claim the key by writing the `running` record before launching.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 36,
+            "issue": "`_save_records` uses a bare `path.write_text()` \u2014 non-atomic, unlike every sibling writer in this codebase (handover.write uses mkstemp+os.replace at handover.py:198-202, and register_planner_session in this very diff does the same at mcp.py:33-37). Combined with `_load_records` swallowing JSONDecodeError into `[]` (line 28), a crash mid-write or an unlocked concurrent read (`_blocked`, `_existing_attempts` and `decision_points` all read without the lock) silently erases the whole dedup ledger: every `gave_up` and `running` key becomes unblocked and gets relaunched. Use mkstemp + os.replace, and make the JSONDecodeError path fail closed (or back the file up) rather than returning an empty ledger.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 133,
+            "issue": "`_record_skip` unconditionally APPENDS a new record and skip records never block, so every tick that hits a guard adds another row forever. With an interactive session attached (the intended steady state on a laptop) and one standing decision point, a 30s daemon interval writes ~2880 records/day into planner_runs.json, and every `_blocked()` / `decision_points()` call rescans all of them. Skips are also indistinguishable in the file from real attempts. Either don't persist guard skips, update one skip row in place per key, or prune them.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/mcp.py",
+            "line": 60,
+            "issue": "Guard ordering: `daemon.start_background()` runs at line 14, but `register_planner_session()` (which sets ORCH_DAEMON_HOST and writes planner_session.json) only runs at line 60. `_loop` calls `tick(Pool())` immediately with no initial sleep, and tick does plenty of blocking file I/O that releases the GIL, so with `[planner] autonomous = true` the first tick can reach the autonomous block at daemon.py:548 while neither guard exists yet \u2014 the exact 'never runs alongside a human' invariant the feature is built on. Move `register_planner_session()` and the atexit hook above the `daemon.start_background` call.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_planner_runs.py",
+            "line": 251,
+            "issue": "`import orchestrator.mcp` runs that module's import-time `register_planner_session()` BEFORE the test swaps `mcp_mod.STATE`, so it writes a real planner_session.json into the shared main-repo state dir and sets ORCH_DAEMON_HOST=mcp process-wide. Verified by running it: STATE at import resolves to /Users/k3ntaw/code/orchestrator/.orchestrator and the file exists there for the life of the process (only atexit removes it). A real autonomous daemon ticking against that repo during a test run will see 'planner session attached' and skip every decision, and the leaked env var affects any later test in the same process that exercises the autonomous path (test_daemon only happens to sort earlier). Set the sandbox STATE before importing, or move register/deregister behind an explicit entrypoint that import does not call.",
+            "severity": "med"
+          }
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 7671,
+          "trimmed": {
+            "comments": 4
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789766178.301812,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789765864.419022,
+  "pid": 97530,
+  "account": "B",
+  "review_verdict": "request_changes"
+}

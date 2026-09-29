@@ -1,0 +1,470 @@
+{
+  "id": "T-0658",
+  "created_at": 1789982891.106953,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "R15b v3: gate/merge/executor integration \u2014 stale.py evidence in the gate, merged_at and changed_files stamped by merge(), gate stamps cleared on fix-round replies, allocation and active Jev routing hooks in executor.start, scout reuse check in spawn_scout",
+  "spec": "v3 after spec reviews T-0655 and T-0657 (executor.start derives the ready set and priorities itself; hooks live inside the branch that picks an executor; skipped-scout results are real findings). Why: merged pure modules need their call sites: daemon.stale_check/_record_stale_check/_stale_rebase (orchestrator/daemon.py:1152-1223 on goal/T-0561 after the R15a merge) only knows path signals; merge.merge (orchestrator/merge.py:25-99) stamps no merged_at (merge wait undefined for Planner merges, AP P0 gap) and no changed_files (stale.overlapping_merge floor); executor.post_tool_result with replace_result=True (executor.py:215-247) leaves pipeline.gated_at set so gate() skips a task fixed by codex_reply (Planner had to clear it by hand on T-0570/T-0574 today); executor.start (executor.py:249-300) picks executors without allocation or active Jev adjustment; mcp.spawn_scout (mcp.py:75-77) launches without the scout_evidence reuse check.\nWhat. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in the named file; no pytest fixtures; use the daemon test harness in tests/_harness.py.\n1. Stale: daemon.stale_check(task) delegates to stale.evidence(task, graph_links=stale.load_links(), graph=interference.load_graph(), tasks=bus.read(role='execute')) and returns its dict (today's keys base, goal_head, moved_count, stale_paths, risk remain; signals/risk_reasons/graph added); _record_stale_check writes stale.row(...) with action recorded; _stale_rebase writes rows with action rebased/rebase_conflict; risk 'medium' is treated like 'low' for the stale_rebase decision (only high rebases).\n2. merge.merge: on status merged, bus.update also sets merged_at=time.time() (top-level, mirrored into pipeline.merged_at when absent) and changed_files = git diff --name-only previous_sha..sha (bounded to 500 paths). scorecard.parallelism merge_wait_s must read either location (read stamp helper accepts pipeline or top-level; already does per _stamp \u2014 verify with a test).\n3. executor.post_tool_result(replace_result=True): pop pipeline keys gated_at, gated_at_lease, gated_at_done and hold_reason/resume_hint gate residue, so gate() re-runs on the new head; record pipeline.regated_by='codex_reply'.\n4. executor.start: inside the existing `else` branch that runs when no executor_id was supplied (executor.py:270-274), immediately after scores = scorecard.scores(...) and before pool.pick_executor is used for the final pick, so a caller-supplied executor_id path is untouched and scores is always defined: if [jev.routing].mode == active: routing = jev_route.shadow_context(t, pool) and scores = jev_route.active_scores(t, pool, routing['eligible'], routing['classification'], routing['evidence'], scores). Then if [allocation].mode != off: build the ranking inputs from the bus inside executor.start (no daemon import, daemon imports executor): graph = {x['id']: x for x in bus.read(role='execute', compact=False) if not x.get('merged_into') and x.get('status') != 'failed'} plus the task itself; durations = duration.durations_for(list(graph.values())); ready_ids = [x['id'] for x in graph.values() if x['status'] in ('queued', 'running') and bus.ready(x)] with the task id included; priority = critical_path.explain(t['id'], graph, durations); ready_priorities = [critical_path.explain(i, graph, durations)['critical_path_s'] for i in ready_ids]; eligible_ids = [e.id for e in pool.eligible_executors('execute', t['complexity'], t)]; ev = allocation.evidence_for(eligible_ids, scorecard.task_class(t)); baseline = pool.pick_executor('execute', t['complexity'], scores=scores, task=t); choice = allocation.choose(t, eligible_ids, baseline=baseline.id, priority=priority, ready_priorities=ready_priorities, evidence=ev); allocation.record(t['id'], choice); in active mode ex = pool.executors[choice['executor']], in shadow ex stays baseline. Any exception in these hooks -> baseline pick, hook error text stored in the run row (bus.log_run field allocation_error) and dispatch continues.\n5. mcp.spawn_scout(task_id): before _bg, check = scout_evidence.reuse_check(task spec, objective=constraints.objective, head_sha=HEAD); scout_evidence.record_decision(...); when check['sufficient'] and constraints.force is not true, return {'task': id, 'status': 'skipped: reusable evidence', 'hits': check['hits']} and post the task result as done with result = {'summary': 'reused evidence: ' + ', '.join(hit ids), 'findings': [{'finding': hit['title'], 'source': hit['id'], 'confidence': 0.8, 'relevance': 'reused', 'unresolved': ''} for each fresh hit] (the shape scout_evidence.normalize_findings accepts), 'reused_evidence': check['hits'], 'provenance': ['repo']}; otherwise spawn as today.\nSafety: security review path and reviews_expected untouched; allocation never returns an ineligible executor; all hooks fail open to today's behaviour.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_returns_extended_evidence_and_only_high_rebases \u2014 stale_check output has signals and risk_reasons; a medium risk never triggers _stale_rebase",
+    "tests/test_merge.py::test_merge_stamps_merged_at_and_changed_files \u2014 a successful merge leaves merged_at and a changed_files list on the task",
+    "tests/test_executor.py::test_reply_result_clears_gate_stamps_for_regating \u2014 post_tool_result with replace_result removes gated_at keys and sets regated_by",
+    "tests/test_executor.py::test_start_uses_allocation_only_in_active_mode_and_fails_open \u2014 with two concurrently ready execute tasks of different critical-path length on the bus, shadow mode keeps the baseline executor and writes an allocation decision row whose candidates carry non_critical_factor for the shorter task; active mode uses the chosen eligible executor for the critical one; a raising allocation.choose falls back to baseline and records allocation_error",
+    "tests/test_executor.py::test_start_applies_active_jev_scores_only_when_mode_active \u2014 with [jev.routing].mode active the scores passed to pick_executor are the adjusted ones; in shadow they are unchanged",
+    "tests/test_mcp.py::test_spawn_scout_skips_when_reusable_evidence_is_sufficient \u2014 sufficient fresh evidence returns skipped with hits and posts a done result whose findings each carry finding, source, confidence and relevance (normalize_findings keeps them all) plus reused_evidence; force true spawns anyway",
+    "tests/test_executor.py::test_start_with_explicit_executor_id_skips_routing_hooks \u2014 start(task, prompt, executor_id='sol') never calls jev_route or allocation and uses the given executor"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/executor.py",
+    "orchestrator/mcp.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py",
+    "tests/test_executor.py",
+    "tests/test_mcp.py"
+  ],
+  "depends_on": [
+    "T-0570",
+    "T-0572",
+    "T-0574",
+    "T-0600",
+    "T-0606",
+    "T-0634"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/daemon.py",
+      "orchestrator/merge.py",
+      "orchestrator/executor.py",
+      "orchestrator/mcp.py",
+      "orchestrator/stale.py",
+      "orchestrator/allocation.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/scout_evidence.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/critical_path.py",
+      "orchestrator/pool.py",
+      "tests/_harness.py",
+      "tests/test_daemon.py",
+      "tests/test_executor.py",
+      "tests/test_merge.py",
+      "tests/test_mcp.py"
+    ],
+    "interface_contract": "stale_check(task) keeps today's keys and adds signals, risk_reasons, graph; merge() stamps merged_at and changed_files; post_tool_result(replace_result=True) clears gated_at*; executor.start hooks read [allocation].mode and [jev.routing].mode; spawn_scout returns status 'skipped: reusable evidence' when sufficient"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0658",
+  "codex_thread": "01a0c34b-ceb4-7bd2-ba00-5dfaf69f75de",
+  "result": {
+    "summary": "Implemented stale evidence, merge timestamps/files, fix-round regating, routing hooks, and scout reuse.\n\nFiles changed: `daemon.py`, `executor.py`, `merge.py`, `mcp.py` and their four test files. 287 insertions, 40 deletions.\n\nGate: **PASS \u2014 930 tests**. Failures-only output: empty.\nCommit: `f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c`\nWorking tree: clean.",
+    "executed_by": "codex:astra",
+    "thread": "01a0c34b-ceb4-7bd2-ba00-5dfaf69f75de",
+    "usage": {
+      "input_tokens": 1546093,
+      "cached_input_tokens": 1480320,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10025,
+      "reasoning_output_tokens": 1532,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789982891.108397,
+      "spec_review_verdict": "approve",
+      "spec_review_waived": "Planner decision 2026-09-21 after spec-review rounds T-0655 and T-0657: all three remaining risks folded into v3"
+    },
+    {
+      "ts": 1789982909.006473,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409
+      }
+    },
+    {
+      "ts": 1789982909.008407,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329
+      }
+    },
+    {
+      "ts": 1789982912.7555652,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392
+      }
+    },
+    {
+      "ts": 1789982920.066847,
+      "packet_meta": {
+        "chars": 3513,
+        "est_tokens": 878,
+        "hash": "8ca94671444e",
+        "version": "8ca94671444e",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@449b76c28a8a gotchas@96253725aeac memory@notes",
+        "policy_version": "449b76c28a8a",
+        "gotchas": "96253725aeac"
+      }
+    },
+    {
+      "ts": 1789982920.068285,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0658",
+      "claimed_at": 1789982920.0681221
+    },
+    {
+      "ts": 1789982920.069358,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789983408.485292,
+      "codex_thread": "01a0c34b-ceb4-7bd2-ba00-5dfaf69f75de",
+      "codex_thread_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+    },
+    {
+      "ts": 1789983408.4910522,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        }
+      }
+    },
+    {
+      "ts": 1789983408.493854,
+      "status": "done",
+      "result": {
+        "summary": "Implemented stale evidence, merge timestamps/files, fix-round regating, routing hooks, and scout reuse.\n\nFiles changed: `daemon.py`, `executor.py`, `merge.py`, `mcp.py` and their four test files. 287 insertions, 40 deletions.\n\nGate: **PASS \u2014 930 tests**. Failures-only output: empty.\nCommit: `f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c`\nWorking tree: clean.",
+        "executed_by": "codex:astra",
+        "thread": "01a0c34b-ceb4-7bd2-ba00-5dfaf69f75de",
+        "usage": {
+          "input_tokens": 1546093,
+          "cached_input_tokens": 1480320,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10025,
+          "reasoning_output_tokens": 1532,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789983415.174732,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789983536.438852,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789983536.4386601,
+        "gated_at_lease": 1789984436.4386601,
+        "first_green_at": 1789983536.437889,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789983536.538719,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789983536.4386601,
+        "gated_at_lease": 1789984436.4386601,
+        "first_green_at": 1789983536.437889,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0658",
+          "goal_head": "81b8d884812bd9b9731a64541c51c51ee4d02501",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789983536.538274,
+          "head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+        }
+      }
+    },
+    {
+      "ts": 1789983536.698587,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789983536.4386601,
+        "gated_at_lease": 1789984436.4386601,
+        "first_green_at": 1789983536.437889,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0658",
+          "goal_head": "81b8d884812bd9b9731a64541c51c51ee4d02501",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789983536.538274,
+          "head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+        },
+        "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+      }
+    },
+    {
+      "ts": 1789983536.707399,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789983536.4386601,
+        "gated_at_lease": 1789984436.4386601,
+        "first_green_at": 1789983536.437889,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0658",
+          "goal_head": "81b8d884812bd9b9731a64541c51c51ee4d02501",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789983536.538274,
+          "head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+        },
+        "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+        "gated_at_done": 1789983536.70594
+      }
+    },
+    {
+      "ts": 1789983815.525312,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789983819.8443289,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789983536.4386601,
+        "gated_at_lease": 1789984436.4386601,
+        "first_green_at": 1789983536.437889,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0658",
+          "goal_head": "81b8d884812bd9b9731a64541c51c51ee4d02501",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789983536.538274,
+          "head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+        },
+        "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+        "gated_at_done": 1789983536.70594,
+        "merged_at": 1789983819.8441322,
+        "merged_at_lease": 1789984719.8441322
+      }
+    },
+    {
+      "ts": 1789983942.328628,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+    },
+    {
+      "ts": 1789983942.829399,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789983536.4386601,
+        "gated_at_lease": 1789984436.4386601,
+        "first_green_at": 1789983536.437889,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0658",
+          "goal_head": "81b8d884812bd9b9731a64541c51c51ee4d02501",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789983536.538274,
+          "head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+        },
+        "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+        "gated_at_done": 1789983536.70594,
+        "merged_at": 1789983819.8441322,
+        "merged_at_lease": 1789984719.8441322,
+        "accepted_at": 1789983942.829014
+      }
+    },
+    {
+      "ts": 1789983942.9559228,
+      "pipeline": {
+        "first_ready_at": 1789982909.006409,
+        "dispatched_at": 1789982909.008329,
+        "dispatched_at_lease": 1789983809.008329,
+        "dispatched_at_done": 1789982912.755392,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "a2709b82c7447cea42ab64a6503680d906692645"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789983536.4386601,
+        "gated_at_lease": 1789984436.4386601,
+        "first_green_at": 1789983536.437889,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0658",
+          "goal_head": "81b8d884812bd9b9731a64541c51c51ee4d02501",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789983536.538274,
+          "head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+        },
+        "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+        "gated_at_done": 1789983536.70594,
+        "merged_at": 1789983819.8441322,
+        "merged_at_lease": 1789984719.8441322,
+        "accepted_at": 1789983942.829014,
+        "merged_at_done": 1789983942.955756
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_waived": "Planner decision 2026-09-21 after spec-review rounds T-0655 and T-0657: all three remaining risks folded into v3",
+  "pipeline": {
+    "first_ready_at": 1789982909.006409,
+    "dispatched_at": 1789982909.008329,
+    "dispatched_at_lease": 1789983809.008329,
+    "dispatched_at_done": 1789982912.755392,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "a2709b82c7447cea42ab64a6503680d906692645"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789983536.4386601,
+    "gated_at_lease": 1789984436.4386601,
+    "first_green_at": 1789983536.437889,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0658",
+      "goal_head": "81b8d884812bd9b9731a64541c51c51ee4d02501",
+      "moved_count": 0,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789983536.538274,
+      "head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+    },
+    "reviewed_sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+    "gated_at_done": 1789983536.70594,
+    "merged_at": 1789983819.8441322,
+    "merged_at_lease": 1789984719.8441322,
+    "accepted_at": 1789983942.829014,
+    "merged_at_done": 1789983942.955756
+  },
+  "packet_meta": {
+    "chars": 3513,
+    "est_tokens": 878,
+    "hash": "8ca94671444e",
+    "version": "8ca94671444e",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@449b76c28a8a gotchas@96253725aeac memory@notes",
+    "policy_version": "449b76c28a8a",
+    "gotchas": "96253725aeac"
+  },
+  "claimed_at": 1789982920.0681221,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0561",
+  "sha": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c"
+}

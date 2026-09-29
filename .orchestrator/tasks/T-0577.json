@@ -1,0 +1,192 @@
+{
+  "id": "T-0577",
+  "created_at": 1789971223.696109,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "R8: orchestrator/jev_sched.py \u2014 Jev as a shadow scheduling signal for ambiguous soft-interference pairs only, batched, cached, fail-open, never overriding deterministic constraints (AP P15)",
+  "spec": "Why: waves are deterministic (interference.select_wave) and soft pairs are deferred or admitted by rule; AP P15 / brief P10 allow Jev to answer only ambiguous questions (semantic interference, stale-assumption risk) where deterministic evidence is insufficient, in shadow first, without O(n^2) calls.\nWhat: new module orchestrator/jev_sched.py using jev.ask (orchestrator/jev.py:184, returns {answers:{key:{noul, confidence}}, usage} or None) and decision_log.record(kind=\"jev_sched\").\n- PAIR_QUESTIONS = {\"semantic_interference\": \"...\", \"stale_assumption_risk\": \"...\"} phrased as probabilities; ambiguous_pairs(pairwise_rows) -> only rows with level soft (hard and none are never asked; explicit dependency reasons excluded).\n- cfg from pool config [scheduler]: jev_mode off|shadow|active (default shadow; unknown -> shadow), jev_max_pairs 8, jev_cache_ttl_s 3600, jev_cache_max_entries 200.\n- state for one batch: per pair {a, b, titles, scope lists, spec[:400] redacted with jev.redact, reasons}; never file contents or diffs (privacy test asserts no path content and that redact was applied). One jev.ask per annotate() call with at most jev_max_pairs pairs (questions keyed <pair>:<question>); cache in STATE/runs/jev/sched_cache.json keyed sha1(sorted pair ids + scope tuples + goal_head), TTL and bounded entries, invalidated when goal_head or scopes change.\n- annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask) -> {\"mode\", \"asked\", \"cache\", \"signals\": {\"a|b\": {semantic_interference, stale_assumption_risk, confidence}}, \"would_defer\": [task ids Jev rates semantic_interference >= 0.7 for a pair inside the wave], \"applied\": [], \"wave\": wave_result[\"wave\"], \"deferred\": wave_result[\"deferred\"], \"error\": None|reason}. off -> returns input unchanged with asked 0. shadow -> computes would_defer, changes nothing. active -> may move a task from wave to deferred with reason \"jev:<pair>\" only when the pair is soft, never a hard pair (already deferred), never a dependency, never exceeding capacity (it only removes), and never re-adding a deferred task; any Jev failure (None, malformed, out-of-range) -> error set, deterministic wave returned unchanged (fail open).\n- Every call records decision_log.record(kind=\"jev_sched\", subject=<goal or first task>, candidates=pairs, hard_constraints=[\"dependency\", \"hard_conflicts\", \"capacity\"], deterministic=wave_result, jev=signals, selected=applied or [], rejected=would_defer, reason, confidence, n=asked, mode).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_sched.py::test_off_mode_never_calls_jev_and_returns_wave_unchanged \u2014 jev_mode off: ask not called, asked 0, wave and deferred identical",
+    "tests/test_jev_sched.py::test_shadow_mode_records_would_defer_without_changing_wave \u2014 a soft pair rated 0.9 lands in would_defer, applied empty, wave unchanged, and a jev_sched decision row is written",
+    "tests/test_jev_sched.py::test_active_mode_defers_soft_pair_but_never_hard_or_dependency \u2014 active: the soft-pair task moves to deferred with reason jev:<pair>; a hard pair and a dependency pair are never asked and never changed",
+    "tests/test_jev_sched.py::test_fail_open_and_single_batched_call_without_n_squared \u2014 ask returning None yields error set and deterministic wave; with 12 soft pairs ask is called once with at most jev_max_pairs pairs and hard/none pairs are absent from the questions",
+    "tests/test_jev_sched.py::test_cache_invalidation_and_privacy \u2014 same pairs and goal_head hit the cache (ask not called twice); a new goal_head misses; the state passed to ask contains no file contents and is redacted"
+  ],
+  "scope": [
+    "orchestrator/jev_sched.py",
+    "tests/test_jev_sched.py"
+  ],
+  "depends_on": [
+    "T-0570"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/jev.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/interference.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/daemon.py",
+      "tests/test_jev_route.py",
+      "tests/test_jev.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask) -> {mode, asked, cache, signals, would_defer, applied, wave, deferred, error}; ambiguous_pairs(pairwise_rows) -> soft rows only; config [scheduler].jev_mode off|shadow|active default shadow, jev_max_pairs 8, jev_cache_ttl_s 3600, jev_cache_max_entries 200; decision rows via decision_log.record(kind='jev_sched'); must not import daemon"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R8 v2 after spec review T-0616 (scope paths allowed in Jev state and privacy criterion reworded; nested [scheduler.jev] table; locked atomic cache like jev_route; PAIR_QUESTIONS dict shape)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789975982.338675,
+      "pipeline": {
+        "first_ready_at": 1789975982.3386319
+      }
+    },
+    {
+      "ts": 1789975982.371459,
+      "pipeline": {
+        "first_ready_at": 1789975982.3386319,
+        "spec_review_at": 1789975982.371418,
+        "spec_review_at_lease": 1789976882.371418
+      }
+    },
+    {
+      "ts": 1789975982.37634,
+      "pipeline": {
+        "first_ready_at": 1789975982.3386319,
+        "spec_review_at": 1789975982.371418,
+        "spec_review_at_lease": 1789976882.371418,
+        "spec_review_at_done": 1789975982.376241
+      }
+    },
+    {
+      "ts": 1789976215.797324,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/jev_sched.py",
+          "issue": "Spec's own design text says the per-pair state sent to jev.ask() includes 'scope lists' (which are literal file paths, e.g. 'orchestrator/jev_sched.py'), but the acceptance test test_cache_invalidation_and_privacy requires 'the state passed to ask contains no path content'. Scope lists are path content. As written, the design and the acceptance criterion cannot both be satisfied, so the test cannot be implemented unambiguously without the spec clarifying what 'no path content' actually excludes (full filesystem paths / diffs / file contents vs. the task's own repo-relative scope strings).",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Spec places jev_mode/jev_max_pairs/jev_cache_ttl_s/jev_cache_max_entries as flat keys directly inside the existing [scheduler] table (pool.toml:291), which already defines an unrelated 'mode' key (off|shadow|active governing wave dispatch, read by orchestrator/daemon.py:597 _load_scheduler_cfg). Every other Jev sub-feature in this codebase (orchestrator/jev_route.py:23 _routing_cfg) uses a nested subtable ([jev.routing]) with bare keys (mode, cache_ttl_s, cache_max_entries) instead of a prefixed flat namespace. Two independently-meaning 'mode' vocabularies (off/shadow/active) coexisting in one flat table, one bare and one jev_-prefixed, is inconsistent with the established convention and will read as a config bug later.",
+          "severity": "med",
+          "line": 291
+        },
+        {
+          "path": "orchestrator/jev_sched.py",
+          "issue": "Spec does not specify locking discipline for STATE/runs/jev/sched_cache.json. Every existing Jev cache in this codebase (orchestrator/jev_route.py:34-49 _cache_read/_cache_write) locks a sidecar .lock file with fcntl.flock around read-modify-write and writes atomically via tempfile.mkstemp + os.replace, matching orchestrator/jev.py's _with_state_lock discipline for jev_state.json. annotate() can be called concurrently (daemon dispatch tick plus any scout/challenge process), so an unlocked read-modify-write on sched_cache.json risks lost updates or a corrupt cache file, the exact failure mode the existing lock pattern exists to prevent.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_sched.py",
+          "issue": "PAIR_QUESTIONS is sketched as {\"semantic_interference\": \"...\", \"stale_assumption_risk\": \"...\"} \u2014 plain question strings \u2014 but jev.ask()'s questions parameter (orchestrator/jev.py:184) requires each entry to be a dict of the form {\"type\": \"noul\", \"instructions\": \"...\"}, per the precedent in jev_gate.py's QUESTIONS and jev_route.py's QUESTIONS. If PAIR_QUESTIONS is built as bare strings the payload sent to the real Jev endpoint is malformed; this won't be caught by tests that mock ask() with the expected shape, only in production.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789976243.05684,
+      "pipeline": {
+        "first_ready_at": 1789975982.3386319,
+        "spec_review_at": 1789975982.371418,
+        "spec_review_at_lease": 1789976882.371418,
+        "spec_review_at_done": 1789975982.376241,
+        "spec_review_held_at": 1789976243.056784
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789976431.277368,
+      "pipeline": {
+        "first_ready_at": 1789975982.3386319,
+        "spec_review_at": 1789975982.371418,
+        "spec_review_at_lease": 1789976882.371418,
+        "spec_review_at_done": 1789975982.376241,
+        "spec_review_held_at": 1789976243.056784,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789976431.311038,
+      "pipeline": {
+        "first_ready_at": 1789975982.3386319,
+        "spec_review_at": 1789975982.371418,
+        "spec_review_at_lease": 1789976882.371418,
+        "spec_review_at_done": 1789975982.376241,
+        "spec_review_held_at": 1789976243.056784,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789976243.05684": true
+        }
+      }
+    },
+    {
+      "ts": 1789976488.432218,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R8 v2 after spec review T-0616 (scope paths allowed in Jev state and privacy criterion reworded; nested [scheduler.jev] table; locked atomic cache like jev_route; PAIR_QUESTIONS dict shape)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789975982.3386319,
+    "spec_review_at": 1789975982.371418,
+    "spec_review_at_lease": 1789976882.371418,
+    "spec_review_at_done": 1789975982.376241,
+    "spec_review_held_at": 1789976243.056784,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789976243.05684": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/jev_sched.py",
+      "issue": "Spec's own design text says the per-pair state sent to jev.ask() includes 'scope lists' (which are literal file paths, e.g. 'orchestrator/jev_sched.py'), but the acceptance test test_cache_invalidation_and_privacy requires 'the state passed to ask contains no path content'. Scope lists are path content. As written, the design and the acceptance criterion cannot both be satisfied, so the test cannot be implemented unambiguously without the spec clarifying what 'no path content' actually excludes (full filesystem paths / diffs / file contents vs. the task's own repo-relative scope strings).",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Spec places jev_mode/jev_max_pairs/jev_cache_ttl_s/jev_cache_max_entries as flat keys directly inside the existing [scheduler] table (pool.toml:291), which already defines an unrelated 'mode' key (off|shadow|active governing wave dispatch, read by orchestrator/daemon.py:597 _load_scheduler_cfg). Every other Jev sub-feature in this codebase (orchestrator/jev_route.py:23 _routing_cfg) uses a nested subtable ([jev.routing]) with bare keys (mode, cache_ttl_s, cache_max_entries) instead of a prefixed flat namespace. Two independently-meaning 'mode' vocabularies (off/shadow/active) coexisting in one flat table, one bare and one jev_-prefixed, is inconsistent with the established convention and will read as a config bug later.",
+      "severity": "med",
+      "line": 291
+    },
+    {
+      "path": "orchestrator/jev_sched.py",
+      "issue": "Spec does not specify locking discipline for STATE/runs/jev/sched_cache.json. Every existing Jev cache in this codebase (orchestrator/jev_route.py:34-49 _cache_read/_cache_write) locks a sidecar .lock file with fcntl.flock around read-modify-write and writes atomically via tempfile.mkstemp + os.replace, matching orchestrator/jev.py's _with_state_lock discipline for jev_state.json. annotate() can be called concurrently (daemon dispatch tick plus any scout/challenge process), so an unlocked read-modify-write on sched_cache.json risks lost updates or a corrupt cache file, the exact failure mode the existing lock pattern exists to prevent.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_sched.py",
+      "issue": "PAIR_QUESTIONS is sketched as {\"semantic_interference\": \"...\", \"stale_assumption_risk\": \"...\"} \u2014 plain question strings \u2014 but jev.ask()'s questions parameter (orchestrator/jev.py:184) requires each entry to be a dict of the form {\"type\": \"noul\", \"instructions\": \"...\"}, per the precedent in jev_gate.py's QUESTIONS and jev_route.py's QUESTIONS. If PAIR_QUESTIONS is built as bare strings the payload sent to the real Jev endpoint is malformed; this won't be caught by tests that mock ask() with the expected shape, only in production.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

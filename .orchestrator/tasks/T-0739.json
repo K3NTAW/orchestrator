@@ -1,0 +1,175 @@
+{
+  "id": "T-0739",
+  "created_at": 1790002275.0442612,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: B1 v2: planner_runs routing integration \u2014 taxonomy \u2192 router \u2192 tier per headless decision, mode off byte-identical, shadow Opus launch, hold instead of downgrade, telemetry rows and skip rows, re-escalation (P3, P5, P6, P9, P15, P17)",
+  "spec": "Why: planner_runs.run_group/launch_routed (planner_runs.py:1090-1236) launch every escalate-route decision on [models].planner (Fable); tick() drops routine/none points silently; run_group's same-state_version guard returns without a record; usage is logged only as bus.log_run planner_decision rows. The Wave A modules are merged on goal/T-0674: planner_taxonomy.classify(point, ctx, *, goal, task); planner_router.load_cfg / fable_reserve_ok / hard_escalation / decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal, sample) / record(decision, *, subject, route, jev_signal, root) / RouterDecision(tier, mode, hard, hold, hold_reason, reasons, hard_reasons, soft_score, shadow_tier, candidates, evidence, decision_type); planner_telemetry.record_launch/record_usage/snapshot/materiality/record_materiality/record_skip/read_invocations; jev_planner.should_ask(router_mode, jev_mode, hard_reasons, availability, route_name)/ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route, state_version, task, ...); planner_shadow.eligible/launch/parse/record/score; planner_scorecard.class_evidence. Spec review of T-0732 folded in: route.name for should_ask, single launch path, 4-tuple sections with tie-break, module import, shadow pid_start, a jev invocation test.\nWhat (planner_runs.py, decision.py, goals.py; new tests in tests/test_planner_runs_routing.py; existing tests keep passing):\n- Imports in planner_runs.py: `from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner` (module references only; planner_telemetry already imports planner_runs, so never `from .planner_telemetry import name`); planner_scorecard imported lazily inside the evidence helper with try/except ImportError.\n- goals.launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None, model=None): model None keeps cfg[\"models\"][\"planner\"]; argv otherwise unchanged. launch_routed(pool, route, prompt, account, budget, log) becomes a thin resolver: tier = route.tier or \"fable\"; model = models[\"planner\"] if tier == \"fable\" else models.get(tier, tier); return goals.launch_planner(ROOT, prompt, account.id, budget, log, model=model). Delete the duplicated argv block (lines 1096-1109). Mode off therefore produces exactly the legacy argv.\n- decision.route: kind \"retrospective\" -> routine \"retrospective_deterministic\"; ctx.get(\"state_unchanged\") True -> none \"unchanged_state\" (checked right after the infra check). Existing tests unchanged.\n- tick(): sections are 4-tuples (point, ctx, route, classification). Before routing each point: ctx[\"complexity\"] = task complexity for held points else goal complexity; ctx[\"state_version\"] = state_version(goal_id); ctx[\"state_unchanged\"] = (_goal_launches().get(goal_id) or {}).get(\"last_state_version\") == ctx[\"state_version\"]; classification = planner_taxonomy.classify(point, ctx, goal=goal, task=task). Every point that does not reach run_group records planner_telemetry.record_skip(goal_id=..., event=\"tick\", reason=..., kind=..., payload_key=...) with reason routine, none:<route reason>, fix_round_in_flight, or unknown_gate.\n- run_group(sections, pool): update every unpack site to 4-tuples (`for point, ctx, section_route, classification in sections`, the _blocked filter, the _claim loop, the record update loop, the skip loop, the running-record loop). Leader section = max over sections by (route priority investigate 1 / escalate 2, planner_router.effective_complexity(classification, ctx), then the smallest payload_key string as the deterministic tie-break); its route, ctx and classification drive the decision and the telemetry row. rcfg = planner_router.load_cfg(pool.cfg). availability = {rcfg[\"default_tier\"]: {\"available\": models alias configured and account is not None, \"reason\": \"ok\" or why}, rcfg[\"escalation_tier\"]: same, \"fable_reserve_ok\": planner_router.fable_reserve_ok(headroom_share, rcfg)} with headroom_share None when the picked account's daily_budget is 0 else 1 - (day_tokens + planner_day_tokens) / daily_budget. evidence = _class_evidence(...) -> planner_scorecard.class_evidence(models[default_tier], decision_type, band, task_class, architectural, root=STATE, cfg=pool.cfg) guarded by try/except Exception -> {\"n\": 0, \"noninferior\": None, \"reescalation_rate\": 0.0}. Re-escalation (P15): if the goal's latest invocation row (planner_telemetry.read_invocations() filtered by goal_id, max started_at) has tier == rcfg[\"default_tier\"] and (classification decision_type == \"architectural_replan\" or spec_review_request_changes >= rcfg[\"hard_spec_review_request_changes_min\"] or the lineage cap is reached), set ctx[\"reescalation\"] = True before hard_escalation. hard_reasons = planner_router.hard_escalation(classification, ctx, route, rcfg). jev_signal = jev_planner.ask(classification, ctx, goal, cfg=rcfg, router_mode=rcfg[\"mode\"], hard_reasons=hard_reasons, availability=availability, route=route, state_version=ctx[\"state_version\"], task=held task or None) only when jev_planner.should_ask(rcfg[\"mode\"], rcfg[\"jev_mode\"], hard_reasons, availability, route.name)[0] (route.name, the plain string). sample = random.random(); decision = planner_router.decide(classification, ctx, route, cfg=rcfg, availability=availability, evidence=evidence, jev_signal=jev_signal, sample=sample); planner_router.record(decision, subject=goal_id, route=route, jev_signal=jev_signal).\n- Effects: decision.hold -> every section record gets status \"held_for_fable\", hold_reason = decision.hold_reason, notify.notify_once(goal_id, f\"held_for_fable:{launch_id}\", ...); return {\"launched\": False, \"reason\": decision.hold_reason}; the next tick retries (records in status held_for_fable are treated like skipped: never blocking, never claimed). Otherwise before_snapshot = planner_telemetry.snapshot(goal_id); launched = launch_routed(pool, dataclasses.replace(route, tier=decision.tier), prompt, account, budget, log); planner_telemetry.record_launch(launch_id=launch_id, goal_id, event=\"tick\", decision_type=classification decision_type, kind=leader kind, payload_keys=[for each section: the bare held task id (payload_key split at ':' [0]) when kind == held else payload_key], model=resolved model id, tier=decision.tier, account=account.id, complexity=ctx[\"complexity\"], band, task_class, architectural, route=route.name, route_reason=route.reason, mode=rcfg[\"mode\"], state_version=ctx[\"state_version\"], packet_chars=len(prompt), started_at=now, reescalation=bool(ctx.get(\"reescalation\"))); records store telemetry_before=before_snapshot and launch_started_at. Shadow: ok, why = planner_shadow.eligible(decision, rcfg, sample=sample); when ok: account_dict = the [[claude_accounts]] entry whose id == account.id; shadow = planner_shadow.launch(prompt, model=models[decision.shadow_tier], account=account_dict, budget_usd=limits.max_budget_usd.planner_shadow default 1.5, log=STATE/runs/f\"planner-shadow-{goal_id}-{launch_id}.log\"); when shadow is not None store shadow_pid=shadow[\"pid\"], shadow_pid_start=goals._proc_start(shadow[\"pid\"]), shadow_log, shadow_started_at on the records; exceptions printed to stderr and ignored.\n- _record_decision_usage(r): additionally planner_telemetry.record_usage(r[\"launch_id\"], input_tokens=..., output_tokens=..., cache_read_tokens=..., cache_write_tokens=..., usd=..., latency_s=now - r[\"launch_started_at\"], outcome=..., session_id=...) when the record has launch_id.\n- reconcile(): when a running record's process is gone and telemetry_before exists: planner_telemetry.record_materiality(launch_id, before, planner_telemetry.snapshot(goal_id)) once (flag materiality_logged). When shadow_log exists and not goals.identity_of(shadow_pid, shadow_pid_start): parsed = planner_shadow.parse(shadow_log); row = planner_shadow.record(launch_id=..., goal_id, decision_type, state_version, model, tier=decision shadow tier, started_at=shadow_started_at, parsed, latency_s); r[\"shadow_agreement\"] = planner_shadow.score(row, materiality) once (flag shadow_logged).\nTests use the sandbox pattern of tests/test_planner_runs.py (patched goals.Popen / launch_planner, planner_shadow popen, jev_planner.ask, no real subprocess).",
+  "inputs": [
+    "T-0738"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs_routing.py::test_mode_off_argv_identical_to_legacy \u2014 with [planner.routing].mode off, run_group produces exactly the argv that goals.launch_planner produced before this change for the same decision (captured via patched Popen, compared list-equal), one Popen call only, and no held_for_fable record",
+    "tests/test_planner_runs_routing.py::test_shadow_mode_launches_fable_then_opus_shadow_without_bus_writes \u2014 shadow mode: the first Popen argv uses models.planner and .mcp.planner.json, the second uses models.opus, .mcp.planner-shadow.json and --disallowedTools; bus task files and plan.md are byte-identical after the shadow launch; the record carries shadow_log and shadow_pid_start; a launch row exists with tier fable, mode shadow and packet_chars",
+    "tests/test_planner_runs_routing.py::test_hard_decision_holds_when_fable_unavailable \u2014 active mode, goal complexity 9, escalation tier unavailable: no Popen call, every section record has status held_for_fable with hold_reason starting fable_unavailable, one notify_once, and a second tick with the tier available launches instead of giving up",
+    "tests/test_planner_runs_routing.py::test_skips_usage_materiality_and_jev_invocation \u2014 a routine point and an unchanged-state goal produce planner_skips rows with reasons routine and none:unchanged_state; on a shadow-mode escalate decision with two available tiers and no hard reasons jev_planner.ask is called exactly once with route the Route object and state_version set, while a hard decision never calls it; a launched decision followed by a fake exit whose log carries usage yields usage and materiality rows under the same launch_id, materiality naming the task created during the run",
+    "tests/test_planner_runs_routing.py::test_reescalation_forces_fable_after_opus_and_tie_break \u2014 a goal whose latest invocation row has tier opus and whose held point has spec_review_request_changes 2 launches on models.planner in active mode with reescalation True in the launch row and a planner_route decision row whose hard_constraints contain repeated_spec_rejection and reescalation; two escalate sections in one group pick the leader with the higher effective complexity, then the smaller payload_key; tests/test_decision.py::test_retrospective_and_unchanged_state_routes \u2014 kind retrospective routes routine retrospective_deterministic and state_unchanged True routes none unchanged_state"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/decision.py",
+    "orchestrator/goals.py",
+    "tests/test_planner_runs_routing.py",
+    "tests/test_decision.py",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0739",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_router.py",
+        "issue": "soft_score() does `evidence.get(\"reescalation_rate\", 0) > 0.2` (line 123), but planner_scorecard.class_evidence() (planner_scorecard.py:198-203) returns successfully \u2014 no exception \u2014 with `reescalation_rate: None` whenever the candidate/reference groups are under min_samples (candidate = card[\"groups\"].get(key, {}), so an empty dict's .get(\"reescalation_rate\") is None, not 0). This is the default cold-start state for essentially every (model, decision_type, band, task_class, architectural) combination. The spec's try/except in `_class_evidence` only guards the *call* to class_evidence and falls back to {\"reescalation_rate\": 0.0} on exception, but class_evidence doesn't raise here \u2014 it returns normally with None, so the guard never fires. decide() calls soft_score() unconditionally for every non-hard escalate route (both shadow and active mode), so this raises `TypeError: '>' not supported between NoneType and float` on essentially the first live decision, including inside the spec's own acceptance test test_shadow_mode_launches_fable_then_opus_shadow_without_bus_writes (fresh test state has zero scorecard rows).",
+        "severity": "high",
+        "line": 123
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Spec's run_group wiring calls `jev_planner.ask(..., route=route, ...)` passing the Route dataclass instance, but jev_planner.ask's real signature is `route: str` and internally re-runs `should_ask(router_mode, mode, hard_reasons, availability, route)` which does `if route != \"escalate\": return False, \"deterministic\"` (jev_planner.py:90). A frozen Route dataclass is never `== \"escalate\"`, so ask()'s own internal gate always resolves to asked=False even when the spec's separate outer pre-check `jev_planner.should_ask(..., route.name)` (correctly using the string) reported eligible. This silently disables the Jev shadow signal for every real invocation. Because the routing tests patch jev_planner.ask entirely (per the stated sandbox pattern), this type mismatch cannot be caught by the acceptance suite \u2014 it only breaks in production.",
+        "severity": "high",
+        "line": 90
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The spec's stated motivation is 'run_group's same-state_version guard returns without a record' (planner_runs.py:1165-1172, plus the 'goal launch active'/'already decided' returns). The new tick()-level ctx[\"state_unchanged\"] check fixes the common case by routing those points to route=none before they ever reach run_group, but run_group's own internal recheck under bus.locked() (recomputing state_version fresh, since time has passed since tick() computed ctx) is left untouched and still returns silently with no planner_telemetry.record_skip call. The stated defect is only partially fixed; the acceptance criteria don't test this residual path either.",
+        "severity": "med",
+        "line": 1165
+      }
+    ],
+    "suggested_spec_changes": [
+      "In `_class_evidence`, normalize the returned dict after a successful call too \u2014 e.g. `evidence['reescalation_rate'] = evidence.get('reescalation_rate') or 0.0` \u2014 not only in the except branch, so soft_score never sees None regardless of whether class_evidence raised or just returned an under-sampled result.",
+      "Change the jev_planner.ask call in run_group to pass `route=route.name` (the plain string), matching the string contract should_ask/ask already use everywhere else, instead of the Route dataclass object.",
+      "Extend the same planner_telemetry.record_skip(reason=...) treatment to run_group's own early returns (same state_version / goal launch active / already decided) so the originally-cited defect is fully closed, not just the tick()-level occurrence of it."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790002277.6085591,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0739",
+      "claimed_at": 1790002277.608214
+    },
+    {
+      "ts": 1790002277.609527,
+      "account": "B"
+    },
+    {
+      "ts": 1790002278.0969548,
+      "pid": 83884,
+      "account": "B"
+    },
+    {
+      "ts": 1790002670.645065,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_router.py",
+            "issue": "soft_score() does `evidence.get(\"reescalation_rate\", 0) > 0.2` (line 123), but planner_scorecard.class_evidence() (planner_scorecard.py:198-203) returns successfully \u2014 no exception \u2014 with `reescalation_rate: None` whenever the candidate/reference groups are under min_samples (candidate = card[\"groups\"].get(key, {}), so an empty dict's .get(\"reescalation_rate\") is None, not 0). This is the default cold-start state for essentially every (model, decision_type, band, task_class, architectural) combination. The spec's try/except in `_class_evidence` only guards the *call* to class_evidence and falls back to {\"reescalation_rate\": 0.0} on exception, but class_evidence doesn't raise here \u2014 it returns normally with None, so the guard never fires. decide() calls soft_score() unconditionally for every non-hard escalate route (both shadow and active mode), so this raises `TypeError: '>' not supported between NoneType and float` on essentially the first live decision, including inside the spec's own acceptance test test_shadow_mode_launches_fable_then_opus_shadow_without_bus_writes (fresh test state has zero scorecard rows).",
+            "severity": "high",
+            "line": 123
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Spec's run_group wiring calls `jev_planner.ask(..., route=route, ...)` passing the Route dataclass instance, but jev_planner.ask's real signature is `route: str` and internally re-runs `should_ask(router_mode, mode, hard_reasons, availability, route)` which does `if route != \"escalate\": return False, \"deterministic\"` (jev_planner.py:90). A frozen Route dataclass is never `== \"escalate\"`, so ask()'s own internal gate always resolves to asked=False even when the spec's separate outer pre-check `jev_planner.should_ask(..., route.name)` (correctly using the string) reported eligible. This silently disables the Jev shadow signal for every real invocation. Because the routing tests patch jev_planner.ask entirely (per the stated sandbox pattern), this type mismatch cannot be caught by the acceptance suite \u2014 it only breaks in production.",
+            "severity": "high",
+            "line": 90
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The spec's stated motivation is 'run_group's same-state_version guard returns without a record' (planner_runs.py:1165-1172, plus the 'goal launch active'/'already decided' returns). The new tick()-level ctx[\"state_unchanged\"] check fixes the common case by routing those points to route=none before they ever reach run_group, but run_group's own internal recheck under bus.locked() (recomputing state_version fresh, since time has passed since tick() computed ctx) is left untouched and still returns silently with no planner_telemetry.record_skip call. The stated defect is only partially fixed; the acceptance criteria don't test this residual path either.",
+            "severity": "med",
+            "line": 1165
+          }
+        ],
+        "suggested_spec_changes": [
+          "In `_class_evidence`, normalize the returned dict after a successful call too \u2014 e.g. `evidence['reescalation_rate'] = evidence.get('reescalation_rate') or 0.0` \u2014 not only in the except branch, so soft_score never sees None regardless of whether class_evidence raised or just returned an under-sampled result.",
+          "Change the jev_planner.ask call in run_group to pass `route=route.name` (the plain string), matching the string contract should_ask/ask already use everywhere else, instead of the Route dataclass object.",
+          "Extend the same planner_telemetry.record_skip(reason=...) treatment to run_group's own early returns (same state_version / goal launch active / already decided) so the originally-cited defect is fully closed, not just the tick()-level occurrence of it."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790002670.646967,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_router.py",
+          "issue": "soft_score() does `evidence.get(\"reescalation_rate\", 0) > 0.2` (line 123), but planner_scorecard.class_evidence() (planner_scorecard.py:198-203) returns successfully \u2014 no exception \u2014 with `reescalation_rate: None` whenever the candidate/reference groups are under min_samples (candidate = card[\"groups\"].get(key, {}), so an empty dict's .get(\"reescalation_rate\") is None, not 0). This is the default cold-start state for essentially every (model, decision_type, band, task_class, architectural) combination. The spec's try/except in `_class_evidence` only guards the *call* to class_evidence and falls back to {\"reescalation_rate\": 0.0} on exception, but class_evidence doesn't raise here \u2014 it returns normally with None, so the guard never fires. decide() calls soft_score() unconditionally for every non-hard escalate route (both shadow and active mode), so this raises `TypeError: '>' not supported between NoneType and float` on essentially the first live decision, including inside the spec's own acceptance test test_shadow_mode_launches_fable_then_opus_shadow_without_bus_writes (fresh test state has zero scorecard rows).",
+          "severity": "high",
+          "line": 123
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Spec's run_group wiring calls `jev_planner.ask(..., route=route, ...)` passing the Route dataclass instance, but jev_planner.ask's real signature is `route: str` and internally re-runs `should_ask(router_mode, mode, hard_reasons, availability, route)` which does `if route != \"escalate\": return False, \"deterministic\"` (jev_planner.py:90). A frozen Route dataclass is never `== \"escalate\"`, so ask()'s own internal gate always resolves to asked=False even when the spec's separate outer pre-check `jev_planner.should_ask(..., route.name)` (correctly using the string) reported eligible. This silently disables the Jev shadow signal for every real invocation. Because the routing tests patch jev_planner.ask entirely (per the stated sandbox pattern), this type mismatch cannot be caught by the acceptance suite \u2014 it only breaks in production.",
+          "severity": "high",
+          "line": 90
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The spec's stated motivation is 'run_group's same-state_version guard returns without a record' (planner_runs.py:1165-1172, plus the 'goal launch active'/'already decided' returns). The new tick()-level ctx[\"state_unchanged\"] check fixes the common case by routing those points to route=none before they ever reach run_group, but run_group's own internal recheck under bus.locked() (recomputing state_version fresh, since time has passed since tick() computed ctx) is left untouched and still returns silently with no planner_telemetry.record_skip call. The stated defect is only partially fixed; the acceptance criteria don't test this residual path either.",
+          "severity": "med",
+          "line": 1165
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790002277.608214,
+  "account": "B",
+  "pid": 83884,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_router.py",
+      "issue": "soft_score() does `evidence.get(\"reescalation_rate\", 0) > 0.2` (line 123), but planner_scorecard.class_evidence() (planner_scorecard.py:198-203) returns successfully \u2014 no exception \u2014 with `reescalation_rate: None` whenever the candidate/reference groups are under min_samples (candidate = card[\"groups\"].get(key, {}), so an empty dict's .get(\"reescalation_rate\") is None, not 0). This is the default cold-start state for essentially every (model, decision_type, band, task_class, architectural) combination. The spec's try/except in `_class_evidence` only guards the *call* to class_evidence and falls back to {\"reescalation_rate\": 0.0} on exception, but class_evidence doesn't raise here \u2014 it returns normally with None, so the guard never fires. decide() calls soft_score() unconditionally for every non-hard escalate route (both shadow and active mode), so this raises `TypeError: '>' not supported between NoneType and float` on essentially the first live decision, including inside the spec's own acceptance test test_shadow_mode_launches_fable_then_opus_shadow_without_bus_writes (fresh test state has zero scorecard rows).",
+      "severity": "high",
+      "line": 123
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Spec's run_group wiring calls `jev_planner.ask(..., route=route, ...)` passing the Route dataclass instance, but jev_planner.ask's real signature is `route: str` and internally re-runs `should_ask(router_mode, mode, hard_reasons, availability, route)` which does `if route != \"escalate\": return False, \"deterministic\"` (jev_planner.py:90). A frozen Route dataclass is never `== \"escalate\"`, so ask()'s own internal gate always resolves to asked=False even when the spec's separate outer pre-check `jev_planner.should_ask(..., route.name)` (correctly using the string) reported eligible. This silently disables the Jev shadow signal for every real invocation. Because the routing tests patch jev_planner.ask entirely (per the stated sandbox pattern), this type mismatch cannot be caught by the acceptance suite \u2014 it only breaks in production.",
+      "severity": "high",
+      "line": 90
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The spec's stated motivation is 'run_group's same-state_version guard returns without a record' (planner_runs.py:1165-1172, plus the 'goal launch active'/'already decided' returns). The new tick()-level ctx[\"state_unchanged\"] check fixes the common case by routing those points to route=none before they ever reach run_group, but run_group's own internal recheck under bus.locked() (recomputing state_version fresh, since time has passed since tick() computed ctx) is left untouched and still returns silently with no planner_telemetry.record_skip call. The stated defect is only partially fixed; the acceptance criteria don't test this residual path either.",
+      "severity": "med",
+      "line": 1165
+    }
+  ]
+}

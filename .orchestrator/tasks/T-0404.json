@@ -1,0 +1,151 @@
+{
+  "id": "T-0404",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 2,
+  "title": "H4 fix round 5: executor.start's finally must not release the reservation when the fallback branch hands the task to a background run_worker thread; ownership passes to that thread, which releases at its end (review T-0402)",
+  "spec": "STEP 0: the worktree must contain ade6b74, 530c2ab, c1ba47c, aca3bb2, d54104f and a214aaf (T-0362, T-0392, T-0395, T-0398, T-0400) in git log; never drop or amend them.\nReview T-0402 on T-0400, one high finding:\n1. orchestrator/executor.py:178 start()'s finally releases the reservation unconditionally, including on _exhausted()'s fallback branch, which only starts a background thread (run_worker(task_id, account_id=...)) and returns; the reservation is released the instant start() returns, before the thread's own reserve, so the primary Codex-cooling path runs with no reservation counted. Fix: make reservation ownership explicit: start() releases in finally only when it ran the work itself (Codex path) or exited without handing off (refused, held, exception); on the fallback hand-off it transfers ownership by leaving the reservation in place (or re-keying it to the worker's run key) and run_worker releases at its end in its own finally, reusing the existing reservation instead of creating a second one. Test: tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes (Codex cooling, start() returns after spawning the worker thread, the reservation still exists until the mocked run_worker completes, then it is released exactly once) and tests/test_executor.py::test_refused_or_exception_path_releases_immediately.\nKeep every T-0362 lineage test green (test_exhausted_hold_releases_dispatch_reservation, test_reservation_owner_matches_running_executor, test_failed_dispatch_stamp_releases_reservation, test_fallback_claude_when_codex_cooling, and the pool and daemon reservation tests). Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0400",
+    "T-0402"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows a214aaf, d54104f, aca3bb2, c1ba47c, 530c2ab and ade6b74 below your commit",
+    "tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes and ::test_refused_or_exception_path_releases_immediately pass",
+    "tests/test_executor.py::test_exhausted_hold_releases_dispatch_reservation, ::test_fallback_claude_when_codex_cooling and tests/test_daemon.py::test_reservation_owner_matches_running_executor, ::test_failed_dispatch_stamp_releases_reservation, ::test_depends_on_gates_dispatch still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/pool.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "fix_round_for": "T-0400",
+    "task_class": "budget"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0404",
+  "codex_thread": "01a0beea-a0af-7e71-9ab1-f0ae3a9b19e2",
+  "result": {
+    "summary": "Summary: fallback reservations now transfer to the Claude worker; commit `f3ef147`.\n\nFiles changed: `orchestrator/executor.py`, `tests/test_executor.py`.\n\nFailures-only test output: `.claude/hooks/tests-green.sh .` exited 0 (no failures). `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent.",
+    "executed_by": "codex:terra",
+    "thread": "01a0beea-a0af-7e71-9ab1-f0ae3a9b19e2",
+    "usage": {
+      "input_tokens": 389645,
+      "cached_input_tokens": 323840,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 4798,
+      "reasoning_output_tokens": 2304
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789909440.956678,
+      "pipeline": {
+        "dispatched_at": 1789909440.956631
+      }
+    },
+    {
+      "ts": 1789909442.439017,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0404",
+      "claimed_at": 1789909442.438569
+    },
+    {
+      "ts": 1789909442.4405482,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1789909714.16014,
+      "codex_thread": "01a0beea-a0af-7e71-9ab1-f0ae3a9b19e2"
+    },
+    {
+      "ts": 1789909714.164205,
+      "status": "done",
+      "result": {
+        "summary": "Summary: fallback reservations now transfer to the Claude worker; commit `f3ef147`.\n\nFiles changed: `orchestrator/executor.py`, `tests/test_executor.py`.\n\nFailures-only test output: `.claude/hooks/tests-green.sh .` exited 0 (no failures). `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent.",
+        "executed_by": "codex:terra",
+        "thread": "01a0beea-a0af-7e71-9ab1-f0ae3a9b19e2",
+        "usage": {
+          "input_tokens": 389645,
+          "cached_input_tokens": 323840,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 4798,
+          "reasoning_output_tokens": 2304
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789909800.3243752,
+      "pipeline": {
+        "dispatched_at": 1789909440.956631,
+        "gated_at": 1789909800.324255,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789910234.239607,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789910309.84715,
+      "pipeline": {
+        "dispatched_at": 1789909440.956631,
+        "gated_at": 1789909800.324255,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789910309.846984
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0406 (request_changes)"
+    },
+    {
+      "ts": 1789915459.315677,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "rebase T-0431 df2ae89",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789915618.66491,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0431 df2ae89",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789909440.956631,
+    "gated_at": 1789909800.324255,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789910309.846984
+  },
+  "claimed_at": 1789909442.438569,
+  "rounds": 0,
+  "executor": "terra",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0431 df2ae89"
+}

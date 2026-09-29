@@ -1,0 +1,154 @@
+{
+  "id": "T-0554",
+  "created_at": 1789952115.479564,
+  "parent": "T-0503",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S4b v6: stale-work detection before review \u2014 record when the goal branch moved across a task's surface after its base, optional rebase and re-gate behind [scheduler].stale_rebase, never discarding work (spec reviews T-0545, T-0547, T-0549 folded in; Planner-dispatched after three rounds)",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P12 (cheap deterministic checks; rebase/revalidate before expensive review when stale risk is high; never silently discard work; record stale events) and P14. Base goal/T-0503 with S3 v4 (T-0541) merged: daemon has schedlog, _load_scheduler_cfg returning {mode, soft_conflict_policy, max_wave}, waves, critical path; tests/test_daemon.py::test_scheduler_cfg_defaults asserts that exact dict. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods (the gate runs unittest discover).\nFacts: daemon.gate skips tasks whose pipeline.gated_at is set, runs tests-green on a done execute task's worktree, and on green stamps gated_at with green_fields inside a `with bus.locked():` block, then (outside the lock, in the same try scope as report_merge/_open_reviews) merges directly (n_reviews == 0) or calls _open_reviews; clear_stage(tid, \"gated_at\", ...) removes the stamp so the task re-enters gate(); changed_paths(task) fails soft with None; failures.failure_kind classifies hold_reason stale_rebase_conflict as kind conflict, which auto_fix_round never treats as routine and decision.route sends to the Planner (hold_requires_planner); scorecard.parallelism already reads stale.jsonl rows by task, goal_id, risk == \"high\" and pipeline.stale_check.risk; merge.merge rebases onto the goal branch at merge time and marks conflicts failed with reason rebase_conflict.\n1. gitutil: add class GitError(RuntimeError). moved_paths(base_ref, target_ref, cwd, git=...) -> sorted list of paths changed between the merge-base of the two refs and target_ref (git merge-base, then git diff --name-only, both with cwd=cwd, normally the task worktree); raises GitError on any git failure. Differs from changed_paths' None convention on purpose: the caller must distinguish \"nothing moved\" (empty list) from \"git failed\" (risk unknown); say so in the docstring.\n2. _load_scheduler_cfg gains stale_rebase = False (bool) in its defaults and return dict; update tests/test_daemon.py::test_scheduler_cfg_defaults's expected literal; add [scheduler].stale_rebase = false to .orchestrator/pool.toml with a comment.\n3. daemon.stale_check(task) -> {\"base\", \"goal_head\", \"moved_count\", \"stale_paths\", \"risk\"} (keep exactly these key names; scorecard reads risk): goal branch = the task's merge target; moved = moved_paths(task branch, goal branch, cwd=task worktree); surface = literal scope paths plus changed_paths(task) or []; stale_paths = moved entries equal to a surface literal or fnmatching a surface glob; risk none when empty, high when any stale path is also in changed_paths(task), else low; unknown when moved_paths raises GitError. Called from gate() after the locked gated_at stamp block has completed, outside bus.locked(), in the same try scope as report_merge/_open_reviews and before them; idempotent per head (skip when pipeline.stale_check.head equals the current head); stamps pipeline.stale_check = {base, goal_head, moved_count, stale_paths, risk, checked_at, head} and appends runs/sched/stale.jsonl {\"ts\",\"task\",\"goal_id\",\"base\",\"goal_head\",\"moved_count\",\"stale_paths\",\"risk\",\"action\"} (keep task, goal_id and risk names) with action \"recorded\". Never blocks the pipeline: any exception inside stale_check is caught, recorded as risk unknown, and gate proceeds.\n4. When stale_rebase is true and risk is high (also outside bus.locked()): run git rebase <goal branch> inside the task worktree. On conflict: abort the rebase, clear_stage the gated_at stamp, hold the task with hold_reason \"stale_rebase_conflict\" and resume_hint {\"conflicts\": [...], \"goal_head\": ...}, action \"rebase_conflict\", return before reviews. This hold escalates to the Planner (kind conflict is never auto-fixed); the Planner authors a constraints.fix_round_for task that resolves the rebase in the worktree, after which gate() re-runs because gated_at is clear. On success: clear_stage the gated_at stamp so the next tick re-gates the rebased head before reviews, action \"rebased\", pipeline.stale_check.rebased_to = new head, return. merge.merge's own rebase stays as the final safety. No commit or branch is ever deleted.\n5. README Pipeline paragraph: two sentences on stale checks and the stale_rebase switch, naming the hold reason and that it escalates to the Planner.\n6. Tests: tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base and ::test_moved_paths_raises_git_error_on_failure (new file, reuse the git sandbox helpers of tests/test_merge.py or tests/_harness.py); tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, ::test_stale_check_low_when_scope_overlaps_moved_paths, ::test_stale_check_high_when_changed_file_moved, ::test_stale_check_unknown_on_git_failure, ::test_stale_check_records_row_and_stamp_before_reviews, ::test_stale_rebase_conflict_holds_clears_gate_and_never_discards, ::test_stale_rebase_success_regates_before_reviews. Existing tests stay green.",
+  "inputs": [
+    "T-0550"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_stale_check_none_when_goal_unmoved, tests/test_daemon.py::test_stale_check_low_when_scope_overlaps_moved_paths, tests/test_daemon.py::test_stale_check_high_when_changed_file_moved, tests/test_daemon.py::test_stale_check_unknown_on_git_failure and tests/test_daemon.py::test_stale_check_records_row_and_stamp_before_reviews pass: after the green gated_at stamp and before reviews or a direct merge every execute task gets pipeline.stale_check (with risk) and one stale.jsonl row (task, goal_id, risk) with risk none, low, high or unknown; a git failure yields unknown and never blocks",
+    "tests/test_daemon.py::test_stale_rebase_conflict_holds_clears_gate_and_never_discards and tests/test_daemon.py::test_stale_rebase_success_regates_before_reviews pass: with stale_rebase true a high-risk task is rebased and re-gated before reviews, or held with hold_reason stale_rebase_conflict, a conflicts resume_hint and no gated_at stamp; the default false changes nothing but the record; no commit or branch is deleted",
+    "tests/test_gitutil.py::test_moved_paths_lists_files_changed_on_target_since_merge_base and tests/test_gitutil.py::test_moved_paths_raises_git_error_on_failure pass; tests/test_daemon.py::test_scheduler_cfg_defaults asserts the defaults including stale_rebase false",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains nine tests"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/gitutil.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "tests/test_daemon.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0554",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "014c98f30972",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789952115.4804978,
+      "reviewed_sha": "3e6737bdeee719dc7895d0b3a873651c2a05d56c"
+    },
+    {
+      "ts": 1789952118.228545,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0554",
+      "claimed_at": 1789952118.228199
+    },
+    {
+      "ts": 1789952118.229646,
+      "account": "B"
+    },
+    {
+      "ts": 1789952118.6081622,
+      "pid": 80185,
+      "account": "B"
+    },
+    {
+      "ts": 1789952408.725495,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "014c98f30972",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789952408.72651,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789952408.7535481,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": null,
+        "packet_version": "014c98f30972",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": null,
+      "packet_version": "014c98f30972",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": null,
+  "claimed_at": 1789952118.228199,
+  "account": "B",
+  "pid": 80185,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": null,
+    "packet_version": "014c98f30972",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "014c98f30972",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

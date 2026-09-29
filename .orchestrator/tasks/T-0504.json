@@ -1,0 +1,259 @@
+{
+  "id": "T-0504",
+  "created_at": 1789945545.050099,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 4,
+  "title": "S0a: dispatch-skip telemetry \u2014 runs/sched/dispatch.jsonl rows with a reason per considered task, pipeline.first_ready_at stamp, schedlog helper",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P0 (\"record why a ready task was not dispatched\"). Base goal/T-0503. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nVerified facts: daemon.dispatch (orchestrator/daemon.py:591-689) walks bus.read(status=\"queued\", role=\"execute\") plus budget-held retries in id order; skips stale(t) or not bus.ready(t); below SPEC_REVIEW_MIN or verdict approve it dispatches while free_slots (daemon.py:449-464) remain and `break`s at slots <= 0; verdict request_changes holds; otherwise it creates a spec review. Nothing records why a ready task waited. gotchas.md 2026-09-18: the break also skips spec-review creation for later tasks (documented fix candidate).\n1. New orchestrator/schedlog.py: SCHED_DIR = STATE / \"runs\" / \"sched\"; append(name, row) writes one JSON line to SCHED_DIR/<name>.jsonl (mkdir parents, ts added when absent); read(name) returns the list of dict rows, skipping blank or malformed lines and counting them (return (rows, malformed) or expose read_with_malformed); never raises on a missing file (empty list).\n2. daemon.dispatch: stamp pipeline.first_ready_at = time.time() once (never overwrite) the first time bus.ready(t) holds for a queued execute task, before any slot check. Build one row per tick and append it as \"dispatch\" only when at least one queued or budget-held execute task was considered: {\"ts\", \"free_slots\", \"fallback\", \"running_execute\", \"running_claude\", \"considered\": [{\"task\", \"goal_id\" (parent), \"ready\", \"action\": dispatched|spec_review|skipped, \"reason\", \"executor\" (when known)}]}. Reasons: stale -> \"stale\"; not ready -> \"dependency\"; fallback with no Claude tier -> \"fallback_no_tier\"; no slot -> \"cooldown\" when every enabled execute executor is cooling and not fallback, \"account_capacity\" when fallback and the Claude ceiling is used up, else \"executor_capacity\"; verdict request_changes -> \"spec_review_changes\"; spec review created or already pending -> \"spec_review_pending\"; budget-held retry that is not dispatched -> \"budget\"; stamp() no-op -> \"other\". A dispatched task has action dispatched and no reason.\n3. Replace the `break` at slots <= 0 with a slots_exhausted flag: tasks after exhaustion are recorded skipped with the capacity reason and are NOT dispatched, but the spec-review branch still runs for later tasks that need one (the gotchas.md fix). No other change to which tasks dispatch or in which order; the second loop (review respawn) is untouched.\n4. Tests: tests/test_schedlog.py test_append_and_read_tolerates_malformed_lines, test_read_missing_file_is_empty; tests/test_daemon.py test_dispatch_stamps_first_ready_at_once, test_dispatch_logs_skip_reasons_capacity_and_dependency, test_dispatch_log_row_absent_on_idle_tick, test_dispatch_creates_spec_reviews_after_slots_exhausted. Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "runs/sched/dispatch.jsonl gains one row per daemon tick that considered a queued or budget-held execute task, with a considered entry per task carrying action and reason exactly as named in the spec; idle ticks write no row",
+    "pipeline.first_ready_at is stamped once when a queued execute task first becomes ready and is never overwritten",
+    "the set and order of tasks dispatched per tick is unchanged, except that spec reviews are now created for ready tasks behind the exhausted-slots point",
+    "tests test_append_and_read_tolerates_malformed_lines, test_read_missing_file_is_empty, test_dispatch_stamps_first_ready_at_once, test_dispatch_logs_skip_reasons_capacity_and_dependency, test_dispatch_log_row_absent_on_idle_tick, test_dispatch_creates_spec_reviews_after_slots_exhausted pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/schedlog.py",
+    "tests/test_daemon.py",
+    "tests/test_schedlog.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500,
+    "task_class": "telemetry",
+    "read_scope": [
+      "orchestrator/bus.py",
+      "orchestrator/pool.py",
+      ".orchestrator/memory/gotchas.md",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "schedlog.append(name, row) / schedlog.read(name); pipeline.first_ready_at epoch float; dispatch.jsonl row shape and reason vocabulary as in the spec (S0b reads the file by path in parallel, S2 extends considered reasons with predicted_interference)"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0504",
+  "codex_thread": "01a0c112-16b5-7b01-b3f0-64e7de0ce9b4",
+  "result": {
+    "summary": "Implemented dispatch telemetry, one-time readiness stamps, and spec reviews after slot exhaustion.\n\nGate: exit 0, 762 tests passed. Working tree clean.\nCommit: `9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f`\n\nFiles changed: `orchestrator/daemon.py`, `orchestrator/schedlog.py`, `tests/test_daemon.py`, `tests/test_schedlog.py`.\n\nFailures-only output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0c112-16b5-7b01-b3f0-64e7de0ce9b4",
+    "usage": {
+      "input_tokens": 825174,
+      "cached_input_tokens": 774912,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6789,
+      "reasoning_output_tokens": 1157,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789945569.881543,
+      "pipeline": {
+        "dispatched_at": 1789945569.881505,
+        "dispatched_at_lease": 1789946469.881505
+      }
+    },
+    {
+      "ts": 1789945571.0885508,
+      "pipeline": {
+        "dispatched_at": 1789945569.881505,
+        "dispatched_at_lease": 1789946469.881505,
+        "dispatched_at_done": 1789945571.0884402
+      }
+    },
+    {
+      "ts": 1789945583.008013,
+      "packet_meta": {
+        "chars": 2084,
+        "est_tokens": 521,
+        "hash": "1a79dfb66b3a",
+        "version": "1a79dfb66b3a",
+        "base": "8fd67c8dd0ad",
+        "sources": "pool.toml@58c877fd1717 gotchas@b678444c3139 memory@notes",
+        "policy_version": "58c877fd1717",
+        "gotchas": "b678444c3139"
+      }
+    },
+    {
+      "ts": 1789945583.009024,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0504",
+      "claimed_at": 1789945583.008914
+    },
+    {
+      "ts": 1789945583.0102358,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789945894.7833312,
+      "codex_thread": "01a0c112-16b5-7b01-b3f0-64e7de0ce9b4",
+      "codex_thread_head": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f"
+    },
+    {
+      "ts": 1789945894.787282,
+      "pipeline": {
+        "dispatched_at": 1789945569.881505,
+        "dispatched_at_lease": 1789946469.881505,
+        "dispatched_at_done": 1789945571.0884402,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "567faf693c21e90745be3d0c6a9585c89144411f"
+        }
+      }
+    },
+    {
+      "ts": 1789945894.789195,
+      "status": "done",
+      "result": {
+        "summary": "Implemented dispatch telemetry, one-time readiness stamps, and spec reviews after slot exhaustion.\n\nGate: exit 0, 762 tests passed. Working tree clean.\nCommit: `9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f`\n\nFiles changed: `orchestrator/daemon.py`, `orchestrator/schedlog.py`, `tests/test_daemon.py`, `tests/test_schedlog.py`.\n\nFailures-only output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0c112-16b5-7b01-b3f0-64e7de0ce9b4",
+        "usage": {
+          "input_tokens": 825174,
+          "cached_input_tokens": 774912,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6789,
+          "reasoning_output_tokens": 1157,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789945910.4888918,
+      "pipeline": {
+        "dispatched_at": 1789945569.881505,
+        "dispatched_at_lease": 1789946469.881505,
+        "dispatched_at_done": 1789945571.0884402,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "567faf693c21e90745be3d0c6a9585c89144411f"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789945995.238307,
+      "pipeline": {
+        "dispatched_at": 1789945569.881505,
+        "dispatched_at_lease": 1789946469.881505,
+        "dispatched_at_done": 1789945571.0884402,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "567faf693c21e90745be3d0c6a9585c89144411f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789945995.238209,
+        "gated_at_lease": 1789946895.238209,
+        "first_green_at": 1789945995.2377422,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789945995.3997529,
+      "pipeline": {
+        "dispatched_at": 1789945569.881505,
+        "dispatched_at_lease": 1789946469.881505,
+        "dispatched_at_done": 1789945571.0884402,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "567faf693c21e90745be3d0c6a9585c89144411f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789945995.238209,
+        "gated_at_lease": 1789946895.238209,
+        "first_green_at": 1789945995.2377422,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f"
+      }
+    },
+    {
+      "ts": 1789945995.404186,
+      "pipeline": {
+        "dispatched_at": 1789945569.881505,
+        "dispatched_at_lease": 1789946469.881505,
+        "dispatched_at_done": 1789945571.0884402,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "567faf693c21e90745be3d0c6a9585c89144411f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789945995.238209,
+        "gated_at_lease": 1789946895.238209,
+        "first_green_at": 1789945995.2377422,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f",
+        "gated_at_done": 1789945995.404114
+      }
+    },
+    {
+      "ts": 1789946120.308171,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789946449.3306901,
+      "status": "done",
+      "merged_into": "goal/T-0503",
+      "sha": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789945569.881505,
+    "dispatched_at_lease": 1789946469.881505,
+    "dispatched_at_done": 1789945571.0884402,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "sol",
+      "key": "567faf693c21e90745be3d0c6a9585c89144411f"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789945995.238209,
+    "gated_at_lease": 1789946895.238209,
+    "first_green_at": 1789945995.2377422,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "reviewed_sha": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f",
+    "gated_at_done": 1789945995.404114
+  },
+  "packet_meta": {
+    "chars": 2084,
+    "est_tokens": 521,
+    "hash": "1a79dfb66b3a",
+    "version": "1a79dfb66b3a",
+    "base": "8fd67c8dd0ad",
+    "sources": "pool.toml@58c877fd1717 gotchas@b678444c3139 memory@notes",
+    "policy_version": "58c877fd1717",
+    "gotchas": "b678444c3139"
+  },
+  "claimed_at": 1789945583.008914,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0503",
+  "sha": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f"
+}

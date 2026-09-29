@@ -1,0 +1,83 @@
+{
+  "id": "T-0387",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H8 fix round 5: tests.test_cli Background.test_autostart_true_starts_thread_and_holds_the_lock leaves the autostarted daemon thread running into later tests (breaks test_all_reviews_failed_holds_without_merge); stop and join it in the test, keep the BusSandbox tearDown, prove ordering independence (T-0385 held without commit)",
+  "spec": "STEP 0: the worktree must contain f43c354, 0751d53, a25898a and bf8898c (T-0360, T-0374, T-0379, T-0382) in git log; never drop or amend them. T-0385 diagnosed the leak but did not commit because the fix was outside its scope; its uncommitted change (an explicit BusSandbox base class with tearDown in tests/test_bus.py, 8 lines) is not on the branch: redo it here.\nMeasured leaking sequence (T-0385 report): tests.test_cli -> Background.test_autostart_true_starts_thread_and_holds_the_lock -> tests.test_daemon.Daemon.test_all_reviews_failed_holds_without_merge fails with 'failed' != 'held'. The autostarted daemon thread keeps ticking against the later test's sandbox (merge_reviewed marks the task failed before the test's own tick), and it is the source of the stray RuntimeError boom tracebacks seen in gate logs.\nFix: (1) in tests/test_cli.py that test (and any sibling that autostarts the daemon) stops the thread before returning: use the daemon's stop event or flag if one exists (grep daemon.py for stop, running, Event, autostart), otherwise add a minimal stop hook to the autostart path in orchestrator/daemon.py (a threading.Event checked once per loop, exposed for tests, default behaviour unchanged), then join the thread with a timeout in the test or its tearDown and release the daemon lock. (2) Keep the BusSandbox base class and tearDown in tests/test_bus.py from T-0385. (3) Do not change tests/test_daemon.py assertions. Prove: python -m unittest tests.test_cli tests.test_daemon exits 0; then .claude/hooks/tests-green.sh from the worktree root twice in a row, exit 0 both times. git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0386"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows bf8898c, a25898a, 0751d53 and f43c354 below your commit",
+    "python -m unittest tests.test_cli tests.test_daemon in the worktree exits 0 and tests.test_daemon.Daemon.test_all_reviews_failed_holds_without_merge passes with its assertion unchanged",
+    "tests/test_cli.py::test_autostart_true_starts_thread_and_holds_the_lock stops and joins the thread it starts (grep shows the join or stop call) and still passes",
+    "tests/test_bus.py::test_events_filtered_page_never_exceeds_next_since, ::test_events_role_filter_keeps_seq_and_cursor and ::test_events_truncated_flag_and_next_since still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "tests/test_cli.py",
+    "tests/test_bus.py",
+    "orchestrator/daemon.py",
+    "tests/_harness.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0387",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789905208.3437781,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0387",
+      "claimed_at": 1789905208.3432372
+    },
+    {
+      "ts": 1789905208.345145,
+      "account": "B"
+    },
+    {
+      "ts": 1789905208.3864572,
+      "pid": 69014,
+      "account": "B"
+    },
+    {
+      "ts": 1789905568.846858,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789905568.849223,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789905208.3432372,
+  "account": "B",
+  "pid": 69014,
+  "review_verdict": "approve"
+}

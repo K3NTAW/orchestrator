@@ -1,0 +1,106 @@
+{
+  "id": "T-0394",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H5b fix round 1: the review re-spawn guard skips only tasks already stamped respawned_at for the current requeue, not any task with leftover pipeline keys; the five acceptance tests at 3164bed stay green (review T-0391)",
+  "spec": "STEP 0: the worktree must contain ec54196 and 3164bed (T-0363, H5b code and its five acceptance tests) in git log; never drop or amend them. Review T-0391 judged ec54196 before 3164bed added the tests; its first finding is answered by 3164bed (confirm the five tests exist and pass, do not rewrite them). Remaining finding:\n1. (med) orchestrator/daemon.py:561 the guard `if pipeline or pipeline.get(\"respawned_at\"): continue` is equivalent to `if pipeline: continue`, so any queued review or spec_review carrying an unrelated leftover pipeline key (a stale spec_review_error or dispatch_error stamp) is never re-spawned, defeating the once-per-requeue stamp. Fix: skip only when pipeline.respawned_at is present and later than the task's most recent \"process died; requeued\" event (or than claimed_at when no such event exists); a task with other pipeline keys but no current respawned_at is re-spawned once. Test: tests/test_daemon.py::test_respawn_ignores_unrelated_pipeline_keys (a queued review with pipeline {spec_review_error: ...} and a requeue event is re-spawned and stamped; a second tick does not re-spawn it; a later requeue event makes it eligible again).\nKeep the five T-0363 tests and every existing test green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0393"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 3164bed and ec54196 below your commit",
+    "tests/test_daemon.py::test_respawn_ignores_unrelated_pipeline_keys passes",
+    "tests/test_spawn.py::test_ensure_worktree_reuses_existing_task_branch, tests/test_mcp.py::test_spawn_scout_reports_error_when_worktree_fails, tests/test_daemon.py::test_dispatch_respawns_requeued_review_once, ::test_dispatch_respawns_unclaimed_spec_review_after_delay and tests/test_handover.py::test_unchanged_state_writes_nothing still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0394",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 572,
+        "issue": "bus.events(limit=10000, task_ids=[task[\"id\"]]) is a global cursor query (`where seq>0 order by seq limit 10000`), not a per-task lookup. It returns only the oldest 10000 events ever recorded system-wide. Once the bus's lifetime event count passes 10000 (routine for a long-running daemon), any queued review/spec_review task created afterward has zero matching rows here, so `created_at` falls back to `default=now`, `now - created_at` is always 0, and `not died and now - created_at < respawn_after` is always True \u2014 the 'unclaimed task, spawn thread vanished before bus.claim' recovery path silently stops firing forever for newer tasks. The died-worker path is unaffected since it short-circuits before this check, but the delay-based path (covered by test_dispatch_respawns_unclaimed_spec_review_after_delay) degrades exactly when the system has been running long enough to need it. Tests pass because sandboxes never approach 10000 events. Use the task's own data (e.g. track created_at on the task, or query events ordered by seq desc / since a recent cursor) instead of an unscoped global-log scan.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 341,
+        "issue": "_requeue now does two separate bus.locked()/bus.update() round trips for one logical reset (clear_stage's update, then a second update to pop respawned_at), appending two events to the task's history for a single requeue. Not incorrect (respawned_at is still cleared before dispatch() re-reads it), but the extra read-modify-write could be folded into clear_stage's existing pipeline_fields update to avoid doubling event volume, which matters given the global-event-log scaling issue above.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789907428.8461702,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0394",
+      "claimed_at": 1789907428.84576
+    },
+    {
+      "ts": 1789907428.847306,
+      "account": "B"
+    },
+    {
+      "ts": 1789907428.879481,
+      "pid": 5990,
+      "account": "B"
+    },
+    {
+      "ts": 1789907676.5800478,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 572,
+            "issue": "bus.events(limit=10000, task_ids=[task[\"id\"]]) is a global cursor query (`where seq>0 order by seq limit 10000`), not a per-task lookup. It returns only the oldest 10000 events ever recorded system-wide. Once the bus's lifetime event count passes 10000 (routine for a long-running daemon), any queued review/spec_review task created afterward has zero matching rows here, so `created_at` falls back to `default=now`, `now - created_at` is always 0, and `not died and now - created_at < respawn_after` is always True \u2014 the 'unclaimed task, spawn thread vanished before bus.claim' recovery path silently stops firing forever for newer tasks. The died-worker path is unaffected since it short-circuits before this check, but the delay-based path (covered by test_dispatch_respawns_unclaimed_spec_review_after_delay) degrades exactly when the system has been running long enough to need it. Tests pass because sandboxes never approach 10000 events. Use the task's own data (e.g. track created_at on the task, or query events ordered by seq desc / since a recent cursor) instead of an unscoped global-log scan.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 341,
+            "issue": "_requeue now does two separate bus.locked()/bus.update() round trips for one logical reset (clear_stage's update, then a second update to pop respawned_at), appending two events to the task's history for a single requeue. Not incorrect (respawned_at is still cleared before dispatch() re-reads it), but the extra read-modify-write could be folded into clear_stage's existing pipeline_fields update to avoid doubling event volume, which matters given the global-event-log scaling issue above.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789907676.582529,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789907428.84576,
+  "account": "B",
+  "pid": 5990,
+  "review_verdict": "request_changes"
+}

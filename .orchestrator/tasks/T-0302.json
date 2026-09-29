@@ -1,0 +1,128 @@
+{
+  "id": "T-0302",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 3,
+  "title": "G2b fix round 1: repo-map trimming spreads cuts across modules so daemon.py and spawn.py keep their public functions; the merge gate never skips on an ambient env var (review T-0295)",
+  "spec": "STEP 0: the worktree must contain dd8ab79 \"T-0267 add repository map generator\" in git log; never drop it.\nReview T-0295 on T-0267: (high) repomap.build's budget trim sorts candidates by (rank, module, symbol) and pops from the front, so it empties whole modules in rank-then-alphabetical order; on this repo daemon.py and spawn.py sections end up with only their docstring, failing acceptance 3 (daemon.py, bus.py and spawn.py must list their public functions); the three-module fixture is too small to expose it. (med) merge.py guards the entire tests-green invocation with `if not os.environ.get(IN_TESTS_GREEN)`, so any process with ORCH_TESTS_GREEN in its environment skips the merge gate and fast-forwards unverified code; the gate is the merge bar and must never be skippable by an ambient variable.\nChange:\n1. repomap.build: trim round-robin across modules by removing the lowest-value symbol from the module that currently has the most symbols (ties by lower rank), never removing a module's last 3 public symbols while any module still has more than 3; module order and header unchanged. Test with a fixture of four modules where two have 12 symbols each and the budget forces cuts: every module keeps at least 3 symbols and the two big modules lose symbols first. Verify on this repo that `orchestrator repomap --stdout` lists at least 3 functions each for daemon.py, bus.py and spawn.py under 4,000 chars.\n2. merge.merge: the tests-green gate always runs; remove the environment-based skip of the gate. Only the repo-map refresh may be skipped, and only when merge() is called with an explicit keyword refresh_repomap=False or ORCH_ROOT has no orchestrator/repomap.py. If the recursion the first thread saw (test_merge's real-repo merges re-running the suite) reappears, fix its cause explicitly: the nested gate must run inside the scratch repo only (cwd and ORCH_ROOT of the scratch repo, whose tests are tiny), never against this repo; document the mechanism in a comment. Test: test_merge_gate_runs_even_with_marker_env (ORCH_TESTS_GREEN set in os.environ, merge still invokes the gate, asserted through a monkeypatched subprocess.run).\n3. Keep tests/test_repomap.py and tests/test_merge.py green; final message reports the repomap --stdout size and the per-module function counts for daemon, bus and spawn.",
+  "inputs": [
+    "T-0267",
+    "T-0295"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows dd8ab79 below your commit",
+    "tests/test_repomap.py::test_trim_spreads_across_modules passes and the three T-0267 repomap tests still pass",
+    "tests/test_merge.py::test_merge_gate_runs_even_with_marker_env passes and test_merge_refreshes_repomap_on_py_change still passes",
+    "uv run orchestrator repomap --stdout prints under 4,000 chars with at least 3 functions each for daemon.py, bus.py and spawn.py (counts in the final message)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree within 10 minutes"
+  ],
+  "scope": [
+    "orchestrator/repomap.py",
+    "orchestrator/merge.py",
+    "tests/test_repomap.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500,
+    "fix_round_for": "T-0267"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0302",
+  "codex_thread": "01a0bb40-c509-7063-99b8-726b123893f7",
+  "result": {
+    "summary": "Codex (terra) committed 66ff50f over dd8ab79 (T-0267) in wt/T-0302: repomap trims round-robin across modules keeping at least three symbols per module (new four-module fixture test); merge.merge always runs the tests-green gate, the environment marker can no longer skip it, only the repo-map refresh is skippable (explicit keyword or no repomap.py under ORCH_ROOT); test_merge_gate_runs_even_with_marker_env added. Planner check: repomap --stdout is 3,966 chars and lists 4 functions each for daemon.py, bus.py and spawn.py. tests-green.sh wt/T-0302 exited 0 in 51 s (Planner). Addresses review T-0295. Carries G2b. Posted by hand.",
+    "executed_by": "codex:terra",
+    "sha": "66ff50f",
+    "carries": "dd8ab79",
+    "confidence": 0.9,
+    "provenance": "repo"
+  },
+  "events": [
+    {
+      "ts": 1789847977.764731,
+      "pipeline": {
+        "dispatched_at": 1789847977.764689
+      }
+    },
+    {
+      "ts": 1789847979.085221,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0302",
+      "claimed_at": 1789847979.084933
+    },
+    {
+      "ts": 1789847979.086741,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1789848403.780776,
+      "codex_thread": "01a0bb40-c509-7063-99b8-726b123893f7"
+    },
+    {
+      "ts": 1789848518.794353,
+      "status": "done",
+      "result": {
+        "summary": "Codex (terra) committed 66ff50f over dd8ab79 (T-0267) in wt/T-0302: repomap trims round-robin across modules keeping at least three symbols per module (new four-module fixture test); merge.merge always runs the tests-green gate, the environment marker can no longer skip it, only the repo-map refresh is skippable (explicit keyword or no repomap.py under ORCH_ROOT); test_merge_gate_runs_even_with_marker_env added. Planner check: repomap --stdout is 3,966 chars and lists 4 functions each for daemon.py, bus.py and spawn.py. tests-green.sh wt/T-0302 exited 0 in 51 s (Planner). Addresses review T-0295. Carries G2b. Posted by hand.",
+        "executed_by": "codex:terra",
+        "sha": "66ff50f",
+        "carries": "dd8ab79",
+        "confidence": 0.9,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789848585.73545,
+      "pipeline": {
+        "dispatched_at": 1789847977.764689,
+        "gated_at": 1789848585.735361,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789848764.735478,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789848789.377853,
+      "pipeline": {
+        "dispatched_at": 1789847977.764689,
+        "gated_at": 1789848585.735361,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789848789.3777852
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0305 (request_changes)"
+    },
+    {
+      "ts": 1789851498.789593,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "merged_via": "fix round T-0329 aab6312",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789847977.764689,
+    "gated_at": 1789848585.735361,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789848789.3777852
+  },
+  "claimed_at": 1789847979.084933,
+  "rounds": 0,
+  "executor": "terra",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0260",
+  "merged_via": "fix round T-0329 aab6312"
+}

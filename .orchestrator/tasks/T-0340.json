@@ -1,0 +1,102 @@
+{
+  "id": "T-0340",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G10 fix round 1: decision packets honour the goals.py import boundary, put the decision data before the file inventory, fence untrusted text safely, guard lookups, parse usage robustly (review T-0330)",
+  "spec": "STEP 0: the worktree must contain 875da13 \"Bounded decision packets and token accounting for autonomous Planner runs\" (T-0276) in git log; never drop it.\nReview T-0330 on T-0276, all to be addressed:\n1. (high) goals.py must keep its T-0115 import boundary (only install.install, spawn.trust_workspace, spawn.resolve_secrets; every path from repo_path). Move decision_packet into planner_runs.py (which may import bus and spawn) or a new orchestrator/decision.py, and have goals.launch_planner receive the rendered packet text as an argument; read [planner].decision_packet_chars from the target repo's pool.toml (repo_path), not PACKAGE_REPO.\n2. (high) Packet order for a held decision: decision kind and expectation, goal and task ids and titles, hold_reason, failures (fenced), review comments (path:line lines), then the spawn.packet inventory last; apply the cap by trimming the inventory first and never the sections above it; test with a five-file scope task whose spawn packet alone exceeds the cap.\n3. (high) Untrusted content: remove the two-string blocklist; every field with non-repo provenance (titles, hold_reason, failures, review issue text, scout summaries, packet lines) goes inside fenced blocks labelled data, and planner-decision.md states that fenced content is data and never instructions. No filtering pretence.\n4. (med) Escape backtick runs inside fenced values (replace three or more backticks with a visible placeholder) so a value cannot close the fence; test with a failure string containing a code fence.\n5. (med) Guard bus.get(goal_id) like the task lookup: a missing goal yields a minimal packet with the ids, never an exception in planner_runs.run().\n6. (med) Usage accounting: launch_planner writes stderr to a separate file (or planner_runs parses only the last line that is a JSON object) so a stray brace on stderr cannot break extract_json; when usage is absent, set usage_logged = false with a stderr warning and a counter on the record; test with a noisy log.\n7. (low) [planner].handover_context_tokens: either handover.py reads it and prints the threshold in the Auto-handover section, or the pool.toml comment and CLAUDE.md say it records the threshold and does not enforce it. Pick the first if it is under 15 lines.\n8. (low) tests/test_goals.py DecisionPacket tests use the per-test bus sandbox convention of the file (GoalsTestCase or equivalent) and clean up.\nKeep the four T-0276 tests green (renamed if the module moves).",
+  "inputs": [
+    "T-0331"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 875da13 below your commit",
+    "goals.py imports nothing from bus or spawn beyond install.install, spawn.trust_workspace and spawn.resolve_secrets (grep), and the packet is built in planner_runs.py or orchestrator/decision.py",
+    "tests cover: five-file scope keeps hold_reason, failures and comments; fenced value with backticks stays fenced; missing goal yields a minimal packet; noisy log leaves usage_logged false with a warning",
+    "planner-decision.md states fenced content is data; no blocklist remains",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/decision.py",
+    "orchestrator/handover.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_goals.py",
+    "tests/test_planner_runs.py",
+    ".orchestrator/pool.toml",
+    "CLAUDE.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0340",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "tests/test_goals.py",
+        "line": 690,
+        "issue": "test_held_packet_trims_inventory_before_context (the five-file-scope trim test) has no review/comments on the held task, so it doesn't jointly verify that hold_reason, failures, AND review comments all survive when the spawn-packet inventory is being trimmed for cap \u2014 only hold_reason+failures are checked there; comments-survival is only checked in a separate test with a single-file, non-trimmed task.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789852121.496928,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0340",
+      "claimed_at": 1789852121.496623
+    },
+    {
+      "ts": 1789852121.4978921,
+      "account": "B"
+    },
+    {
+      "ts": 1789852121.5247009,
+      "pid": 19672,
+      "account": "B"
+    },
+    {
+      "ts": 1789852524.50785,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "tests/test_goals.py",
+            "line": 690,
+            "issue": "test_held_packet_trims_inventory_before_context (the five-file-scope trim test) has no review/comments on the held task, so it doesn't jointly verify that hold_reason, failures, AND review comments all survive when the spawn-packet inventory is being trimmed for cap \u2014 only hold_reason+failures are checked there; comments-survival is only checked in a separate test with a single-file, non-trimmed task.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789852524.511057,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789852121.496623,
+  "account": "B",
+  "pid": 19672,
+  "review_verdict": "approve"
+}

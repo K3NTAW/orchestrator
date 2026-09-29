@@ -1,0 +1,191 @@
+{
+  "id": "T-0818",
+  "created_at": 1790091393.8112562,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: P14/P15/P16/P29 handoff economics, shadow: handoff scorecard from run logs and planner telemetry, expected_route_cost per executor and task class, a shadow \"handoff\" decision at executor pick time; routing unchanged (v2)",
+  "spec": "Facts (Planner grep, provenance repo): execute runs log per round (bus.log_run rows role execute with task, tier/executor, usage tokens, usd); fix rounds are tasks with constraints.fix_round_for and pipeline.resume {\"mode\": \"resume\"|\"fresh\"} (daemon dispatch ~838-850); resume rounds send only a delta (executor.reply, ~416-428), fresh rounds resend the full packet + repair delta (executor.py ~185-197); attribution.lineage(task) walks a lineage; scorecard.by_task/by_goal aggregate cost; planner_telemetry.record_launch/record_usage rows carry launch_id, goal_id, kind, decision_type and tokens for headless Planner launches including escalation launches (planner_packet builds the escalation packet \u22646000 chars); executor.start picks the executor via pool.pick_executor + allocation (executor.py 276-323); decision_log kind \"handoff\" exists since T-0772.\nDo:\n1. orchestrator/handoff_scorecard.py (new). `lineage_rows(root)` groups execute run rows by lineage root (attribution.lineage) and orders rounds; per lineage: first_executor, executors_by_round, rounds, resume_rounds, fresh_rounds, tokens_by_round, first_pass (rounds == 1 and merged), accepted (merged_into set), accepted_tokens, accepted_usd, reconstruction_tokens = sum over fresh rounds of that round's packet tokens (context.presented_tokens when present, else input tokens minus cache reads as a bounded proxy, flagged estimated=True), handoff_pairs = [(from_executor, to_executor, reason)] where reason is the fix-round kind (gate_red / review / conflict) from the fix task's hold cause.\n2. `by_start(root)`: per (first_executor, task_class): n, first_pass_rate, avg_rounds, avg_accepted_tokens, avg_accepted_usd, avg_reconstruction_tokens. `expected_route_cost(task_class, executor, root, cfg)` = avg first-round cost for that executor and class + P(fix | executor, class) \u00d7 (avg fix-round cost + avg reconstruction) + P(handoff to another executor) \u00d7 avg cost of the destination's rounds; every term reports its n; below min_samples (cfg [promotion] min_samples, default 20) the function returns {\"insufficient\": True, \"n\": n} and never a number.\n3. `recommendation(task_class, root, cfg)`: among executors with sufficient samples, the one with the lowest expected_route_cost; \"start_strong\" flag when the cheapest-first executor (lowest first-round cost) is not the lowest expected_route_cost. Pure reporting.\n4. Planner side (P15): `planner_handoffs(root)` from planner_telemetry rows: per escalation launch (kind or decision_type marking an escalation from the default tier to the escalation tier): tokens before escalation on the source launch, escalation packet tokens (from the launch payload size when recorded, else estimated from the packet cap and flagged), tokens after on the destination launch, and whether the goal was accepted; summary counts and averages; no routing change. If the telemetry rows lack a field needed, report it as unmeasured in the output rather than guessing.\n5. Shadow decision (P16): in executor.start, after the executor is chosen and before launch, when [handoff] mode (add `[handoff] mode = \"shadow\"` to pool.toml with a dated comment, and the feature \"handoff_routing\" to promotion.FEATURES with evidence loader returning {\"n\": lineage count}) is shadow or active: record decision_log.record(kind=\"handoff\", subject=task id, candidates=eligible executor ids, hard_constraints=[pool constraints text], deterministic={\"baseline\": chosen executor, \"expected_route_cost\": {executor: value or insufficient}, \"task_class\": ...}, historical={\"n\": ...}, selected=chosen executor (unchanged), reason=\"shadow: routing unchanged\", mode=mode). Never raises into start (try/except + one notify line). Active is treated as shadow with a one-time warning.\n6. CLI: `orchestrator scorecard --handoffs` prints by_start, recommendations and the Planner handoff summary; JSON with --json.\nTests (unittest): tests/test_handoff_scorecard.py::test_lineage_rows_orders_rounds_and_counts_resume_vs_fresh, ::test_expected_route_cost_insufficient_below_min_samples, ::test_start_strong_flag_when_cheap_first_costs_more_overall, ::test_planner_handoffs_reports_unmeasured_fields; tests/test_executor.py::test_start_records_handoff_decision_in_shadow_without_changing_executor (executor patched; the chosen executor equals the baseline pick and one decision row of kind handoff exists). docs/context-economy/08-handoffs.md (\u226470 lines): formulas, fields, what is estimated, revert path ([handoff] mode off).\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.\n\nSPEC v2 (2026-09-22 18:20) after spec review T-0813, binding on top of v1:\n- Step 4 (P15): an escalation launch is a planner_telemetry record_launch row whose route == \"escalate\" (route/tier fields on the row), i.e. routed to [planner.routing].escalation_tier while the goal's classification would route to default_tier. Pre-escalation token counts (the default-tier shadow decision) come from planner_shadow's own log (planner_shadow.record, keyed by launch_id/goal_id; see planner_runs._previous_shadow) joined by goal_id; when no shadow row exists the before-tokens field is reported as unmeasured, never estimated.\n- Step 5: the evidence loader is a new `if feature == \"handoff_routing\":` branch inside promotion.collect() (the flat per-feature dispatch; FEATURES' \"evidence\" key is descriptive only), returning {\"n\": number of lineages with \u22651 completed round} plus reason \"shadow_quality_unmeasured\".\n- tests/test_handoff_scorecard.py::test_planner_handoffs_reports_unmeasured_fields must build one record_launch row with route == \"escalate\" and no shadow row, and assert before_tokens is reported unmeasured while after tokens come from record_usage.",
+  "inputs": [
+    "T-0815"
+  ],
+  "acceptance": [
+    "tests/test_handoff_scorecard.py::test_lineage_rows_orders_rounds_and_counts_resume_vs_fresh passes",
+    "tests/test_handoff_scorecard.py::test_expected_route_cost_insufficient_below_min_samples passes",
+    "tests/test_handoff_scorecard.py::test_start_strong_flag_when_cheap_first_costs_more_overall passes",
+    "tests/test_handoff_scorecard.py::test_planner_handoffs_reports_unmeasured_fields passes",
+    "tests/test_executor.py::test_start_records_handoff_decision_in_shadow_without_changing_executor passes",
+    "pool.toml has [handoff] mode = \"shadow\" and promotion.FEATURES has handoff_routing; `uv run orchestrator scorecard --handoffs` runs; docs/context-economy/08-handoffs.md exists; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/handoff_scorecard.py",
+    "orchestrator/executor.py",
+    "orchestrator/promotion.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_handoff_scorecard.py",
+    "tests/test_executor.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/08-handoffs.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0818",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/executor.py",
+        "issue": "Handoff decision's 'candidates' (eligible executor ids) and 'baseline'/'chosen' executor are only well-defined on the allocation-active/shadow path (mode != 'off', inside the try at ~282-320). The explicit-executor_id fast path (line 274-275) and allocation-mode-off path never compute eligible_ids/choice, so the new shadow decision_log record would silently have no candidates or be skipped entirely on those paths \u2014 likely the majority of production dispatches.",
+        "severity": "high",
+        "line": 274
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Spec's fixed reason vocabulary for handoff_pairs (gate_red/review/conflict) doesn't cover the real hold_reason space (worktree missing, executor did not commit, budget, orphaned_dirty_worktree, respawn_exhausted, merge <status>). No fallback bucket is specified.",
+        "severity": "med",
+        "line": 156
+      },
+      {
+        "path": "docs/context-economy/08-handoffs.md",
+        "issue": "Doc numbered 08 but no 07 exists in the repo; unexplained gap in the sequence (T-0800 extended 05 in place instead of adding 07).",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "In executor.start, recompute pool.eligible_executors(role, complexity, task) independently for the handoff decision record, not conditionally on the allocation mode branch, so candidates and the baseline pick are always populated regardless of executor_id override or allocation mode.",
+      "Define the handoff_pairs reason mapping explicitly: gate_red <- hold_reason == 'gate_red'; review <- hold_reason.startswith('review request_changes'); conflict <- 'conflict' in hold_reason (matches failures.failure_kind); everything else buckets to 'other' and is reported, not dropped or raised on.",
+      "Confirm doc numbering 08 vs 07 is intentional (07 reserved by another in-flight task) or renumber to 07."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790091395.31571,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1790095495.685722,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner 19:05: held on account headroom during B's cooldown; re-spawned by hand"
+    },
+    {
+      "ts": 1790095498.097409,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0818",
+      "claimed_at": 1790095498.097055
+    },
+    {
+      "ts": 1790095498.098637,
+      "account": "B"
+    },
+    {
+      "ts": 1790095498.764461,
+      "pid": 51961,
+      "account": "B"
+    },
+    {
+      "ts": 1790095706.248375,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/executor.py",
+            "issue": "Handoff decision's 'candidates' (eligible executor ids) and 'baseline'/'chosen' executor are only well-defined on the allocation-active/shadow path (mode != 'off', inside the try at ~282-320). The explicit-executor_id fast path (line 274-275) and allocation-mode-off path never compute eligible_ids/choice, so the new shadow decision_log record would silently have no candidates or be skipped entirely on those paths \u2014 likely the majority of production dispatches.",
+            "severity": "high",
+            "line": 274
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Spec's fixed reason vocabulary for handoff_pairs (gate_red/review/conflict) doesn't cover the real hold_reason space (worktree missing, executor did not commit, budget, orphaned_dirty_worktree, respawn_exhausted, merge <status>). No fallback bucket is specified.",
+            "severity": "med",
+            "line": 156
+          },
+          {
+            "path": "docs/context-economy/08-handoffs.md",
+            "issue": "Doc numbered 08 but no 07 exists in the repo; unexplained gap in the sequence (T-0800 extended 05 in place instead of adding 07).",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "In executor.start, recompute pool.eligible_executors(role, complexity, task) independently for the handoff decision record, not conditionally on the allocation mode branch, so candidates and the baseline pick are always populated regardless of executor_id override or allocation mode.",
+          "Define the handoff_pairs reason mapping explicitly: gate_red <- hold_reason == 'gate_red'; review <- hold_reason.startswith('review request_changes'); conflict <- 'conflict' in hold_reason (matches failures.failure_kind); everything else buckets to 'other' and is reported, not dropped or raised on.",
+          "Confirm doc numbering 08 vs 07 is intentional (07 reserved by another in-flight task) or renumber to 07."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790095706.2498088,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Handoff decision's 'candidates' (eligible executor ids) and 'baseline'/'chosen' executor are only well-defined on the allocation-active/shadow path (mode != 'off', inside the try at ~282-320). The explicit-executor_id fast path (line 274-275) and allocation-mode-off path never compute eligible_ids/choice, so the new shadow decision_log record would silently have no candidates or be skipped entirely on those paths \u2014 likely the majority of production dispatches.",
+          "severity": "high",
+          "line": 274
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Spec's fixed reason vocabulary for handoff_pairs (gate_red/review/conflict) doesn't cover the real hold_reason space (worktree missing, executor did not commit, budget, orphaned_dirty_worktree, respawn_exhausted, merge <status>). No fallback bucket is specified.",
+          "severity": "med",
+          "line": 156
+        },
+        {
+          "path": "docs/context-economy/08-handoffs.md",
+          "issue": "Doc numbered 08 but no 07 exists in the repo; unexplained gap in the sequence (T-0800 extended 05 in place instead of adding 07).",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 19:05: held on account headroom during B's cooldown; re-spawned by hand",
+  "claimed_at": 1790095498.097055,
+  "account": "B",
+  "pid": 51961,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Handoff decision's 'candidates' (eligible executor ids) and 'baseline'/'chosen' executor are only well-defined on the allocation-active/shadow path (mode != 'off', inside the try at ~282-320). The explicit-executor_id fast path (line 274-275) and allocation-mode-off path never compute eligible_ids/choice, so the new shadow decision_log record would silently have no candidates or be skipped entirely on those paths \u2014 likely the majority of production dispatches.",
+      "severity": "high",
+      "line": 274
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Spec's fixed reason vocabulary for handoff_pairs (gate_red/review/conflict) doesn't cover the real hold_reason space (worktree missing, executor did not commit, budget, orphaned_dirty_worktree, respawn_exhausted, merge <status>). No fallback bucket is specified.",
+      "severity": "med",
+      "line": 156
+    },
+    {
+      "path": "docs/context-economy/08-handoffs.md",
+      "issue": "Doc numbered 08 but no 07 exists in the repo; unexplained gap in the sequence (T-0800 extended 05 in place instead of adding 07).",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

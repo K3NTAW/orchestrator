@@ -1,0 +1,373 @@
+{
+  "id": "T-0263",
+  "parent": "T-0260",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Scout G-S3 (daemon stage stamps, automatic fix rounds, review triggers): crash windows between stamp and action, what an automatic fix task needs and already exists, and where semantic review triggers and commit-bound approval would go",
+  "spec": "Goal T-0260 has three daemon items. Inventory with path:line for each:\n1. Stage stamps: orchestrator/daemon.py stamp() and every stage that stamps then acts (dispatched_at, spec_review_at, gated_at, review spawn, merged_at, review_held_at). For each: what happens if the process dies between the stamp and the action (is the stage skipped forever, retried, or reconciled by reconcile()/requeue of dead processes/already_merged()); which of these already reconcile against git or process state. Rank the windows by likelihood and damage. Propose the smallest state model (claimed/started/completed with a lease and reconciliation) that fits stamp() as it is.\n2. Automatic fix rounds: what the daemon knows when a task is held (hold_reason, resume_hint.failures from tests-green, review comments with path/line/severity, acceptance, scope, branch and commit) and which of it a Python-generated fix-task spec could use without a model; the existing pieces (constraints.fix_round_for, spawn.base_for, planner_runs held decision point, fit_result, fix-delta.md prompt); where merged_into reconciliation of the original task would hook after a fix round merges (merge_reviewed, merge.py). Define the boundary: routine (gate red with failing test ids or review request_changes with concrete path/line comments, scope unchanged) versus escalate (spec_review request_changes, conflicts, missing files outside scope, no concrete failure).\n3. Review triggers and approval binding: daemon.changed_paths and the security_paths policy (where the glob match happens); what it would take to also match diff content or paths for authorization behaviour, migrations, public interfaces (module __all__, MCP tool signatures, CLI args), dependency files (pyproject, uv.lock, Dockerfile); how a review verdict is stored (review_verdict on the review task and on src, no commit sha) and what merge.merge does after approval (rebase, tests) so a rebase with real changes still merges under the old approval; where to record the reviewed commit and compare after rebase.\nReport three sections with path:line, a ranked risk table for section 1, the routine/escalate rule for section 2, the trigger list and binding point for section 3. Under 1,500 tokens, confidence per finding.",
+  "inputs": [],
+  "acceptance": [
+    "every claim carries path:line",
+    "section 1 lists each stamp-then-act window with its recovery status and a ranked risk table",
+    "section 2 states the routine versus escalate rule and names the existing pieces to reuse",
+    "section 3 names the match point for semantic triggers and where approval would be bound to a commit",
+    "result under 1,500 tokens with a confidence per finding"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/spawn.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/bus.py",
+    ".orchestrator/prompts/fix-delta.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 12,
+    "timeout_s": 600
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0263",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "stamp() claims a pipeline stage under bus.locked() before daemon.py acts, so a crash between stamp and action leaves the task wedged, not skipped or auto-retried (no lease/TTL)",
+        "evidence": [
+          "orchestrator/daemon.py:33-43"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "dispatched_at (dispatch): crash after stamp before executor.start leaves task queued+stamped forever; only reconciled if bus status flips to running then pid dies (tick's requeue at daemon.py:212-214), not by the dispatch stamp itself",
+        "evidence": [
+          "orchestrator/daemon.py:129-132",
+          "orchestrator/daemon.py:212-214"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "spec_review_at: crash after stamp before bus.create_task/spawn_async leaves task stuck queued with no spec_review task ever created; nothing reconciles this (dispatch() skips re-creating since stamp already set)",
+        "evidence": [
+          "orchestrator/daemon.py:137-144"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "gated_at: stamp happens after tests-green already ran and after the merge-vs-review branch decision starts; crash inside the try block leaves task done+gated with no merge/review ever spawned, unrecovered except by hold_failed on raised exceptions",
+        "evidence": [
+          "orchestrator/daemon.py:163-173"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "merged_at (merge_reviewed, approve path): stamped before merge.merge() runs; crash mid-merge leaves review done+stamped with src never merged and merged_into unset, and no retry path since the stamp blocks future ticks",
+        "evidence": [
+          "orchestrator/daemon.py:198-204"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "already_merged() partially reconciles the merged_at/dispatched gap: it detects a task's branch already an ancestor of goal/<parent> via merge-base --is-ancestor even when merged_into is unset, self-healing fix-round merges",
+        "evidence": [
+          "orchestrator/daemon.py:59-81"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "review_held_at and spec_review_held_at stamps are terminal by design (status set to held in the same stamp call), intentionally not auto-recovered \u2014 comments say the Planner must write the fix-round spec",
+        "evidence": [
+          "orchestrator/daemon.py:134-135",
+          "orchestrator/daemon.py:206-207"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Ranked risk (damage x likelihood): 1) merged_at crash mid-merge.merge (silent lost merge, no auto-retry) 2) gated_at crash before review/merge spawn (done task orphaned) 3) spec_review_at crash before task creation (queued task orphaned) 4) dispatched_at crash before executor.start (recovered within 60s by tick's dead-pid requeue, lowest damage)",
+        "evidence": [
+          "orchestrator/daemon.py:198-204",
+          "orchestrator/daemon.py:163-173",
+          "orchestrator/daemon.py:137-144",
+          "orchestrator/daemon.py:212-214"
+        ],
+        "confidence": 0.65,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Smallest fitting state model: keep stamp()'s single bus_lock claim but split each pipeline.<stage>_at into claimed_at/completed_at pair with a lease timestamp; tick() sweeps stages where claimed_at is set, completed_at is unset, and lease expired, re-running the action (idempotent by design: create_task calls already dedupe via bus.read role checks at daemon.py:136, merge.merge is safe to re-call since it checks already_merged first)",
+        "evidence": [
+          "orchestrator/daemon.py:33-43",
+          "orchestrator/daemon.py:136",
+          "orchestrator/daemon.py:59-81"
+        ],
+        "confidence": 0.55,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "On held tasks the daemon/bus already carries hold_reason and resume_hint (e.g. {failures:...} from tests-green, {conflicts,hunks} from rebase) that a Python fix-spec generator could reuse without a model call",
+        "evidence": [
+          "orchestrator/daemon.py:159-160",
+          "orchestrator/merge.py:24",
+          "orchestrator/merge.py:28"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "No constraints.fix_round_for, spawn.base_for-driven fix-round spec builder, or automatic fix-task spec generation exists in this worktree's orchestrator/*.py \u2014 fix rounds are currently manual: Planner calls codex_reply with a delta text against fix-delta.md (round {{n}}/5, failing_tests, assertion_lines), and merge_reviewed()/dispatch() explicitly hold and defer to the Planner instead of writing a spec",
+        "evidence": [
+          "orchestrator/daemon.py:184-207",
+          "orchestrator/mcp.py:56",
+          "orchestrator/prompts/fix-delta.md:1-3"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "gotchas.md records that fix rounds leave the original task without merged_into, which is exactly what already_merged() at daemon.py:59-81 was built to reconcile before gate/review re-run",
+        "evidence": [
+          "mem:gotchas.md:86"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Does the security_paths/changed_paths feature from bus:T-0221-T-0225 exist on a different branch (e.g. goal/T-0221) not yet merged to this worktree's base \u2014 worth checking main or that goal branch directly",
+      "Is there a separate module (e.g. constraints.py) for fix_round_for/spawn.base_for referenced in the task prompt that lives outside orchestrator/ \u2014 not found in this worktree"
+    ],
+    "suggested_next": [
+      "Diff this worktree's base against goal/T-0221..T-0225 branches to locate the security_paths implementation before designing section 3's extension",
+      "Confirm with Planner whether fix-round automation (section 2) is intentionally manual-only per merge_reviewed()'s comment, or whether a constraints.py module was planned but not yet written"
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 9320,
+      "trimmed": {
+        "findings": 7
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789844415.962875,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0263",
+      "claimed_at": 1789844415.9624808
+    },
+    {
+      "ts": 1789844415.9646468,
+      "account": "B"
+    },
+    {
+      "ts": 1789844416.0115771,
+      "pid": 46478,
+      "account": "B"
+    },
+    {
+      "ts": 1789844533.9485471,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "stamp() claims a pipeline stage under bus.locked() before daemon.py acts, so a crash between stamp and action leaves the task wedged, not skipped or auto-retried (no lease/TTL)",
+            "evidence": [
+              "orchestrator/daemon.py:33-43"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "dispatched_at (dispatch): crash after stamp before executor.start leaves task queued+stamped forever; only reconciled if bus status flips to running then pid dies (tick's requeue at daemon.py:212-214), not by the dispatch stamp itself",
+            "evidence": [
+              "orchestrator/daemon.py:129-132",
+              "orchestrator/daemon.py:212-214"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "spec_review_at: crash after stamp before bus.create_task/spawn_async leaves task stuck queued with no spec_review task ever created; nothing reconciles this (dispatch() skips re-creating since stamp already set)",
+            "evidence": [
+              "orchestrator/daemon.py:137-144"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "gated_at: stamp happens after tests-green already ran and after the merge-vs-review branch decision starts; crash inside the try block leaves task done+gated with no merge/review ever spawned, unrecovered except by hold_failed on raised exceptions",
+            "evidence": [
+              "orchestrator/daemon.py:163-173"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "merged_at (merge_reviewed, approve path): stamped before merge.merge() runs; crash mid-merge leaves review done+stamped with src never merged and merged_into unset, and no retry path since the stamp blocks future ticks",
+            "evidence": [
+              "orchestrator/daemon.py:198-204"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "already_merged() partially reconciles the merged_at/dispatched gap: it detects a task's branch already an ancestor of goal/<parent> via merge-base --is-ancestor even when merged_into is unset, self-healing fix-round merges",
+            "evidence": [
+              "orchestrator/daemon.py:59-81"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "review_held_at and spec_review_held_at stamps are terminal by design (status set to held in the same stamp call), intentionally not auto-recovered \u2014 comments say the Planner must write the fix-round spec",
+            "evidence": [
+              "orchestrator/daemon.py:134-135",
+              "orchestrator/daemon.py:206-207"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Ranked risk (damage x likelihood): 1) merged_at crash mid-merge.merge (silent lost merge, no auto-retry) 2) gated_at crash before review/merge spawn (done task orphaned) 3) spec_review_at crash before task creation (queued task orphaned) 4) dispatched_at crash before executor.start (recovered within 60s by tick's dead-pid requeue, lowest damage)",
+            "evidence": [
+              "orchestrator/daemon.py:198-204",
+              "orchestrator/daemon.py:163-173",
+              "orchestrator/daemon.py:137-144",
+              "orchestrator/daemon.py:212-214"
+            ],
+            "confidence": 0.65,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Smallest fitting state model: keep stamp()'s single bus_lock claim but split each pipeline.<stage>_at into claimed_at/completed_at pair with a lease timestamp; tick() sweeps stages where claimed_at is set, completed_at is unset, and lease expired, re-running the action (idempotent by design: create_task calls already dedupe via bus.read role checks at daemon.py:136, merge.merge is safe to re-call since it checks already_merged first)",
+            "evidence": [
+              "orchestrator/daemon.py:33-43",
+              "orchestrator/daemon.py:136",
+              "orchestrator/daemon.py:59-81"
+            ],
+            "confidence": 0.55,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "On held tasks the daemon/bus already carries hold_reason and resume_hint (e.g. {failures:...} from tests-green, {conflicts,hunks} from rebase) that a Python fix-spec generator could reuse without a model call",
+            "evidence": [
+              "orchestrator/daemon.py:159-160",
+              "orchestrator/merge.py:24",
+              "orchestrator/merge.py:28"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "No constraints.fix_round_for, spawn.base_for-driven fix-round spec builder, or automatic fix-task spec generation exists in this worktree's orchestrator/*.py \u2014 fix rounds are currently manual: Planner calls codex_reply with a delta text against fix-delta.md (round {{n}}/5, failing_tests, assertion_lines), and merge_reviewed()/dispatch() explicitly hold and defer to the Planner instead of writing a spec",
+            "evidence": [
+              "orchestrator/daemon.py:184-207",
+              "orchestrator/mcp.py:56",
+              "orchestrator/prompts/fix-delta.md:1-3"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "gotchas.md records that fix rounds leave the original task without merged_into, which is exactly what already_merged() at daemon.py:59-81 was built to reconcile before gate/review re-run",
+            "evidence": [
+              "mem:gotchas.md:86"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Does the security_paths/changed_paths feature from bus:T-0221-T-0225 exist on a different branch (e.g. goal/T-0221) not yet merged to this worktree's base \u2014 worth checking main or that goal branch directly",
+          "Is there a separate module (e.g. constraints.py) for fix_round_for/spawn.base_for referenced in the task prompt that lives outside orchestrator/ \u2014 not found in this worktree"
+        ],
+        "suggested_next": [
+          "Diff this worktree's base against goal/T-0221..T-0225 branches to locate the security_paths implementation before designing section 3's extension",
+          "Confirm with Planner whether fix-round automation (section 2) is intentionally manual-only per merge_reviewed()'s comment, or whether a constraints.py module was planned but not yet written"
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 9320,
+          "trimmed": {
+            "findings": 7
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789844415.9624808,
+  "account": "B",
+  "pid": 46478
+}

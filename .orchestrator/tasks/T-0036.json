@@ -1,0 +1,86 @@
+{
+  "id": "T-0036",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "B4a fix round: minimal Scrapling dependency, no browser extra (acceptance of T-0023)",
+  "spec": "Why: T-0023 commit 67adc81 added `scrapling[fetchers]>=0.4.15` to pyproject.toml; the spec and acceptance said base package only, no [fetchers]/browser extras (uv.lock grew by 455 lines). The plain HTTP `scrapling.fetchers.Fetcher` may require one runtime dependency that the base package marks optional (likely curl_cffi); find out precisely instead of pulling the whole extra.\n\nWhat (2 files + lockfile: pyproject.toml, uv.lock, and orchestrator/bench.py only if an import path must change; this worktree branches from task/T-0023):\n1. Change the dependency to `scrapling>=0.4.15`. Run `uv lock` and `uv sync`. Then `uv run python -c \"from scrapling.fetchers import Fetcher; print(Fetcher)\"`. If that import (or a Fetcher.get call path, check the source for lazily imported modules) requires a package that is not installed, add exactly that package as a direct dependency (e.g. `curl_cffi>=x` with the version scrapling's own metadata requires) and nothing else. Report which packages the [fetchers] extra would have pulled that are now absent (playwright, camoufox, browserforge, etc. \u2014 list from `uv lock --dry-run` diff or by comparing uv.lock).\n2. Do not run `scrapling install`. Do not change tests. Confirm with one live `uv run orchestrator bench fetch --force` that fetch_html still works with the minimal dependency set and report matched/unmatched counts (one fetch allowed).\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"bench: minimal scrapling dependency (no browser extra)\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "pyproject.toml lists scrapling>=0.4.15 without the [fetchers] extra, plus at most one explicitly named runtime dependency the plain Fetcher needs",
+    "uv.lock contains no playwright, camoufox or browserforge entries",
+    "uv run python -c 'from scrapling.fetchers import Fetcher' succeeds in the worktree venv",
+    "uv run python -m unittest tests/test_orchestrator.py exits 0",
+    "git diff --stat limited to pyproject.toml, uv.lock and (only if needed) orchestrator/bench.py"
+  ],
+  "scope": [
+    "pyproject.toml",
+    "uv.lock",
+    "orchestrator/bench.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0036",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean. Summary for the Planner review:\n\n**Files changed:** `pyproject.toml`, `uv.lock` (2 files, as scoped \u2014 `orchestrator/bench.py` untouched, no import path change needed).\n\n**Key finding \u2014 deviates from one acceptance criterion, with reason:**\nThe spec assumed the plain `Fetcher` needed at most one extra runtime package (e.g. curl_cffi). Investigation showed that's false for scrapling 0.4.15: `scrapling.engines.static` (imported by `scrapling.fetchers.Fetcher`) unconditionally imports:\n- `scrapling.engines.toolbelt.convertor` \u2192 needs `curl_cffi`, `playwright`, `patchright` (shared response-conversion code with the dynamic/browser engine)\n- `scrapling.engines.toolbelt.fingerprints` \u2192 needs `browserforge` (header fingerint generation, used even for plain HTTP)\n\nNone of these are lazy/try-except imports \u2014 they're required just to `import scrapling.fetchers.Fetcher`. So the acceptance criterion \"uv.lock contains no playwright or browserforge entries\" cannot be satisfied while that import path works, in this scrapling version.\n\n**What was actually achieved:** `pyproject.toml` now lists `scrapling>=0.4.15` plus 4 explicit direct deps (`curl_cffi`, `playwright`, `patchright`, `browserforge`) instead of the `[fetchers]` extra. Net real savings: `msgspec` and `protego` dropped (2 packages, used only by the extra's rag/click paths, not by `Fetcher.get`). `camoufox` was never pulled and stays absent.\n\n**Verified:**\n- `from scrapling.fetchers import Fetcher` succeeds\n- `uv run orchestrator bench fetch --force` did a live fetch: 200 OK, matched 0/8 (unrelated to this change \u2014 bench alias matching)\n- `uv run python -m unittest tests/test_orchestrator.py`: 54 tests, all green\n\nCommitted as `74bf13a` on `task/T-0036` with revert path in the message (`git revert 74bf13a`).\n\nOne process note: an intermediate commit briefly landed with a placeholder message due to a bash heredoc/apostrophe quoting quirk inside `-m \"$(...)\"`; caught immediately and fixed via `git commit --amend -F -` before reporting \u2014 no push happened, nothing else touched it.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789661732.6744041,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789661732.6790872,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0036",
+      "claimed_at": 1789661732.6788852
+    },
+    {
+      "ts": 1789661732.686808,
+      "pid": 14059,
+      "account": "B"
+    },
+    {
+      "ts": 1789661980.9110122,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean. Summary for the Planner review:\n\n**Files changed:** `pyproject.toml`, `uv.lock` (2 files, as scoped \u2014 `orchestrator/bench.py` untouched, no import path change needed).\n\n**Key finding \u2014 deviates from one acceptance criterion, with reason:**\nThe spec assumed the plain `Fetcher` needed at most one extra runtime package (e.g. curl_cffi). Investigation showed that's false for scrapling 0.4.15: `scrapling.engines.static` (imported by `scrapling.fetchers.Fetcher`) unconditionally imports:\n- `scrapling.engines.toolbelt.convertor` \u2192 needs `curl_cffi`, `playwright`, `patchright` (shared response-conversion code with the dynamic/browser engine)\n- `scrapling.engines.toolbelt.fingerprints` \u2192 needs `browserforge` (header fingerint generation, used even for plain HTTP)\n\nNone of these are lazy/try-except imports \u2014 they're required just to `import scrapling.fetchers.Fetcher`. So the acceptance criterion \"uv.lock contains no playwright or browserforge entries\" cannot be satisfied while that import path works, in this scrapling version.\n\n**What was actually achieved:** `pyproject.toml` now lists `scrapling>=0.4.15` plus 4 explicit direct deps (`curl_cffi`, `playwright`, `patchright`, `browserforge`) instead of the `[fetchers]` extra. Net real savings: `msgspec` and `protego` dropped (2 packages, used only by the extra's rag/click paths, not by `Fetcher.get`). `camoufox` was never pulled and stays absent.\n\n**Verified:**\n- `from scrapling.fetchers import Fetcher` succeeds\n- `uv run orchestrator bench fetch --force` did a live fetch: 200 OK, matched 0/8 (unrelated to this change \u2014 bench alias matching)\n- `uv run python -m unittest tests/test_orchestrator.py`: 54 tests, all green\n\nCommitted as `74bf13a` on `task/T-0036` with revert path in the message (`git revert 74bf13a`).\n\nOne process note: an intermediate commit briefly landed with a placeholder message due to a bash heredoc/apostrophe quoting quirk inside `-m \"$(...)\"`; caught immediately and fixed via `git commit --amend -F -` before reporting \u2014 no push happened, nothing else touched it.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789662097.236901,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "019cb09586a4eebe9525436971f486dd64ece54e"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789661732.6788852,
+  "pid": 14059,
+  "account": "B",
+  "merged_into": "goal/T-0005",
+  "sha": "019cb09586a4eebe9525436971f486dd64ece54e"
+}

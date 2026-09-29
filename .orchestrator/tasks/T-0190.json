@@ -1,0 +1,170 @@
+{
+  "id": "T-0190",
+  "parent": "T-0109",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: D3 v3: Planner as a function \u2014 decision-point launches with per-event dedup keys, dead-run reconciliation and a tested attached-session guard (spec round 3 after T-0188; supersedes T-0187)",
+  "spec": "Why: the interactive Planner spent about 11.2M tokens on 2026-09-18 and session 2 repeated it; most was re-sending a large context on wait notifications. Round 3 folds in spec review T-0188 on top of round 2 (T-0182): per-event dedup keys, reconciliation of dead decision Planners, only real guards, both guard branches tested.\n\ngoals.py (additive refactor): extract the launch step of start() into `launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None) -> dict` (trust_workspace, env incl. CLAUDE_CONFIG_DIR / CLAUDE_CODE_OAUTH_TOKEN / ORCH_ROOT / filtered target secrets via _filter_target_secrets + resolve_secrets, argv with --model models.planner, --output-format json, --max-budget-usd, --mcp-config .mcp.planner.json, --strict-mcp-config, --append-system-prompt <planner.md>, --dangerously-skip-permissions, Popen start_new_session, stdout+stderr to log_path; returns {pid, pid_start, log}); start() calls it; behaviour unchanged (tests/test_goals.py green plus one test that start() goes through launch_planner). Expose `identity_of(pid, pid_start) -> bool` (the existing identity check as a function of the two values).\n\norchestrator/planner_runs.py (ROOT only; bus.py binds one STATE per process). DEDUP KEYS: kind \"scouts_done\" \u2192 payload_key = goal_id; \"closable\" \u2192 payload_key = goal_id; \"held\" \u2192 payload_key = f\"{task_id}:{hold_reason}:{int(held_at)}\" where held_at is the task's pipeline review_held_at or spec_review_held_at or the timestamp of the latest status=held event, so every new hold is a new decision even with the same reason. decision_points() scans goals (parentless triage not done) and yields (goal_id, kind, payload_key) for: scouts_done (scout children exist, all done or failed, no execute child, no LAUNCHED run for the key), held (each held execute child, no launched run for the key), closable (every execute child merged, nothing queued or running, no launched run). A run counts as launched only if its record has a pid and status \"running\" or \"exited_ok\"; records with status \"exited_early\" (see reconcile) count as not launched until attempts >= 2, then the decision is recorded \"gave_up\" and notify() fires once.\nrun(goal_id, kind, payload_key): (a) ATTACHED-SESSION GUARD, two real branches: env ORCH_DAEMON_HOST == \"mcp\" (mcp.py sets it before daemon.start_background; a standalone `orchestrator daemon` leaves it unset) \u2192 skip \"planner session attached\"; or .orchestrator/planner_session.json exists with {pid, pid_start} whose identity_of() is true \u2192 skip \"planner session attached\"; a stale file is ignored. No goals.status() clause (it never applies to ROOT). (b) ACCOUNT GUARD: acct = Pool().pick(\"planner\"); None \u2192 skip \"no account with headroom\". (c) handover.write(f\"decision {kind}\"). (d) prompt from .orchestrator/prompts/planner-decision.md ({{kind}}, {{goal_id}}, {{payload}}: \"Read .orchestrator/plan.md and the bus. Decision: <kind> for <goal_id>. Do only what this decision needs, write plan.md, and finish.\"). (e) goals.launch_planner(ROOT, prompt, acct.id, limits.max_budget_usd.get(\"planner_decision\", 3), runs/planner-decision-<goal_id>-<kind>-<n>.log). (f) record {goal_id, kind, payload_key, pid, pid_start, started_at, account, log, status \"running\", attempts} in .orchestrator/runs/planner_runs.json under bus.locked(); guard skips are recorded with skipped_reason and no pid and never block a retry.\nreconcile(): for each record with status running: identity_of false \u2192 status \"exited_ok\" if the decision's condition no longer holds (scouts_done: an execute child now exists; held: the task is no longer held with that held_at; closable: the goal is done) else \"exited_early\" with attempts += 1; called at the start of the autonomous block each tick.\ndaemon.tick(): after the stages, when pool.cfg.get(\"planner\", {}).get(\"autonomous\", False): reconcile(), then iterate decision_points() and launch at most one per tick, wrapped like the stages. pool.toml: `[planner] autonomous = false` with a comment (default off: the interactive Planner owns decisions; turn on only in the executor container) and `planner_decision = 3.0` in limits.max_budget_usd. mcp.py: os.environ[\"ORCH_DAEMON_HOST\"] = \"mcp\" before start_background (one line). README.md: paragraph \"Autonomous decisions\" under Pipeline.\nTests tests/test_planner_runs.py (harness; launch_planner patched to return a fake pid, identity_of patched): decision_points_scouts_done_held_closable, held_key_changes_with_each_new_hold (same reason, later held_at \u2192 new decision), run_skips_when_daemon_host_is_mcp, run_skips_when_planner_session_file_has_live_pid (and launches when the pid is stale), run_skips_without_account_headroom, run_launches_once_per_key, reconcile_marks_exited_ok_and_exited_early_and_gives_up_after_two, tick_launches_nothing_when_autonomous_false; tests/test_goals.py: start_uses_launch_planner. No new dependency; commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0189"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py has the eight named tests and tests/test_goals.py the launch_planner test; all green; existing tests untouched and green",
+    "With [planner] autonomous = false (default) tick() launches nothing; with it true, ORCH_DAEMON_HOST=mcp or a live planner_session.json pid skips with a recorded reason; a stale session file does not block",
+    "Dedup keys per kind as specified; a repeated hold with the same reason but a later held_at is a new decision; a launched decision is not relaunched; a dead run is reconciled to exited_ok or exited_early and retried at most twice, then gave_up with one notify",
+    "goals.start unchanged and routed through launch_planner (secrets filter preserved); identity_of exposed; mcp.py sets ORCH_DAEMON_HOST=mcp",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the nine scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/goals.py",
+    "orchestrator/daemon.py",
+    "orchestrator/mcp.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0190",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "ATTACHED-SESSION GUARD's file-based branch reads .orchestrator/planner_session.json, but nothing in this spec's scope (or anywhere in the current codebase \u2014 verified by grep) ever writes that file. mcp.py is only asked to set ORCH_DAEMON_HOST=mcp, not to register the session. The guard is only exercisable by a test that fabricates the file; in real operation it can never fire, so a standalone daemon (e.g. in the executor container) has no actual way to detect a human-attached interactive session running elsewhere.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The definition of a 'launched' run (pid + status running/exited_ok) excludes the 'gave_up' terminal status the reconcile rule introduces after 2 failed attempts. Since decision_points() is specified to re-yield a key whenever no launched run exists for it, a gave_up record does not block re-decision, so the daemon would relaunch the same decision again (another 2 attempts, another notify) indefinitely instead of giving up once. No listed test (reconcile_marks_exited_ok_and_exited_early_and_gives_up_after_two) actually checks that decision_points() stays quiet after gave_up.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "held payload_key truncates held_at to whole seconds via int(); two distinct holds on the same task/reason within the same second collapse to the same key and the second is silently dropped as a duplicate.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Either scope in a writer for .orchestrator/planner_session.json (name the exact place \u2014 e.g. mcp.py writes {pid, pid_start} of the interactive Claude Code process at startup) or drop the file-based guard branch entirely and rely solely on ORCH_DAEMON_HOST==mcp, documenting the resulting narrower guarantee.",
+      "Explicitly state that a record with status gave_up counts as launched for decision_points() purposes (blocks re-yielding the same key), and add a test asserting decision_points() does not re-yield a key after it reaches gave_up."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789764522.167639,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0190",
+      "claimed_at": 1789764522.16721
+    },
+    {
+      "ts": 1789764522.175427,
+      "pid": 46098,
+      "account": "A"
+    },
+    {
+      "ts": 1789764790.444758,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "ATTACHED-SESSION GUARD's file-based branch reads .orchestrator/planner_session.json, but nothing in this spec's scope (or anywhere in the current codebase \u2014 verified by grep) ever writes that file. mcp.py is only asked to set ORCH_DAEMON_HOST=mcp, not to register the session. The guard is only exercisable by a test that fabricates the file; in real operation it can never fire, so a standalone daemon (e.g. in the executor container) has no actual way to detect a human-attached interactive session running elsewhere.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The definition of a 'launched' run (pid + status running/exited_ok) excludes the 'gave_up' terminal status the reconcile rule introduces after 2 failed attempts. Since decision_points() is specified to re-yield a key whenever no launched run exists for it, a gave_up record does not block re-decision, so the daemon would relaunch the same decision again (another 2 attempts, another notify) indefinitely instead of giving up once. No listed test (reconcile_marks_exited_ok_and_exited_early_and_gives_up_after_two) actually checks that decision_points() stays quiet after gave_up.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "held payload_key truncates held_at to whole seconds via int(); two distinct holds on the same task/reason within the same second collapse to the same key and the second is silently dropped as a duplicate.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Either scope in a writer for .orchestrator/planner_session.json (name the exact place \u2014 e.g. mcp.py writes {pid, pid_start} of the interactive Claude Code process at startup) or drop the file-based guard branch entirely and rely solely on ORCH_DAEMON_HOST==mcp, documenting the resulting narrower guarantee.",
+          "Explicitly state that a record with status gave_up counts as launched for decision_points() purposes (blocks re-yielding the same key), and add a test asserting decision_points() does not re-yield a key after it reaches gave_up."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789764790.447873,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "ATTACHED-SESSION GUARD's file-based branch reads .orchestrator/planner_session.json, but nothing in this spec's scope (or anywhere in the current codebase \u2014 verified by grep) ever writes that file. mcp.py is only asked to set ORCH_DAEMON_HOST=mcp, not to register the session. The guard is only exercisable by a test that fabricates the file; in real operation it can never fire, so a standalone daemon (e.g. in the executor container) has no actual way to detect a human-attached interactive session running elsewhere.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The definition of a 'launched' run (pid + status running/exited_ok) excludes the 'gave_up' terminal status the reconcile rule introduces after 2 failed attempts. Since decision_points() is specified to re-yield a key whenever no launched run exists for it, a gave_up record does not block re-decision, so the daemon would relaunch the same decision again (another 2 attempts, another notify) indefinitely instead of giving up once. No listed test (reconcile_marks_exited_ok_and_exited_early_and_gives_up_after_two) actually checks that decision_points() stays quiet after gave_up.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "held payload_key truncates held_at to whole seconds via int(); two distinct holds on the same task/reason within the same second collapse to the same key and the second is silently dropped as a duplicate.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789764522.16721,
+  "pid": 46098,
+  "account": "A",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "ATTACHED-SESSION GUARD's file-based branch reads .orchestrator/planner_session.json, but nothing in this spec's scope (or anywhere in the current codebase \u2014 verified by grep) ever writes that file. mcp.py is only asked to set ORCH_DAEMON_HOST=mcp, not to register the session. The guard is only exercisable by a test that fabricates the file; in real operation it can never fire, so a standalone daemon (e.g. in the executor container) has no actual way to detect a human-attached interactive session running elsewhere.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The definition of a 'launched' run (pid + status running/exited_ok) excludes the 'gave_up' terminal status the reconcile rule introduces after 2 failed attempts. Since decision_points() is specified to re-yield a key whenever no launched run exists for it, a gave_up record does not block re-decision, so the daemon would relaunch the same decision again (another 2 attempts, another notify) indefinitely instead of giving up once. No listed test (reconcile_marks_exited_ok_and_exited_early_and_gives_up_after_two) actually checks that decision_points() stays quiet after gave_up.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "held payload_key truncates held_at to whole seconds via int(); two distinct holds on the same task/reason within the same second collapse to the same key and the second is silently dropped as a duplicate.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

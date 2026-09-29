@@ -1,0 +1,171 @@
+{
+  "id": "T-0871",
+  "created_at": 1790106473.97809,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S1a: canonical skill registry (P1/P2 states, P22 versions by content hash, P32 provenance fields) built from skills/**/SKILL.md, `orchestrator skills` CLI, and the P0 inventory doc",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P0, P1, P2, P22, P32 (P37 stage 1). Facts (Planner grep, provenance repo): 12 skills under skills/<role>/<name>/SKILL.md with YAML frontmatter (name, description; some carry scripts/ and references/); 11 are symlinked into .claude/skills so every Claude worker sees their descriptions; Codex executors load implement-spec through AGENTS.md; worker prompts do not name skills; no registry, telemetry or per-skill tests exist except tests/test_memory_skill.py; task classes come from attribution.task_class (security, architectural, debugging, mechanical, unfamiliar, or explicit constraints.task_class); workflow strategies are strategy.STRATEGIES.\nDo:\n1. orchestrator/skills_registry.py (new). `SkillRecord` dataclass with: id (f\"{role}/{name}\" from the directory path), version (12-hex sha256 of the SKILL.md body + scripts/ + references/ contents, i.e. a content hash; the same value is content_hash), name, description, provenance (\"builtin\" for skills/ in this repo; \"repository\", \"learned\", \"external\" reserved), trust (\"trusted\" | \"untrusted\"), state (one of STATES = discovered, quarantined, testing, shadow, active, demoted, disabled), roles (from the directory: planner/scout/review/triage/executor; \"review\" also serves spec_review and challenge; explicit override via an optional frontmatter key `roles:`), task_classes (frontmatter `task_classes:` or [\"*\"]), triggers (frontmatter `triggers:` list; default: keywords parsed from the description's \"Use when ...\" / \"Use for ...\" clause, lower-cased, \u22654 chars), tools (frontmatter `allowed-tools`/`tools:` plus every script under scripts/ as \"script:<path>\"), context_requirements (frontmatter `requires_context:` or []; P26 placeholder), output_contract (frontmatter `output:` or the text after \"Finish with\" / \"Output\" in the body, \u2264300 chars), est_tokens_l0 (description chars//4), est_tokens_l1 (trigger+objective+output chars//4 when present), est_tokens_l2 (full body chars//4), security_class (frontmatter `security:` or \"internal\"), repo_scope (\"orchestrator\" default; frontmatter `repo:`), validation ({\"tests\": [test module paths that mention the skill dir], \"status\": \"untested\"|\"tested\"}), promotion_state (mirror of state for the promotion module), created_at/updated_at (git log of the SKILL.md path; fall back to mtime), source (path).\n2. Registry store: `.orchestrator/skills/registry.json` (under STATE) with {\"version\": 1, \"synced_at\", \"skills\": {id: record}} plus a per-skill state override file `.orchestrator/skills/state.json` {id: {\"state\", \"trust\", \"since\", \"reason\", \"history\": [...]}} so lifecycle transitions are observable and reversible (P2): `transition(id, new_state, reason)` validates against ALLOWED_TRANSITIONS (discovered\u2192quarantined/testing/disabled; quarantined\u2192testing/disabled; testing\u2192shadow/disabled/quarantined; shadow\u2192active/testing/disabled; active\u2192demoted/disabled/shadow; demoted\u2192shadow/testing/disabled; disabled\u2192discovered/testing) and appends to history; `rollback(id)` restores the previous state. Builtin skills start in state \"active\" and trust \"trusted\" (explicit, recorded in state.json with reason \"builtin baseline 2026-09-22\"), never inferred from provenance at runtime: registry.state(id) reads state.json first.\n3. `sync(root=STATE, skills_dir=REPO/skills)` rebuilds records from disk, keeps state.json entries, marks skills whose content hash changed as version bumps (history entry \"content changed: old\u2192new\"; state unchanged for builtins, \"testing\" for anything not trusted), and marks missing skills \"disabled\" with reason \"source removed\".\n4. CLI: `orchestrator skills sync|list|show <id>|transition <id> <state> --reason|rollback <id>` (list prints id, state, trust, roles, est tokens l0/l2, version; --json). Exit non-zero on an invalid transition.\n5. docs/skill-intelligence/00-audit.md: the P0 inventory table (one row per skill: id, roles, purpose, trigger, tokens l0/l2, tools, output contract, repo specificity, always exposed?, dynamic?, tests, provenance) and the exposure facts above; docs/skill-intelligence/01-registry.md (\u226460 lines): the record schema, the state machine, the CLI, revert path (delete .orchestrator/skills/*.json and re-sync; nothing else changes).\nConstraints: read-only with respect to skills/ and .claude/skills (no compaction, no symlink changes: that is S2/S5); no behaviour change for any worker. Never quote double-brace placeholder tokens literally.\nTests (unittest, `import _harness` first): tests/test_skills_registry.py::test_sync_builds_twelve_builtin_records_with_content_hashes, ::test_triggers_parsed_from_use_when_clause, ::test_transition_validates_and_records_history, ::test_rollback_restores_previous_state, ::test_state_override_beats_provenance (a builtin marked disabled in state.json reports disabled), ::test_sync_marks_missing_skill_disabled_and_version_bump_on_content_change, ::test_cli_list_and_invalid_transition_exit_code.\nDo not ask questions; decide and note decisions in the result.",
+  "inputs": [
+    "T-0863"
+  ],
+  "acceptance": [
+    "tests/test_skills_registry.py::test_sync_builds_twelve_builtin_records_with_content_hashes passes",
+    "tests/test_skills_registry.py::test_triggers_parsed_from_use_when_clause passes",
+    "tests/test_skills_registry.py::test_transition_validates_and_records_history passes",
+    "tests/test_skills_registry.py::test_rollback_restores_previous_state passes",
+    "tests/test_skills_registry.py::test_state_override_beats_provenance passes",
+    "tests/test_skills_registry.py::test_sync_marks_missing_skill_disabled_and_version_bump_on_content_change passes",
+    "tests/test_skills_registry.py::test_cli_list_and_invalid_transition_exit_code passes",
+    "docs/skill-intelligence/00-audit.md lists all 12 skills; docs/skill-intelligence/01-registry.md exists; `uv run orchestrator skills sync` then `list` runs; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    "tests/test_skills_registry.py",
+    "docs/skill-intelligence/00-audit.md",
+    "docs/skill-intelligence/01-registry.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0871",
+  "codex_thread": null,
+  "result": {
+    "summary": "Verified: all 7 new unittest cases pass, full tests-green gate passes (1117 tests), docs match the 12-skill inventory, CLI sync/list/show/transition/rollback work end-to-end against the real repo, and the cli.py dispatch chain insertion doesn't break other subcommands. Scope is respected (only the 5 allowed files touched, skills/ and .claude/skills untouched). One real but non-blocking correctness bug found in the content-change history bookkeeping for non-builtin skills (see comment) \u2014 doesn't affect builtins, doesn't fail any acceptance test, and this stage is read-only/observational with no consumer yet depending on the field, so it doesn't block merge.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/skills_registry.py",
+        "line": 224,
+        "issue": "On a content-change for a non-trusted skill, sync() demotes state to 'testing' (line 229) but the history event appended just above (line 224) sets to: entry['state'] evaluated before the demotion, so 'to' equals 'from' and the log never shows the state actually became 'testing'. Reproduced directly: after editing a shadow-state, untrusted skill's SKILL.md and re-syncing, current state is 'testing' but history[-1] reads {'from':'shadow','to':'shadow'}. This undermines the P2 goal that lifecycle transitions be observable via history; not caught by tests since the builtin-only test fixtures never hit the non-trusted demotion branch.",
+        "severity": "med"
+      }
+    ],
+    "packet_version": "53f17a7a2ee8",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790106473.978972,
+      "reviewed_sha": "40fda3de708d76cbba56b9facb3a4995403f534e"
+    },
+    {
+      "ts": 1790106477.273571,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0871",
+      "claimed_at": 1790106477.2385879
+    },
+    {
+      "ts": 1790106477.274873,
+      "account": "B"
+    },
+    {
+      "ts": 1790106478.177412,
+      "pid": 39757,
+      "account": "B"
+    },
+    {
+      "ts": 1790106767.0771358,
+      "status": "done",
+      "result": {
+        "summary": "Verified: all 7 new unittest cases pass, full tests-green gate passes (1117 tests), docs match the 12-skill inventory, CLI sync/list/show/transition/rollback work end-to-end against the real repo, and the cli.py dispatch chain insertion doesn't break other subcommands. Scope is respected (only the 5 allowed files touched, skills/ and .claude/skills untouched). One real but non-blocking correctness bug found in the content-change history bookkeeping for non-builtin skills (see comment) \u2014 doesn't affect builtins, doesn't fail any acceptance test, and this stage is read-only/observational with no consumer yet depending on the field, so it doesn't block merge.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/skills_registry.py",
+            "line": 224,
+            "issue": "On a content-change for a non-trusted skill, sync() demotes state to 'testing' (line 229) but the history event appended just above (line 224) sets to: entry['state'] evaluated before the demotion, so 'to' equals 'from' and the log never shows the state actually became 'testing'. Reproduced directly: after editing a shadow-state, untrusted skill's SKILL.md and re-syncing, current state is 'testing' but history[-1] reads {'from':'shadow','to':'shadow'}. This undermines the P2 goal that lifecycle transitions be observable via history; not caught by tests since the builtin-only test fixtures never hit the non-trusted demotion branch.",
+            "severity": "med"
+          }
+        ],
+        "packet_version": "53f17a7a2ee8",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790106767.0780869,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790106767.1282198,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 1,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "40fda3de708d76cbba56b9facb3a4995403f534e",
+        "packet_version": "53f17a7a2ee8",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 1,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "40fda3de708d76cbba56b9facb3a4995403f534e",
+      "packet_version": "53f17a7a2ee8",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "40fda3de708d76cbba56b9facb3a4995403f534e",
+  "claimed_at": 1790106477.2385879,
+  "account": "B",
+  "pid": 39757,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 1,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "40fda3de708d76cbba56b9facb3a4995403f534e",
+    "packet_version": "53f17a7a2ee8",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 1,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "53f17a7a2ee8",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

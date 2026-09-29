@@ -1,0 +1,95 @@
+{
+  "id": "T-0345",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G3 fix round 2: test_review_prompt_diff_is_bounded uses the worktree short-circuit and persists the reviewed worktree via bus.update; the review branch fetches the reviewed task once (review T-0339)",
+  "spec": "STEP 0: the worktree must contain 211e674 (T-0271) and 6edc2f3 (T-0336, G3 fix round 1) in git log; never drop or amend them.\nReview T-0339 on T-0336, all to be addressed:\n1. (high) tests/test_spawn.py test_review_prompt_diff_is_bounded errors instead of passing: it lacks the (TMP / \"wt\" / review[\"id\"]).mkdir(parents=True, exist_ok=True) short-circuit every other run_worker and review test in the file uses, so ensure_worktree runs a real git worktree add against TMP and fails with 'not a git repository'. Add the short-circuit exactly as the sibling tests do and make sure the test runs green on its own (python -m unittest tests.test_spawn -k test_review_prompt_diff_is_bounded) and inside the full suite.\n2. (med) The same test sets reviewed[\"worktree\"] = str(TMP) on a local dict, which bus.get() never sees because it reloads from disk; the assertion only passes because the harness aliases spawn.ROOT to TMP. Persist it with bus.update(reviewed[\"id\"], worktree=str(TMP)) as the other tests do, and make the assertion prove the reviewed task's worktree path is what scoped_diff used (e.g. the expand hint names that worktree).\n3. (low) orchestrator/spawn.py review branch (around the run_worker review section) calls bus.get(t[\"inputs\"][0]) twice plus once more inside scoped_diff() for the same task; fetch the reviewed task once and pass it down like the spec_review branch does, without changing behaviour.\nKeep the other four T-0336 tests and every T-0271 test green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id in the message; report sha and failures only.",
+  "inputs": [
+    "T-0344"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 6edc2f3 and 211e674 below your commit",
+    "tests/test_spawn.py::test_review_prompt_diff_is_bounded passes alone and in the full suite, uses the wt short-circuit and bus.update for the reviewed worktree",
+    "tests/test_spawn.py::test_bounded_diff_summary_first, ::test_bounded_diff_expansion_hint, ::test_bounded_diff_hunk_header_once, ::test_render_does_not_rebound_diff still pass",
+    "orchestrator/spawn.py review branch fetches the reviewed task once (grep shows one bus.get(t[\"inputs\"][0]) in that branch and scoped_diff takes the task or its fields)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0345",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 467,
+        "issue": "reviewed is only bound inside `if role == \"review\" and t.get(\"inputs\") and isinstance(t[\"inputs\"][0], str):` (line 450). If a review task reaches this point with no inputs, empty inputs, or a non-string inputs[0] (create_task defaults inputs to [] and does not enforce shape per role, and bus_create_task is callable directly), that guard is False, `reviewed` is never assigned, and line 467's `src = reviewed if reviewed is not None else t` raises NameError, crashing run_worker for that task. Before this diff, scoped_diff(t) handled the same case gracefully via `bus.get(t[\"inputs\"][0]) if t.get(\"inputs\") else t`. This is a regression from graceful fallback to an unhandled crash on a defensive path the code elsewhere clearly anticipates (the KeyError catch at line 451-454 and the isinstance check are pointless if `reviewed` must always end up bound for the code below to work).",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789853431.997962,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0345",
+      "claimed_at": 1789853431.9976802
+    },
+    {
+      "ts": 1789853431.999033,
+      "account": "B"
+    },
+    {
+      "ts": 1789853432.062675,
+      "pid": 38221,
+      "account": "B"
+    },
+    {
+      "ts": 1789853621.6890528,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 467,
+            "issue": "reviewed is only bound inside `if role == \"review\" and t.get(\"inputs\") and isinstance(t[\"inputs\"][0], str):` (line 450). If a review task reaches this point with no inputs, empty inputs, or a non-string inputs[0] (create_task defaults inputs to [] and does not enforce shape per role, and bus_create_task is callable directly), that guard is False, `reviewed` is never assigned, and line 467's `src = reviewed if reviewed is not None else t` raises NameError, crashing run_worker for that task. Before this diff, scoped_diff(t) handled the same case gracefully via `bus.get(t[\"inputs\"][0]) if t.get(\"inputs\") else t`. This is a regression from graceful fallback to an unhandled crash on a defensive path the code elsewhere clearly anticipates (the KeyError catch at line 451-454 and the isinstance check are pointless if `reviewed` must always end up bound for the code below to work).",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789853621.6920562,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789853431.9976802,
+  "account": "B",
+  "pid": 38221,
+  "review_verdict": "request_changes"
+}

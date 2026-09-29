@@ -1,0 +1,107 @@
+{
+  "id": "T-0343",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G5 fix round 1: per-session Jev state file writes take the shared state lock, _target_mtime stats the real path and only the logged target is redacted; the seven acceptance tests at f9747a8 stay green (review T-0338)",
+  "spec": "STEP 0: the worktree must contain d7ce217 and f9747a8 (T-0273, sampled Jev gate plus its seven acceptance tests) in git log; never drop or amend them. The two test findings of review T-0338 are already answered by f9747a8: confirm the seven named tests exist and pass, do not rewrite them.\nRemaining findings of review T-0338 on T-0273:\n1. (med) orchestrator/jev_gate.py _record_call does a read-modify-write on .orchestrator/state/runs/jev/session-{id}.json with no lock, while jev.py guards jev_state.json with STATE_LOCK_FILE. PreToolUse hooks fire concurrently for parallel tool calls, so repeat counts can be lost and a partial write makes json.loads fail and silently reset the session state to {}. Guard the read-modify-write with the same lock helper jev.py uses (reuse it, do not add a second locking scheme), write atomically (temp file plus os.replace), and treat an unparseable file as corrupt: log one stderr warning and start from {} instead of silently resetting.\n2. (low) _target returns jev.redact(path) and _target_mtime then calls os.stat on that redacted string, so any path matching a redaction pattern (32+ character alnum runs, content-hashed cache dirs) gets mtime None forever and repeat clearing never fires for it. Keep the real path for os.stat and hashing; redact only the value that is written to gate rows or logs.\nTests to add in tests/test_jev_gate.py: test_record_call_serialises_concurrent_writes (two threads or interleaved calls both land, count is exact), test_corrupt_session_file_warns_and_recovers, test_target_mtime_uses_unredacted_path (a path whose basename is a 40-char hex string gets a real mtime while the logged target is redacted).\nRun .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id in the message; report sha and failures only.",
+  "inputs": [
+    "T-0341"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f9747a8 and d7ce217 below your commit",
+    "tests/test_jev_gate.py::test_sample_mode_is_deterministic, ::test_unsampled_call_makes_no_request, ::test_repeat_detected_without_network, ::test_repeat_cleared_when_mtime_changes, ::test_rows_have_target_hash_and_flags, ::test_block_repeats_denies and tests/test_cli.py::test_jev_diagnose_summary pass",
+    "tests/test_jev_gate.py::test_record_call_serialises_concurrent_writes, ::test_corrupt_session_file_warns_and_recovers, ::test_target_mtime_uses_unredacted_path pass",
+    "orchestrator/jev_gate.py session-file writes go through the jev.py lock helper and os.replace; os.stat is never called on a redacted string (grep)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev_gate.py",
+    "tests/test_jev_gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0343",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 151,
+        "issue": "Session state path is built from an unvalidated session_id (f\"session-{session_id}.json\"). No sanitization/allowlist on the identifier before it reaches a filesystem path used in a mkstemp+os.replace write. Low exploitability today since session_id is CLI-generated, but worth a narrow validation (e.g. reject/hash anything not matching a UUID-ish pattern) per the path-injection checklist item.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 318,
+        "issue": "block_repeats denial message says 'identical read already made this session' but block_repeats fires for any repeated tool call, not just reads (Bash/Edit/Write included). Misleading stderr message.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789852567.625194,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0343",
+      "claimed_at": 1789852567.62491
+    },
+    {
+      "ts": 1789852567.626443,
+      "account": "B"
+    },
+    {
+      "ts": 1789852567.6600142,
+      "pid": 65405,
+      "account": "B"
+    },
+    {
+      "ts": 1789852926.7303932,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 151,
+            "issue": "Session state path is built from an unvalidated session_id (f\"session-{session_id}.json\"). No sanitization/allowlist on the identifier before it reaches a filesystem path used in a mkstemp+os.replace write. Low exploitability today since session_id is CLI-generated, but worth a narrow validation (e.g. reject/hash anything not matching a UUID-ish pattern) per the path-injection checklist item.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 318,
+            "issue": "block_repeats denial message says 'identical read already made this session' but block_repeats fires for any repeated tool call, not just reads (Bash/Edit/Write included). Misleading stderr message.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789852926.731968,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789852567.62491,
+  "account": "B",
+  "pid": 65405,
+  "review_verdict": "approve"
+}

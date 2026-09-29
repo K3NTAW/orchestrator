@@ -1,0 +1,152 @@
+{
+  "id": "T-0150",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): D1 review policy from pool.toml [review] table (T-0120, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0120 delta: `git diff 674b390 cf7ad84` in worktree wt/T-0120 (orchestrator/daemon.py, tests/test_daemon.py, .orchestrator/pool.toml, README.md). Acceptance: thresholds spec_review_min (6), direct_merge_max (3), two_reviews_from (7), spec_review_tier (sonnet) read from pool.cfg[\"review\"] at each tick with the module attributes kept for tests; dispatch() spec-reviews only at complexity >= spec_review_min with tier spec_review_tier; gate() creates exactly one review for mid complexity (a second gate pass creates none) and, for two_reviews_from and up, a second review on the other model; merge_reviewed() merges one-review tasks on the first approve and two-review tasks only when every review approved; [review] table with a policy comment in pool.toml; README Pipeline paragraph updated; the four named tests present and meaningful. Check interplay with today's merged daemon code: review_tier() still chosen for the first review; the orphaned-result branch in gate() (C-O9) still forces a review; reconcile_dead untouched; _load_review_cfg cannot crash tick() when [review] is missing (defaults). Security: no shell strings from config. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0120"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each acceptance point of T-0120 confirmed with evidence from the delta",
+    "Interplay with review_tier, the orphaned branch and reconcile_dead checked"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0150",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 387,
+        "issue": "Deadlock: an orphaned task with complexity >= TWO_REVIEWS_FROM never merges. gate() line 325-336 deliberately creates exactly ONE review for an orphaned result (`continue` before the two-review block, per its own comment 'One review is enough here regardless of complexity'), but merge_reviewed() here requires len(siblings) >= 2 for the same complexity, so the single approve is discarded on every tick forever. gated_at is already stamped, so gate() will never create the second review either. Reproduced against this worktree: complexity-7 task with result.orphaned=true -> 1 review (tier opus) -> review_verdict=approve -> two further ticks -> merged=[], src status=done, merged_into=None, no hold and no notify. This is the same silent-stall class as gotchas.md:137 (T-0135 sat done+gated 15 min). Fix: gate the two-review wait on the number of reviews actually created for src (e.g. skip the sibling check when the task is orphaned, or require all-approve over the existing siblings rather than a hard count of 2).",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 389,
+        "issue": "`any(s['status'] != 'done' for s in siblings)` waits forever on a sibling that will never reach done, with no hold and no notify. spawn.run_worker sets a review task to status='failed' (reason 'review returned no parseable verdict', spawn.py) -- exactly the T-0139/T-0135 failure mode this repo already hit. One failed review of a complexity-7 pair permanently wedges the other review's approve: merge_reviewed silently `continue`s each tick, the Planner gets no signal, and the task stays done-but-unmerged. A failed or held sibling needs an escape hatch (hold src with a reason + notify, or treat a failed sibling as a re-spawn trigger), not an unbounded wait.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 302,
+        "issue": "The docstring claims the second review lands 'on whichever tier the first one didn't get, so no single model grades a task twice', but that is false whenever the executor was a Claude fallback tier -- and with only two Claude tiers it is unavoidable. Verified by running the real functions: pool.fallback_tier(7)=pool.fallback_tier(8)='opus', so executor='claude:opus' -> review_tier()='sonnet' -> _other_tier()='opus' == the executing model. Same for a sonnet-executed task (opus + sonnet). So every fallback-executed complexity 7-8 task is graded once by the model that wrote it, which is what CLAUDE.md's 'Never let a model review its own output' and review_tier()'s own docstring (gotchas.md 2026-09-18, T-0071) exist to prevent. Either exclude the executor's tier and route the second review to a non-Claude reviewer, or drop the claim and state the tradeoff explicitly.",
+        "severity": "med"
+      },
+      {
+        "path": "CLAUDE.md",
+        "line": 17,
+        "issue": "spec_review_min moved 5 -> 6 (pool.toml + daemon.py:11) and README.md was updated, but the governing doc still says the daemon routes 'complexity \u22655 through a spec review first'. A Planner following CLAUDE.md will expect a complexity-5 task to be spec-reviewed; it now dispatches straight to the executor (the new test test_spec_review_threshold_from_cfg asserts exactly that). tests/test_daemon.py:1 module docstring carries the same stale '>=5'. Update both, or leave spec_review_min at 5.",
+        "severity": "med"
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 28,
+        "issue": "The policy comment says '7-10: two reviews, the second on the other account with the other model.' The code only guarantees the other model: gate() sets tier=_other_tier(...) but account selection happens later in spawn.run_worker, whose pool.pick(role, avoid=...) only avoids the account the EXECUTOR ran on -- it has no knowledge of the sibling review, so both reviews can be picked onto the same account. Either make the second review avoid the first reviewer's account too, or write down what the code actually promises.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 395,
+        "issue": "merged_at is stamped on the review task, not on src, so with two reviews the conflict guarantee in the comment above ('a conflict leaves merged_into unset, and retrying it every tick would just rebuild the same conflict') weakens: when both siblings approve in the same tick and merge.merge() returns status='conflict', merged_into stays unset (merge.py:24) so the second review passes already_merged(), stamps its own merged_at, and rebuilds the identical conflict -- a second rebase/abort cycle and a second notify per task. Stamping on src['id'] instead would keep it at one attempt.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789740020.553762,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0150",
+      "claimed_at": 1789740020.5533319
+    },
+    {
+      "ts": 1789740020.5914822,
+      "pid": 36822,
+      "account": "A"
+    },
+    {
+      "ts": 1789740166.5110059,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 387,
+            "issue": "Deadlock: an orphaned task with complexity >= TWO_REVIEWS_FROM never merges. gate() line 325-336 deliberately creates exactly ONE review for an orphaned result (`continue` before the two-review block, per its own comment 'One review is enough here regardless of complexity'), but merge_reviewed() here requires len(siblings) >= 2 for the same complexity, so the single approve is discarded on every tick forever. gated_at is already stamped, so gate() will never create the second review either. Reproduced against this worktree: complexity-7 task with result.orphaned=true -> 1 review (tier opus) -> review_verdict=approve -> two further ticks -> merged=[], src status=done, merged_into=None, no hold and no notify. This is the same silent-stall class as gotchas.md:137 (T-0135 sat done+gated 15 min). Fix: gate the two-review wait on the number of reviews actually created for src (e.g. skip the sibling check when the task is orphaned, or require all-approve over the existing siblings rather than a hard count of 2).",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 389,
+            "issue": "`any(s['status'] != 'done' for s in siblings)` waits forever on a sibling that will never reach done, with no hold and no notify. spawn.run_worker sets a review task to status='failed' (reason 'review returned no parseable verdict', spawn.py) -- exactly the T-0139/T-0135 failure mode this repo already hit. One failed review of a complexity-7 pair permanently wedges the other review's approve: merge_reviewed silently `continue`s each tick, the Planner gets no signal, and the task stays done-but-unmerged. A failed or held sibling needs an escape hatch (hold src with a reason + notify, or treat a failed sibling as a re-spawn trigger), not an unbounded wait.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 302,
+            "issue": "The docstring claims the second review lands 'on whichever tier the first one didn't get, so no single model grades a task twice', but that is false whenever the executor was a Claude fallback tier -- and with only two Claude tiers it is unavoidable. Verified by running the real functions: pool.fallback_tier(7)=pool.fallback_tier(8)='opus', so executor='claude:opus' -> review_tier()='sonnet' -> _other_tier()='opus' == the executing model. Same for a sonnet-executed task (opus + sonnet). So every fallback-executed complexity 7-8 task is graded once by the model that wrote it, which is what CLAUDE.md's 'Never let a model review its own output' and review_tier()'s own docstring (gotchas.md 2026-09-18, T-0071) exist to prevent. Either exclude the executor's tier and route the second review to a non-Claude reviewer, or drop the claim and state the tradeoff explicitly.",
+            "severity": "med"
+          },
+          {
+            "path": "CLAUDE.md",
+            "line": 17,
+            "issue": "spec_review_min moved 5 -> 6 (pool.toml + daemon.py:11) and README.md was updated, but the governing doc still says the daemon routes 'complexity \u22655 through a spec review first'. A Planner following CLAUDE.md will expect a complexity-5 task to be spec-reviewed; it now dispatches straight to the executor (the new test test_spec_review_threshold_from_cfg asserts exactly that). tests/test_daemon.py:1 module docstring carries the same stale '>=5'. Update both, or leave spec_review_min at 5.",
+            "severity": "med"
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 28,
+            "issue": "The policy comment says '7-10: two reviews, the second on the other account with the other model.' The code only guarantees the other model: gate() sets tier=_other_tier(...) but account selection happens later in spawn.run_worker, whose pool.pick(role, avoid=...) only avoids the account the EXECUTOR ran on -- it has no knowledge of the sibling review, so both reviews can be picked onto the same account. Either make the second review avoid the first reviewer's account too, or write down what the code actually promises.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 395,
+            "issue": "merged_at is stamped on the review task, not on src, so with two reviews the conflict guarantee in the comment above ('a conflict leaves merged_into unset, and retrying it every tick would just rebuild the same conflict') weakens: when both siblings approve in the same tick and merge.merge() returns status='conflict', merged_into stays unset (merge.py:24) so the second review passes already_merged(), stamps its own merged_at, and rebuilds the identical conflict -- a second rebase/abort cycle and a second notify per task. Stamping on src['id'] instead would keep it at one attempt.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789740166.513123,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789740020.5533319,
+  "pid": 36822,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

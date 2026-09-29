@@ -1,0 +1,206 @@
+{
+  "id": "T-0853",
+  "created_at": 1790104632.293608,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "Active path 4: read suppression in the Jev gate returns a structured \"already read\" reply for unchanged repeated reads and identical searches, bounded and reversible (v2)",
+  "spec": "Today (T-0809) read_economy classifies Read/Grep/Glob calls in the Jev gate and logs would_suppress without acting. Build the active branch behind a new [jev] read_suppression = \"off\" | \"shadow\" | \"active\" key (default shadow; add to promotion.FEATURES as read_suppression with an evidence loader over gate.jsonl). Facts: the gate is a PreToolUse hook (.claude/hooks/jev-gate.sh \u2192 jev_gate.run) that can deny a call with a message; guardrails.sh remains the only destructive-command blocker; block_repeats stays as is.\nDo:\n1. Active: for kind repeated_read_unchanged (same path, mtime and size unchanged) and repeated_search (identical pattern+path+flags), deny the call with a structured reply: \"already read at call N in this session; file unchanged (mtime, size); use your earlier result or pass a different range\". A narrower_search or a read with a different offset/limit is never suppressed. At most [jev] max_suppressions_per_session (default 20) and never twice in a row for the same path (the second identical attempt is allowed and logged \"suppression_override\"), so a worker can always recover.\n2. Every suppression records an action_gate decision row with selected \"suppress\" and the tokens_estimate; read_economy.summary adds suppressed, overrides, and the false-suppression proxy computed from overrides + later edits of the path.\n3. Safety: refuse active (fall back to shadow with one notify line) when read_economy.summary over the last 7 days shows a false-suppression proxy above [jev] max_false_suppression (default 0.02) or fewer than 50 would_suppress rows.\nTests: tests/test_jev_gate.py::test_active_suppresses_unchanged_repeated_read_with_structured_reply, ::test_active_allows_second_identical_attempt_and_logs_override, ::test_active_never_suppresses_narrower_search_or_different_range, ::test_active_refused_without_evidence; tests/test_read_economy.py::test_summary_counts_suppressions_and_overrides; docs/context-economy/09-read-economy.md Active section with the revert path.\nDo not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-22 22:45) after spec review T-0852 (request_changes), binding on top of v1:\n- read_economy.classify() compares the full Read input signature (path, offset, limit and any other range keys; ignoring only cosmetic keys) plus mtime and size: a different offset/limit on an unchanged file is kind \"same_file_different_range\" and never suppressed. Test: tests/test_read_economy.py::test_different_range_is_never_repeated_read_unchanged.\n- Active suppression fires independent of [jev] gate_mode: the read_suppression key alone decides (off/shadow/active), and the deny happens before the Jev sample logic. Test: tests/test_jev_gate.py::test_active_suppresses_with_gate_mode_sample (gate_mode \"sample\", read_suppression \"active\" \u2192 suppressed).\n- Call index: _record_call stores an incrementing per-session call_index on every history entry; the deny message cites the earlier entry's index (\"already read at call 7\"). Test asserts the cited index equals the earlier matching entry's index.\n- read_economy.summary(root, since_s=None) gains a since filter and a top-level \"total\" block (would_suppress, suppressed, overrides, false_suppression_proxy over unique rows) separate from by_role/by_task_class; the active-mode safety check and the promotion evidence loader read total with since_s=7 days. Test: tests/test_read_economy.py::test_summary_total_block_respects_since_and_counts_rows_once.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_active_suppresses_unchanged_repeated_read_with_structured_reply passes",
+    "tests/test_jev_gate.py::test_active_allows_second_identical_attempt_and_logs_override passes",
+    "tests/test_jev_gate.py::test_active_never_suppresses_narrower_search_or_different_range passes",
+    "tests/test_jev_gate.py::test_active_refused_without_evidence passes",
+    "tests/test_read_economy.py::test_summary_counts_suppressions_and_overrides passes",
+    "pool.toml has [jev] read_suppression and promotion.FEATURES has read_suppression; docs/context-economy/09-read-economy.md has an Active section; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_read_economy.py::test_different_range_is_never_repeated_read_unchanged passes",
+    "tests/test_jev_gate.py::test_active_suppresses_with_gate_mode_sample passes",
+    "tests/test_read_economy.py::test_summary_total_block_respects_since_and_counts_rows_once passes"
+  ],
+  "scope": [
+    "orchestrator/jev_gate.py",
+    "orchestrator/read_economy.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_gate.py",
+    "tests/test_read_economy.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/09-read-economy.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790104647.614293,
+      "pipeline": {
+        "first_ready_at": 1790104647.614243
+      }
+    },
+    {
+      "ts": 1790104647.67226,
+      "pipeline": {
+        "first_ready_at": 1790104647.614243,
+        "spec_review_at": 1790104647.672215,
+        "spec_review_at_lease": 1790105547.672215
+      }
+    },
+    {
+      "ts": 1790104647.678547,
+      "pipeline": {
+        "first_ready_at": 1790104647.614243,
+        "spec_review_at": 1790104647.672215,
+        "spec_review_at_lease": 1790105547.672215,
+        "spec_review_at_done": 1790104647.678414
+      }
+    },
+    {
+      "ts": 1790104855.553656,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/read_economy.py",
+          "issue": "false_suppression_proxy is aggregated today as a raw per-row count (existing test asserts ==1), but the item-3 safety check needs to compare it against a fractional threshold (max_false_suppression default 0.02) in the new total block. The spec reuses one field name for two different semantics (count vs rate) without saying how the total block derives the ratio.",
+          "severity": "high",
+          "line": 186
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "decision_log.record's selected value is hardcoded to \"allow\" inside finish(). The spec requires selected=\"suppress\" on every suppression's action_gate row, but nothing in the spec says whether the deny path must still route through finish() (which would need a new parameter) or log separately.",
+          "severity": "high",
+          "line": 398
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "Each PreToolUse call is a fresh short-lived process (jev-gate.sh execs a new python process per call; no daemon, no cross-call cache). A literal read of item-3's safety check implies calling read_economy.summary() -- which parses the full gate.jsonl plus every tasks/*.json -- on every Read/Grep/Glob call once read_suppression=\"active\", inside the existing 3s hook timeout.",
+          "severity": "med",
+          "line": 367
+        },
+        {
+          "path": "tests/test_jev_gate.py",
+          "issue": "No acceptance test drives 20+ suppressions in one session, so [jev].max_suppressions_per_session is unverifiable by the merge gate and could ship missing or off-by-one.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "\"never twice in a row for the same path\" is ambiguous: does a third identical attempt after an override get suppressed again, or is suppression permanently disabled for that call once overridden? Only attempts 1 and 2 are covered by the named acceptance test.",
+          "severity": "med",
+          "line": 407
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "_record_call already computes the per-session call_index the deny message must cite, but the history entry built by _call_record and stored via _history() is a separate dict with no call_index field wired in yet -- needs explicit merging before storage.",
+          "severity": "low",
+          "line": 373
+        }
+      ]
+    },
+    {
+      "ts": 1790104860.698742,
+      "pipeline": {
+        "first_ready_at": 1790104647.614243,
+        "spec_review_at": 1790104647.672215,
+        "spec_review_at_lease": 1790105547.672215,
+        "spec_review_at_done": 1790104647.678414,
+        "spec_review_held_at": 1790104860.698694
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790104861.9060512,
+      "pipeline": {
+        "first_ready_at": 1790104647.614243,
+        "spec_review_at": 1790104647.672215,
+        "spec_review_at_lease": 1790105547.672215,
+        "spec_review_at_done": 1790104647.678414,
+        "spec_review_held_at": 1790104860.698694,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790104862.2416158,
+      "pipeline": {
+        "first_ready_at": 1790104647.614243,
+        "spec_review_at": 1790104647.672215,
+        "spec_review_at_lease": 1790105547.672215,
+        "spec_review_at_done": 1790104647.678414,
+        "spec_review_held_at": 1790104860.698694,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790104860.698742": true
+        }
+      }
+    },
+    {
+      "ts": 1790104883.661261,
+      "status": "failed",
+      "reason": "superseded 23:15 by T-0860 (v3, Planner-approved)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790104647.614243,
+    "spec_review_at": 1790104647.672215,
+    "spec_review_at_lease": 1790105547.672215,
+    "spec_review_at_done": 1790104647.678414,
+    "spec_review_held_at": 1790104860.698694,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790104860.698742": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/read_economy.py",
+      "issue": "false_suppression_proxy is aggregated today as a raw per-row count (existing test asserts ==1), but the item-3 safety check needs to compare it against a fractional threshold (max_false_suppression default 0.02) in the new total block. The spec reuses one field name for two different semantics (count vs rate) without saying how the total block derives the ratio.",
+      "severity": "high",
+      "line": 186
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "decision_log.record's selected value is hardcoded to \"allow\" inside finish(). The spec requires selected=\"suppress\" on every suppression's action_gate row, but nothing in the spec says whether the deny path must still route through finish() (which would need a new parameter) or log separately.",
+      "severity": "high",
+      "line": 398
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "Each PreToolUse call is a fresh short-lived process (jev-gate.sh execs a new python process per call; no daemon, no cross-call cache). A literal read of item-3's safety check implies calling read_economy.summary() -- which parses the full gate.jsonl plus every tasks/*.json -- on every Read/Grep/Glob call once read_suppression=\"active\", inside the existing 3s hook timeout.",
+      "severity": "med",
+      "line": 367
+    },
+    {
+      "path": "tests/test_jev_gate.py",
+      "issue": "No acceptance test drives 20+ suppressions in one session, so [jev].max_suppressions_per_session is unverifiable by the merge gate and could ship missing or off-by-one.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "\"never twice in a row for the same path\" is ambiguous: does a third identical attempt after an override get suppressed again, or is suppression permanently disabled for that call once overridden? Only attempts 1 and 2 are covered by the named acceptance test.",
+      "severity": "med",
+      "line": 407
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "_record_call already computes the per-session call_index the deny message must cite, but the history entry built by _call_record and stored via _history() is a separate dict with no call_index field wired in yet -- needs explicit merging before storage.",
+      "severity": "low",
+      "line": 373
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 23:15 by T-0860 (v3, Planner-approved)"
+}

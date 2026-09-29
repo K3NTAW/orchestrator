@@ -1,0 +1,152 @@
+{
+  "id": "T-0511",
+  "created_at": 1789945995.402304,
+  "parent": "T-0503",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S0a: dispatch-skip telemetry \u2014 runs/sched/dispatch.jsonl rows with a reason per considered task, pipeline.first_ready_at stamp, schedlog helper",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P0 (\"record why a ready task was not dispatched\"). Base goal/T-0503. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nVerified facts: daemon.dispatch (orchestrator/daemon.py:591-689) walks bus.read(status=\"queued\", role=\"execute\") plus budget-held retries in id order; skips stale(t) or not bus.ready(t); below SPEC_REVIEW_MIN or verdict approve it dispatches while free_slots (daemon.py:449-464) remain and `break`s at slots <= 0; verdict request_changes holds; otherwise it creates a spec review. Nothing records why a ready task waited. gotchas.md 2026-09-18: the break also skips spec-review creation for later tasks (documented fix candidate).\n1. New orchestrator/schedlog.py: SCHED_DIR = STATE / \"runs\" / \"sched\"; append(name, row) writes one JSON line to SCHED_DIR/<name>.jsonl (mkdir parents, ts added when absent); read(name) returns the list of dict rows, skipping blank or malformed lines and counting them (return (rows, malformed) or expose read_with_malformed); never raises on a missing file (empty list).\n2. daemon.dispatch: stamp pipeline.first_ready_at = time.time() once (never overwrite) the first time bus.ready(t) holds for a queued execute task, before any slot check. Build one row per tick and append it as \"dispatch\" only when at least one queued or budget-held execute task was considered: {\"ts\", \"free_slots\", \"fallback\", \"running_execute\", \"running_claude\", \"considered\": [{\"task\", \"goal_id\" (parent), \"ready\", \"action\": dispatched|spec_review|skipped, \"reason\", \"executor\" (when known)}]}. Reasons: stale -> \"stale\"; not ready -> \"dependency\"; fallback with no Claude tier -> \"fallback_no_tier\"; no slot -> \"cooldown\" when every enabled execute executor is cooling and not fallback, \"account_capacity\" when fallback and the Claude ceiling is used up, else \"executor_capacity\"; verdict request_changes -> \"spec_review_changes\"; spec review created or already pending -> \"spec_review_pending\"; budget-held retry that is not dispatched -> \"budget\"; stamp() no-op -> \"other\". A dispatched task has action dispatched and no reason.\n3. Replace the `break` at slots <= 0 with a slots_exhausted flag: tasks after exhaustion are recorded skipped with the capacity reason and are NOT dispatched, but the spec-review branch still runs for later tasks that need one (the gotchas.md fix). No other change to which tasks dispatch or in which order; the second loop (review respawn) is untouched.\n4. Tests: tests/test_schedlog.py test_append_and_read_tolerates_malformed_lines, test_read_missing_file_is_empty; tests/test_daemon.py test_dispatch_stamps_first_ready_at_once, test_dispatch_logs_skip_reasons_capacity_and_dependency, test_dispatch_log_row_absent_on_idle_tick, test_dispatch_creates_spec_reviews_after_slots_exhausted. Existing tests stay green.",
+  "inputs": [
+    "T-0504"
+  ],
+  "acceptance": [
+    "runs/sched/dispatch.jsonl gains one row per daemon tick that considered a queued or budget-held execute task, with a considered entry per task carrying action and reason exactly as named in the spec; idle ticks write no row",
+    "pipeline.first_ready_at is stamped once when a queued execute task first becomes ready and is never overwritten",
+    "the set and order of tasks dispatched per tick is unchanged, except that spec reviews are now created for ready tasks behind the exhausted-slots point",
+    "tests test_append_and_read_tolerates_malformed_lines, test_read_missing_file_is_empty, test_dispatch_stamps_first_ready_at_once, test_dispatch_logs_skip_reasons_capacity_and_dependency, test_dispatch_log_row_absent_on_idle_tick, test_dispatch_creates_spec_reviews_after_slots_exhausted pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/schedlog.py",
+    "tests/test_daemon.py",
+    "tests/test_schedlog.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0511",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "5bced4eedf81",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789945995.403075,
+      "reviewed_sha": "9a41eb62aa9fb86c855ffcc9a614ca3952ba5f4f"
+    },
+    {
+      "ts": 1789945997.637931,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0511",
+      "claimed_at": 1789945997.637619
+    },
+    {
+      "ts": 1789945997.638825,
+      "account": "B"
+    },
+    {
+      "ts": 1789945997.958103,
+      "pid": 23954,
+      "account": "B"
+    },
+    {
+      "ts": 1789946120.2818089,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "5bced4eedf81",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789946120.2828338,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789946120.307193,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": null,
+        "packet_version": "5bced4eedf81",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": null,
+      "packet_version": "5bced4eedf81",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": null,
+  "claimed_at": 1789945997.637619,
+  "account": "B",
+  "pid": 23954,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": null,
+    "packet_version": "5bced4eedf81",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "5bced4eedf81",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,86 @@
+{
+  "id": "T-0048",
+  "parent": "T-0043",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "C-B: bus tasks carry depends_on; bus.ready(); bus_mcp passes depends_on and constraints",
+  "spec": "Why: the daemon must dispatch a task only when its dependencies are merged (scout T-0045: nothing reads dependencies today; bus_mcp.bus_create_task also drops constraints). Depends on C-A (T-0047) merged so tests go in tests/test_bus.py.\n\nWhat (3 files: orchestrator/bus.py, orchestrator/bus_mcp.py, tests/test_bus.py; worktree off goal/T-0043):\n1. bus.create_task(..., depends_on=None): store `\"depends_on\": list(depends_on or [])`; validate each id exists (KeyError \u2192 ValueError naming it) and is not the task itself. `depends_on` is Planner-owned like spec/scope (update() raises PermissionError). Add `def ready(task_or_id) -> bool`: True iff every depends_on task has `merged_into` set (or status done for non-execute roles such as spec_review/scout). Add `def dependents(tid) -> list[task]`.\n2. bus_mcp.bus_create_task gains `depends_on: list[str] | None = None` and `constraints: dict | None = None` and passes both through. bus_read output unchanged (depends_on shows in the task json).\n3. tests/test_bus.py: create A, B(depends_on=[A]); ready(B) False; mark A merged via bus.update(A, merged_into=\"goal/x\", sha=\"abc\") \u2192 ready(B) True; depends_on on a missing id \u2192 ValueError; update(B, depends_on=[]) \u2192 PermissionError; dependents(A) == [B].\n\nRun `uv run python -m unittest discover -q tests`. Commit: \"bus: depends_on, ready(), dependents(); bus_mcp passes depends_on and constraints\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest discover -q tests exits 0 with the new test_bus cases",
+    "bus.create_task validates depends_on ids and stores them; update() refuses to change depends_on",
+    "bus.ready(B) flips from False to True when A gets merged_into",
+    "bus_mcp.bus_create_task signature includes depends_on and constraints",
+    "git diff --stat limited to orchestrator/bus.py, orchestrator/bus_mcp.py, tests/test_bus.py"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "orchestrator/bus_mcp.py",
+    "tests/test_bus.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0048",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed as `e79202a`.\n\n**Summary:** Added `depends_on` support to the task bus: `bus.create_task` validates and stores it, `update()` now treats it as Planner-owned (PermissionError on change), new `bus.ready()` and `bus.dependents()` helpers, and `bus_mcp.bus_create_task` now passes through both `depends_on` and `constraints` (previously dropped).\n\n**Files changed:** `orchestrator/bus.py`, `orchestrator/bus_mcp.py`, `tests/test_bus.py`\n\n**Note:** while adding `test_depends_on`, I found it ran alphabetically before the existing `test_lifecycle_and_rules` in the same shared-process test state, which broke that test's `bus.events(0)` global-sequence assumption. Fixed by scoping that assertion to the test's own task id instead \u2014 no order coupling introduced.\n\n**Test output:** `uv run python -m unittest discover -q tests` \u2192 68 tests, `OK` (no failures). `tests_green.sh` also exits 0.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789672573.8847208,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789672573.889514,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0048",
+      "claimed_at": 1789672573.8892171
+    },
+    {
+      "ts": 1789672573.8994188,
+      "pid": 68219,
+      "account": "B"
+    },
+    {
+      "ts": 1789672704.681138,
+      "status": "done",
+      "result": {
+        "summary": "Committed as `e79202a`.\n\n**Summary:** Added `depends_on` support to the task bus: `bus.create_task` validates and stores it, `update()` now treats it as Planner-owned (PermissionError on change), new `bus.ready()` and `bus.dependents()` helpers, and `bus_mcp.bus_create_task` now passes through both `depends_on` and `constraints` (previously dropped).\n\n**Files changed:** `orchestrator/bus.py`, `orchestrator/bus_mcp.py`, `tests/test_bus.py`\n\n**Note:** while adding `test_depends_on`, I found it ran alphabetically before the existing `test_lifecycle_and_rules` in the same shared-process test state, which broke that test's `bus.events(0)` global-sequence assumption. Fixed by scoping that assertion to the test's own task id instead \u2014 no order coupling introduced.\n\n**Test output:** `uv run python -m unittest discover -q tests` \u2192 68 tests, `OK` (no failures). `tests_green.sh` also exits 0.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789672852.367147,
+      "status": "done",
+      "merged_into": "goal/T-0043",
+      "sha": "b85b7420b1dc33605c675cd6a940c32a79d976d6"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789672573.8892171,
+  "pid": 68219,
+  "account": "B",
+  "merged_into": "goal/T-0043",
+  "sha": "b85b7420b1dc33605c675cd6a940c32a79d976d6"
+}

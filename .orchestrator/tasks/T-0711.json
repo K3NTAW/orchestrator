@@ -1,0 +1,152 @@
+{
+  "id": "T-0711",
+  "created_at": 1789999430.743795,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Q4 v3: orchestrator/planner_router.py \u2014 Planner tier router: modes off|shadow|active, hard vs soft Fable escalation, evidence gate, Fable reserve, hold instead of silent downgrade; decision_log kind planner_route (P5, P9, P11, P17, P18)",
+  "spec": "Why: decision.route (orchestrator/decision.py) decides routine/investigate/escalate and names escalate_tier fable; planner_runs.launch_routed (lines 1090-1110) resolves that alias to [models].planner. There is no Opus tier between investigate (sonnet) and escalate (fable), no hard/soft split, no evidence gate, no Fable reserve and no hold path (brief P5, P9, P11, P17, P18). Spec reviews T-0681 and of T-0692 are folded in (plain notify with a module-level warned set, record() inputs, dict access, classification producer, extra as a dict, numeric band fallback, candidates content, reasons in the hard branch, reserve helper, jev_mode ownership).\nWhat: new pure module orchestrator/planner_router.py plus one new entry \"planner_route\" in decision_log.KINDS. No bus, pool or file reads; inputs never mutated. Every structured input is a plain dict read with .get(): ctx (decision.route's ctx dict, see decision.py docstring; callers add ctx[\"complexity\"] = task complexity for held, goal complexity otherwise), classification (planner_taxonomy.classify output from orchestrator/planner_taxonomy.py on goal/T-0674: keys decision_type, architectural, ambiguous, risk_class none|low|high, signals, band, task_class), evidence ({\"n\": int, \"noninferior\": True|False|None, \"reescalation_rate\": float}; produced later by planner_scorecard.class_evidence in this goal; consumed only), availability ({tier: {\"available\": bool, \"reason\": str}, \"fable_reserve_ok\": bool}), jev_signal ({\"soft_adjust\": float} or None). route is decision.Route (attributes name, reason, evidence, tier) or a dict with those keys; a tiny _get(obj, key, default) helper reads both.\n- load_cfg(pool_cfg) -> dict: the ONE reader of pool.toml [planner.routing] for every module in this goal. Keys and defaults: mode \"shadow\" (off|shadow|active), default_tier \"opus\", escalation_tier \"fable\", hard_complexity_min 9, hard_security True, hard_spec_review_request_changes_min 2, hard_ambiguous True, min_samples 20, shadow_sample_rate 1.0, fable_reserve_share 0.2, jev_mode \"shadow\" (off|shadow|active; read by jev_planner through this dict), soft_threshold 0.5. Module docstring carries a table key -> consumer (mode/default_tier/escalation_tier/hard_*/min_samples/soft_threshold: this module; shadow_sample_rate: this module and planner_shadow.eligible; fable_reserve_share: fable_reserve_ok below, called by planner_runs when it builds availability; jev_mode: jev_planner). An invalid mode or jev_mode, or a non-numeric number, -> default plus one plain notify.notify(f\"pool.toml [planner.routing].{key} invalid ({value!r}); using {default!r}\") per key per process via a module-level set _WARNED; never raises, never touches the bus.\n- fable_reserve_ok(headroom_share, cfg) -> bool: headroom_share None -> True (unlimited budget); else headroom_share >= cfg[\"fable_reserve_share\"].\n- BAND_FLOOR = {\"1-3\": 1, \"4-6\": 4, \"7-10\": 7}; effective_complexity(classification, ctx) -> int: ctx[\"complexity\"] when it is an int, else BAND_FLOOR.get(classification band, 0). With the default hard_complexity_min 9 a missing ctx complexity can never hard-escalate on band alone (floor 7).\n- @dataclass(frozen=True) RouterDecision: tier (str), mode (str), hard (bool), hold (bool), hold_reason (str|None), reasons (tuple[str, ...]), hard_reasons (tuple[str, ...]), soft_score (float), shadow_tier (str|None), candidates (tuple[str, ...]) = (default_tier, escalation_tier) always, evidence (dict), decision_type (str).\n- hard_escalation(classification, ctx, route, cfg) -> list[str]: route name != \"escalate\" -> []; route reason startswith \"unknown:\" or == \"routes_disabled\" -> \"unknown_risk\"; effective_complexity >= hard_complexity_min -> \"complexity\"; hard_security and (risk_class == \"high\" or ctx security_trigger or touches_auth or touches_data_deletion) -> \"security\"; hard_ambiguous and decision_type in (\"architectural_replan\", \"ambiguous_requirement\") -> \"architectural_or_ambiguous\"; ctx spec_review_request_changes >= hard_spec_review_request_changes_min -> \"repeated_spec_rejection\"; auto_fix_rounds_used and auto_fix_rounds both ints and used >= cap -> \"lineage_cap\"; ctx reescalation truthy -> \"reescalation\".\n- soft_score(classification, ctx, evidence, jev_signal=None) -> float in [0, 1]: +0.3 architectural; +0.2 effective_complexity in (7, 8); +0.2 evidence reescalation_rate > 0.2; +0.2 evidence noninferior is False; +0.1 risk_class low; plus jev soft_adjust clamped to [-0.2, 0.2]; clamp to [0, 1]. Tokens/usd never inputs (docstring).\n- decide(classification, ctx, route, *, cfg, availability, evidence, jev_signal=None, sample=1.0) -> RouterDecision, rules in order: route name != \"escalate\" -> tier = route tier or \"fable\", reasons (\"not_escalate_route\",), hard False, unchanged in every mode. mode off -> tier route tier or \"fable\", reasons (\"mode_off\",), shadow_tier None. hard_reasons non-empty -> hard True, tier escalation_tier, reasons = hard_reasons; escalation tier unavailable -> hold True, hold_reason f\"fable_unavailable:{reason}\", reasons = hard_reasons + (\"hold\",) (never downgrade, jev ignored). mode shadow -> tier escalation_tier, reasons (\"shadow_production_fable\",); shadow_tier default_tier when default tier available and sample <= shadow_sample_rate, else None with reason shadow_default_unavailable or sampled_out appended. mode active, not hard: default_tier when evidence noninferior is True and n >= min_samples and soft_score < soft_threshold (\"evidence_noninferior\"); elif availability fable_reserve_ok is False and noninferior is not False -> default_tier (\"fable_reserve_low\"); else escalation_tier (\"insufficient_evidence\" when noninferior is None or n < min_samples, else \"soft_escalation\"); a chosen tier that is unavailable falls back to the other available tier for soft decisions (append \"fallback:<tier>_unavailable\"); none available -> hold, hold_reason \"no_planner_tier_available\".\n- record(decision, *, subject, route, jev_signal=None, root=None) -> decision_log.record(kind=\"planner_route\", subject=goal id, candidates=list(decision.candidates), hard_constraints=list(decision.hard_reasons), deterministic={\"route\": route name, \"reason\": route reason}, historical=dict(decision.evidence), jev=jev_signal, selected=\"hold\" if decision.hold else decision.tier, rejected=[c for c in candidates if c != selected], reason=\";\".join(decision.reasons), mode=decision.mode, extra={\"decision_type\": decision.decision_type, \"hold_reason\": decision.hold_reason, \"shadow_tier\": decision.shadow_tier, \"soft_score\": decision.soft_score}, root=root).\n- explain(decision) -> one line. decision_log.py change: append \"planner_route\" to KINDS only.",
+  "inputs": [
+    "T-0700"
+  ],
+  "acceptance": [
+    "tests/test_planner_router.py::test_mode_off_reproduces_route_tier \u2014 mode off returns the route tier (fable) with reasons ('mode_off',), shadow_tier None, hold False for every decision type; a non-escalate route returns its own tier unchanged in every mode; candidates is always (opus, fable)",
+    "tests/test_planner_router.py::test_hard_escalation_never_downgrades_and_holds_when_fable_unavailable \u2014 complexity 9, security, ambiguous_requirement and repeated_spec_rejection each yield tier fable, hard True and reasons == hard_reasons in active mode even with noninferior evidence and jev soft_adjust -0.2; with fable unavailable the decision is hold True with hold_reason starting fable_unavailable; a ctx without complexity and band 7-10 does not hard-escalate on complexity",
+    "tests/test_planner_router.py::test_shadow_mode_keeps_fable_and_sets_shadow_tier \u2014 shadow mode yields tier fable and shadow_tier opus for a soft decision, shadow_tier None for a hard decision, when opus is unavailable, or when sample exceeds shadow_sample_rate",
+    "tests/test_planner_router.py::test_active_mode_requires_evidence_and_ignores_tokens \u2014 active with n 25 noninferior True picks opus; n 5 picks fable with reason insufficient_evidence; noninferior False picks fable; evidence carrying tokens_saved 1e9 changes nothing; fable_reserve_ok False with noninferior None picks opus with reason fable_reserve_low; fable_reserve_ok(0.1, cfg) is False and fable_reserve_ok(None, cfg) is True",
+    "tests/test_planner_router.py::test_load_cfg_defaults_and_record_kind \u2014 missing table gives every documented default; an invalid mode falls back to shadow with exactly one notify.notify call across two load_cfg calls and no bus access; record(decision, subject, route, jev_signal) appends a decision_log row of kind planner_route whose candidates, rejected, deterministic.route, jev and extra.decision_type are set, readable by decision_log.explain under a sandbox root"
+  ],
+  "scope": [
+    "orchestrator/planner_router.py",
+    "orchestrator/decision_log.py",
+    "tests/test_planner_router.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0711",
+  "codex_thread": null,
+  "result": {
+    "summary": "Traced every rule in planner_router.py (load_cfg, fable_reserve_ok, effective_complexity, hard_escalation, soft_score, decide, record, explain) against the spec's exact ordering and thresholds \u2014 matches line for line, including the subtle ones (mode=off bypasses hard escalation entirely per spec; hard branch never falls back to default_tier and holds instead; shadow mode always keeps escalation_tier with no availability check on it, as spec'd; soft_threshold comparison is strict '<' so a 0.5 score does not qualify for evidence_noninferior at the default 0.5 threshold). Verified decision_log.py's KINDS addition and confirmed planner_router.record()'s kwargs match decision_log.record()'s actual signature. Ran the five acceptance tests plus the bonus purity test with PYTHONPATH=tests:. python3 -m unittest \u2014 all 6 pass. Module makes no bus/pool/file reads outside notify.notify and decision_log.record (append-only, bounded/redacted), so no injection or auth/deletion surface despite the security-sensitive routing role. No findings.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "d8757e0f8fd0",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789999430.744788,
+      "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73"
+    },
+    {
+      "ts": 1789999433.061323,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0711",
+      "claimed_at": 1789999433.0609229
+    },
+    {
+      "ts": 1789999433.062369,
+      "account": "B"
+    },
+    {
+      "ts": 1789999433.496043,
+      "pid": 51427,
+      "account": "B"
+    },
+    {
+      "ts": 1789999566.2162108,
+      "status": "done",
+      "result": {
+        "summary": "Traced every rule in planner_router.py (load_cfg, fable_reserve_ok, effective_complexity, hard_escalation, soft_score, decide, record, explain) against the spec's exact ordering and thresholds \u2014 matches line for line, including the subtle ones (mode=off bypasses hard escalation entirely per spec; hard branch never falls back to default_tier and holds instead; shadow mode always keeps escalation_tier with no availability check on it, as spec'd; soft_threshold comparison is strict '<' so a 0.5 score does not qualify for evidence_noninferior at the default 0.5 threshold). Verified decision_log.py's KINDS addition and confirmed planner_router.record()'s kwargs match decision_log.record()'s actual signature. Ran the five acceptance tests plus the bonus purity test with PYTHONPATH=tests:. python3 -m unittest \u2014 all 6 pass. Module makes no bus/pool/file reads outside notify.notify and decision_log.record (append-only, bounded/redacted), so no injection or auth/deletion surface despite the security-sensitive routing role. No findings.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "d8757e0f8fd0",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789999566.217267,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789999566.2579782,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+        "packet_version": "d8757e0f8fd0",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+      "packet_version": "d8757e0f8fd0",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+  "claimed_at": 1789999433.0609229,
+  "account": "B",
+  "pid": 51427,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "4d4f30a1959740f29c033180f5be5567ee752e73",
+    "packet_version": "d8757e0f8fd0",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "d8757e0f8fd0",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

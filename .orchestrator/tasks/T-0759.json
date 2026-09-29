@@ -1,0 +1,152 @@
+{
+  "id": "T-0759",
+  "created_at": 1790008087.709686,
+  "parent": "T-0755",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: T2: daemon re-respawns a queued unassigned review after respawn_after_s, counts respawns and holds with respawn_exhausted at [daemon].respawn_max",
+  "spec": "What: let the review respawn path retry instead of giving up after one attempt, with a visible cap.\nWhy: daemon.dispatch's respawn block (orchestrator/daemon.py:922-962) stamps pipeline.respawned_at once and then skips the task forever via the check that respawned_at is newer than the last requeue. When that respawned worker dies before claiming (crash, killed process, formerly a render error) the review or spec_review stays queued with no worker and no reason (gotcha 2026-09-21: T-0686 and T-0712 stamped respawned_at, no worker, no error on the bus). T-0756 already turned render errors into holds; this task covers every other silent death.\n1. In the respawn block (both the pre-lock filter around daemon.py:938 and the locked recheck around 957): treat a stamped respawn as still pending only while now - respawned_at < respawn_after (same [daemon].respawn_after_s value, default 120). Older stamps on a task that is still queued with assigned_to None are eligible again.\n2. Track pipeline.respawn_count (int, incremented at every respawn under the lock; a missing key counts as 0). Read [daemon].respawn_max from pool.cfg (default 3). When respawn_count already equals or exceeds respawn_max, do not spawn; instead set status held, hold_reason \"respawn_exhausted: <count> respawns without a claim\", pop pipeline.respawned_at, and notify.notify once with the task id (same message shape as hold_failed).\n3. Document respawn_max in .orchestrator/pool.toml [daemon] next to respawn_after_s with a one-line comment (default 3); keep respawn_after_s unchanged.\nKeep tests/test_daemon.py::test_dispatch_respawns_requeued_review_once (two dispatch calls within the window still spawn exactly once and keep the same stamp), test_respawn_skips_task_claimed_between_snapshot_and_lock, test_respawn_skips_stale_review, test_respawn_ignores_unrelated_pipeline_keys, test_dispatch_respawns_unclaimed_spec_review_after_delay and test_respawn_age_uses_task_events_not_global_page green. Use the existing test helpers in tests/test_daemon.py (self.task, self.workers, P.Pool) and adjust time via the existing patterns in that file (patch daemon.time.time or backdate pipeline stamps). No new dependencies.",
+  "inputs": [
+    "T-0757"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_dispatch_respawns_review_again_after_window \u2014 a queued unassigned review whose pipeline.respawned_at is older than respawn_after_s is spawned again by daemon.dispatch(pool): spawn.run_worker called once more, respawned_at moved forward, pipeline.respawn_count == 2; a stamp younger than the window is left alone",
+    "tests/test_daemon.py::test_respawn_holds_after_respawn_max \u2014 with pipeline.respawn_count == 3 (default respawn_max) and a stale stamp, daemon.dispatch(pool) does not spawn, sets status held with hold_reason startswith 'respawn_exhausted', removes pipeline.respawned_at and notify is called once with the task id; with [daemon].respawn_max = 5 in pool.cfg the same task is respawned instead",
+    "tests/test_daemon.py::test_dispatch_respawns_requeued_review_once \u2014 existing test unchanged and green",
+    "tests/test_pool.py::test_daemon_respawn_max_documented \u2014 .orchestrator/pool.toml [daemon] contains respawn_max = 3 (tomllib parse) and it sits next to respawn_after_s"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    "tests/test_pool.py",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0759",
+  "codex_thread": null,
+  "result": {
+    "summary": "Verified the committed diff (160f28c in wt/T-0757) against all acceptance criteria and ran the full test_daemon.py + test_pool.py suite (255 tests, all pass). The time-window gate only blocks a stamped-but-unclaimed respawn; a genuine worker death still clears pipeline.respawned_at via _requeue's clear_pipeline_keys, so real repeated deaths respawn immediately while still incrementing respawn_count toward the cap. respawn_max defaults to 3, is read from pool.cfg, holds the task with the correct hold_reason and single notify call, pops respawned_at on exhaustion, and is documented in pool.toml immediately after respawn_after_s as required.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "dd806a338697",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790008087.710548,
+      "reviewed_sha": "160f28c284e3d2102832b11caa76d4cc12c70718"
+    },
+    {
+      "ts": 1790008091.5162292,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0759",
+      "claimed_at": 1790008091.515884
+    },
+    {
+      "ts": 1790008091.51716,
+      "account": "B"
+    },
+    {
+      "ts": 1790008092.0165849,
+      "pid": 31837,
+      "account": "B"
+    },
+    {
+      "ts": 1790008217.274013,
+      "status": "done",
+      "result": {
+        "summary": "Verified the committed diff (160f28c in wt/T-0757) against all acceptance criteria and ran the full test_daemon.py + test_pool.py suite (255 tests, all pass). The time-window gate only blocks a stamped-but-unclaimed respawn; a genuine worker death still clears pipeline.respawned_at via _requeue's clear_pipeline_keys, so real repeated deaths respawn immediately while still incrementing respawn_count toward the cap. respawn_max defaults to 3, is read from pool.cfg, holds the task with the correct hold_reason and single notify call, pops respawned_at on exhaustion, and is documented in pool.toml immediately after respawn_after_s as required.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "dd806a338697",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790008217.2759,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790008217.371156,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "160f28c284e3d2102832b11caa76d4cc12c70718",
+        "packet_version": "dd806a338697",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "160f28c284e3d2102832b11caa76d4cc12c70718",
+      "packet_version": "dd806a338697",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "160f28c284e3d2102832b11caa76d4cc12c70718",
+  "claimed_at": 1790008091.515884,
+  "account": "B",
+  "pid": 31837,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "160f28c284e3d2102832b11caa76d4cc12c70718",
+    "packet_version": "dd806a338697",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "dd806a338697",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

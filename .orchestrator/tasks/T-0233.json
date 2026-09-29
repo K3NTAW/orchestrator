@@ -1,0 +1,142 @@
+{
+  "id": "T-0233",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "E6 fix round 1: unanswered items are kept not dropped, coerce Jev values, rank outside the bus lock (from review T-0231)",
+  "spec": "Fix round on task/T-0216 (commit 978b24a on goal/T-0201). STEP 0: your worktree was cut from goal/T-0201 and lacks that commit; run `git reset --hard task/T-0216` and confirm `git log --oneline -1` shows 978b24a. Then address the opus review T-0231:\n1. orchestrator/jev_rank.py rank(): an item whose answer is missing, or whose noul value is not a finite number in [0, 1] after coercion (float() on int/float/numeric string; anything else -> None), keeps p_relevant None and is KEPT (never dropped); only items with a numeric p below the threshold are dropped. A response without an answers map behaves like ask() None (all items kept, unranked). Sorting uses a key that places None after numeric values without comparing None to floats. rank() never raises: wrap the answer parsing in try/except and fall back to the unranked list.\n2. orchestrator/handover.py: move every jev_rank call out of the bus flock. Structure: read the bus snapshot under bus.locked(), release, rank the groups (network), then re-acquire the lock only for the plan.md write. Cap the number of Jev requests per handover at 6 (batch the goals' groups into one request per group type when possible) so worst-case latency stays under 6 x timeout.\n3. Tests: tests/test_jev_rank.py gains test_missing_answer_kept, test_non_numeric_kept_and_no_raise, test_empty_answers_returns_unranked; tests/test_handover.py gains test_rank_not_called_under_lock (monkeypatch jev.ask to assert bus lock is not held, e.g. via a probe that tries a non-blocking flock) and test_handover_jev_request_cap.\nCommit on the task branch when green.",
+  "inputs": [
+    "T-0216",
+    "T-0231"
+  ],
+  "acceptance": [
+    "git log on the task branch contains 978b24a below the fix commit",
+    "tests/test_jev_rank.py::test_missing_answer_kept, ::test_non_numeric_kept_and_no_raise, ::test_empty_answers_returns_unranked pass",
+    "tests/test_handover.py::test_rank_not_called_under_lock and ::test_handover_jev_request_cap pass",
+    "All tests from T-0216 still pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev_rank.py",
+    "orchestrator/handover.py",
+    "tests/test_jev_rank.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [
+    "T-0214",
+    "T-0204"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "fix_round_for": "T-0216",
+    "planner_note": "complexity 3 on purpose: one opus review already ran; merges directly at a green gate per the 2026-09-19 review decision"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0233",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed as `5a2cf4d`, sitting directly on top of `978b24a` (T-0216) on `task/T-0233`. Gate ran green before the commit.\n\n## Summary\n\nFixed round on T-0231 review:\n\n1. **`orchestrator/jev_rank.py`** \u2014 added `_coerce_p()` (float() on int/float/numeric-string, requires finite value in [0,1], else `None`). Items with missing answers or non-numeric/out-of-range `noul` keep `p_relevant=None` and are always kept; only numeric scores below threshold get dropped. Sort key `(1, 0.0)`/`(0, -p)` never compares `None` to a float. Answer parsing wrapped in try/except, falling back to the unranked list on any error.\n\n2. **`orchestrator/handover.py`** \u2014 `write()` now takes the bus snapshot (`bus.read()` + last events) under `bus.locked()`, releases it, runs all jev_rank scoring unlocked, then re-acquires the lock only for the plan.md compare-and-swap. `maybe_write()` no longer wraps the call to `write()` in its own lock (it was reentrant-nesting the flock across the whole call before). Added `MAX_JEV_REQUESTS = 6`: failed+done tasks per goal are now scored in one combined `_prune_many()` call instead of two, and once the budget is spent, further groups/events pass through unpruned rather than placing more requests.\n\n3. **Tests** \u2014 added `test_missing_answer_kept`, `test_non_numeric_kept_and_no_raise`, `test_empty_answers_returns_unranked` to `tests/test_jev_rank.py`; added `test_rank_not_called_under_lock` (probes with a non-blocking flock on `bus.LOCK` from inside a fake `jev.ask`) and `test_handover_jev_request_cap` (8 goals, asserts calls capped at 6) to `tests/test_handover.py`.\n\n**Test output (failures only):** none \u2014 `.claude/hooks/tests-green.sh` exited 0; all 23 tests in `test_jev_rank.py` + `test_handover.py` passed, plus the full repo suite via the gate script.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789817746.403831,
+      "pipeline": {
+        "dispatched_at": 1789817746.403766
+      }
+    },
+    {
+      "ts": 1789817746.443736,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789817746.4470289,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789817747.5194979,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0233",
+      "claimed_at": 1789817747.5190568
+    },
+    {
+      "ts": 1789817747.521353,
+      "account": "B"
+    },
+    {
+      "ts": 1789817747.528345,
+      "pid": 5231,
+      "account": "B"
+    },
+    {
+      "ts": 1789818330.421822,
+      "status": "done",
+      "result": {
+        "summary": "Committed as `5a2cf4d`, sitting directly on top of `978b24a` (T-0216) on `task/T-0233`. Gate ran green before the commit.\n\n## Summary\n\nFixed round on T-0231 review:\n\n1. **`orchestrator/jev_rank.py`** \u2014 added `_coerce_p()` (float() on int/float/numeric-string, requires finite value in [0,1], else `None`). Items with missing answers or non-numeric/out-of-range `noul` keep `p_relevant=None` and are always kept; only numeric scores below threshold get dropped. Sort key `(1, 0.0)`/`(0, -p)` never compares `None` to a float. Answer parsing wrapped in try/except, falling back to the unranked list on any error.\n\n2. **`orchestrator/handover.py`** \u2014 `write()` now takes the bus snapshot (`bus.read()` + last events) under `bus.locked()`, releases it, runs all jev_rank scoring unlocked, then re-acquires the lock only for the plan.md compare-and-swap. `maybe_write()` no longer wraps the call to `write()` in its own lock (it was reentrant-nesting the flock across the whole call before). Added `MAX_JEV_REQUESTS = 6`: failed+done tasks per goal are now scored in one combined `_prune_many()` call instead of two, and once the budget is spent, further groups/events pass through unpruned rather than placing more requests.\n\n3. **Tests** \u2014 added `test_missing_answer_kept`, `test_non_numeric_kept_and_no_raise`, `test_empty_answers_returns_unranked` to `tests/test_jev_rank.py`; added `test_rank_not_called_under_lock` (probes with a non-blocking flock on `bus.LOCK` from inside a fake `jev.ask`) and `test_handover_jev_request_cap` (8 goals, asserts calls capped at 6) to `tests/test_handover.py`.\n\n**Test output (failures only):** none \u2014 `.claude/hooks/tests-green.sh` exited 0; all 23 tests in `test_jev_rank.py` + `test_handover.py` passed, plus the full repo suite via the gate script.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789818429.18978,
+      "pipeline": {
+        "dispatched_at": 1789817746.403766,
+        "gated_at": 1789818429.189666
+      }
+    },
+    {
+      "ts": 1789818482.1044722,
+      "status": "failed",
+      "reason": "tests_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_disabled_returns_none_without_network (test_jev.JevTests.test_disabled_returns_none_without_network)\nTraceback (most recent call last):\n    raise AssertionError(\"urlopen must not be called when jev is disabled\")\nAssertionError: urlopen must not be called when jev is disabled\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789818684.34576,
+      "status": "failed",
+      "reason": "tests_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_jev_triage_exception_still_launches (test_planner_runs.JevShadowTriage.test_jev_triage_exception_still_launches)\nTraceback (most recent call last):\nAssertionError: False is not true : {'launched': False, 'reason': 'failed_launch', 'error': 'jev endpoint exploded'}\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789828704.648993,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "hold_reason": null,
+      "reason": "E6 chain landed via T-0238 merge"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789817746.403766,
+    "gated_at": 1789818429.189666
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789817747.5190568,
+  "account": "B",
+  "pid": 5231,
+  "reason": "E6 chain landed via T-0238 merge",
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_jev_triage_exception_still_launches (test_planner_runs.JevShadowTriage.test_jev_triage_exception_still_launches)\nTraceback (most recent call last):\nAssertionError: False is not true : {'launched': False, 'reason': 'failed_launch', 'error': 'jev endpoint exploded'}\nFAILED (failures=1)\n"
+  },
+  "merged_into": "goal/T-0201",
+  "hold_reason": null
+}

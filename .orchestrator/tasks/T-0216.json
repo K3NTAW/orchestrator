@@ -1,0 +1,136 @@
+{
+  "id": "T-0216",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "E6: Jev relevance ranking for memory recall and the handover snapshot \u2014 prune what the Planner reads, keep the rest verbatim",
+  "spec": "Compaction the jev-compactor way: score each candidate item for relevance to the current goal, drop the low ones, never summarize. Two Planner inputs qualify. Build on E2 (T-0214) and P3 (T-0204).\n1. orchestrator/jev_rank.py rank(items: list[dict], goal_text: str, *, threshold=0.35, batch=40) -> list[dict]: each item {id, text}; asks Jev one noul question per item ('Is this entry relevant to the goal below?' with the goal as part of the state; batch up to 40 questions per request within the 64k limit), attaches p_relevant, returns items with p >= threshold sorted by p desc. jev.ask() None -> return items unchanged (fail-open) with p_relevant = None.\n2. skills/planner/memory/scripts/recall.py index: new flag --goal \"<text>\" (or env ORCH_GOAL_TEXT): rank the hits with jev_rank before printing, print p as a fourth column, and print 'jev: off' when the client is disabled. Default output without --goal unchanged.\n3. orchestrator/handover.py: the 'done (not merged)', 'failed' and 'Last events' groups pass through jev_rank against the open goal's title+spec with threshold 0.5 before rendering; merged and held groups are never pruned; the section header notes 'pruned N by jev' when N is greater than 0. Without Jev the output is byte-identical to today.\nTests: tests/test_jev_rank.py (batching, threshold, fail-open) and tests/test_handover.py::test_handover_prunes_with_jev and ::test_handover_unchanged_without_jev with jev.ask monkeypatched; tests/test_memory_skill.py::test_recall_goal_flag_ranks.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_rank.py::test_rank_batches_questions, ::test_rank_applies_threshold, ::test_rank_fail_open pass",
+    "tests/test_handover.py::test_handover_prunes_with_jev and ::test_handover_unchanged_without_jev pass",
+    "tests/test_memory_skill.py::test_recall_goal_flag_ranks passes",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev_rank.py",
+    "skills/planner/memory/scripts/recall.py",
+    "orchestrator/handover.py",
+    "tests/test_jev_rank.py",
+    "tests/test_handover.py",
+    "tests/test_memory_skill.py"
+  ],
+  "depends_on": [
+    "T-0214",
+    "T-0204"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0216",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean, with `tests-green.sh` passing (347 tests, exit 0).\n\n**Summary**\n\nImplemented jev-compactor-style relevance ranking and wired it into the two spec'd Planner inputs:\n\n- `orchestrator/jev_rank.py` \u2014 new `rank(items, goal_text, *, threshold=0.35, batch=40)`: one noul question per item, batched \u226440/request, fail-open (returns items unchanged with `p_relevant=None` on `jev.ask()` \u2192 `None`), else filters by threshold and sorts by `p_relevant` desc.\n- `skills/planner/memory/scripts/recall.py` \u2014 `index` gains `--goal \"<text>\"` / `ORCH_GOAL_TEXT`, ranks hits through `jev_rank`, adds `p` as a 4th column, prints `jev: off` when nothing could be scored. Default (no `--goal`) output unchanged. Fixed the package import to resolve `orchestrator` from recall.py's own repo (`parents[4]`) rather than `ORCH_ROOT`, since an editable install elsewhere was shadowing it.\n- `orchestrator/handover.py` \u2014 `done (not merged)`, `failed`, and `Last events` groups now pass through `jev_rank` (threshold 0.5) against the primary open goal's title+spec before rendering; `merged`/`held` are never pruned; header gains `\u2014 pruned N by jev` when `N > 0`. Fail-open leaves output byte-identical to before.\n\n**Files changed:** `orchestrator/jev_rank.py` (new), `orchestrator/handover.py`, `skills/planner/memory/scripts/recall.py`, `tests/test_jev_rank.py` (new), `tests/test_handover.py`, `tests/test_memory_skill.py`.\n\n**Test output:** all pass \u2014 `tests/test_jev_rank.py` (4), `tests/test_handover.py` (14, including `test_handover_prunes_with_jev`/`test_handover_unchanged_without_jev`), `tests/test_memory_skill.py` (2, including `test_recall_goal_flag_ranks`), full suite 347/347, `.claude/hooks/tests-green.sh` exits 0.\n\nCommitted on `task/T-0216` as `978b24a`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789817003.922272,
+      "pipeline": {
+        "dispatched_at": 1789817003.9221709
+      }
+    },
+    {
+      "ts": 1789817003.981694,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789817003.986837,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789817005.147522,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0216",
+      "claimed_at": 1789817005.147105
+    },
+    {
+      "ts": 1789817005.151125,
+      "account": "B"
+    },
+    {
+      "ts": 1789817005.165119,
+      "pid": 52239,
+      "account": "B"
+    },
+    {
+      "ts": 1789817501.88896,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean, with `tests-green.sh` passing (347 tests, exit 0).\n\n**Summary**\n\nImplemented jev-compactor-style relevance ranking and wired it into the two spec'd Planner inputs:\n\n- `orchestrator/jev_rank.py` \u2014 new `rank(items, goal_text, *, threshold=0.35, batch=40)`: one noul question per item, batched \u226440/request, fail-open (returns items unchanged with `p_relevant=None` on `jev.ask()` \u2192 `None`), else filters by threshold and sorts by `p_relevant` desc.\n- `skills/planner/memory/scripts/recall.py` \u2014 `index` gains `--goal \"<text>\"` / `ORCH_GOAL_TEXT`, ranks hits through `jev_rank`, adds `p` as a 4th column, prints `jev: off` when nothing could be scored. Default (no `--goal`) output unchanged. Fixed the package import to resolve `orchestrator` from recall.py's own repo (`parents[4]`) rather than `ORCH_ROOT`, since an editable install elsewhere was shadowing it.\n- `orchestrator/handover.py` \u2014 `done (not merged)`, `failed`, and `Last events` groups now pass through `jev_rank` (threshold 0.5) against the primary open goal's title+spec before rendering; `merged`/`held` are never pruned; header gains `\u2014 pruned N by jev` when `N > 0`. Fail-open leaves output byte-identical to before.\n\n**Files changed:** `orchestrator/jev_rank.py` (new), `orchestrator/handover.py`, `skills/planner/memory/scripts/recall.py`, `tests/test_jev_rank.py` (new), `tests/test_handover.py`, `tests/test_memory_skill.py`.\n\n**Test output:** all pass \u2014 `tests/test_jev_rank.py` (4), `tests/test_handover.py` (14, including `test_handover_prunes_with_jev`/`test_handover_unchanged_without_jev`), `tests/test_memory_skill.py` (2, including `test_recall_goal_flag_ranks`), full suite 347/347, `.claude/hooks/tests-green.sh` exits 0.\n\nCommitted on `task/T-0216` as `978b24a`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789817557.1115258,
+      "pipeline": {
+        "dispatched_at": 1789817003.9221709,
+        "gated_at": 1789817557.111386
+      }
+    },
+    {
+      "ts": 1789817683.87469,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789817685.700406,
+      "pipeline": {
+        "dispatched_at": 1789817003.9221709,
+        "gated_at": 1789817557.111386,
+        "review_held_at": 1789817685.70031
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789828704.645354,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "hold_reason": null,
+      "reason": "E6 chain landed via T-0238 merge"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789817003.9221709,
+    "gated_at": 1789817557.111386,
+    "review_held_at": 1789817685.70031
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789817005.147105,
+  "account": "B",
+  "pid": 52239,
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0201",
+  "reason": "E6 chain landed via T-0238 merge"
+}

@@ -1,0 +1,186 @@
+{
+  "id": "T-0580",
+  "created_at": 1789971265.411585,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "R10: orchestrator/strategy.py \u2014 workflow-strategy identifiers derived from task lineage, per-strategy outcome scorecard and shadow recommendation with evidence thresholds (AP P18)",
+  "spec": "Why: the orchestrator records which model worked (scorecard.executor_economics) but not which workflow worked per task kind; AP P18 / brief P12 want explicit strategy ids, per-strategy outcomes, a strategy scorecard, and an observe-only then off/shadow/active recommendation that never removes deterministic safety steps.\nWhat: new pure module orchestrator/strategy.py reading tasks and runs under root.\n- STRATEGIES = (\"direct_execute\", \"scout_execute\", \"dependency_scout_execute\", \"architecture_impact_scouts_then_decompose\", \"execute_specialist_review\", \"security_context_strong_execute_security_review\", \"parallel_wave\"); derive(task, tasks, waves_rows=None) -> {\"strategy\": id, \"steps\": [...], \"components\": [...]}: goal scouts = tasks with role scout and the same parent created before the task; dependency-map objective (constraints.objective) -> dependency_scout_execute; >= 2 scouts with objectives in (architecture, migration-impact, API-consumers) -> architecture_impact_scouts_then_decompose; any scout -> scout_execute; reviews of the task with constraints.reviewer_role acceptance and adversarial -> execute_specialist_review; pipeline.review_reason starting security_paths -> security_context_strong_execute_security_review; task id appearing in a waves row wave with >= 2 members -> parallel_wave; none -> direct_execute. Composite: ordered by the STRATEGIES tuple, joined with \"+\"; deterministic.\n- observations(root=STATE) -> per execute lineage root that is merged or failed: {\"task\", \"goal\", \"repo\" (root dir name), \"strategy\", \"task_class\", \"band\", \"complexity\", \"models\" (executor and review tiers), \"tokens\", \"usd\", \"time_s\" (created -> merged), \"first_pass\" (lineage_fix_rounds == 0 and gate_reds == 0), \"fix_rounds\", \"gate_reds\", \"review_request_changes\", \"accepted\"} reusing scorecard helpers (_task_lineage, _efficiency_rows, _attributed) where importable.\n- scorecard(root=STATE, by=(\"task_class\", \"band\")) -> {(strategy, class, band): {\"n\", \"accepted_rate\", \"first_pass_rate\", \"median_usd\", \"median_time_s\", \"avg_fix_rounds\"}}; format(card).\n- recommend(task_class, band, *, repo=None, root=STATE, cfg=None) -> {\"mode\", \"strategy\"|None, \"n\", \"evidence\", \"reason\", \"required\": [\"security_review_if_security_paths\", \"tests_green\", \"spec_review_from_6\"]}: cfg [strategy] mode off|shadow|active default shadow, min_samples 10; n < min -> strategy None reason insufficient_evidence; ranks strategies by accepted_rate then first_pass_rate then median_usd; separates repo and task class (never mixes classes); off -> mode off, strategy None. Active still only recommends; the Planner policy applies.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_strategy.py::test_derive_attributes_strategy_from_lineage \u2014 a task with a goal scout of objective dependency-map, complementary reviews and a security review_reason derives dependency_scout_execute+execute_specialist_review+security_context_strong_execute_security_review in STRATEGIES order",
+    "tests/test_strategy.py::test_observations_aggregate_outcomes_per_strategy \u2014 three merged lineages of two strategies yield scorecard rows with n, accepted_rate, first_pass_rate, median_usd",
+    "tests/test_strategy.py::test_cold_start_and_insufficient_evidence_return_no_strategy \u2014 empty root and n below min_samples both yield strategy None with reason insufficient_evidence",
+    "tests/test_strategy.py::test_shadow_recommendation_prefers_evidence_without_changing_policy \u2014 with 12 observations per strategy the better accepted_rate wins in shadow mode and required lists the deterministic safety steps",
+    "tests/test_strategy.py::test_repository_and_task_class_are_separated \u2014 observations from another repo or task class never count toward a recommendation for this one"
+  ],
+  "scope": [
+    "orchestrator/strategy.py",
+    "tests/test_strategy.py"
+  ],
+  "depends_on": [
+    "T-0570"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/scorecard.py",
+      "orchestrator/attribution.py",
+      "orchestrator/daemon.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/decision_log.py",
+      "tests/test_scorecard.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "STRATEGIES tuple; derive(task, tasks, waves_rows=None) -> {strategy, steps, components}; observations(root=STATE) -> rows; scorecard(root=STATE, by=('task_class','band')) -> dict; recommend(task_class, band, *, repo=None, root=STATE, cfg=None) -> {mode, strategy, n, evidence, reason, required}; config [strategy] mode off|shadow|active default shadow, min_samples 10; must not import daemon"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R10 v2 after spec review T-0618 (merged_into/created_at/merged_at field names; attribution helpers; constraints.objective documented as the Planner convention; steps/components pinned by a test; waves.jsonl source; decision_log dependency dropped)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789975982.451742,
+      "pipeline": {
+        "first_ready_at": 1789975982.451576
+      }
+    },
+    {
+      "ts": 1789975982.566392,
+      "pipeline": {
+        "first_ready_at": 1789975982.451576,
+        "spec_review_at": 1789975982.566286,
+        "spec_review_at_lease": 1789976882.566286
+      }
+    },
+    {
+      "ts": 1789975982.573907,
+      "pipeline": {
+        "first_ready_at": 1789975982.451576,
+        "spec_review_at": 1789975982.566286,
+        "spec_review_at_lease": 1789976882.566286,
+        "spec_review_at_done": 1789975982.573687
+      }
+    },
+    {
+      "ts": 1789976244.9674618,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "derive() routes dependency_scout_execute and architecture_impact_scouts_then_decompose off constraints.objective, but no task anywhere in the codebase (bus.create_task, daemon, write-spec skill) ever sets constraints.objective \u2014 it doesn't exist as a task field today. Tests can fabricate it in fixtures, but in production no real scout task will carry it, so these two strategies would never be detected on live goals despite the routing logic existing.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "observations() spec says a lineage is 'accepted' via task.get(\"merged\") \u2014 no such field exists. The real acceptance signal is merged_into (set in orchestrator/merge.py:93, truthy = accepted), used everywhere else in scorecard.py (e.g. lines 90, 212, 1274). Using \"merged\" means observations()/scorecard() would treat every real lineage as unmerged.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "time_s is specified as 'created -> merged' but the real task field is created_at (epoch seconds set at bus.create_task, bus.py:101), not 'created'. There is a matching merged_at field (see tests/test_scorecard.py fixture usage). Field names in the spec don't match the schema and would produce KeyErrors or silently-wrong durations.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "task_class and band are described as if read from task/run data, but they are not stored fields \u2014 they must be computed via attribution.task_class(task) and attribution.band(task.get(\"complexity\")) (orchestrator/attribution.py:118-148), the same helpers scorecard._band/scorecard.task_class wrap (scorecard.py:56-61). The spec should say to call these rather than imply the fields are already present on tasks/rows.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "derive()'s return contract includes \"steps\" and \"components\" keys that no acceptance test ever asserts (test_derive_attributes_strategy_from_lineage only checks the composite \"strategy\" string). This leaves part of the documented contract unverifiable \u2014 an executor could stub these fields with anything and still pass gates.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "waves_rows sourcing is unspecified. The real wave data lives in STATE/runs/sched/waves.jsonl (written by daemon.py via schedlog.append(\"waves\", ...), already consumed by scorecard.parallelism()), not in decision_log.py. Meanwhile depends_on names T-0570 (decision_log.py) but the spec's \"What\" section never calls decision_log.explain()/record() anywhere \u2014 the dependency looks vestigial and the actual waves_rows source is left to the caller's imagination.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789976461.9618292,
+      "pipeline": {
+        "first_ready_at": 1789975982.451576,
+        "spec_review_at": 1789975982.566286,
+        "spec_review_at_lease": 1789976882.566286,
+        "spec_review_at_done": 1789975982.573687,
+        "spec_review_held_at": 1789976461.9617732
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789976488.433874,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R10 v2 after spec review T-0618 (merged_into/created_at/merged_at field names; attribution helpers; constraints.objective documented as the Planner convention; steps/components pinned by a test; waves.jsonl source; decision_log dependency dropped)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789975982.451576,
+    "spec_review_at": 1789975982.566286,
+    "spec_review_at_lease": 1789976882.566286,
+    "spec_review_at_done": 1789975982.573687,
+    "spec_review_held_at": 1789976461.9617732
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "derive() routes dependency_scout_execute and architecture_impact_scouts_then_decompose off constraints.objective, but no task anywhere in the codebase (bus.create_task, daemon, write-spec skill) ever sets constraints.objective \u2014 it doesn't exist as a task field today. Tests can fabricate it in fixtures, but in production no real scout task will carry it, so these two strategies would never be detected on live goals despite the routing logic existing.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "observations() spec says a lineage is 'accepted' via task.get(\"merged\") \u2014 no such field exists. The real acceptance signal is merged_into (set in orchestrator/merge.py:93, truthy = accepted), used everywhere else in scorecard.py (e.g. lines 90, 212, 1274). Using \"merged\" means observations()/scorecard() would treat every real lineage as unmerged.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "time_s is specified as 'created -> merged' but the real task field is created_at (epoch seconds set at bus.create_task, bus.py:101), not 'created'. There is a matching merged_at field (see tests/test_scorecard.py fixture usage). Field names in the spec don't match the schema and would produce KeyErrors or silently-wrong durations.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "task_class and band are described as if read from task/run data, but they are not stored fields \u2014 they must be computed via attribution.task_class(task) and attribution.band(task.get(\"complexity\")) (orchestrator/attribution.py:118-148), the same helpers scorecard._band/scorecard.task_class wrap (scorecard.py:56-61). The spec should say to call these rather than imply the fields are already present on tasks/rows.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "derive()'s return contract includes \"steps\" and \"components\" keys that no acceptance test ever asserts (test_derive_attributes_strategy_from_lineage only checks the composite \"strategy\" string). This leaves part of the documented contract unverifiable \u2014 an executor could stub these fields with anything and still pass gates.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "waves_rows sourcing is unspecified. The real wave data lives in STATE/runs/sched/waves.jsonl (written by daemon.py via schedlog.append(\"waves\", ...), already consumed by scorecard.parallelism()), not in decision_log.py. Meanwhile depends_on names T-0570 (decision_log.py) but the spec's \"What\" section never calls decision_log.explain()/record() anywhere \u2014 the dependency looks vestigial and the actual waves_rows source is left to the caller's imagination.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

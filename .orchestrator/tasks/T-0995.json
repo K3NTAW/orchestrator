@@ -1,0 +1,157 @@
+{
+  "id": "T-0995",
+  "created_at": 1790153717.819607,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S1d context_scanner: deterministic hostile-content scanner (safe/suspicious/blocked with evidence) and trust classes with a fixed authority order on evidence objects (P19, P20)",
+  "spec": "Create orchestrator/context_scanner.py. scan(text, *, source_kind) -> {\"verdict\": \"safe\"|\"suspicious\"|\"blocked\", \"findings\": [{\"pattern\": name, \"line\": n, \"excerpt\": max 120 chars}], \"score\": int}. Pattern families (regex, case-insensitive, each with a weight): override_instructions (ignore/disregard previous or prior instructions, you are now, new system prompt), authority_claim (claims to be the system, the operator, the developer, or to have higher authority), credential_read (read/print/cat of dotenv files, the user's ssh or cloud-provider credential directories, tokens, api keys, passwords), exfiltration (curl/wget/nc/fetch of a URL with a variable, token or file attached; base64 pipe to network), permission_change (world-writable chmod, sudoers edits, disable safeguards, hooks, guardrails, permissions bypass), hidden_execution (shell execution hidden in HTML comments, markdown links or images with javascript: or data: schemes), invisible_unicode (zero-width space/joiner, bidi overrides, tag characters), hidden_html (html comments or display:none blocks containing instruction verbs). Scoring: blocked when any pattern of weight 3 hits (override_instructions, credential_read+exfiltration together, hidden_execution, invisible_unicode inside instruction text) or score >= 6; suspicious for score 2..5; safe below. Document text that merely describes these attacks (security docs, this scanner's own tests, review checklists) must scan safe or suspicious, never blocked, when the matches sit inside fenced code blocks or lines starting with a list marker followed by a pattern name or a quote; implement that as a context rule (code fences and quoted lines carry weight 0 for override_instructions and authority_claim). source_kind in (\"skill\", \"agents_md\", \"claude_md\", \"readme\", \"prompt\", \"mcp_description\", \"evidence\", \"other\") only tunes thresholds (skill and mcp_description: blocked threshold 4). Pure function, no I/O, no network, no LLM.\nTrust classes: TRUST_CLASSES = (\"SYSTEM\",\"TRUSTED_REPO\",\"LOCAL_USER\",\"EXTERNAL\",\"UNTRUSTED\") and authority(cls) -> int (SYSTEM 4 ... UNTRUSTED 0); may_override(lower, higher) -> False whenever authority(lower) < authority(higher). Jev is never consulted here.\norchestrator/evidence.py: add field trust_class to the evidence dataclass, set in make() from provenance (repo -> TRUSTED_REPO, memory -> LOCAL_USER, anything else -> EXTERNAL) and demoted to UNTRUSTED when scan(content, source_kind=\"evidence\")[\"verdict\"] == \"blocked\"; the scan result (verdict, pattern names only) is stored as field scan on the object and persisted; keep the existing trust field values as they are for compatibility. Existing evidence JSONL rows without the new fields must still load (default trust_class from provenance, scan None).\norchestrator/skill_discovery.py inspect(): run scan over every text file of the quarantined skill (SKILL.md first) with source_kind skill and add scan results to the inspection report (verdict per file, overall = worst); a blocked overall verdict is recorded in the report and the skill stays quarantined (no state change here; stage 2 hardening gates on it). CLI: `orchestrator scan <path> [--kind k] [--json]` prints the verdict and findings for a file (read-only). Docs: docs/hermes-hardening/04-context-scanner.md (pattern families, weights, thresholds, trust classes and the authority rule, known limitations: heuristic, not semantic). Test fixtures must be synthetic and must never contain credential-shaped strings (no key-like tokens); describe the attack in words.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_context_scanner.py::test_blocks_override_and_exfiltration_patterns (malicious AGENTS.md, fake authority escalation, secret exfiltration instruction all blocked with findings naming the pattern and line)",
+    "tests/test_context_scanner.py::test_harmless_security_documentation_not_blocked (a review checklist and a docs page describing the attacks inside fences and quoted lines scan safe or suspicious)",
+    "tests/test_context_scanner.py::test_invisible_unicode_detected (zero-width and bidi characters inside instruction text block; inside a code fence only suspicious)",
+    "tests/test_context_scanner.py::test_authority_order_is_deterministic (may_override false for every lower class against every higher one)",
+    "tests/test_evidence.py::test_make_sets_trust_class_and_scan (repo, memory and external provenance mapping; blocked content demoted to UNTRUSTED; old rows load)",
+    "tests/test_skill_discovery.py::test_inspect_reports_scan_verdicts (a quarantined skill with an injection line reports blocked and stays quarantined)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/context_scanner.py",
+    "orchestrator/evidence.py",
+    "orchestrator/skill_discovery.py",
+    "orchestrator/cli.py",
+    "tests/test_context_scanner.py",
+    "tests/test_evidence.py",
+    "tests/test_skill_discovery.py",
+    "docs/hermes-hardening/04-context-scanner.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790153740.360183,
+      "pipeline": {
+        "first_ready_at": 1790153740.3596501
+      }
+    },
+    {
+      "ts": 1790153740.9728901,
+      "pipeline": {
+        "first_ready_at": 1790153740.3596501,
+        "spec_review_at": 1790153740.9725041,
+        "spec_review_at_lease": 1790154640.9725041
+      }
+    },
+    {
+      "ts": 1790153741.004834,
+      "pipeline": {
+        "first_ready_at": 1790153740.3596501,
+        "spec_review_at": 1790153740.9725041,
+        "spec_review_at_lease": 1790154640.9725041,
+        "spec_review_at_done": 1790153741.0033112
+      }
+    },
+    {
+      "ts": 1790153854.877833,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/evidence.py",
+          "issue": "Evidence is a frozen dataclass with no defaulted fields, and EvidencePool.__init__ loads persisted rows via `Evidence(**row)` (line ~131). Old JSONL rows written before this change will lack `trust_class` and `scan` keys, so `Evidence(**row)` raises TypeError unless something backfills those keys first. The spec says 'default trust_class from provenance, scan None' for old rows but never names where that backfill happens (EvidencePool.__init__ is the only place the raw row dict is available before construction) and never says trust_class/scan need dataclass defaults to make positional construction in make() still work. Without an explicit insertion point this is a coin-flip for the implementer and directly risks failing tests/test_evidence.py::test_make_sets_trust_class_and_scan's 'old rows load' clause.",
+          "severity": "high",
+          "line": 131
+        },
+        {
+          "path": "orchestrator/skill_discovery.py",
+          "issue": "inspect() already runs its own regex-based CHECKS tuple, including a 'hidden-instructions' block-severity check (ignore previous / you are now / system prompt / HTML comments / invisible unicode / base64), with its own severity vocabulary (info/warn/block) and findings schema (id/severity/check/line/excerpt). The spec adds a second, independent scan() pass (verdict safe/suspicious/blocked, pattern/line/excerpt/score) over the same files without saying whether the old hidden-instructions CHECK is superseded, kept as redundant defense-in-depth, or reconciled into one schema. Two overlapping detectors with different vocabularies bolted onto the same findings.json report is the kind of inconsistency a reviewer would reject, and the acceptance test only asserts the new scan verdict, not how the two coexist.",
+          "severity": "med",
+          "line": 225
+        }
+      ]
+    },
+    {
+      "ts": 1790153866.5377011,
+      "pipeline": {
+        "first_ready_at": 1790153740.3596501,
+        "spec_review_at": 1790153740.9725041,
+        "spec_review_at_lease": 1790154640.9725041,
+        "spec_review_at_done": 1790153741.0033112,
+        "spec_review_held_at": 1790153866.537638
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790153868.0668101,
+      "pipeline": {
+        "first_ready_at": 1790153740.3596501,
+        "spec_review_at": 1790153740.9725041,
+        "spec_review_at_lease": 1790154640.9725041,
+        "spec_review_at_done": 1790153741.0033112,
+        "spec_review_held_at": 1790153866.537638,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790153868.55717,
+      "pipeline": {
+        "first_ready_at": 1790153740.3596501,
+        "spec_review_at": 1790153740.9725041,
+        "spec_review_at_lease": 1790154640.9725041,
+        "spec_review_at_done": 1790153741.0033112,
+        "spec_review_held_at": 1790153866.537638,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790153866.5377011": true
+        }
+      }
+    },
+    {
+      "ts": 1790154004.527613,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 13:05: spec review T-1001 request_changes folded into T-1005"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790153740.3596501,
+    "spec_review_at": 1790153740.9725041,
+    "spec_review_at_lease": 1790154640.9725041,
+    "spec_review_at_done": 1790153741.0033112,
+    "spec_review_held_at": 1790153866.537638,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790153866.5377011": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/evidence.py",
+      "issue": "Evidence is a frozen dataclass with no defaulted fields, and EvidencePool.__init__ loads persisted rows via `Evidence(**row)` (line ~131). Old JSONL rows written before this change will lack `trust_class` and `scan` keys, so `Evidence(**row)` raises TypeError unless something backfills those keys first. The spec says 'default trust_class from provenance, scan None' for old rows but never names where that backfill happens (EvidencePool.__init__ is the only place the raw row dict is available before construction) and never says trust_class/scan need dataclass defaults to make positional construction in make() still work. Without an explicit insertion point this is a coin-flip for the implementer and directly risks failing tests/test_evidence.py::test_make_sets_trust_class_and_scan's 'old rows load' clause.",
+      "severity": "high",
+      "line": 131
+    },
+    {
+      "path": "orchestrator/skill_discovery.py",
+      "issue": "inspect() already runs its own regex-based CHECKS tuple, including a 'hidden-instructions' block-severity check (ignore previous / you are now / system prompt / HTML comments / invisible unicode / base64), with its own severity vocabulary (info/warn/block) and findings schema (id/severity/check/line/excerpt). The spec adds a second, independent scan() pass (verdict safe/suspicious/blocked, pattern/line/excerpt/score) over the same files without saying whether the old hidden-instructions CHECK is superseded, kept as redundant defense-in-depth, or reconciled into one schema. Two overlapping detectors with different vocabularies bolted onto the same findings.json report is the kind of inconsistency a reviewer would reject, and the acceptance test only asserts the new scan verdict, not how the two coexist.",
+      "severity": "med",
+      "line": 225
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 13:05: spec review T-1001 request_changes folded into T-1005"
+}

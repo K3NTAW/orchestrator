@@ -1,0 +1,244 @@
+{
+  "id": "T-0146",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review (round 3, final): C-O4 v3 `orchestrator serve` (T-0144)",
+  "spec": "Final spec review of execute task T-0144 (C-O4 v3, supersedes T-0142/T-0116). Rounds 1 (T-0140) and 2 (T-0143) raised nine risks in total; the v3 spec claims to fold in all of them: requester in goals.py scope; 409 via goals.list_goals; plain def handlers; 422 map; account field; per-slug flock around the first-use clone with a re-check inside the lock; module-attribute import of goals for patching; \"repo\": slug on every goal entry; requester/account validated as strings. Confirm each is resolved. Planner decision: this is the last round. Verdict approve unless a remaining risk would break the kgpt integration contract (routes, status codes, auth) or is a security defect (injection, token leak, unlocked shared state); list anything smaller as notes for the code review instead of request_changes. Read orchestrator/goals.py on goal/T-0073 for the real start()/status()/list_goals()/stop() shapes and confirm starlette and uvicorn import in this venv.",
+  "inputs": [
+    "T-0144"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes (request_changes only for contract-breaking or security risks per the Planner decision)",
+    "Each of the nine prior risks marked resolved or open with evidence",
+    "Smaller findings listed as notes for the code review"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "orchestrator/cli.py",
+    "orchestrator/goals.py",
+    "tests/test_serve.py",
+    "tests/test_goals.py",
+    ".orchestrator/repos.toml.example"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 15,
+    "timeout_s": 900,
+    "spec_review_round": 3
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0146",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/cli.py",
+        "issue": "Spec says GET /goals/{repo}/{goal_id} returns 'goals.status(path, goal_id) entry' (singular), but the existing cli.py call site (`entries = goals.status(a.repo, a.id)` then `for e in entries`) treats the return value as an iterable/list even when an id is passed. serve.py needs a concrete contract (list vs single dict, and how 'unknown goal' is signaled) to implement the 404 check and shape the response correctly \u2014 as written this is genuinely ambiguous and not shown in the goals.py excerpt.",
+        "severity": "high",
+        "line": 86
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "The 14 named tests in test_serve.py do not include any test for GET /goals/{repo}/{goal_id} (single-goal lookup, its 200 shape, or its 404-unknown-goal case), even though that route is in the spec's route list. Combined with the ambiguity above, this route can ship with a wrong return shape or broken 404 detection and nothing in the acceptance suite would catch it.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "Clone failure response returns `stderr[-500:]` verbatim in the 502 body. Git error output commonly echoes the remote URL it tried to reach (e.g. 'fatal: repository https://user:TOKEN@host/... not found'), so a git_url with embedded credentials in repos.toml would leak the credential back to the API caller on a failed/misconfigured clone.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "git clone runs via subprocess.run with no timeout. An unreachable or slow-DNS git_url hangs the call indefinitely, tying up a threadpool worker forever; several concurrent first-use clones against bad URLs can exhaust starlette's threadpool and stall unrelated routes including /healthz \u2014 the exact failure mode that motivated making handlers sync-in-threadpool in the first place.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "'when path is missing' as the clone trigger is ambiguous: it isn't specified whether this means the `path` key is absent from the repos.toml entry, or the directory doesn't exist on disk. An entry with both `path` and `git_url` set, where the directory hasn't been created yet, would never trigger a clone under the literal 'path is missing' (key-absent) reading, and nothing else in scope creates that directory \u2014 it would just fail downstream in goals.* with an unclear error.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "The pre-check for the 409 'already running' response calls goals.list_goals(path) outside of any lock, then separately calls goals.start(path, ...). Under real concurrency two requests can both observe 'not running' and both proceed to start(); correctness then depends entirely on goals.start()'s own internal serialization (not shown in the excerpt) to prevent an actual double-launch. Worth confirming that guarantee exists, since the spec's 409 branch alone does not provide it.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify goals.status(path, goal_id)'s exact return contract (single dict or list) and how an unknown goal_id is signaled (empty list, None, or exception), matching how cli.py already consumes it, then have serve.py's single-goal handler follow that contract explicitly.",
+      "Add two tests to the fourteen: one for GET /goals/{repo}/{goal_id} success shape (repo=slug added) and one for its 404-unknown-goal case.",
+      "Before including clone stderr in the 502 body, strip credentials from the echoed git_url (or omit the URL from the truncated stderr) so a repos.toml git_url with an embedded token can't leak back to the caller.",
+      "Add a timeout to the git clone subprocess.run call and define the response for a timeout (e.g. 502 with a 'clone timed out' reason).",
+      "Define 'path is missing' precisely as either 'key absent in the repos.toml entry' or 'os.path.isdir(path) is False', and state which of the two triggers a clone when both path and git_url are configured but the directory doesn't exist yet."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789739717.434531,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0146",
+      "claimed_at": 1789739717.434123
+    },
+    {
+      "ts": 1789739717.441859,
+      "pid": 20499,
+      "account": "B"
+    },
+    {
+      "ts": 1789739840.33488,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/cli.py",
+            "issue": "Spec says GET /goals/{repo}/{goal_id} returns 'goals.status(path, goal_id) entry' (singular), but the existing cli.py call site (`entries = goals.status(a.repo, a.id)` then `for e in entries`) treats the return value as an iterable/list even when an id is passed. serve.py needs a concrete contract (list vs single dict, and how 'unknown goal' is signaled) to implement the 404 check and shape the response correctly \u2014 as written this is genuinely ambiguous and not shown in the goals.py excerpt.",
+            "severity": "high",
+            "line": 86
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "The 14 named tests in test_serve.py do not include any test for GET /goals/{repo}/{goal_id} (single-goal lookup, its 200 shape, or its 404-unknown-goal case), even though that route is in the spec's route list. Combined with the ambiguity above, this route can ship with a wrong return shape or broken 404 detection and nothing in the acceptance suite would catch it.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "Clone failure response returns `stderr[-500:]` verbatim in the 502 body. Git error output commonly echoes the remote URL it tried to reach (e.g. 'fatal: repository https://user:TOKEN@host/... not found'), so a git_url with embedded credentials in repos.toml would leak the credential back to the API caller on a failed/misconfigured clone.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "git clone runs via subprocess.run with no timeout. An unreachable or slow-DNS git_url hangs the call indefinitely, tying up a threadpool worker forever; several concurrent first-use clones against bad URLs can exhaust starlette's threadpool and stall unrelated routes including /healthz \u2014 the exact failure mode that motivated making handlers sync-in-threadpool in the first place.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "'when path is missing' as the clone trigger is ambiguous: it isn't specified whether this means the `path` key is absent from the repos.toml entry, or the directory doesn't exist on disk. An entry with both `path` and `git_url` set, where the directory hasn't been created yet, would never trigger a clone under the literal 'path is missing' (key-absent) reading, and nothing else in scope creates that directory \u2014 it would just fail downstream in goals.* with an unclear error.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "The pre-check for the 409 'already running' response calls goals.list_goals(path) outside of any lock, then separately calls goals.start(path, ...). Under real concurrency two requests can both observe 'not running' and both proceed to start(); correctness then depends entirely on goals.start()'s own internal serialization (not shown in the excerpt) to prevent an actual double-launch. Worth confirming that guarantee exists, since the spec's 409 branch alone does not provide it.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify goals.status(path, goal_id)'s exact return contract (single dict or list) and how an unknown goal_id is signaled (empty list, None, or exception), matching how cli.py already consumes it, then have serve.py's single-goal handler follow that contract explicitly.",
+          "Add two tests to the fourteen: one for GET /goals/{repo}/{goal_id} success shape (repo=slug added) and one for its 404-unknown-goal case.",
+          "Before including clone stderr in the 502 body, strip credentials from the echoed git_url (or omit the URL from the truncated stderr) so a repos.toml git_url with an embedded token can't leak back to the caller.",
+          "Add a timeout to the git clone subprocess.run call and define the response for a timeout (e.g. 502 with a 'clone timed out' reason).",
+          "Define 'path is missing' precisely as either 'key absent in the repos.toml entry' or 'os.path.isdir(path) is False', and state which of the two triggers a clone when both path and git_url are configured but the directory doesn't exist yet."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789739840.337396,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "Spec says GET /goals/{repo}/{goal_id} returns 'goals.status(path, goal_id) entry' (singular), but the existing cli.py call site (`entries = goals.status(a.repo, a.id)` then `for e in entries`) treats the return value as an iterable/list even when an id is passed. serve.py needs a concrete contract (list vs single dict, and how 'unknown goal' is signaled) to implement the 404 check and shape the response correctly \u2014 as written this is genuinely ambiguous and not shown in the goals.py excerpt.",
+          "severity": "high",
+          "line": 86
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "The 14 named tests in test_serve.py do not include any test for GET /goals/{repo}/{goal_id} (single-goal lookup, its 200 shape, or its 404-unknown-goal case), even though that route is in the spec's route list. Combined with the ambiguity above, this route can ship with a wrong return shape or broken 404 detection and nothing in the acceptance suite would catch it.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "Clone failure response returns `stderr[-500:]` verbatim in the 502 body. Git error output commonly echoes the remote URL it tried to reach (e.g. 'fatal: repository https://user:TOKEN@host/... not found'), so a git_url with embedded credentials in repos.toml would leak the credential back to the API caller on a failed/misconfigured clone.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "git clone runs via subprocess.run with no timeout. An unreachable or slow-DNS git_url hangs the call indefinitely, tying up a threadpool worker forever; several concurrent first-use clones against bad URLs can exhaust starlette's threadpool and stall unrelated routes including /healthz \u2014 the exact failure mode that motivated making handlers sync-in-threadpool in the first place.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "'when path is missing' as the clone trigger is ambiguous: it isn't specified whether this means the `path` key is absent from the repos.toml entry, or the directory doesn't exist on disk. An entry with both `path` and `git_url` set, where the directory hasn't been created yet, would never trigger a clone under the literal 'path is missing' (key-absent) reading, and nothing else in scope creates that directory \u2014 it would just fail downstream in goals.* with an unclear error.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "The pre-check for the 409 'already running' response calls goals.list_goals(path) outside of any lock, then separately calls goals.start(path, ...). Under real concurrency two requests can both observe 'not running' and both proceed to start(); correctness then depends entirely on goals.start()'s own internal serialization (not shown in the excerpt) to prevent an actual double-launch. Worth confirming that guarantee exists, since the spec's 409 branch alone does not provide it.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789739717.434123,
+  "pid": 20499,
+  "account": "B",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "Spec says GET /goals/{repo}/{goal_id} returns 'goals.status(path, goal_id) entry' (singular), but the existing cli.py call site (`entries = goals.status(a.repo, a.id)` then `for e in entries`) treats the return value as an iterable/list even when an id is passed. serve.py needs a concrete contract (list vs single dict, and how 'unknown goal' is signaled) to implement the 404 check and shape the response correctly \u2014 as written this is genuinely ambiguous and not shown in the goals.py excerpt.",
+      "severity": "high",
+      "line": 86
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "The 14 named tests in test_serve.py do not include any test for GET /goals/{repo}/{goal_id} (single-goal lookup, its 200 shape, or its 404-unknown-goal case), even though that route is in the spec's route list. Combined with the ambiguity above, this route can ship with a wrong return shape or broken 404 detection and nothing in the acceptance suite would catch it.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "Clone failure response returns `stderr[-500:]` verbatim in the 502 body. Git error output commonly echoes the remote URL it tried to reach (e.g. 'fatal: repository https://user:TOKEN@host/... not found'), so a git_url with embedded credentials in repos.toml would leak the credential back to the API caller on a failed/misconfigured clone.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "git clone runs via subprocess.run with no timeout. An unreachable or slow-DNS git_url hangs the call indefinitely, tying up a threadpool worker forever; several concurrent first-use clones against bad URLs can exhaust starlette's threadpool and stall unrelated routes including /healthz \u2014 the exact failure mode that motivated making handlers sync-in-threadpool in the first place.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "'when path is missing' as the clone trigger is ambiguous: it isn't specified whether this means the `path` key is absent from the repos.toml entry, or the directory doesn't exist on disk. An entry with both `path` and `git_url` set, where the directory hasn't been created yet, would never trigger a clone under the literal 'path is missing' (key-absent) reading, and nothing else in scope creates that directory \u2014 it would just fail downstream in goals.* with an unclear error.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "The pre-check for the 409 'already running' response calls goals.list_goals(path) outside of any lock, then separately calls goals.start(path, ...). Under real concurrency two requests can both observe 'not running' and both proceed to start(); correctness then depends entirely on goals.start()'s own internal serialization (not shown in the excerpt) to prevent an actual double-launch. Worth confirming that guarantee exists, since the spec's 409 branch alone does not provide it.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

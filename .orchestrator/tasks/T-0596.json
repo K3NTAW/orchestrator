@@ -1,0 +1,55 @@
+{
+  "id": "T-0596",
+  "created_at": 1789972102.8176808,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R1: orchestrator/duration.py \u2014 empirical task-duration estimates with robust statistics and deterministic cold-start priors (AP P5)",
+  "spec": "Why: critical_path.est_duration_s (orchestrator/critical_path.py:15-24) only knows COLD_START_S per band or a caller-supplied durations dict; nothing computes empirical durations, so critical-path ranking and waves use crude assumptions (AP P5, brief .orchestrator/roadmap-completion-program.md P2).\nWhat: new module orchestrator/duration.py, pure, no daemon changes.\n- actual_s(task) -> float|None: pipeline.gated_at - pipeline.claimed_at (same definition as scorecard.parallelism, scorecard.py:1481), else sum of runs duration_s rows for role execute if given rows; None when unknown.\n- history(root=STATE) -> list of {task, task_class (attribution.task_class), executor (task.executor or tier), band (attribution.band), actual_s} over merged execute tasks (merged_into set) with a known actual_s; tolerate missing/malformed task files.\n- estimate(task, root=STATE, cfg=None) -> {\"est_s\", \"source\", \"n\", \"band\", \"task_class\", \"executor\"}; evidence ladder, first level with n >= min_samples wins: (task_class, executor, band) -> class_executor; (task_class, band) -> band_class; (band) -> band; else cold_start = critical_path.COLD_START_S[band]. Statistic: median when n < 10, otherwise trimmed median dropping trim fraction from each tail (default 0.1). cfg from pool_config()['scheduler']: duration_mode = \"empirical\"|\"cold_start\" (default empirical; cold_start forces priors), duration_min_samples (default 5), duration_trim (default 0.1); unknown mode -> empirical.\n- durations_for(tasks, root=STATE, cfg=None) -> {task_id: est_s} keyed by task id (critical_path.est_duration_s reads task-id keys first), plus explain_for(tasks, ...) -> {task_id: estimate dict} for telemetry.\n- prediction_error(predicted_s, actual_s) -> {\"abs_s\", \"ratio\"} or None.\nNo pool.toml edit (defaults in code). Docstrings state the ladder. Bus reads via bus.read/bus.get or the tasks directory under root.",
+  "inputs": [
+    "T-0564"
+  ],
+  "acceptance": [
+    "tests/test_duration.py::test_cold_start_uses_band_prior_when_no_history \u2014 no merged tasks: estimate returns COLD_START_S for the band with source cold_start and n 0",
+    "tests/test_duration.py::test_sufficient_history_uses_class_executor_median \u2014 6 merged tasks of the same class, executor and band return their median with source class_executor and n 6",
+    "tests/test_duration.py::test_sparse_history_falls_back_down_the_ladder \u2014 2 class_executor samples and 5 band samples yield source band, never false precision from the 2",
+    "tests/test_duration.py::test_trimmed_median_resists_outliers \u2014 12 samples with two 50x outliers estimate within 10 percent of the clean median",
+    "tests/test_duration.py::test_explain_for_records_source_and_sample_size \u2014 explain_for returns est_s, source, n, band, task_class for every task and durations_for keys match task ids; duration_mode cold_start forces priors"
+  ],
+  "scope": [
+    "orchestrator/duration.py",
+    "tests/test_duration.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded: T-0583 reviewer verdict (approve) transcribed by the Planner; no second review needed",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789972102.819414,
+      "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+    },
+    {
+      "ts": 1789972213.4913092,
+      "status": "failed",
+      "result": {
+        "summary": "superseded: T-0583 reviewer verdict (approve) transcribed by the Planner; no second review needed",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+}

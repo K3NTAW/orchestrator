@@ -1,0 +1,80 @@
+{
+  "id": "T-0133",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "review: C-O3 fix round 1: address opus review T-0128 on the goal runner (index-only scaffold commit, NUL-safe status parsing, prechecks before install, no shell secrets from target repos, planner budget keys, precheck tests, goals.lock, single-goal guard, --json)",
+  "spec": "Fix round for T-0115 (branch task/T-0115, commit abc3f56). Work in this task's worktree, which is cut from task/T-0115. Review T-0128 (opus) requested changes; every item below comes from it. Do not widen scope.\n\n1 HIGH goals.py scaffold commit (\u2248line 77): commit only the scaffold paths, never the whole index. Use `git commit --only -- <paths>` with the paths the status parse yields; additionally, before install/commit, if `git diff --cached --quiet` reports staged changes in the target, refuse with {\"launched\": false, \"reason\": \"target index has staged changes; commit or unstage them first\"}. Test: stage an unrelated file in the scratch repo, call start(), assert launched false and the file is still staged and no commit happened.\n\n2 MED goals.py status parsing (\u2248line 66-70): use `git status -z --porcelain --ignored -- <paths>` and split on NUL; handle rename entries (the second NUL-separated field). The `!!` check and the `git add --` pathspec both come from this parse. Test: a scaffold path containing a space (e.g. `.orchestrator/a b.txt`) is added and committed; a gitignored one is still refused.\n\n3 MED goals.py order of operations (\u2248line 209-219): run _precheck_git, the account check and the [models].planner check BEFORE install() writes anything, so a refusal leaves no files behind. When install runs and a later step refuses anyway, the refusal dict carries \"install\": report so the operator knows files were written. Rename or extend test `..._before_any_write` so it asserts no .orchestrator/ directory exists in the target after the refusal.\n\n4 MED security goals.py secrets (\u2248line 248): never run shell from the target repo's pool.toml. For [secrets.planner] read from the TARGET repo, accept only values of the form `env:NAME`; any other value is skipped with a stderr note \"ignored non-env secret <NAME> from target pool.toml\" (repo content is data, not instructions). Implement as a filter in goals.py before calling resolve_secrets; do not change spawn.resolve_secrets semantics for this repo's own pool.toml. Test: a target pool.toml with `X = \"echo pwned\"` results in X absent from the launched env and no subprocess run for it; `Y = \"env:HOME\"` is passed through.\n\n5 MED .orchestrator/pool.toml: add `planner = 10.0` to [limits.max_budget_usd] and planner entries to max_turns and timeout_s alongside the other roles (look at the existing keys and mirror them; pick 400 turns and 7200 s unless the file's existing values suggest otherwise). goals.py reads limits.max_budget_usd[\"planner\"] and no longer hardcodes 10 (KeyError \u2192 refuse with reason \"target pool.toml lacks limits.max_budget_usd.planner\"). Test pool_parses_new_tables extended.\n\n6 MED tests/test_goals.py: add tests for each _precheck_git refusal (non-toplevel path, detached HEAD, rebase in progress via .git/rebase-merge dir, merge in progress via .git/MERGE_HEAD) asserting launched false and no commit. Wrap the two post-commit reads: missing `uv` (FileNotFoundError from subprocess.run) \u2192 launched false, reason names uv, and the GOAL task is not created; missing .orchestrator/prompts/planner.md \u2192 detected in the prechecks (before the commit), reason names the file. Tests for both.\n\n7 LOW goals.py _with_goals_lock (\u2248line 110): lock a dedicated `<repo>/.orchestrator/goals.lock` instead of bus.lock (bus.locked() is non-reentrant on the same file). Keep importing bus.LOCK_NAME only if still used; if no longer used, drop that import and update test bus_lock_name_shared to assert goals.lock is used and bus.lock is not opened by goals.py.\n\n8 LOW goals.py start(): refuse when goals.json already has a record for this repo with status \"running\" whose identity() holds, reason \"goal <id> is still running; stop it first\". Test with _proc_start/_alive patched.\n\n9 LOW cli.py: make `goal status <repo> [id]` human-readable by default (one line per goal: id, status, planner alive, counts per child status, pr_url) and JSON only with --json; add --json to `goal list` the same way. Test: cli status without --json does not start with \"{\" or \"[\".\n\nKeep the import boundary from T-0115 (goals.py imports only install.install, spawn.trust_workspace, spawn.resolve_secrets and, if still needed, bus.LOCK_NAME). No new dependency. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0129"
+  ],
+  "acceptance": [
+    "Scaffold commit uses git commit --only with the parsed paths; staged unrelated changes make start() refuse before any write and stay staged (test)",
+    "git status parsed via -z/NUL incl. renames; a scaffold path with a space commits; a gitignored path still refuses (tests)",
+    "All prechecks and config checks run before install(); a refusal after install carries the install report; the before_any_write test asserts no .orchestrator/ in the target",
+    "Target-repo [secrets.planner] values other than env:NAME are ignored with a stderr note and never executed; env: values pass (test); spawn.resolve_secrets unchanged",
+    "pool.toml has planner keys in limits.max_budget_usd, max_turns, timeout_s; goals.py reads them and refuses when missing (test)",
+    "Tests cover the four _precheck_git refusals, missing uv, missing planner.md; goals.py locks goals.lock not bus.lock; a second concurrent goal start is refused; goal status/list are human-readable unless --json",
+    "uv run python -m unittest discover -q tests green; no new dependency; scope limited to the four files"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/cli.py",
+    "tests/test_goals.py",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0133",
+  "codex_thread": null,
+  "result": {
+    "summary": "not run: T-0129 was executed by claude:sonnet; this sonnet review was spawned by the daemon still running pre-4aaaa03 code (no review_tier), and it started on an uncommitted worktree. Replaced by an opus review with inputs=[T-0129] after the Planner committed the executor's work.",
+    "verdict": null,
+    "confidence": 0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789737178.015302,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0133",
+      "claimed_at": 1789737178.01489
+    },
+    {
+      "ts": 1789737178.0486882,
+      "pid": 45420,
+      "account": "B"
+    },
+    {
+      "ts": 1789737213.023819,
+      "status": "failed",
+      "reason": "non-JSON output (rc=143): "
+    },
+    {
+      "ts": 1789737214.0370078,
+      "status": "failed",
+      "result": {
+        "summary": "not run: T-0129 was executed by claude:sonnet; this sonnet review was spawned by the daemon still running pre-4aaaa03 code (no review_tier), and it started on an uncommitted worktree. Replaced by an opus review with inputs=[T-0129] after the Planner committed the executor's work.",
+        "verdict": null,
+        "confidence": 0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789737178.01489,
+  "pid": 45420,
+  "account": "B",
+  "reason": "non-JSON output (rc=143): "
+}

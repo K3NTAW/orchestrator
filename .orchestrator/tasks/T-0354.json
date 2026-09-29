@@ -1,0 +1,79 @@
+{
+  "id": "T-0354",
+  "parent": "T-0353",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Scout H-S1 (gap matrix, handover sections 2-5): accounting completeness, premium launch attribution and escalation routes, decision identity/claims/coalescing/backoff, budget reservations and quota handling",
+  "spec": "READ THE CODE AT /Users/k3ntaw/code/orchestrator/wt/goal-T-0260 (goal/T-0260 head 2ca1517), NOT your worktree base (it is stale). Read-only. Cite path:line from that tree.\nHandover doc: /Users/k3ntaw/Documents/orchestrator-efficiency-handover.md sections 2, 3, 4, 5 (read those sections once).\nFiles to read (targeted, not whole repo): orchestrator/bus.py (normalize_usage, log_run, post_result, events), orchestrator/scorecard.py (by_goal, tokens_per_accepted_goal, accepted_goals, task_class, scores), orchestrator/planner_runs.py (decision_points, claims, _held_at, leases, reconcile, run, usage), orchestrator/goals.py (launch_planner, decision packet, budgets), orchestrator/decision.py if present, orchestrator/pool.py (budgets, cooldowns, running counters, save, codex_available, pick_executor, tally_planner), orchestrator/executor.py (start, slots, running increments, resume), orchestrator/daemon.py (tick, dispatch, free_slots, stamp, lease, complete, sweep_leases, reconcile_dead, autonomous Planner block, notify), orchestrator/handover.py (auto-handover section every 15 min), .orchestrator/pool.toml ([planner], [daemon], [limits], [review]). Tests: grep tests/ for existing coverage.\nProduce a matrix, one row per handover requirement in sections 2-5, columns: requirement \u00b7 status (existing and verified / partial / missing / unnecessary) \u00b7 evidence path:line \u00b7 gap and the smallest change that closes it (or why unnecessary) \u00b7 verification (existing test name, or the test to write) \u00b7 confidence 0-1.\nRequirements to cover at minimum: run rows carry goal/task/run/attempt/decision ids, role, provider, model, account, client version, prompt/policy version, route reason; token buckets incremental vs cumulative, cached subset vs separate, reasoning double count; marginal spend vs API-equivalent vs quota observation kept separate; tokens per accepted goal undefined at zero accepted; median and tail per goal; premium invocations explained (count, context, output, cache, launch reasons); premium launch reason persisted with decision requested, evidence, cheaper steps tried; routine/investigate/escalate routes with deterministic rules; decision identity from goal+kind+state version; atomic claim with owner and lease; coalescing bursts into one packet; durable processed event cursor; bounded backoff on infra failures (auth, quota, unavailable) without model retries; interactive session exclusion as renewable lease vs stale file; stage stamps claim/start/complete and idempotent side effects; pinned config/prompt version per run; pre-dispatch atomic budget reservation across parallel workers with heartbeat/lease and reconciliation; quota hold produces no repair task and one notification per transition; premium headroom reserved for escalations; second account no duplicate dispatch.\nAlso list which of the handover's required regression cases (section Delivery order, bullet list) already have a test (name it) and which do not.\nOutput cap 1,500 tokens: the matrix rows first, then the regression-case list, then at most 5 lines of what surprised you. No prose introduction.",
+  "inputs": [],
+  "acceptance": [
+    "every listed requirement has a matrix row with a status, a path:line from wt/goal-T-0260 or 'none found', and a verification entry",
+    "the regression-case list names an existing test or marks the case uncovered",
+    "output under 1,500 tokens, no code changes"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/goals.py",
+    "orchestrator/pool.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/handover.py",
+    ".orchestrator/pool.toml",
+    "tests/"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 12,
+    "timeout_s": 600,
+    "read_tree": "/Users/k3ntaw/code/orchestrator/wt/goal-T-0260"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0354",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Gap matrix \u2014 sections 2\u20135 (goal/T-0260 @ 2ca1517)\n\n| # | Requirement | Status | Evidence | Gap / smallest fix | Verification | Conf |\n|---|---|---|---|---|---|---|\n|1|Run rows carry goal/task/run/attempt/decision id, role, provider, model, account, client ver, prompt/policy ver, route reason|Partial|`bus.py:232-245` log_run; `planner_runs.py:560-563` call site|log_run has task/goal_id/role/tier/account/provider/outcome/tokens but no attempt#, decision kind/payload_key, client version, policy version, or route reason field|none found; write `test_log_run_carries_decision_identity`|0.85|\n|2|Token buckets: incremental vs cumulative; cached subset vs separate; no reasoning double-count|Existing, verified|`bus.py:206-229` normalize_usage; `pool.py:232-313` tally_planner (byte-offset incremental read)|none \u2014 codex treats cache as subset of input, claude as separate categories, reasoning excluded from total for both|`test_normalize_usage_claude/codex`, `test_tally_resumes_from_offset`|0.9|\n|3|Marginal spend / API-equivalent / quota observation kept separate|Partial|`scorecard.py` `by_goal` totals usd+tokens per role; `pool.toml` daily_budget_tokens vs window_cap_tokens|no explicit 3-way split; usd is Claude Code's own reported cost, tokens are counted, but nothing labels a value \"quota observation\" distinct from spend estimate|none found|0.6|\n|4|tokens_per_accepted_goal undefined (not 0) at zero accepted|Existing, verified|`scorecard.py:598-603` `tokens = total/count if count else 0`|**returns 0, not undefined** \u2014 contradicts handover \u00a72|`test_tokens_per_accepted_goal` (scorecard.py:294) \u2014 check it doesn't assert the zero-count case|0.75 (status should be \"missing\" for the zero-case; renders \"0\" not \"undefined\")|\n|5|Median and tail per goal|Missing|`scorecard.py` `by_goal`/`by_task` return sums only, no distribution|no median/percentile computation anywhere in scorecard.py|none found|0.8|\n|6|Premium invocations explained (count, context, output, cache, launch reasons)|P",
+    "parse_error": true,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789900790.212267,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0354",
+      "claimed_at": 1789900790.212103
+    },
+    {
+      "ts": 1789900790.214616,
+      "account": "B"
+    },
+    {
+      "ts": 1789900790.2472372,
+      "pid": 54779,
+      "account": "B"
+    },
+    {
+      "ts": 1789900984.5462348,
+      "status": "done",
+      "result": {
+        "summary": "## Gap matrix \u2014 sections 2\u20135 (goal/T-0260 @ 2ca1517)\n\n| # | Requirement | Status | Evidence | Gap / smallest fix | Verification | Conf |\n|---|---|---|---|---|---|---|\n|1|Run rows carry goal/task/run/attempt/decision id, role, provider, model, account, client ver, prompt/policy ver, route reason|Partial|`bus.py:232-245` log_run; `planner_runs.py:560-563` call site|log_run has task/goal_id/role/tier/account/provider/outcome/tokens but no attempt#, decision kind/payload_key, client version, policy version, or route reason field|none found; write `test_log_run_carries_decision_identity`|0.85|\n|2|Token buckets: incremental vs cumulative; cached subset vs separate; no reasoning double-count|Existing, verified|`bus.py:206-229` normalize_usage; `pool.py:232-313` tally_planner (byte-offset incremental read)|none \u2014 codex treats cache as subset of input, claude as separate categories, reasoning excluded from total for both|`test_normalize_usage_claude/codex`, `test_tally_resumes_from_offset`|0.9|\n|3|Marginal spend / API-equivalent / quota observation kept separate|Partial|`scorecard.py` `by_goal` totals usd+tokens per role; `pool.toml` daily_budget_tokens vs window_cap_tokens|no explicit 3-way split; usd is Claude Code's own reported cost, tokens are counted, but nothing labels a value \"quota observation\" distinct from spend estimate|none found|0.6|\n|4|tokens_per_accepted_goal undefined (not 0) at zero accepted|Existing, verified|`scorecard.py:598-603` `tokens = total/count if count else 0`|**returns 0, not undefined** \u2014 contradicts handover \u00a72|`test_tokens_per_accepted_goal` (scorecard.py:294) \u2014 check it doesn't assert the zero-count case|0.75 (status should be \"missing\" for the zero-case; renders \"0\" not \"undefined\")|\n|5|Median and tail per goal|Missing|`scorecard.py` `by_goal`/`by_task` return sums only, no distribution|no median/percentile computation anywhere in scorecard.py|none found|0.8|\n|6|Premium invocations explained (count, context, output, cache, launch reasons)|P",
+        "parse_error": true,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789900790.212103,
+  "account": "B",
+  "pid": 54779
+}

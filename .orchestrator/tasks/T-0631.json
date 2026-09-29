@@ -1,0 +1,189 @@
+{
+  "id": "T-0631",
+  "created_at": 1789976550.0270221,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R11: orchestrator/speculation.py \u2014 selective speculative execution: strict eligibility, shadow estimator of economic benefit, deterministic single-result selection, mode off by default (AP P17)",
+  "spec": "Why: AP P17 / brief P13 ask for an experimental, OFF-by-default capability to run a rare critical-path task on two executors and keep exactly one result; before any dispatch path exists the architecture needs eligibility, a shadow estimator answering \"would speculation have paid\", deterministic result selection and telemetry. Dispatching the duplicate is NOT part of this task (a later daemon task, only if evidence supports it).\nWhat: new pure module orchestrator/speculation.py.\n- cfg [speculation]: mode off|shadow|active (default off), min_fix_round_p 0.5, min_samples 5, min_retry_cost_usd 1.0, security_paths from [review].security_paths.\n- eligible(task, *, priority, ready_priorities, evidence, snapshot, budget_left_usd, cfg=None) -> {\"eligible\": bool, \"reasons\": [...], \"executors\": [a, b] or []}: requires all of: critical (priority critical_path_s == max over ready), fix_round_p >= min_fix_round_p with n >= min_samples for the baseline executor, expected retry cost (fix_round_cost_usd) >= min_retry_cost_usd, spare capacity (at least two distinct eligible executors with free > 0 in snapshot, brief: never speculate because capacity is idle alone), budget_left_usd >= 2 * cost_to_accepted_usd, safe to duplicate (task_class not security, no scope path matching security_paths or containing migration/config/pool.toml). Every failed condition appended to reasons; an ordinary task lists \"not_critical\".\n- shadow_estimate(root=STATE, evidence=None) -> rows per merged lineage with fix rounds: {\"task\", \"initial_usd\", \"fix_round_usd\", \"dup_cost_usd\" (2 x initial), \"expected_saved_usd\" (fix_round_usd x p_other_first_pass - initial_usd), \"latency_saved_s\" (fix-round wall time), \"would_have_paid\": expected_saved_usd > 0} using scorecard.executor_economics and pipeline stamps; summary(rows) -> {\"n\", \"paid_rate\", \"net_usd\"}.\n- select_result(candidates) -> {\"selected\", \"discarded\", \"reason\"} over [{executor, tests_green, gate_reds, usd, duration_s, sha}]: exactly one selected: green first, then fewest gate_reds, then lowest usd, then shortest duration, then executor id; no green -> selected None with reason no_green; never returns two.\n- plan(task, **eligibility_kwargs) -> {\"speculate\": bool, \"mode\", \"reason\", \"eligibility\"}: off -> speculate False reason mode_off (eligibility still computed for the shadow estimator); shadow -> False with would_speculate; active -> eligibility[\"eligible\"]. record(task_id, plan) -> decision_log.record(kind=\"speculation\", ...). Selected results still go through the normal gate, review and serial merge (documented; nothing here merges).",
+  "inputs": [
+    "T-0581"
+  ],
+  "acceptance": [
+    "tests/test_speculation.py::test_default_mode_off_never_speculates \u2014 empty config: plan returns speculate False with reason mode_off even for a fully eligible task",
+    "tests/test_speculation.py::test_ordinary_task_is_ineligible_with_reasons \u2014 a non-critical task with low fix_round_p lists not_critical and low_fix_round_p",
+    "tests/test_speculation.py::test_critical_path_task_with_high_rework_and_capacity_is_eligible \u2014 active mode, critical task, fix_round_p 0.7 n 8, two free executors, budget ok: speculate True with two distinct executors",
+    "tests/test_speculation.py::test_insufficient_budget_or_no_spare_capacity_blocks \u2014 budget_left below 2x cost yields insufficient_budget; a single free executor yields no_spare_capacity",
+    "tests/test_speculation.py::test_select_result_picks_exactly_one_and_estimator_summary \u2014 two green candidates yield one selected by gate_reds then usd, the other discarded; shadow_estimate rows carry would_have_paid and summary paid_rate"
+  ],
+  "scope": [
+    "orchestrator/speculation.py",
+    "tests/test_speculation.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0631",
+  "codex_thread": null,
+  "result": {
+    "summary": "Logic and tests for the four required acceptance behaviors (mode_off, ineligibility reasons, active-mode eligibility, budget/capacity blocking, select_result/shadow_estimate) are correct and the given test suite passes (ran via unittest). The real defect is that eligible()'s evidence field mapping only partially matches the shape scorecard.executor_economics() actually produces: 2 of 4 measured fields (fix_round_p, cost_to_accepted_usd) alias correctly to real scorecard keys, but n and fix_round_cost_usd do not (real key is n_tasks; fix_round_cost_usd doesn't exist anywhere in the codebase). This means once real evidence is wired in (a near-certain next step, since the module's own aliasing shows that was the intent), eligible() will always report insufficient_samples and low_retry_cost and can never actually authorize speculation \u2014 the acceptance tests don't catch this because their evidence fixture is hand-shaped to match the buggy key names rather than the real producer's schema.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/speculation.py",
+        "line": 76,
+        "issue": "eligible() reads measured.get(\"n\") with no fallback, but the only real evidence producer, scorecard.executor_economics(), returns the sample count under the key \"n_tasks\" (see orchestrator/scorecard.py:1324), never \"n\". Since the two other lookups in this function (fix_round_p and cost_to_accepted_usd) DO alias to the real scorecard.executor_economics field names (fix_round_probability, cost_to_accepted), the intent is clearly to be callable directly with that evidence shape \u2014 but this field was missed. With real evidence, _number(measured.get(\"n\")) is always 0.0, so insufficient_samples fires unconditionally regardless of actual sample size, silently defeating eligibility. The unit tests don't catch this because their fixture hand-supplies a key literally named \"n\" instead of reflecting the real producer's schema.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/speculation.py",
+        "line": 78,
+        "issue": "measured.get(\"fix_round_cost_usd\") has no matching field anywhere in the codebase (grep across orchestrator/*.py finds it nowhere but this file) \u2014 scorecard.executor_economics() has no per-executor \"fix round cost\" metric at all. So with real evidence this is always 0.0 and low_retry_cost fires unconditionally, meaning eligible() can never return eligible:true once wired to actual economics data, contrary to the spec's intent for active/shadow mode to identify genuinely eligible critical tasks.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/speculation.py",
+        "line": 30,
+        "issue": "_config() does `section = cfg.get(\"speculation\", cfg)` \u2014 when pool.toml has no [speculation] section (true today; grep of .orchestrator/pool.toml shows no such section), the fallback default is the entire root config dict `cfg` itself, not {}. That whole dict (all of [daemon], [planner], [review], [codex], [executors], etc.) then gets merged into `values` via `{**DEFAULTS, **section}`. It happens to be harmless right now only because no top-level pool.toml key currently collides with mode/min_fix_round_p/min_samples/min_retry_cost_usd, but it's the wrong fallback (should be {}) and would silently corrupt speculation settings if any future top-level config key collided with those names.",
+        "severity": "med"
+      }
+    ],
+    "packet_version": "65387f5ca050",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789976550.0279858,
+      "reviewed_sha": "4c3b031d5dd093413f73531c20987803a7cf2f8b"
+    },
+    {
+      "ts": 1789976552.4411032,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0631",
+      "claimed_at": 1789976552.440778
+    },
+    {
+      "ts": 1789976552.4420888,
+      "account": "B"
+    },
+    {
+      "ts": 1789976552.87822,
+      "pid": 17057,
+      "account": "B"
+    },
+    {
+      "ts": 1789976724.651092,
+      "status": "done",
+      "result": {
+        "summary": "Logic and tests for the four required acceptance behaviors (mode_off, ineligibility reasons, active-mode eligibility, budget/capacity blocking, select_result/shadow_estimate) are correct and the given test suite passes (ran via unittest). The real defect is that eligible()'s evidence field mapping only partially matches the shape scorecard.executor_economics() actually produces: 2 of 4 measured fields (fix_round_p, cost_to_accepted_usd) alias correctly to real scorecard keys, but n and fix_round_cost_usd do not (real key is n_tasks; fix_round_cost_usd doesn't exist anywhere in the codebase). This means once real evidence is wired in (a near-certain next step, since the module's own aliasing shows that was the intent), eligible() will always report insufficient_samples and low_retry_cost and can never actually authorize speculation \u2014 the acceptance tests don't catch this because their evidence fixture is hand-shaped to match the buggy key names rather than the real producer's schema.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/speculation.py",
+            "line": 76,
+            "issue": "eligible() reads measured.get(\"n\") with no fallback, but the only real evidence producer, scorecard.executor_economics(), returns the sample count under the key \"n_tasks\" (see orchestrator/scorecard.py:1324), never \"n\". Since the two other lookups in this function (fix_round_p and cost_to_accepted_usd) DO alias to the real scorecard.executor_economics field names (fix_round_probability, cost_to_accepted), the intent is clearly to be callable directly with that evidence shape \u2014 but this field was missed. With real evidence, _number(measured.get(\"n\")) is always 0.0, so insufficient_samples fires unconditionally regardless of actual sample size, silently defeating eligibility. The unit tests don't catch this because their fixture hand-supplies a key literally named \"n\" instead of reflecting the real producer's schema.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/speculation.py",
+            "line": 78,
+            "issue": "measured.get(\"fix_round_cost_usd\") has no matching field anywhere in the codebase (grep across orchestrator/*.py finds it nowhere but this file) \u2014 scorecard.executor_economics() has no per-executor \"fix round cost\" metric at all. So with real evidence this is always 0.0 and low_retry_cost fires unconditionally, meaning eligible() can never return eligible:true once wired to actual economics data, contrary to the spec's intent for active/shadow mode to identify genuinely eligible critical tasks.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/speculation.py",
+            "line": 30,
+            "issue": "_config() does `section = cfg.get(\"speculation\", cfg)` \u2014 when pool.toml has no [speculation] section (true today; grep of .orchestrator/pool.toml shows no such section), the fallback default is the entire root config dict `cfg` itself, not {}. That whole dict (all of [daemon], [planner], [review], [codex], [executors], etc.) then gets merged into `values` via `{**DEFAULTS, **section}`. It happens to be harmless right now only because no top-level pool.toml key currently collides with mode/min_fix_round_p/min_samples/min_retry_cost_usd, but it's the wrong fallback (should be {}) and would silently corrupt speculation settings if any future top-level config key collided with those names.",
+            "severity": "med"
+          }
+        ],
+        "packet_version": "65387f5ca050",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789976724.654329,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789976724.703661,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 3,
+        "findings_by_severity": {
+          "high": 2,
+          "med": 1,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "4c3b031d5dd093413f73531c20987803a7cf2f8b",
+        "packet_version": "65387f5ca050",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 3,
+      "findings_by_severity": {
+        "high": 2,
+        "med": 1,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "4c3b031d5dd093413f73531c20987803a7cf2f8b",
+      "packet_version": "65387f5ca050",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "4c3b031d5dd093413f73531c20987803a7cf2f8b",
+  "claimed_at": 1789976552.440778,
+  "account": "B",
+  "pid": 17057,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 3,
+    "findings_by_severity": {
+      "high": 2,
+      "med": 1,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "4c3b031d5dd093413f73531c20987803a7cf2f8b",
+    "packet_version": "65387f5ca050",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 3,
+  "findings_by_severity": {
+    "high": 2,
+    "med": 1,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "65387f5ca050",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

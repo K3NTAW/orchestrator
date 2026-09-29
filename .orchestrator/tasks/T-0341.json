@@ -1,0 +1,138 @@
+{
+  "id": "T-0341",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 3,
+  "title": "G5 fix round 1: per-session Jev state file writes take the shared state lock, _target_mtime stats the real path and only the logged target is redacted; the seven acceptance tests at f9747a8 stay green (review T-0338)",
+  "spec": "STEP 0: the worktree must contain d7ce217 and f9747a8 (T-0273, sampled Jev gate plus its seven acceptance tests) in git log; never drop or amend them. The two test findings of review T-0338 are already answered by f9747a8: confirm the seven named tests exist and pass, do not rewrite them.\nRemaining findings of review T-0338 on T-0273:\n1. (med) orchestrator/jev_gate.py _record_call does a read-modify-write on .orchestrator/state/runs/jev/session-{id}.json with no lock, while jev.py guards jev_state.json with STATE_LOCK_FILE. PreToolUse hooks fire concurrently for parallel tool calls, so repeat counts can be lost and a partial write makes json.loads fail and silently reset the session state to {}. Guard the read-modify-write with the same lock helper jev.py uses (reuse it, do not add a second locking scheme), write atomically (temp file plus os.replace), and treat an unparseable file as corrupt: log one stderr warning and start from {} instead of silently resetting.\n2. (low) _target returns jev.redact(path) and _target_mtime then calls os.stat on that redacted string, so any path matching a redaction pattern (32+ character alnum runs, content-hashed cache dirs) gets mtime None forever and repeat clearing never fires for it. Keep the real path for os.stat and hashing; redact only the value that is written to gate rows or logs.\nTests to add in tests/test_jev_gate.py: test_record_call_serialises_concurrent_writes (two threads or interleaved calls both land, count is exact), test_corrupt_session_file_warns_and_recovers, test_target_mtime_uses_unredacted_path (a path whose basename is a 40-char hex string gets a real mtime while the logged target is redacted).\nRun .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id in the message; report sha and failures only.",
+  "inputs": [
+    "T-0273",
+    "T-0338"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f9747a8 and d7ce217 below your commit",
+    "tests/test_jev_gate.py::test_sample_mode_is_deterministic, ::test_unsampled_call_makes_no_request, ::test_repeat_detected_without_network, ::test_repeat_cleared_when_mtime_changes, ::test_rows_have_target_hash_and_flags, ::test_block_repeats_denies and tests/test_cli.py::test_jev_diagnose_summary pass",
+    "tests/test_jev_gate.py::test_record_call_serialises_concurrent_writes, ::test_corrupt_session_file_warns_and_recovers, ::test_target_mtime_uses_unredacted_path pass",
+    "orchestrator/jev_gate.py session-file writes go through the jev.py lock helper and os.replace; os.stat is never called on a redacted string (grep)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev_gate.py",
+    "tests/test_jev_gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "fix_round_for": "T-0273"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0341",
+  "codex_thread": "01a0bb82-caa2-74b3-8f60-427811e4ca2f",
+  "result": {
+    "summary": "Implemented and committed as `cb288aa`.\n\nSummary:\n- Added locked, atomic session-state writes with corruption warnings.\n- Fixed mtime checks to use unredacted paths.\n- Added all three requested regression tests.\n\nFiles changed:\n- `orchestrator/jev_gate.py`\n- `tests/test_jev_gate.py`\n\n`.claude/hooks/tests-green.sh` passed. `scripts/tests_green.sh` was unavailable.\n\nFailures-only output: empty.",
+    "executed_by": "codex:luna",
+    "thread": "01a0bb82-caa2-74b3-8f60-427811e4ca2f",
+    "usage": {
+      "input_tokens": 681656,
+      "cached_input_tokens": 639744,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6073,
+      "reasoning_output_tokens": 2215
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789852304.808157,
+      "pipeline": {
+        "dispatched_at": 1789852304.808117
+      }
+    },
+    {
+      "ts": 1789852305.9278982,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0341",
+      "claimed_at": 1789852305.9275699
+    },
+    {
+      "ts": 1789852305.929091,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1789852482.301922,
+      "codex_thread": "01a0bb82-caa2-74b3-8f60-427811e4ca2f"
+    },
+    {
+      "ts": 1789852482.30419,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed as `cb288aa`.\n\nSummary:\n- Added locked, atomic session-state writes with corruption warnings.\n- Fixed mtime checks to use unredacted paths.\n- Added all three requested regression tests.\n\nFiles changed:\n- `orchestrator/jev_gate.py`\n- `tests/test_jev_gate.py`\n\n`.claude/hooks/tests-green.sh` passed. `scripts/tests_green.sh` was unavailable.\n\nFailures-only output: empty.",
+        "executed_by": "codex:luna",
+        "thread": "01a0bb82-caa2-74b3-8f60-427811e4ca2f",
+        "usage": {
+          "input_tokens": 681656,
+          "cached_input_tokens": 639744,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6073,
+          "reasoning_output_tokens": 2215
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789852566.3877,
+      "pipeline": {
+        "dispatched_at": 1789852304.808117,
+        "gated_at": 1789852566.387614,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789852926.732863,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789852954.060829,
+      "pipeline": {
+        "dispatched_at": 1789852304.808117,
+        "gated_at": 1789852566.387614,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789852954.0607529
+      }
+    },
+    {
+      "ts": 1789853011.9039092,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "sha": "7fa4e8d316654947957d4940f5181fad732df28f"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789852304.808117,
+    "gated_at": 1789852566.387614,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789852954.0607529
+  },
+  "claimed_at": 1789852305.9275699,
+  "rounds": 0,
+  "executor": "luna",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0260",
+  "sha": "7fa4e8d316654947957d4940f5181fad732df28f"
+}

@@ -1,0 +1,352 @@
+{
+  "id": "T-0081",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "spec review: C-O3 headless goal entry point (T-0080)",
+  "spec": "Review the spec of execute task T-0080 before any code is written. Judge: is the file scope sufficient and disjoint from other running tasks (T-0078 daemon.py/tests/README, T-0079 spawn.py/pool.py/tests/pool.toml/README; README overlap is accepted, note if the merge order matters); is launching the Planner via `claude -p` with --mcp-config and --append-system-prompt-file sound given how spawn.run_claude launches workers today (spawn.py:99-113); does creating the GOAL task in the target's bus from a subprocess with ORCH_ROOT avoid the process-global ROOT (orchestrator/__init__.py:5); are the acceptance tests checkable without a real claude binary; anything missing for status() to be truthful (a Planner that dies must show as dead). Verdict approve or request_changes with concrete edits to the spec text.",
+  "inputs": [
+    "T-0080"
+  ],
+  "acceptance": [
+    "Verdict posted with concrete spec edits or approve",
+    "Each concern above answered with path:line evidence"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/cli.py",
+    "tests/test_goals.py",
+    ".orchestrator/prompts/planner.md",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0081",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "`--append-system-prompt-file` does not exist in the installed claude CLI. `claude --help | grep -o -- '--append-system-prompt[a-z-]*'` yields only `--append-system-prompt`. The launch would die on an unrecognized argument, while acceptance criterion 1 explicitly requires a test asserting `--append-system-prompt-file` \u2014 so the test suite would go green over a command that can never run. Use `--append-system-prompt \"$(planner.md text)\"` and assert that instead.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "start() auto-installs the scaffold but nothing commits it. install.py's own docstring and README lines 8-12 state that `git worktree add` only checks out committed files, so a Planner launched immediately after a fresh install gets worktrees with no .orchestrator/, no hooks and no prompts \u2014 bus, spawn, merge and every gate silently degrade. cli.py:60 prints 'Next: commit the scaffold' for exactly this reason; the headless path has no human to read it. Spec must either commit the scaffold (git add .orchestrator .claude .mcp*.json .gitignore && git commit) before launching, or refuse to launch and return the install report when the scaffold is uncommitted.",
+        "severity": "high",
+        "line": 60
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "'append to .orchestrator/goals.json under the bus lock' contradicts step (b) and is wrong: bus.locked() flocks STATE/bus.lock where STATE comes from the module-level ROOT computed at import (orchestrator/__init__.py:5-6) \u2014 the orchestrator repo, not repo_path. It would serialize against the wrong repo's writers while leaving the target's goals.json unprotected. Same defect for status()/list() if they call bus.read/get. Spec must say: flock <repo_path>/.orchestrator/bus.lock directly and read task json from <repo_path>/.orchestrator/tasks/*.json; never call bus.* or Pool() for the target.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "No trust_workspace() call. spawn.py:97-105 documents that headless claude ignores project hooks and permissions in an untrusted workspace, and fresh profiles never saw the trust dialog. Combined with --dangerously-skip-permissions, the launched Planner runs with permissions bypassed AND planner-mode.sh / guardrails.sh not firing \u2014 it can edit source and write protected paths, the exact thing the mode exists to prevent. Spec must mark repo_path trusted in the account's CLAUDE_CONFIG_DIR before Popen.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "Headless auth and secrets are dropped versus spawn.run_claude (T-0079, 6e1c253): no CLAUDE_CODE_OAUTH_TOKEN forwarding from acct.oauth_token_env (spawn.py:118-119), and no secrets injection. .mcp.planner.json's github server needs ${GH_WRITE_TOKEN} and pool.toml has no [secrets.planner] section, so the github MCP server fails to start and the GOAL's own acceptance ('Planner closes the goal with a PR') is unreachable on the machine-callable path this task exists for.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Replace --append-system-prompt-file with --append-system-prompt <contents of .orchestrator/prompts/planner.md>; update acceptance criterion 1 to assert the flag that exists.",
+      "Add --strict-mcp-config to the launch command and to the asserted flag set.",
+      "State that goals.py must not use bus.* or Pool() for the target: take an flock on <repo_path>/.orchestrator/bus.lock itself, read tasks from <repo_path>/.orchestrator/tasks/*.json, and parse <repo_path>/.orchestrator/pool.toml with tomllib. Drop the phrase 'under the bus lock'.",
+      "Require trust_workspace(account.config_dir, repo_path) (reuse spawn.trust_workspace) before Popen, and add an acceptance line that hasTrustDialogAccepted is set for repo_path.",
+      "Forward CLAUDE_CODE_OAUTH_TOKEN from the account's oauth_token_env and inject [secrets.planner] via spawn.secrets_for_role('planner'); add a [secrets.planner] GH_WRITE_TOKEN entry, or drop the github server from the headless mcp config and say the PR step is manual.",
+      "Decide the Planner model explicitly: add planner = \"claude-fable-5-1\" under [models] in pool.toml (add pool.toml to scope) or state opus is intended and why it differs from CLAUDE.md.",
+      "Always call install.install(repo_path) rather than gating on pool.toml, return its report, and either commit the scaffold in repo_path before launching or refuse to launch while it is uncommitted \u2014 cite install.py's worktree constraint as the reason.",
+      "Move goals.json to .orchestrator/runs/goals.json, or add .orchestrator/goals.json to install.IGNORE_LINES and this repo's .gitignore (widening scope to install.py and .gitignore).",
+      "mkdir -p the runs directory before opening the planner log.",
+      "Rename list() to list_goals() and map the CLI verb to it; reuse daemon.alive for the pid check and pair pid with started_at so a reused pid is not reported alive.",
+      "Add `goal stop <repo> [id]` (SIGTERM the recorded pid, mark the goals.json entry stopped) so a detached Planner has a documented kill path, and name `git revert <sha>` as the code rollback in the commit message and decisions.md entry.",
+      "Add an acceptance line that the launch command is never executed when the scaffold is missing/uncommitted, and one asserting the create-task subprocess env sets ORCH_ROOT=repo_path and the task json lands under repo_path/.orchestrator/tasks/."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 9489,
+      "trimmed": {
+        "risks": 8
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789732310.770324,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1789732508.669332,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1789733697.0673568,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0081",
+      "claimed_at": 1789733697.066962
+    },
+    {
+      "ts": 1789733697.075403,
+      "pid": 29051,
+      "account": "B"
+    },
+    {
+      "ts": 1789733892.408509,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "`--append-system-prompt-file` does not exist in the installed claude CLI. `claude --help | grep -o -- '--append-system-prompt[a-z-]*'` yields only `--append-system-prompt`. The launch would die on an unrecognized argument, while acceptance criterion 1 explicitly requires a test asserting `--append-system-prompt-file` \u2014 so the test suite would go green over a command that can never run. Use `--append-system-prompt \"$(planner.md text)\"` and assert that instead.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "start() auto-installs the scaffold but nothing commits it. install.py's own docstring and README lines 8-12 state that `git worktree add` only checks out committed files, so a Planner launched immediately after a fresh install gets worktrees with no .orchestrator/, no hooks and no prompts \u2014 bus, spawn, merge and every gate silently degrade. cli.py:60 prints 'Next: commit the scaffold' for exactly this reason; the headless path has no human to read it. Spec must either commit the scaffold (git add .orchestrator .claude .mcp*.json .gitignore && git commit) before launching, or refuse to launch and return the install report when the scaffold is uncommitted.",
+            "severity": "high",
+            "line": 60
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "'append to .orchestrator/goals.json under the bus lock' contradicts step (b) and is wrong: bus.locked() flocks STATE/bus.lock where STATE comes from the module-level ROOT computed at import (orchestrator/__init__.py:5-6) \u2014 the orchestrator repo, not repo_path. It would serialize against the wrong repo's writers while leaving the target's goals.json unprotected. Same defect for status()/list() if they call bus.read/get. Spec must say: flock <repo_path>/.orchestrator/bus.lock directly and read task json from <repo_path>/.orchestrator/tasks/*.json; never call bus.* or Pool() for the target.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "No trust_workspace() call. spawn.py:97-105 documents that headless claude ignores project hooks and permissions in an untrusted workspace, and fresh profiles never saw the trust dialog. Combined with --dangerously-skip-permissions, the launched Planner runs with permissions bypassed AND planner-mode.sh / guardrails.sh not firing \u2014 it can edit source and write protected paths, the exact thing the mode exists to prevent. Spec must mark repo_path trusted in the account's CLAUDE_CONFIG_DIR before Popen.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "Headless auth and secrets are dropped versus spawn.run_claude (T-0079, 6e1c253): no CLAUDE_CODE_OAUTH_TOKEN forwarding from acct.oauth_token_env (spawn.py:118-119), and no secrets injection. .mcp.planner.json's github server needs ${GH_WRITE_TOKEN} and pool.toml has no [secrets.planner] section, so the github MCP server fails to start and the GOAL's own acceptance ('Planner closes the goal with a PR') is unreachable on the machine-callable path this task exists for.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Replace --append-system-prompt-file with --append-system-prompt <contents of .orchestrator/prompts/planner.md>; update acceptance criterion 1 to assert the flag that exists.",
+          "Add --strict-mcp-config to the launch command and to the asserted flag set.",
+          "State that goals.py must not use bus.* or Pool() for the target: take an flock on <repo_path>/.orchestrator/bus.lock itself, read tasks from <repo_path>/.orchestrator/tasks/*.json, and parse <repo_path>/.orchestrator/pool.toml with tomllib. Drop the phrase 'under the bus lock'.",
+          "Require trust_workspace(account.config_dir, repo_path) (reuse spawn.trust_workspace) before Popen, and add an acceptance line that hasTrustDialogAccepted is set for repo_path.",
+          "Forward CLAUDE_CODE_OAUTH_TOKEN from the account's oauth_token_env and inject [secrets.planner] via spawn.secrets_for_role('planner'); add a [secrets.planner] GH_WRITE_TOKEN entry, or drop the github server from the headless mcp config and say the PR step is manual.",
+          "Decide the Planner model explicitly: add planner = \"claude-fable-5-1\" under [models] in pool.toml (add pool.toml to scope) or state opus is intended and why it differs from CLAUDE.md.",
+          "Always call install.install(repo_path) rather than gating on pool.toml, return its report, and either commit the scaffold in repo_path before launching or refuse to launch while it is uncommitted \u2014 cite install.py's worktree constraint as the reason.",
+          "Move goals.json to .orchestrator/runs/goals.json, or add .orchestrator/goals.json to install.IGNORE_LINES and this repo's .gitignore (widening scope to install.py and .gitignore).",
+          "mkdir -p the runs directory before opening the planner log.",
+          "Rename list() to list_goals() and map the CLI verb to it; reuse daemon.alive for the pid check and pair pid with started_at so a reused pid is not reported alive.",
+          "Add `goal stop <repo> [id]` (SIGTERM the recorded pid, mark the goals.json entry stopped) so a detached Planner has a documented kill path, and name `git revert <sha>` as the code rollback in the commit message and decisions.md entry.",
+          "Add an acceptance line that the launch command is never executed when the scaffold is missing/uncommitted, and one asserting the create-task subprocess env sets ORCH_ROOT=repo_path and the task json lands under repo_path/.orchestrator/tasks/."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 9489,
+          "trimmed": {
+            "risks": 8
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789733892.410885,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "`--append-system-prompt-file` does not exist in the installed claude CLI. `claude --help | grep -o -- '--append-system-prompt[a-z-]*'` yields only `--append-system-prompt`. The launch would die on an unrecognized argument, while acceptance criterion 1 explicitly requires a test asserting `--append-system-prompt-file` \u2014 so the test suite would go green over a command that can never run. Use `--append-system-prompt \"$(planner.md text)\"` and assert that instead.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "start() auto-installs the scaffold but nothing commits it. install.py's own docstring and README lines 8-12 state that `git worktree add` only checks out committed files, so a Planner launched immediately after a fresh install gets worktrees with no .orchestrator/, no hooks and no prompts \u2014 bus, spawn, merge and every gate silently degrade. cli.py:60 prints 'Next: commit the scaffold' for exactly this reason; the headless path has no human to read it. Spec must either commit the scaffold (git add .orchestrator .claude .mcp*.json .gitignore && git commit) before launching, or refuse to launch and return the install report when the scaffold is uncommitted.",
+          "severity": "high",
+          "line": 60
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "'append to .orchestrator/goals.json under the bus lock' contradicts step (b) and is wrong: bus.locked() flocks STATE/bus.lock where STATE comes from the module-level ROOT computed at import (orchestrator/__init__.py:5-6) \u2014 the orchestrator repo, not repo_path. It would serialize against the wrong repo's writers while leaving the target's goals.json unprotected. Same defect for status()/list() if they call bus.read/get. Spec must say: flock <repo_path>/.orchestrator/bus.lock directly and read task json from <repo_path>/.orchestrator/tasks/*.json; never call bus.* or Pool() for the target.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "No trust_workspace() call. spawn.py:97-105 documents that headless claude ignores project hooks and permissions in an untrusted workspace, and fresh profiles never saw the trust dialog. Combined with --dangerously-skip-permissions, the launched Planner runs with permissions bypassed AND planner-mode.sh / guardrails.sh not firing \u2014 it can edit source and write protected paths, the exact thing the mode exists to prevent. Spec must mark repo_path trusted in the account's CLAUDE_CONFIG_DIR before Popen.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Headless auth and secrets are dropped versus spawn.run_claude (T-0079, 6e1c253): no CLAUDE_CODE_OAUTH_TOKEN forwarding from acct.oauth_token_env (spawn.py:118-119), and no secrets injection. .mcp.planner.json's github server needs ${GH_WRITE_TOKEN} and pool.toml has no [secrets.planner] section, so the github MCP server fails to start and the GOAL's own acceptance ('Planner closes the goal with a PR') is unreachable on the machine-callable path this task exists for.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "--mcp-config without --strict-mcp-config: claude still loads the repo's own .mcp.json, which README instructs users to create as a copy of .mcp.planner.json. The orchestrator and bus servers get registered twice, the second copy possibly without --project/ORCH_ROOT pointing at the target (install.py:58-69 only rewrites files it writes). Add --strict-mcp-config and assert it in the flags test.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/prompts/planner.md",
+          "issue": "Model selection is dead code plus a documented contradiction. [models] in pool.toml has haiku/sonnet/opus and no planner key, so 'the planner model from pool.toml if present' never fires and every launch gets claude-opus-5 \u2014 while CLAUDE.md and README line 3 both define the Planner as Fable 5.1. Silent fallback to a different model than the mode is written for. Either add planner = \"claude-fable-5-1\" to pool.toml (widens scope) or state explicitly that opus is the intended headless Planner and why.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Scaffold sentinel is too narrow. install() uses create_if_absent for pool.toml, so a repo can have pool.toml while missing .mcp.planner.json, prompts/planner.md (which this task introduces) or the hooks \u2014 any target installed before this change hits exactly that. Gating on pool.toml alone skips the install and then launches with a missing --mcp-config file. install() is idempotent and reports kept/updated, so just always call it, or gate on .mcp.planner.json and prompts/planner.md too.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/prompts/planner.md",
+          "issue": ".orchestrator/goals.json is mutable runtime state (pid, started_at) written into a committed directory, but it is absent from install.IGNORE_LINES (install.py:9-13) and from this repo's .gitignore, neither of which is in scope. Every goal start dirties the target tree; no-uncommitted.sh refuses to idle on a dirty worktree and the scaffold commit would capture a live pid. Either widen scope to install.py + .gitignore, or place the file under .orchestrator/runs/ which is already ignored.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "tests/test_goals.py",
+          "issue": "start_creates_goal_task_in_target_bus as written forces a real `uv run --project` subprocess (acceptance says 'read the json'), which needs uv on PATH and takes seconds. Worse, tests/_harness.py sets ORCH_ROOT process-wide to TMP at import, so the child inherits it unless start() overrides explicitly \u2014 a passing test could be reading the harness root's bus, not the target's. Spec must state the child env is os.environ | {'ORCH_ROOT': str(repo_path)} and have the test assert the created json lands under repo_path/.orchestrator/tasks/.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "No rollback path and no way to stop a launched Planner. CLAUDE.md step 11 requires every change to name its revert path; beyond `git revert <sha>` for the code, `goal start` forks a detached, permissions-bypassed claude process whose only record is a pid in goals.json. There is no `goal stop`, so a runaway Planner is killable only by hand.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "`def list(...)` shadows the builtin for the whole module; any list(...) call in goals.py (building argv, coercing scope) then raises TypeError. Also 'planner pid alive' should reuse daemon.alive (daemon.py:35-39) rather than re-implement, and pid reuse means a dead goal can report alive \u2014 pair the pid with started_at or the log file mtime.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": ".orchestrator/runs/ is gitignored and install() never creates it, so on a freshly installed target Popen(stdout=open(runs/planner-<GOAL>.log)) raises FileNotFoundError before the Planner ever starts.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "hold_reason": "no account with headroom",
+  "claimed_at": 1789733697.066962,
+  "pid": 29051,
+  "account": "B",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "`--append-system-prompt-file` does not exist in the installed claude CLI. `claude --help | grep -o -- '--append-system-prompt[a-z-]*'` yields only `--append-system-prompt`. The launch would die on an unrecognized argument, while acceptance criterion 1 explicitly requires a test asserting `--append-system-prompt-file` \u2014 so the test suite would go green over a command that can never run. Use `--append-system-prompt \"$(planner.md text)\"` and assert that instead.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "start() auto-installs the scaffold but nothing commits it. install.py's own docstring and README lines 8-12 state that `git worktree add` only checks out committed files, so a Planner launched immediately after a fresh install gets worktrees with no .orchestrator/, no hooks and no prompts \u2014 bus, spawn, merge and every gate silently degrade. cli.py:60 prints 'Next: commit the scaffold' for exactly this reason; the headless path has no human to read it. Spec must either commit the scaffold (git add .orchestrator .claude .mcp*.json .gitignore && git commit) before launching, or refuse to launch and return the install report when the scaffold is uncommitted.",
+      "severity": "high",
+      "line": 60
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "'append to .orchestrator/goals.json under the bus lock' contradicts step (b) and is wrong: bus.locked() flocks STATE/bus.lock where STATE comes from the module-level ROOT computed at import (orchestrator/__init__.py:5-6) \u2014 the orchestrator repo, not repo_path. It would serialize against the wrong repo's writers while leaving the target's goals.json unprotected. Same defect for status()/list() if they call bus.read/get. Spec must say: flock <repo_path>/.orchestrator/bus.lock directly and read task json from <repo_path>/.orchestrator/tasks/*.json; never call bus.* or Pool() for the target.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "No trust_workspace() call. spawn.py:97-105 documents that headless claude ignores project hooks and permissions in an untrusted workspace, and fresh profiles never saw the trust dialog. Combined with --dangerously-skip-permissions, the launched Planner runs with permissions bypassed AND planner-mode.sh / guardrails.sh not firing \u2014 it can edit source and write protected paths, the exact thing the mode exists to prevent. Spec must mark repo_path trusted in the account's CLAUDE_CONFIG_DIR before Popen.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Headless auth and secrets are dropped versus spawn.run_claude (T-0079, 6e1c253): no CLAUDE_CODE_OAUTH_TOKEN forwarding from acct.oauth_token_env (spawn.py:118-119), and no secrets injection. .mcp.planner.json's github server needs ${GH_WRITE_TOKEN} and pool.toml has no [secrets.planner] section, so the github MCP server fails to start and the GOAL's own acceptance ('Planner closes the goal with a PR') is unreachable on the machine-callable path this task exists for.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "--mcp-config without --strict-mcp-config: claude still loads the repo's own .mcp.json, which README instructs users to create as a copy of .mcp.planner.json. The orchestrator and bus servers get registered twice, the second copy possibly without --project/ORCH_ROOT pointing at the target (install.py:58-69 only rewrites files it writes). Add --strict-mcp-config and assert it in the flags test.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/prompts/planner.md",
+      "issue": "Model selection is dead code plus a documented contradiction. [models] in pool.toml has haiku/sonnet/opus and no planner key, so 'the planner model from pool.toml if present' never fires and every launch gets claude-opus-5 \u2014 while CLAUDE.md and README line 3 both define the Planner as Fable 5.1. Silent fallback to a different model than the mode is written for. Either add planner = \"claude-fable-5-1\" to pool.toml (widens scope) or state explicitly that opus is the intended headless Planner and why.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Scaffold sentinel is too narrow. install() uses create_if_absent for pool.toml, so a repo can have pool.toml while missing .mcp.planner.json, prompts/planner.md (which this task introduces) or the hooks \u2014 any target installed before this change hits exactly that. Gating on pool.toml alone skips the install and then launches with a missing --mcp-config file. install() is idempotent and reports kept/updated, so just always call it, or gate on .mcp.planner.json and prompts/planner.md too.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/prompts/planner.md",
+      "issue": ".orchestrator/goals.json is mutable runtime state (pid, started_at) written into a committed directory, but it is absent from install.IGNORE_LINES (install.py:9-13) and from this repo's .gitignore, neither of which is in scope. Every goal start dirties the target tree; no-uncommitted.sh refuses to idle on a dirty worktree and the scaffold commit would capture a live pid. Either widen scope to install.py + .gitignore, or place the file under .orchestrator/runs/ which is already ignored.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "tests/test_goals.py",
+      "issue": "start_creates_goal_task_in_target_bus as written forces a real `uv run --project` subprocess (acceptance says 'read the json'), which needs uv on PATH and takes seconds. Worse, tests/_harness.py sets ORCH_ROOT process-wide to TMP at import, so the child inherits it unless start() overrides explicitly \u2014 a passing test could be reading the harness root's bus, not the target's. Spec must state the child env is os.environ | {'ORCH_ROOT': str(repo_path)} and have the test assert the created json lands under repo_path/.orchestrator/tasks/.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "No rollback path and no way to stop a launched Planner. CLAUDE.md step 11 requires every change to name its revert path; beyond `git revert <sha>` for the code, `goal start` forks a detached, permissions-bypassed claude process whose only record is a pid in goals.json. There is no `goal stop`, so a runaway Planner is killable only by hand.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "`def list(...)` shadows the builtin for the whole module; any list(...) call in goals.py (building argv, coercing scope) then raises TypeError. Also 'planner pid alive' should reuse daemon.alive (daemon.py:35-39) rather than re-implement, and pid reuse means a dead goal can report alive \u2014 pair the pid with started_at or the log file mtime.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": ".orchestrator/runs/ is gitignored and install() never creates it, so on a freshly installed target Popen(stdout=open(runs/planner-<GOAL>.log)) raises FileNotFoundError before the Planner ever starts.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

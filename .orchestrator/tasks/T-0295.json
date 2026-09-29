@@ -1,0 +1,109 @@
+{
+  "id": "T-0295",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G2b: repo map generator \u2014 orchestrator repomap writes memory/architecture.md (module, public symbols, one-line purpose, commit sha) under about 1,000 tokens, refreshed after every merge",
+  "spec": "memory/architecture.md is empty (the record.sh set architecture path exists but nothing generates content). The analysis asks for an aider-style repo map: selected symbols and signatures within a token budget, versioned against repository state, retrieved by workers instead of rediscovered.\nChange:\n1. New orchestrator/repomap.py: build(root, budget_chars=4000) parses every orchestrator/*.py with ast, takes the module docstring's first sentence, top-level classes and functions with their signatures (name and parameter names, no bodies), ranks modules by how many other modules import them (simple import graph) and trims the lowest-ranked symbols first until the budget fits; output is markdown: a header line 'repo map <sha> <date>' then one section per module with the symbol list; deterministic ordering.\n2. cli.py: `orchestrator repomap [--budget N] [--stdout]` writes .orchestrator/memory/architecture.md (or prints).\n3. merge.py: after a successful fast-forward, regenerate architecture.md in the ORCH_ROOT checkout only when the merged diff touched orchestrator/*.py (cheap check via git diff --name-only), never failing the merge if generation raises (log to stderr).\n4. Tests in tests/test_repomap.py: test_build_fits_budget (a fixture package with three modules, one importing the other two, budget forces trimming and keeps the most-imported module), test_build_deterministic, test_header_has_sha; tests/test_merge.py::test_merge_refreshes_repomap_on_py_change (monkeypatched build called once).\nNote: do not let the generator import the modules; ast only.",
+  "inputs": [
+    "T-0267"
+  ],
+  "acceptance": [
+    "tests/test_repomap.py::test_build_fits_budget, ::test_build_deterministic, ::test_header_has_sha pass",
+    "tests/test_merge.py::test_merge_refreshes_repomap_on_py_change passes",
+    "uv run orchestrator repomap --stdout on this repo prints under 4,000 characters and lists daemon.py, bus.py and spawn.py with their public functions",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/repomap.py",
+    "orchestrator/cli.py",
+    "orchestrator/merge.py",
+    "tests/test_repomap.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0295",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/repomap.py",
+        "line": 85,
+        "issue": "Budget-trim loop sorts candidates by (rank, module_name, symbol) and pops from the front, so it strips every symbol from one module completely (in rank-then-alphabetical order) before touching the next module at the same rank, instead of spreading cuts evenly. Verified by running `uv run orchestrator repomap --stdout` on this repo: output is 3913 chars (under budget) and bus.py's functions survive, but daemon.py (rank 3) and spawn.py (rank 7) sections show only their module docstring with zero `- def ...` lines \u2014 every symbol below bus/pool's rank was wiped out first. This directly fails acceptance criterion 3, which requires daemon.py, bus.py and spawn.py to all show their public functions. The 3-module test fixture (ranks 0 vs 1, one symbol per module) is too small to expose this uneven-stripping behavior.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/merge.py",
+        "line": 35,
+        "issue": "`if not os.environ.get(IN_TESTS_GREEN):` guards the entire tests-green.sh invocation. This is needed so a nested self-hosting test run (pytest inheriting gate_env from the outer subprocess.run call) doesn't recursively re-invoke the real gate script \u2014 but the same check means any process that has ORCH_TESTS_GREEN set in its own environment for any other reason (leaked env var, unrelated tooling, future bug) will silently skip the test gate entirely and fast-forward the merge with unverified code. This is the one hard safety property the module's docstring promises ('rebase -> tests-green -> fast-forward') and the house rule 'tests-green.sh exits 0 is the merge bar' depends on. An explicit parameter threaded through nested calls would be safer than an ambient, generically-named env var controlling a security-critical gate.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789847454.393891,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0295",
+      "claimed_at": 1789847454.393566
+    },
+    {
+      "ts": 1789847454.395348,
+      "account": "B"
+    },
+    {
+      "ts": 1789847454.4281752,
+      "pid": 69890,
+      "account": "B"
+    },
+    {
+      "ts": 1789847784.92683,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/repomap.py",
+            "line": 85,
+            "issue": "Budget-trim loop sorts candidates by (rank, module_name, symbol) and pops from the front, so it strips every symbol from one module completely (in rank-then-alphabetical order) before touching the next module at the same rank, instead of spreading cuts evenly. Verified by running `uv run orchestrator repomap --stdout` on this repo: output is 3913 chars (under budget) and bus.py's functions survive, but daemon.py (rank 3) and spawn.py (rank 7) sections show only their module docstring with zero `- def ...` lines \u2014 every symbol below bus/pool's rank was wiped out first. This directly fails acceptance criterion 3, which requires daemon.py, bus.py and spawn.py to all show their public functions. The 3-module test fixture (ranks 0 vs 1, one symbol per module) is too small to expose this uneven-stripping behavior.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/merge.py",
+            "line": 35,
+            "issue": "`if not os.environ.get(IN_TESTS_GREEN):` guards the entire tests-green.sh invocation. This is needed so a nested self-hosting test run (pytest inheriting gate_env from the outer subprocess.run call) doesn't recursively re-invoke the real gate script \u2014 but the same check means any process that has ORCH_TESTS_GREEN set in its own environment for any other reason (leaked env var, unrelated tooling, future bug) will silently skip the test gate entirely and fast-forward the merge with unverified code. This is the one hard safety property the module's docstring promises ('rebase -> tests-green -> fast-forward') and the house rule 'tests-green.sh exits 0 is the merge bar' depends on. An explicit parameter threaded through nested calls would be safer than an ambient, generically-named env var controlling a security-critical gate.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789847784.928234,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789847454.393566,
+  "account": "B",
+  "pid": 69890,
+  "review_verdict": "request_changes"
+}

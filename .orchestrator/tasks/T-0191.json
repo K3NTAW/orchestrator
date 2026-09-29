@@ -1,0 +1,164 @@
+{
+  "id": "T-0191",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): D5 v2 scorecard by task and goal (T-0186, executed by claude:sonnet)",
+  "spec": "Review the T-0186 delta: `git diff 7285bbd 38d91fe` in worktree wt/T-0186 (orchestrator/scorecard.py, orchestrator/cli.py, tests/test_scorecard.py, README.md). Acceptance: (1) build()/by_task()/by_goal() aggregate .orchestrator/runs/*.jsonl records by task (usd, tokens = input + output + cache_read // 10, wall, role, tier) and by goal (children via tasks/<id>.json parent, plus planner runs from planner_runs.json when present, plus a planner line from planner_usage.json when present shown as tokens with usd \"-\"); (2) `scorecard --by task|goal` sorted by usd descending with a total line; --by goal shows the execute/review/spec_review/scout/planner split in percent (planner by tokens with an asterisk and footnote when usd is unknown); missing planner files print \"-\" not 0; (3) default output byte-identical (test); (4) the four named tests exist and are meaningful; (5) malformed jsonl lines or missing task files are skipped, never fatal; no new dependency. Check the token formula matches spawn.run_claude and pool.tally_planner exactly, that the goal rollup does not double count a task that is both a child and has its own runs, and that nothing reads transcript content. Run `uv run python -m unittest tests.test_scorecard -q` once. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0186"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five acceptance points confirmed with evidence from the delta",
+    "Token formula and rollup double-counting explicitly checked"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_scorecard.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0191",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 195,
+        "issue": "Wrong key: pool._save_planner_account writes {acct_id: {\"window_tokens\", \"day_tokens\", \"offsets\"}} (pool.py:49, read back at pool.py:174 as entry.get(\"day_tokens\")). This sums v.get(\"planner_day_tokens\", 0), which never exists on disk, so against a real .orchestrator/planner_usage.json it returns 0 \u2014 and because the file exists, planner is not None and the table prints \"0.0%*\" / \"0\" instead of the real figure or \"-\". Verified: a file written in the real shape with day_tokens=50000 yields planner={'tokens': 0} and cell ('0.0%*', 0). Use \"day_tokens\".",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 226,
+        "issue": "planner_tokens is a single pool-wide value computed once outside the goal loop and stamped onto every goal, so the same token count is double-counted across every row of --by goal (reproduced: two goals, identical planner tokens on both). It is also a *day* counter that resets at day rollover (pool.py:81), so it is neither goal-scoped nor cumulative \u2014 it cannot answer \"what share of this goal was planner\". Either attribute per goal (planner_runs.json is already read per goal) or print it once as a pool-wide footer line, not as a per-goal percent column.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 217,
+        "issue": "Tasks whose role is outside ROLE_BUCKETS (bus.ROLES also has \"challenge\" and \"triage\") are dropped entirely, so their usd never lands in total_usd. cli.py:163 then prints that partial figure under a \"total\" row that reads as the goal's full spend. Reproduced: a goal with a $2 execute and a $5 challenge reports total_usd 2.0. Add an \"other\" bucket or at least sum every child task's usd into total_usd.",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_scorecard.py",
+        "line": 99,
+        "issue": "The fixture writes {\"A\": {\"planner_day_tokens\": 400}}, which is not the shape pool writes; the test therefore green-lights the key bug at scorecard.py:195. Build the fixture with pool._save_planner_account (or the literal {\"window_tokens\", \"day_tokens\", \"offsets\"} shape) so the assertion has contact with production data.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 254,
+        "issue": "n_runs is computed per goal from planner_runs.json but never rendered by any caller, and when planner_runs exist while planner_usage.json is absent the cell degrades to (\"-\", \"-\") \u2014 indistinguishable from \"no planner data at all\", which the docstring at line 246 explicitly claims that output means. README.md:34 advertises planner_runs.json as a source of the printed line; nothing prints it.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_scorecard.py",
+        "line": 131,
+        "issue": "sys.argv is overwritten and never restored (no addCleanup/try-finally), so it leaks to every test that runs after this one in the same process. Also the only behavioural assertion is the header string plus a column count, which would still pass if every number were wrong.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "line": 254,
+        "issue": "format_planner_cell is documented as returning (str, str) but returns planner[\"tokens\"] as an int in the data path; the test asserts == 500 (int) while the \"-\" path returns a str. Harmless in the f-string, but the mixed return type makes any future caller that does string ops on it break only when data is present.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789764659.132899,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0191",
+      "claimed_at": 1789764659.1324852
+    },
+    {
+      "ts": 1789764659.175543,
+      "pid": 55489,
+      "account": "A"
+    },
+    {
+      "ts": 1789764795.338486,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 195,
+            "issue": "Wrong key: pool._save_planner_account writes {acct_id: {\"window_tokens\", \"day_tokens\", \"offsets\"}} (pool.py:49, read back at pool.py:174 as entry.get(\"day_tokens\")). This sums v.get(\"planner_day_tokens\", 0), which never exists on disk, so against a real .orchestrator/planner_usage.json it returns 0 \u2014 and because the file exists, planner is not None and the table prints \"0.0%*\" / \"0\" instead of the real figure or \"-\". Verified: a file written in the real shape with day_tokens=50000 yields planner={'tokens': 0} and cell ('0.0%*', 0). Use \"day_tokens\".",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 226,
+            "issue": "planner_tokens is a single pool-wide value computed once outside the goal loop and stamped onto every goal, so the same token count is double-counted across every row of --by goal (reproduced: two goals, identical planner tokens on both). It is also a *day* counter that resets at day rollover (pool.py:81), so it is neither goal-scoped nor cumulative \u2014 it cannot answer \"what share of this goal was planner\". Either attribute per goal (planner_runs.json is already read per goal) or print it once as a pool-wide footer line, not as a per-goal percent column.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 217,
+            "issue": "Tasks whose role is outside ROLE_BUCKETS (bus.ROLES also has \"challenge\" and \"triage\") are dropped entirely, so their usd never lands in total_usd. cli.py:163 then prints that partial figure under a \"total\" row that reads as the goal's full spend. Reproduced: a goal with a $2 execute and a $5 challenge reports total_usd 2.0. Add an \"other\" bucket or at least sum every child task's usd into total_usd.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_scorecard.py",
+            "line": 99,
+            "issue": "The fixture writes {\"A\": {\"planner_day_tokens\": 400}}, which is not the shape pool writes; the test therefore green-lights the key bug at scorecard.py:195. Build the fixture with pool._save_planner_account (or the literal {\"window_tokens\", \"day_tokens\", \"offsets\"} shape) so the assertion has contact with production data.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 254,
+            "issue": "n_runs is computed per goal from planner_runs.json but never rendered by any caller, and when planner_runs exist while planner_usage.json is absent the cell degrades to (\"-\", \"-\") \u2014 indistinguishable from \"no planner data at all\", which the docstring at line 246 explicitly claims that output means. README.md:34 advertises planner_runs.json as a source of the printed line; nothing prints it.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_scorecard.py",
+            "line": 131,
+            "issue": "sys.argv is overwritten and never restored (no addCleanup/try-finally), so it leaks to every test that runs after this one in the same process. Also the only behavioural assertion is the header string plus a column count, which would still pass if every number were wrong.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "line": 254,
+            "issue": "format_planner_cell is documented as returning (str, str) but returns planner[\"tokens\"] as an int in the data path; the test asserts == 500 (int) while the \"-\" path returns a str. Harmless in the f-string, but the mixed return type makes any future caller that does string ops on it break only when data is present.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789764795.341113,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789764659.1324852,
+  "pid": 55489,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

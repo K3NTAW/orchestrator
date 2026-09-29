@@ -1,0 +1,166 @@
+{
+  "id": "T-0242",
+  "parent": "T-0240",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 3,
+  "title": "F1: jev-gate in one process per tool call \u2014 enabled check inside the scorer, venv python instead of uv run, latency target under 400 ms",
+  "spec": "Review T-0239 (approve, low): .claude/hooks/jev-gate.sh runs `uv run python -m orchestrator.jev_gate --enabled` and then a second `uv run` for the real scoring, so every Read/Grep/Bash of every worker pays two interpreter startups plus one network call. Measured 704 ms per call from the main checkout. Change:\n1. jev-gate.sh: one invocation. Resolve the interpreter as $ORCH_ROOT/.venv/bin/python when it exists (fall back to `uv run python`), pipe the hook JSON once to `-m orchestrator.jev_gate`; the module itself exits 0 immediately when [jev].enabled is false or the role is not gated, before any import of urllib or the transcript reader. Keep the 3 s alarm and fail-open semantics. Remove the --enabled subcommand or keep it only for tests.\n2. jev_gate.py: import jev lazily after the enabled check; cache the parsed pool.toml [jev] table per process (one read); log latency_ms as before plus startup_ms (time from process start to the ask call) so the scorecard can split interpreter cost from network cost.\n3. Skip scoring entirely (exit 0, no log row) for tool calls whose input is empty or for tool_name Glob with a bare pattern, to save calls that never need judgment; make the skip list a module constant with a test.\nTests in tests/test_jev_gate.py: disabled config exits 0 without importing urllib (assert via a sentinel monkeypatch), the hook script issues exactly one python invocation (subprocess spy or a counter file), startup_ms present in a logged row, skip list honoured. Report the measured latency of one live smoke call in the summary (ORCH_TASK_ID set, key in the Keychain).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_disabled_exits_before_network_imports, ::test_hook_single_invocation, ::test_startup_ms_logged, ::test_skip_list pass",
+    "The summary reports one live smoke call latency_ms under 400 (or explains why not)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    ".claude/hooks/jev-gate.sh",
+    "orchestrator/jev_gate.py",
+    "tests/test_jev_gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0242",
+  "codex_thread": "01a0ba7e-e0f0-7e31-bc81-b7ad81bf4e95",
+  "result": {
+    "summary": "Codex committed 56e33a1 in wt/T-0242 (second thread 01a0ba7e-e0f0-7e31-bc81-b7ad81bf4e95; the first thread was aborted by the 18:16 session restart and resumed from its uncommitted diff). jev-gate.sh now makes one interpreter call ($ORCH_ROOT/.venv/bin/python, uv run fallback), jev_gate.py exits before importing urllib when [jev].enabled is false or the role is not gated, caches the [jev] table per process, logs startup_ms next to latency_ms, and skips empty inputs and bare Glob patterns via a module constant. 13 focused tests plus the suite green; tests-green.sh wt/T-0242 exited 0 (Planner, 18:33). Live smoke call: latency_ms 668.7, startup_ms 80.1: the 400 ms target is missed because the remote Jev call itself takes about 590 ms; interpreter cost is now 80 ms.",
+    "executed_by": "codex:sol",
+    "sha": "56e33a1",
+    "confidence": 0.9,
+    "provenance": "repo",
+    "metrics": {
+      "latency_ms": 668.7,
+      "startup_ms": 80.1
+    }
+  },
+  "events": [
+    {
+      "ts": 1789834421.580531,
+      "pipeline": {
+        "dispatched_at": 1789834421.580416
+      }
+    },
+    {
+      "ts": 1789834422.835485,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0242",
+      "claimed_at": 1789834422.834309
+    },
+    {
+      "ts": 1789834422.838399,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789835236.488946,
+      "codex_thread": "01a0ba71-eb9e-7952-8800-b3e80ed0c96c",
+      "resume_hint": {
+        "thread": "01a0ba71-eb9e-7952-8800-b3e80ed0c96c",
+        "note": "turn aborted 18:16:35 when the daemon --once process exited; worktree holds uncommitted edits"
+      }
+    },
+    {
+      "ts": 1789835246.4894469,
+      "rounds": 1
+    },
+    {
+      "ts": 1789835272.127439,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0242",
+      "claimed_at": 1789835272.127254
+    },
+    {
+      "ts": 1789835272.129637,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789835468.051969,
+      "codex_thread": "01a0ba7e-e0f0-7e31-bc81-b7ad81bf4e95"
+    },
+    {
+      "ts": 1789835601.5885088,
+      "status": "done",
+      "result": {
+        "summary": "Codex committed 56e33a1 in wt/T-0242 (second thread 01a0ba7e-e0f0-7e31-bc81-b7ad81bf4e95; the first thread was aborted by the 18:16 session restart and resumed from its uncommitted diff). jev-gate.sh now makes one interpreter call ($ORCH_ROOT/.venv/bin/python, uv run fallback), jev_gate.py exits before importing urllib when [jev].enabled is false or the role is not gated, caches the [jev] table per process, logs startup_ms next to latency_ms, and skips empty inputs and bare Glob patterns via a module constant. 13 focused tests plus the suite green; tests-green.sh wt/T-0242 exited 0 (Planner, 18:33). Live smoke call: latency_ms 668.7, startup_ms 80.1: the 400 ms target is missed because the remote Jev call itself takes about 590 ms; interpreter cost is now 80 ms.",
+        "executed_by": "codex:astra",
+        "sha": "56e33a1",
+        "confidence": 0.9,
+        "provenance": "repo",
+        "metrics": {
+          "latency_ms": 668.7,
+          "startup_ms": 80.1
+        }
+      }
+    },
+    {
+      "ts": 1789835618.626632,
+      "result": {
+        "summary": "Codex committed 56e33a1 in wt/T-0242 (second thread 01a0ba7e-e0f0-7e31-bc81-b7ad81bf4e95; the first thread was aborted by the 18:16 session restart and resumed from its uncommitted diff). jev-gate.sh now makes one interpreter call ($ORCH_ROOT/.venv/bin/python, uv run fallback), jev_gate.py exits before importing urllib when [jev].enabled is false or the role is not gated, caches the [jev] table per process, logs startup_ms next to latency_ms, and skips empty inputs and bare Glob patterns via a module constant. 13 focused tests plus the suite green; tests-green.sh wt/T-0242 exited 0 (Planner, 18:33). Live smoke call: latency_ms 668.7, startup_ms 80.1: the 400 ms target is missed because the remote Jev call itself takes about 590 ms; interpreter cost is now 80 ms.",
+        "executed_by": "codex:sol",
+        "sha": "56e33a1",
+        "confidence": 0.9,
+        "provenance": "repo",
+        "metrics": {
+          "latency_ms": 668.7,
+          "startup_ms": 80.1
+        }
+      }
+    },
+    {
+      "ts": 1789835682.956987,
+      "pipeline": {
+        "dispatched_at": 1789834421.580416,
+        "gated_at": 1789835682.956855,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789836102.104736,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789836102.303658,
+      "pipeline": {
+        "dispatched_at": 1789834421.580416,
+        "gated_at": 1789835682.956855,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789836102.303571
+      }
+    },
+    {
+      "ts": 1789836162.540436,
+      "status": "done",
+      "merged_into": "goal/T-0240",
+      "sha": "b07a5ff650ee0ec08e06aadd019e703e7c994a78"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789834421.580416,
+    "gated_at": 1789835682.956855,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789836102.303571
+  },
+  "claimed_at": 1789835272.127254,
+  "rounds": 0,
+  "executor": "sol",
+  "resume_hint": {
+    "thread": "01a0ba71-eb9e-7952-8800-b3e80ed0c96c",
+    "note": "turn aborted 18:16:35 when the daemon --once process exited; worktree holds uncommitted edits"
+  },
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0240",
+  "sha": "b07a5ff650ee0ec08e06aadd019e703e7c994a78"
+}

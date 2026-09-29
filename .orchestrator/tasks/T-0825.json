@@ -1,0 +1,183 @@
+{
+  "id": "T-0825",
+  "created_at": 1790094179.591977,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P17/P18 read and search economy, shadow: deterministic repeated-read and repeated-search detection in the Jev tool gate, evidence-pool awareness, action_gate decision rows, read-economy scorecard; nothing blocked",
+  "spec": "Facts (Planner grep, provenance repo): orchestrator/jev_gate.py is the PreToolUse gate for Claude worker sessions (.claude/hooks/jev-gate.sh): it reads the transcript's recent tool calls (read_transcript, RECENT_LIMIT), keeps a session state with exact-repeat detection (_session_state, _record_call, _target_mtime, lines ~150-200), asks Jev needed/redundant/destructive on a deterministic sample ([jev] gate_mode sample/log/block, sample_rate) and logs every evaluated call to .orchestrator/runs/jev/gate.jsonl; [jev] block_repeats = false today; guardrails.sh is the only hook that blocks destructive commands. T-0774 declared the gate's Jev boundary (site \"gate\"). evidence.EvidencePool(goal) (T-0794) holds content-addressed evidence with commit freshness; T-0800 fills it from execute/review packet builds.\nDo:\n1. orchestrator/read_economy.py (new): pure functions over the gate's per-session call history: `classify(call, history, *, evidence=None, head_sha=None)` returns {\"kind\": one of \"first_read\", \"repeated_read_unchanged\" (same path, mtime and size unchanged since the earlier read), \"repeated_read_changed\", \"repeated_search\" (Grep/Glob with identical pattern+path+flags), \"narrower_search\" (same path, pattern contains the earlier pattern), \"evidence_available\" (a fresh source_chunk for that path exists in the EvidencePool for the task's goal at head_sha), \"other\"; \"tokens_estimate\": for reads the file size // 4 bounded by the tool's limit/offset when given, for searches the earlier result size when the transcript carries it else None; \"would_suppress\": True only for repeated_read_unchanged and repeated_search}. Never touches Jev.\n2. jev_gate.py: before the Jev sample decision, run read_economy.classify for Read/Grep/Glob calls and: log the classification into the gate.jsonl row (fields read_kind, tokens_estimate, would_suppress); record decision_log.record(kind=\"action_gate\", subject=task id, candidates=[\"allow\", \"suppress\"], hard_constraints=[\"guardrails.sh decides destructive\", \"block_repeats=false\"], deterministic={\"read_kind\", \"tokens_estimate\", \"would_suppress\"}, jev={\"needed_p\", \"redundant_p\"} when a Jev verdict exists, selected=\"allow\", reason=read_kind, mode=[jev].gate_mode) at most once per call and never for skipped/protected calls; behaviour stays fail-open and nothing is denied (block_repeats stays false; do not touch the block path). Only ambiguous kinds (\"repeated_read_changed\", \"narrower_search\", \"other\" with a prior call on the same path) count toward the Jev sample; first reads never consume Jev budget (document this as the P18 rule \"Jev only for ambiguous semantic equivalence\").\n3. Scorecard: `read_economy.summary(root)` over gate.jsonl: per role and per task_class: reads, repeated_read_unchanged, repeated_search, evidence_available, tokens_avoidable (sum of tokens_estimate where would_suppress), jev_calls_avoided (first reads not sampled), and the false-suppression proxy: a would_suppress read whose path was edited by the same session within the next 5 calls (needs the edit; if the transcript does not show later calls at gate time, compute it offline from the transcript path recorded in the row). `orchestrator scorecard --reads` prints it.\n4. Docs: docs/context-economy/09-read-economy.md (\u226460 lines): kinds, what shadow logs, the P18 rule, what active would do (suppress with a structured \"already read at <call>\" reply) and why it is not enabled (needs the false-suppression proxy at zero over min_samples), revert path.\nTests (unittest, `import _harness` first; the gate tests already exist in tests/test_jev_gate.py, extend them): tests/test_read_economy.py::test_repeated_read_unchanged_detected_by_mtime_and_size, ::test_repeated_search_and_narrower_search, ::test_evidence_available_from_pool, ::test_summary_counts_tokens_avoidable_and_false_suppression_proxy; tests/test_jev_gate.py::test_first_reads_skip_jev_sample_and_log_read_kind, ::test_gate_never_denies_on_would_suppress.\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.",
+  "inputs": [
+    "T-0809"
+  ],
+  "acceptance": [
+    "tests/test_read_economy.py::test_repeated_read_unchanged_detected_by_mtime_and_size passes",
+    "tests/test_read_economy.py::test_repeated_search_and_narrower_search passes",
+    "tests/test_read_economy.py::test_evidence_available_from_pool passes",
+    "tests/test_read_economy.py::test_summary_counts_tokens_avoidable_and_false_suppression_proxy passes",
+    "tests/test_jev_gate.py::test_first_reads_skip_jev_sample_and_log_read_kind passes",
+    "tests/test_jev_gate.py::test_gate_never_denies_on_would_suppress passes",
+    "docs/context-economy/09-read-economy.md exists; `uv run orchestrator scorecard --reads` runs; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/read_economy.py",
+    "orchestrator/jev_gate.py",
+    "orchestrator/cli.py",
+    "tests/test_read_economy.py",
+    "tests/test_jev_gate.py",
+    "docs/context-economy/09-read-economy.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0825",
+  "codex_thread": null,
+  "result": {
+    "summary": "The read-economy shadow logging is implemented correctly and matches the P18 rule, but the refactor of the final block in run() (jev_gate.py ~429-437) routes all economy-tracked calls (Read/Grep/Glob) through finish(), which unconditionally returns 0 and never checks decide()'s blocked verdict. This silently disables Jev's ability to block redundant/unneeded Read/Grep/Glob calls in gate_mode=block, well beyond the spec's intent of only shadow-logging the read-economy signal without suppressing on it. The pre-existing regression test for this exact scenario (test_block_mode_blocks_redundant_read) was altered to target Bash instead of Read, masking the regression. Request changes: restore actual blocking behavior for economy-tracked calls when decide() returns blocked=True, and revert/fix the test so it again exercises a Read call.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 436,
+        "issue": "In gate_mode=block, once a Read/Grep/Glob call is classified ambiguous and sampled, `if economy: return finish(answers, scored=True, ...)` returns before checking `decide()`'s `blocked` result. `finish()` hardcodes blocked=False in the log and always returns 0, so a confident Jev redundant/unneeded verdict on a Read/Grep/Glob call no longer blocks the call. The spec only asked to shadow-log the read-economy classification and never suppress based on would_suppress; it did not ask to disable the existing Jev-based block path for these tools. This is a real behavior regression.",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_jev_gate.py",
+        "line": 351,
+        "issue": "test_block_mode_blocks_redundant_read was changed from tool_name \"Read\" to tool_name \"Bash\" in this diff. With \"Bash\" the call never enters the new economy branch, so the test no longer exercises or catches the blocking regression at jev_gate.py:436-437, despite its name still claiming to cover a redundant read being blocked.",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "7e240304f945",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790094179.5938601,
+      "reviewed_sha": "43f6b763bf6cf941d167bfe36baf144f84795664"
+    },
+    {
+      "ts": 1790094185.9529028,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0825",
+      "claimed_at": 1790094185.951498
+    },
+    {
+      "ts": 1790094185.956141,
+      "account": "B"
+    },
+    {
+      "ts": 1790094188.03207,
+      "pid": 9785,
+      "account": "B"
+    },
+    {
+      "ts": 1790094311.593379,
+      "status": "done",
+      "result": {
+        "summary": "The read-economy shadow logging is implemented correctly and matches the P18 rule, but the refactor of the final block in run() (jev_gate.py ~429-437) routes all economy-tracked calls (Read/Grep/Glob) through finish(), which unconditionally returns 0 and never checks decide()'s blocked verdict. This silently disables Jev's ability to block redundant/unneeded Read/Grep/Glob calls in gate_mode=block, well beyond the spec's intent of only shadow-logging the read-economy signal without suppressing on it. The pre-existing regression test for this exact scenario (test_block_mode_blocks_redundant_read) was altered to target Bash instead of Read, masking the regression. Request changes: restore actual blocking behavior for economy-tracked calls when decide() returns blocked=True, and revert/fix the test so it again exercises a Read call.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 436,
+            "issue": "In gate_mode=block, once a Read/Grep/Glob call is classified ambiguous and sampled, `if economy: return finish(answers, scored=True, ...)` returns before checking `decide()`'s `blocked` result. `finish()` hardcodes blocked=False in the log and always returns 0, so a confident Jev redundant/unneeded verdict on a Read/Grep/Glob call no longer blocks the call. The spec only asked to shadow-log the read-economy classification and never suppress based on would_suppress; it did not ask to disable the existing Jev-based block path for these tools. This is a real behavior regression.",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_jev_gate.py",
+            "line": 351,
+            "issue": "test_block_mode_blocks_redundant_read was changed from tool_name \"Read\" to tool_name \"Bash\" in this diff. With \"Bash\" the call never enters the new economy branch, so the test no longer exercises or catches the blocking regression at jev_gate.py:436-437, despite its name still claiming to cover a redundant read being blocked.",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "7e240304f945",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790094311.5945878,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790094311.661612,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 2,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "43f6b763bf6cf941d167bfe36baf144f84795664",
+        "packet_version": "7e240304f945",
+        "review_pass_index": 2,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 2,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "43f6b763bf6cf941d167bfe36baf144f84795664",
+      "packet_version": "7e240304f945",
+      "review_pass_index": 2,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "43f6b763bf6cf941d167bfe36baf144f84795664",
+  "claimed_at": 1790094185.951498,
+  "account": "B",
+  "pid": 9785,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 2,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "43f6b763bf6cf941d167bfe36baf144f84795664",
+    "packet_version": "7e240304f945",
+    "review_pass_index": 2,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 2,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "7e240304f945",
+  "review_pass_index": 2,
+  "reviews_expected": 1
+}

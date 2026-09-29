@@ -1,0 +1,179 @@
+{
+  "id": "T-0593",
+  "created_at": 1789971712.8659341,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "R16 v2: orchestrator/stale.py \u2014 complete stale-work evidence (interface via raw graph links, tests, dependency, graph, overlapping merge) with pinned risk reasons and one source of truth for the worktree (AP P12)",
+  "spec": "Why: daemon.stale_check (orchestrator/daemon.py:1050-1070) compares only moved paths against scope plus changed files and grades none/low/high; brief P7 also requires interface, relevant-test, dependency, graph-relationship and overlapping-merge signals with base, goal head, relevant paths, risk, action and conflict outcome. v2 after spec review T-0576: interference.load_graph drops the link relation, merged tasks carry no changed_files, and a separate worktree kwarg would be a second source of truth.\nWhat: new pure module orchestrator/stale.py; daemon delegation is a later task, so today's stale_check keys stay a subset of the output.\n- load_links(root=ROOT) -> {\"files\": {node_id: source_file}, \"links\": [{\"source\", \"target\", \"relation\"}]} read directly from graphify-out/graph.json (nodes[].id/source_file, links[].source/target/relation); None when absent or malformed. Freshness via interference.graph_fresh_for(files, graph) where graph is interference.load_graph(root) for the same files.\n- evidence(task, *, goal_ref=None, graph_links=None, graph=None, tasks=None, git=None) -> {\"base\": task_ref, \"goal_head\", \"moved_count\", \"stale_paths\", \"signals\": {\"scoped_files_changed\", \"changed_files_moved\", \"tests_changed\", \"interface_changed\": [{\"symbol\", \"file\", \"consumer\"}], \"graph_relationships\": [{\"source_file\", \"target_file\"}], \"dependency_changed\": [ids], \"overlapping_merge\": [ids]}, \"risk\": none|low|medium|high|unknown, \"risk_reasons\": [...], \"graph\": used|absent|stale|skipped}. Worktree comes only from task[\"worktree\"] (like daemon.stale_check); every git call receives cwd=task[\"worktree\"] through the injectable git callable (signature git(*args, cwd) -> CompletedProcess), and gitutil.moved_paths / gitutil.changed_paths are called with that same callable.\n- Signals: moved = gitutil.moved_paths(task_ref, goal_ref); changed = gitutil.changed_paths(task); scoped_files_changed = moved matching scope patterns; changed_files_moved = moved \u2229 changed; tests_changed = moved paths equal to tests/test_<stem>.py for stems of changed or scoped orchestrator/*.py; interface_changed = nodes defined in a moved file with a link of any relation to a node defined in a changed or scoped task file, when graph_links is given and the graph is fresh for those files (else graph = absent|stale and the signal is skipped); graph_relationships = distinct (moved file, task file) pairs behind those links; dependency_changed = depends_on ids whose merged sha (task record \"sha\") is not an ancestor of task_ref (git merge-base --is-ancestor); overlapping_merge = execute tasks in `tasks` merged into goal_ref whose scope literals or, when present, task[\"changed_files\"] intersect the task's changed or scope paths and whose sha is not an ancestor of task_ref (changed_files is optional and populated by a later merge task; scope-literal matching is the floor).\n- Risk and pinned reasons: high with reasons among \"changed_files_moved\", \"interface_changed\", \"dependency_changed\"; medium with \"tests_changed\", \"graph_relationships\", \"overlapping_merge\"; low with \"scoped_files_changed\"; none with []; unknown with [\"git_failed\"] on gitutil.GitError. risk_reasons lists every signal that fired, in that order.\n- row(task, evidence, action, conflict=None) -> dict for schedlog.append(\"stale\", ...) with task, goal_id, base, goal_head, changed_relevant_paths, risk, risk_reasons, action (recorded|rebased|rebase_conflict|revalidated), conflict paths. Never mutates git; never discards work.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_stale.py::test_interface_change_in_moved_file_consumed_by_task_is_high_risk \u2014 graph_links with a link from a symbol in a moved file to a node in the task's changed file yields interface_changed non-empty, risk high and risk_reasons containing interface_changed",
+    "tests/test_stale.py::test_relevant_test_change_is_medium_risk \u2014 tests/test_foo.py moved while the task changed orchestrator/foo.py yields tests_changed, risk medium, risk_reasons ['tests_changed']",
+    "tests/test_stale.py::test_dependency_merged_after_branch_point_is_high_risk \u2014 a depends_on task whose sha is not an ancestor of the task ref (git callable answers merge-base --is-ancestor with rc 1) yields dependency_changed and risk high",
+    "tests/test_stale.py::test_overlapping_earlier_merge_uses_scope_literals_and_optional_changed_files \u2014 a merged execute task whose scope literal matches appears in overlapping_merge; one matching only through its changed_files list also appears; risk medium",
+    "tests/test_stale.py::test_absent_or_stale_graph_falls_back_and_git_failure_is_unknown \u2014 graph_links None yields graph absent with deterministic signals intact; a stale graph yields graph stale and no interface signal; a git callable raising GitError yields risk unknown and risk_reasons ['git_failed']; row() carries base, goal_head, changed_relevant_paths, risk, risk_reasons, action"
+  ],
+  "scope": [
+    "orchestrator/stale.py",
+    "tests/test_stale.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/daemon.py",
+      "orchestrator/gitutil.py",
+      "orchestrator/interference.py",
+      "orchestrator/schedlog.py",
+      "graphify-out/graph.json",
+      "tests/test_daemon.py",
+      "tests/test_gitutil.py",
+      "tests/test_interference.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "load_links(root=ROOT) -> {files, links[{source,target,relation}]}|None; evidence(task, *, goal_ref=None, graph_links=None, graph=None, tasks=None, git=None) -> dict with keys base, goal_head, moved_count, stale_paths, signals{...}, risk, risk_reasons, graph; row(task, evidence, action, conflict=None) -> stale row; worktree only from task['worktree']; git callable git(*args, cwd) -> CompletedProcess; tests are unittest.TestCase methods; must not import daemon"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R16 v3 after spec review T-0595 request_changes (git adapter to gitutil's git(cwd, *args) shape, freshness bound to the task worktree, graph=skipped defined)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789971828.4164212,
+      "pipeline": {
+        "first_ready_at": 1789971828.416379
+      }
+    },
+    {
+      "ts": 1789971828.445091,
+      "pipeline": {
+        "first_ready_at": 1789971828.416379,
+        "spec_review_at": 1789971828.445044,
+        "spec_review_at_lease": 1789972728.445044
+      }
+    },
+    {
+      "ts": 1789971828.449964,
+      "pipeline": {
+        "first_ready_at": 1789971828.416379,
+        "spec_review_at": 1789971828.445044,
+        "spec_review_at_lease": 1789972728.445044,
+        "spec_review_at_done": 1789971828.449885
+      }
+    },
+    {
+      "ts": 1789972015.436594,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/stale.py",
+          "issue": "Spec mandates a single injectable git callable shaped `git(*args, cwd) -> CompletedProcess` and says gitutil.moved_paths/gitutil.changed_paths 'are called with that same callable.' But those functions invoke their own `git` param positionally as `git(cwd, *command_args)` (see gitutil.py: `git(cwd, \"merge-base\", base_ref, target_ref)` and `git(worktree, \"diff\", ...)`), matching `_git_in(worktree, *args)`'s convention, not `git(*args, cwd)`. Passing the spec'd callable straight through will raise TypeError on every real call (cwd lands in *args, keyword-only cwd is left unbound); gitutil wraps generic Exception into GitError, so moved_paths/changed_paths will unconditionally fail whenever the mandated callable shape is used. That drives risk to 'unknown' for essentially every task and breaks all acceptance tests except the explicit git_failed case, which is the opposite of what those tests assert.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/stale.py",
+          "issue": "Freshness is specified as `interference.graph_fresh_for(files, graph)` with no git/cwd override. graph_fresh_for's default runner derives its cwd from `graph[\"path\"]` (graphify-out/graph.json's grandparent, i.e. repo ROOT), not from `task[\"worktree\"]`, and diffs `built_at_commit..HEAD` there. Every other git call in this spec is pinned to cwd=task[\"worktree\"] on purpose (so evidence reflects the task branch), but this one silently diffs the main checkout's HEAD instead, which can call a graph fresh/stale incorrectly for any task whose worktree has diverged from ROOT.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/stale.py",
+          "issue": "The `graph` output field is documented as one of used|absent|stale|skipped, but only 'absent' (graph_links is None) and 'stale' (graph_fresh_for is not True) are given trigger conditions; 'skipped' has none, leaving it to implementer/test guesswork.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789972017.10256,
+      "pipeline": {
+        "first_ready_at": 1789971828.416379,
+        "spec_review_at": 1789971828.445044,
+        "spec_review_at_lease": 1789972728.445044,
+        "spec_review_at_done": 1789971828.449885,
+        "spec_review_held_at": 1789972017.1025112
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789972018.1844192,
+      "pipeline": {
+        "first_ready_at": 1789971828.416379,
+        "spec_review_at": 1789971828.445044,
+        "spec_review_at_lease": 1789972728.445044,
+        "spec_review_at_done": 1789971828.449885,
+        "spec_review_held_at": 1789972017.1025112,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789972018.2131772,
+      "pipeline": {
+        "first_ready_at": 1789971828.416379,
+        "spec_review_at": 1789971828.445044,
+        "spec_review_at_lease": 1789972728.445044,
+        "spec_review_at_done": 1789971828.449885,
+        "spec_review_held_at": 1789972017.1025112,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789972017.10256": true
+        }
+      }
+    },
+    {
+      "ts": 1789972331.268076,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R16 v3 after spec review T-0595 request_changes (git adapter to gitutil's git(cwd, *args) shape, freshness bound to the task worktree, graph=skipped defined)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789971828.416379,
+    "spec_review_at": 1789971828.445044,
+    "spec_review_at_lease": 1789972728.445044,
+    "spec_review_at_done": 1789971828.449885,
+    "spec_review_held_at": 1789972017.1025112,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789972017.10256": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/stale.py",
+      "issue": "Spec mandates a single injectable git callable shaped `git(*args, cwd) -> CompletedProcess` and says gitutil.moved_paths/gitutil.changed_paths 'are called with that same callable.' But those functions invoke their own `git` param positionally as `git(cwd, *command_args)` (see gitutil.py: `git(cwd, \"merge-base\", base_ref, target_ref)` and `git(worktree, \"diff\", ...)`), matching `_git_in(worktree, *args)`'s convention, not `git(*args, cwd)`. Passing the spec'd callable straight through will raise TypeError on every real call (cwd lands in *args, keyword-only cwd is left unbound); gitutil wraps generic Exception into GitError, so moved_paths/changed_paths will unconditionally fail whenever the mandated callable shape is used. That drives risk to 'unknown' for essentially every task and breaks all acceptance tests except the explicit git_failed case, which is the opposite of what those tests assert.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/stale.py",
+      "issue": "Freshness is specified as `interference.graph_fresh_for(files, graph)` with no git/cwd override. graph_fresh_for's default runner derives its cwd from `graph[\"path\"]` (graphify-out/graph.json's grandparent, i.e. repo ROOT), not from `task[\"worktree\"]`, and diffs `built_at_commit..HEAD` there. Every other git call in this spec is pinned to cwd=task[\"worktree\"] on purpose (so evidence reflects the task branch), but this one silently diffs the main checkout's HEAD instead, which can call a graph fresh/stale incorrectly for any task whose worktree has diverged from ROOT.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/stale.py",
+      "issue": "The `graph` output field is documented as one of used|absent|stale|skipped, but only 'absent' (graph_links is None) and 'stale' (graph_fresh_for is not True) are given trigger conditions; 'skipped' has none, leaving it to implementer/test guesswork.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

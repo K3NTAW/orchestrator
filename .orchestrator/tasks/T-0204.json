@@ -1,0 +1,111 @@
+{
+  "id": "T-0204",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "P3: handover.py polish from approving review T-0180 (gitignore state, throttle under the flock, truncation test)",
+  "spec": "Low notes from the approving review of C-O7b (orchestrator/handover.py, `orchestrator handover`).\n1. .gitignore gains .orchestrator/handover_state.json and .orchestrator/planner_session.json and .orchestrator/planner_usage.json and .orchestrator/planner_runs.json (operator state, never committed).\n2. The handover throttle (last-written timestamp) is checked and updated inside the same flock as the plan.md write, so two daemons cannot both write within the interval.\n3. The section-wide truncation branch (_join_truncated / MAX_ITEMS overflow) gets a test that renders more items than the cap and asserts the '\u2026 and N more' tail.\n4. write() must not touch plan.md when the rendered Auto-handover section is byte-identical to the one already present (no dirtying the tracked file every 15 minutes with the same content).\nTests in tests/test_handover.py.",
+  "inputs": [],
+  "acceptance": [
+    "git check-ignore .orchestrator/handover_state.json .orchestrator/planner_session.json .orchestrator/planner_usage.json .orchestrator/planner_runs.json all exit 0",
+    "tests/test_handover.py gains test_throttle_under_lock, test_truncation_tail, test_identical_section_does_not_rewrite and all pass",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/handover.py",
+    "tests/test_handover.py",
+    ".gitignore"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0204",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nImplemented all 4 low-severity C-O7b review notes, scoped to `orchestrator/handover.py`, `tests/test_handover.py`, `.gitignore`.\n\n**Files changed:**\n- `.gitignore`: added `.orchestrator/planner_runs.json` (the other three were already present).\n- `orchestrator/handover.py`:\n  - `write()` now compares the freshly rendered section against the section already on disk and returns early (no temp file / `os.replace`) when they're byte-identical.\n  - Added `maybe_write(reason, now, interval)`: checks, writes, and saves the last-written timestamp all inside one `bus.locked()` acquisition, so a concurrent racing caller blocks on the flock instead of also passing the throttle check and double-writing.\n- `tests/test_handover.py`: added `test_throttle_under_lock`, `test_truncation_tail`, `test_identical_section_does_not_rewrite`.\n\n**Scope note:** `daemon.py` (which owns the tick loop's actual `maybe_handover` call) is outside this task's scope \u2014 the scope-guard hook blocked an edit there. Its existing check-then-write-then-save still isn't atomic under one lock. I added the properly-guarded `handover.maybe_write()` as the fix for the part reachable within scope; wiring `daemon.py`'s tick loop to call it instead of its own separate flock dance needs a follow-up task.\n\n**Test output:** all 12 tests in `tests/test_handover.py` pass; `.claude/hooks/tests-green.sh` exits 0 (no failures to report).\n\nCommitted on `task/T-0204` as `02463d1`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789810647.826039,
+      "pipeline": {
+        "dispatched_at": 1789810647.825839
+      }
+    },
+    {
+      "ts": 1789810647.913525,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789810647.918657,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789810649.140459,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0204",
+      "claimed_at": 1789810649.137397
+    },
+    {
+      "ts": 1789810649.145345,
+      "account": "B"
+    },
+    {
+      "ts": 1789810649.160843,
+      "pid": 73797,
+      "account": "B"
+    },
+    {
+      "ts": 1789811148.303798,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nImplemented all 4 low-severity C-O7b review notes, scoped to `orchestrator/handover.py`, `tests/test_handover.py`, `.gitignore`.\n\n**Files changed:**\n- `.gitignore`: added `.orchestrator/planner_runs.json` (the other three were already present).\n- `orchestrator/handover.py`:\n  - `write()` now compares the freshly rendered section against the section already on disk and returns early (no temp file / `os.replace`) when they're byte-identical.\n  - Added `maybe_write(reason, now, interval)`: checks, writes, and saves the last-written timestamp all inside one `bus.locked()` acquisition, so a concurrent racing caller blocks on the flock instead of also passing the throttle check and double-writing.\n- `tests/test_handover.py`: added `test_throttle_under_lock`, `test_truncation_tail`, `test_identical_section_does_not_rewrite`.\n\n**Scope note:** `daemon.py` (which owns the tick loop's actual `maybe_handover` call) is outside this task's scope \u2014 the scope-guard hook blocked an edit there. Its existing check-then-write-then-save still isn't atomic under one lock. I added the properly-guarded `handover.maybe_write()` as the fix for the part reachable within scope; wiring `daemon.py`'s tick loop to call it instead of its own separate flock dance needs a follow-up task.\n\n**Test output:** all 12 tests in `tests/test_handover.py` pass; `.claude/hooks/tests-green.sh` exits 0 (no failures to report).\n\nCommitted on `task/T-0204` as `02463d1`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789811196.943122,
+      "pipeline": {
+        "dispatched_at": 1789810647.825839,
+        "gated_at": 1789811196.9430048
+      }
+    },
+    {
+      "ts": 1789811230.899942,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "sha": "02463d137606b218656e41cd51140d0dd5fdbba3"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789810647.825839,
+    "gated_at": 1789811196.9430048
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789810649.137397,
+  "account": "B",
+  "pid": 73797,
+  "merged_into": "goal/T-0201",
+  "sha": "02463d137606b218656e41cd51140d0dd5fdbba3"
+}

@@ -1,0 +1,156 @@
+{
+  "id": "T-0226",
+  "parent": "T-0201",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review: E2: Jev client \u2014 orchestrator/jev.py typed questions against TypeSafe AI System One, fail-open, budgeted",
+  "spec": "Jev (TypeSafe AI) answers typed questions about a state with calibrated probabilities instead of text: POST https://api.typesafe.ai/v1/systemone, header Authorization: Bearer <key>, body {\"state\": str|obj, \"model\": \"jev-latest\", \"questions\": {id: {\"type\": \"noul\"|\"choice\"|\"score\", \"instructions\": str, \"criteria\": ...}}}; response {\"answers\": {id: {\"type\", \"noul\": 0-1, \"choice\": str, \"probabilities\": {opt: p}, \"score\": n, \"confidence\": 0-1}}, \"usage\": {\"input_tokens\", \"output_tokens\"}}. Limits: 64k tokens per request, 32k for state + longest question; 429/529 need backoff; 0.042 USD per M input tokens, output free. New module orchestrator/jev.py, stdlib only (urllib):\n1. ask(state, questions, *, model=None, timeout_s=5.0) -> dict | None. Reads pool.toml [jev] {enabled=false, model=\"jev-latest\", timeout_s=5, daily_budget_tokens=20_000_000, max_state_chars=100_000} and the key from env TYPESAFE_API_KEY (pool.toml [secrets.jev] TYPESAFE_API_KEY = \"source ~/.config/f/f.sh && f tok get typesafe --reveal\" on the laptop, env:TYPESAFE_API_KEY headless; resolved through spawn.resolve_secrets, never logged). Returns None (fail-open) when disabled, no key, timeout, HTTP error, invalid JSON or budget exhausted; one retry with 0.5 s backoff on 429/529.\n2. State hygiene before sending: truncate to max_state_chars, redact anything matching token-like patterns (sk-..., ghp_..., Bearer ..., 32+ char hex/base64 runs, KEY=VALUE where KEY contains TOKEN|SECRET|PASSWORD|KEY). Provide redact(text) as a tested public helper.\n3. Usage accounting: append {ts, caller, input_tokens, model, latency_ms, ok} to .orchestrator/runs/jev-<date>.jsonl and keep the day counter in .orchestrator/jev_state.json; ask() returns None when the day counter exceeds daily_budget_tokens.\n4. Helpers: noul(state, instructions, criteria=None) -> float | None (P(true)); choice(state, instructions, options: dict) -> (choice, probabilities, confidence) | None; score(state, instructions, levels: list) -> (score, confidence) | None.\nTests in tests/test_jev.py with a monkeypatched urlopen: disabled returns None without network; happy path parses answers; 429 retried once then None; redact() strips a fake token; budget exhaustion returns None; oversize state is truncated. README: one paragraph 'Jev' under Pipeline with the egress note (task specs, tool-call metadata and memory titles leave the machine; file contents never do).",
+  "inputs": [
+    "T-0214"
+  ],
+  "acceptance": [
+    "tests/test_jev.py::test_disabled_returns_none_without_network, ::test_ask_parses_answers, ::test_retry_then_none_on_429, ::test_redact_strips_tokens, ::test_budget_exhausted_returns_none, ::test_state_truncated pass",
+    "pool.toml has a commented [jev] table with enabled = false and [secrets.jev] with the two documented value forms; no secret value in any file",
+    "grep -c 'typesafe.ai' README.md is at least 1",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev.py",
+    "tests/test_jev.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0226",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/jev.py",
+        "line": 100,
+        "issue": "Dead config: `[jev].timeout_s` is read into `_cfg()[\"timeout_s\"]` (line 56) but never used. `ask()` hardcodes the keyword default `timeout_s=5.0` and passes that to `urlopen` (line 125), so setting `timeout_s = 30` in pool.toml \u2014 a knob the commented table at pool.toml:185 advertises \u2014 has no effect. Same class as the T-0212 fix round (TOOLS[role] defined but never reaching argv). Fix: `timeout_s = timeout_s if timeout_s is not None else cfg[\"timeout_s\"]` with the signature default set to None.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/jev.py",
+        "line": 92,
+        "issue": "`_log_usage` writes `jev-<date>.jsonl` into `.orchestrator/runs/`, the same directory `bus.log_run` writes worker runs to, and two consumers glob it indiscriminately: `cli.cost()` (cli.py:20) sums `input_tokens` over every `*.jsonl` line keyed by `e.get(by, \"?\")`, so jev calls inflate a bogus `?` row and the `runs` count in `orchestrator cost`; `scorecard.build(by=\"tier\")` (scorecard.py:76,81) likewise creates a `?` executor row from jev entries. The test's own tearDown comment concedes the collision (it has to delete jev files so test_spawn's `sorted(glob(\"*.jsonl\"))[-1]` stays correct) \u2014 production has no such cleanup. Write to a separate dir (e.g. `STATE / \"jev_runs\"`) or give entries a discriminator both consumers filter on.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/jev.py",
+        "line": 111,
+        "issue": "Budget check uses `>` instead of `>=`, so a call is admitted when the tally already equals the budget, and `daily_budget_tokens = 0` \u2014 the obvious way to hard-stop spend without editing `enabled` \u2014 never blocks anything: `_day_tokens_used()` starts at 0, `0 > 0` is false, so the first call always goes out (and every subsequent one until the tally exceeds 0). Should be `>=`.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/jev.py",
+        "line": 85,
+        "issue": "`_add_day_tokens` is an unlocked read-modify-write (`_load_state()` then `write_text`), unlike the repo's own convention for the same pattern in `pool._save_planner_account`, which takes an flock on the file precisely so a concurrent tally can't clobber an entry. Two daemon processes calling jev concurrently lose counts; a crash mid-`write_text` truncates the file, and `_load_state`'s JSONDecodeError fallback then silently resets the day's tally to 0 \u2014 the budget under-counts in exactly the case it exists to guard.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/jev.py",
+        "line": 96,
+        "issue": "`_api_key()` runs on every `ask()` and goes through `spawn.secrets_for_role`, which constructs a full `Pool()` (re-reads pool.toml and pool_state.json, already read once by `_cfg()` in the same call) and then `subprocess.run(['bash','-c', 'source ~/.config/f/f.sh && f tok get ...'])` \u2014 a Keychain-backed shell per question. For a client whose whole point is cheap 5s typed questions (`noul`/`choice`/`score` are one call each), that is a large fixed overhead per call and is unbounded if a caller loops. Cache the resolved key for the process lifetime.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_jev.py",
+        "line": 103,
+        "issue": "No test covers the README's central safety claim that `ask()` redacts before anything leaves the machine. `test_redact_strips_tokens` exercises `redact()` in isolation and `test_state_truncated` asserts the captured payload equals `long_state[:50]` verbatim (token-free input), so removing the `redact(...)` wrapper at jev.py:118 leaves the whole suite green. Worth a capture-based test asserting a `sk-` token in `state` never appears in `req.data`. Related: `redact` is applied after truncation, so a secret straddling `max_state_chars` is cut below the `{10,}`/`{32,}` thresholds and ships unredacted.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789816233.59517,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0226",
+      "claimed_at": 1789816233.5947149
+    },
+    {
+      "ts": 1789816233.5969799,
+      "account": "A"
+    },
+    {
+      "ts": 1789816233.637863,
+      "pid": 23710,
+      "account": "A"
+    },
+    {
+      "ts": 1789816401.062197,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/jev.py",
+            "line": 100,
+            "issue": "Dead config: `[jev].timeout_s` is read into `_cfg()[\"timeout_s\"]` (line 56) but never used. `ask()` hardcodes the keyword default `timeout_s=5.0` and passes that to `urlopen` (line 125), so setting `timeout_s = 30` in pool.toml \u2014 a knob the commented table at pool.toml:185 advertises \u2014 has no effect. Same class as the T-0212 fix round (TOOLS[role] defined but never reaching argv). Fix: `timeout_s = timeout_s if timeout_s is not None else cfg[\"timeout_s\"]` with the signature default set to None.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/jev.py",
+            "line": 92,
+            "issue": "`_log_usage` writes `jev-<date>.jsonl` into `.orchestrator/runs/`, the same directory `bus.log_run` writes worker runs to, and two consumers glob it indiscriminately: `cli.cost()` (cli.py:20) sums `input_tokens` over every `*.jsonl` line keyed by `e.get(by, \"?\")`, so jev calls inflate a bogus `?` row and the `runs` count in `orchestrator cost`; `scorecard.build(by=\"tier\")` (scorecard.py:76,81) likewise creates a `?` executor row from jev entries. The test's own tearDown comment concedes the collision (it has to delete jev files so test_spawn's `sorted(glob(\"*.jsonl\"))[-1]` stays correct) \u2014 production has no such cleanup. Write to a separate dir (e.g. `STATE / \"jev_runs\"`) or give entries a discriminator both consumers filter on.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/jev.py",
+            "line": 111,
+            "issue": "Budget check uses `>` instead of `>=`, so a call is admitted when the tally already equals the budget, and `daily_budget_tokens = 0` \u2014 the obvious way to hard-stop spend without editing `enabled` \u2014 never blocks anything: `_day_tokens_used()` starts at 0, `0 > 0` is false, so the first call always goes out (and every subsequent one until the tally exceeds 0). Should be `>=`.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/jev.py",
+            "line": 85,
+            "issue": "`_add_day_tokens` is an unlocked read-modify-write (`_load_state()` then `write_text`), unlike the repo's own convention for the same pattern in `pool._save_planner_account`, which takes an flock on the file precisely so a concurrent tally can't clobber an entry. Two daemon processes calling jev concurrently lose counts; a crash mid-`write_text` truncates the file, and `_load_state`'s JSONDecodeError fallback then silently resets the day's tally to 0 \u2014 the budget under-counts in exactly the case it exists to guard.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/jev.py",
+            "line": 96,
+            "issue": "`_api_key()` runs on every `ask()` and goes through `spawn.secrets_for_role`, which constructs a full `Pool()` (re-reads pool.toml and pool_state.json, already read once by `_cfg()` in the same call) and then `subprocess.run(['bash','-c', 'source ~/.config/f/f.sh && f tok get ...'])` \u2014 a Keychain-backed shell per question. For a client whose whole point is cheap 5s typed questions (`noul`/`choice`/`score` are one call each), that is a large fixed overhead per call and is unbounded if a caller loops. Cache the resolved key for the process lifetime.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_jev.py",
+            "line": 103,
+            "issue": "No test covers the README's central safety claim that `ask()` redacts before anything leaves the machine. `test_redact_strips_tokens` exercises `redact()` in isolation and `test_state_truncated` asserts the captured payload equals `long_state[:50]` verbatim (token-free input), so removing the `redact(...)` wrapper at jev.py:118 leaves the whole suite green. Worth a capture-based test asserting a `sk-` token in `state` never appears in `req.data`. Related: `redact` is applied after truncation, so a secret straddling `max_state_chars` is cut below the `{10,}`/`{32,}` thresholds and ships unredacted.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789816401.065203,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789816233.5947149,
+  "account": "A",
+  "pid": 23710,
+  "review_verdict": "request_changes"
+}

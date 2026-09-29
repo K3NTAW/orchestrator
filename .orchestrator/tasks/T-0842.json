@@ -1,0 +1,192 @@
+{
+  "id": "T-0842",
+  "created_at": 1790102138.778018,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P21/P27/P28/P30/P31 closing the loop: context evaluation suite over fixture tasks (seven categories, both modes), promotion evidence for the shadow features from the scorecards, and the unified `orchestrator scorecard --economy` view (v3)",
+  "spec": "Depends on the shadow features being merged: T-0800 (context router wiring), T-0802 (tool disclosure), T-0814 (conditional instructions), T-0831 (handoffs), T-0809 (read economy). Facts: promotion.evaluate needs {n, first_pass_delta, fix_rounds_delta, gate_success_delta, review_findings_delta, accepted_cost_delta, accepted_tokens_delta, latency_delta, security_ok}; context_scorecard, handoff_scorecard, read_economy and tool_catalog expose per-role/per-class rows; decision_log rows carry every shadow decision; the harness (tests/_harness.py) gives a temp ORCH_ROOT.\nDo:\n1. orchestrator/context_eval.py (new): fixture task builders for the seven P31 categories (localized_fix, cross_cutting, security, test_failure, documentation, review, repeated_fix_round), each a small synthetic worktree built under a temp dir (a few python files, a test file, a failing-output blob, an .md file) so no network or model is needed. `run(category, root)` builds the execute (or review) packet with every feature mode off and again with the modes in shadow, then reads the shadow meta (routed_tokens, routed_reduction_ratio, routed_hidden, instruction_tokens_modular, tool_tokens_minimal) and returns {\"category\", \"candidate_tokens\", \"presented_tokens\", \"routed_tokens\", \"reduction\", \"hidden\", \"instruction_delta\", \"tool_delta\", \"expectation\": {\"min_reduction\", \"max_reduction\"}, \"within_expectation\": bool, \"must_keep\": [...], \"kept\": bool}. Expectations from the brief: localized_fix large reduction (\u22650.4), cross_cutting modest (0.1\u20130.4), security keeps security instructions and security-path evidence FULL (kept check), test_failure keeps failing output and the named tests FULL, documentation summaries over full chunks (no source_chunk FULL), review packet has diff + acceptance + interfaces and no implementation transcript, repeated_fix_round reuses prior evidence (evidence ids overlap with the first round \u2265 0.8). Every number is deterministic (chars//4).\n2. `orchestrator context-eval` CLI: runs all categories, prints a table, exits 1 when any within_expectation or kept is False (so it can gate a future active flip); `--json`.\n3. promotion.py evidence loaders for context_router, tool_disclosure, conditional_instructions, handoff_routing: n = number of runs carrying that feature's shadow keys (from runs jsonl context objects / decision rows), accepted_tokens_delta = -(avg reduction) as the efficiency signal ONLY when the context-eval suite passed in the same report (P21: shadow cannot show quality deltas because packets are unchanged; set first_pass_delta etc. to None and add reason \"shadow_quality_unmeasured\" so evaluate() returns stay, never promote, until an active A/B exists); context_recovery_rate placeholder from read_economy (evidence_available reads that happened after HIDE decisions for the same path, per task) reported as a number with n.\n4. `orchestrator scorecard --economy`: one view joining context (P27), tool economy (P28), handoffs (P29) and read economy per role and task class, plus the promotion report for the four features and the last context-eval result; `--json`.\n5. docs/context-economy/10-evaluation.md (\u226480 lines): the seven fixtures and their expectations, how to read --economy, what promotion needs before any mode goes active (the P30 list: sample size, non-inferior quality, measurable efficiency, recovery rate low), the revert paths per feature.\nTests (unittest): tests/test_context_eval.py::test_localized_fix_reduces_and_keeps_scope_full, ::test_security_fixture_keeps_security_evidence_full, ::test_test_failure_fixture_keeps_failing_output_full, ::test_documentation_fixture_has_no_full_source_chunks, ::test_repeated_fix_round_reuses_evidence, ::test_cli_exit_code_reflects_expectations; tests/test_promotion.py::test_shadow_features_never_promote_without_quality_evidence.\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.\n\nSPEC v2 (2026-09-22 20:40) after spec review T-0838 (request_changes), binding on top of v1:\n- promotion.evaluate(): for the four shadow features (context_router, tool_disclosure, conditional_instructions, handoff_routing) any None among first_pass_delta / fix_rounds_delta / gate_success_delta / review_findings_delta caps the recommendation at \"stay\" with reason \"shadow_quality_unmeasured\", regardless of cost or token deltas. Test tests/test_promotion.py::test_shadow_features_never_promote_without_quality_evidence asserts exactly that path (all quality deltas None, accepted_tokens_delta negative, n above min_samples \u2192 stay).\n- Packet building in both modes, exact mechanism: orchestrator/spawn.py is added to scope; spawn.packet(task, worktree, *, cfg=None) and the internal builders that read Pool().cfg accept an explicit cfg override (when given, no Pool() construction; existing callers unchanged). context_eval.run builds the packet twice with two cfg dicts derived from the harness pool.toml (modes off vs shadow) and never mutates the global pool.toml. Add tests/test_spawn.py::test_packet_accepts_cfg_override (same fixture task, cfg with context_router off vs shadow: identical packet text, shadow meta only in shadow).\n- context_scorecard.build(): add a per-(role, task_class) grouping (task_class via attribution.task_class of the run's task, \"unknown\" when the task is gone) mirroring read_economy.summary and handoff_scorecard.by_start, so --economy joins on (role, task_class) across all four sources.\n- Tool economy (P28) figures in --economy come from context_scorecard's existing tool_tokens_disclosed / tool_tokens_minimal / tool_reduction fields; tool_catalog.py is not a dependency and stays out of scope.\n- tests/test_context_scorecard.py exists (six tests after T-0800/T-0814); extend it in place and keep every current test green.\n\nSPEC v3 (2026-09-22 21:00) after spec review T-0840 (round 2; the three points folded in, further review waived by the Planner, verdict set to approve):\n- Isolation of shadow writes during context-eval: context_eval.run(category, root) redirects every STATE-derived path for the duration of the call. Implement `context_eval.isolated_state(root)` as a context manager that sets ORCH_ROOT and overrides the module-level STATE/ROOT constants of spawn, evidence, decision_log and bus (whatever each module actually reads; read them, do not guess) to a directory under `root`, and restores them on exit. The CLI `orchestrator context-eval` always runs inside a fresh temp root (default) or `--root <dir>`; it never records decision rows or evidence into the production .orchestrator. Test: tests/test_context_eval.py::test_eval_writes_nothing_into_production_state (run one category with STATE pointed at a sentinel dir; assert the sentinel dir has no new evidence/decision files).\n- Persistence of the eval result: the CLI stores STATE/context_eval.json = {\"ran_at\", \"git_head\", \"results\": [...], \"suite_passed\": bool} after each run (into the real STATE, this one file only, via an explicit path argument outside the isolated block). promotion.collect(feature, root) reads it for the four shadow features and sets evidence[\"suite_passed\"]; evaluate() sets accepted_tokens_delta only when suite_passed is True (else None) and adds reason \"context_eval_missing\" or \"context_eval_failed\". `scorecard --economy` prints the file's ran_at, git_head and suite_passed as \"last context-eval result\" or \"never run\". Tests: tests/test_promotion.py::test_shadow_features_need_a_passing_context_eval_for_efficiency_evidence; tests/test_context_eval.py::test_cli_writes_context_eval_json.\n- cfg override coverage: spawn.review_packet(task, reviewed, *, cfg=None) threads the override into every Pool().cfg read inside it (security_paths, review_diff_chars, the shadow-route cfg). Test: tests/test_spawn.py::test_review_packet_accepts_cfg_override (two cfgs, context_router off vs shadow: identical packet text; shadow meta keys only in shadow; no Pool() constructed when cfg is given, asserted with a mock).",
+  "inputs": [
+    "T-0841"
+  ],
+  "acceptance": [
+    "tests/test_context_eval.py::test_localized_fix_reduces_and_keeps_scope_full passes",
+    "tests/test_context_eval.py::test_security_fixture_keeps_security_evidence_full passes",
+    "tests/test_context_eval.py::test_test_failure_fixture_keeps_failing_output_full passes",
+    "tests/test_context_eval.py::test_documentation_fixture_has_no_full_source_chunks passes",
+    "tests/test_context_eval.py::test_repeated_fix_round_reuses_evidence passes",
+    "tests/test_context_eval.py::test_cli_exit_code_reflects_expectations passes",
+    "tests/test_promotion.py::test_shadow_features_never_promote_without_quality_evidence passes",
+    "`uv run orchestrator context-eval` and `uv run orchestrator scorecard --economy` run; docs/context-economy/10-evaluation.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_packet_accepts_cfg_override passes",
+    "tests/test_context_eval.py::test_eval_writes_nothing_into_production_state passes",
+    "tests/test_context_eval.py::test_cli_writes_context_eval_json passes",
+    "tests/test_promotion.py::test_shadow_features_need_a_passing_context_eval_for_efficiency_evidence passes",
+    "tests/test_spawn.py::test_review_packet_accepts_cfg_override passes"
+  ],
+  "scope": [
+    "orchestrator/context_eval.py",
+    "orchestrator/promotion.py",
+    "orchestrator/cli.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_context_eval.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/10-evaluation.md",
+    "orchestrator/spawn.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0842",
+  "codex_thread": null,
+  "result": {
+    "summary": "Two correctness bugs found in the promotion/scorecard join logic; tests pass because nothing seeds real production data through these paths.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/promotion.py",
+        "line": 177,
+        "issue": "collect(\"handoff_routing\") filters decision_log rows by kind==\"handoff_routing\", but the only place that actually records handoff decisions (orchestrator/executor.py:331) writes kind=\"handoff\" (the CONTEXT_KINDS value; \"handoff_routing\" is not in decision_log.KINDS at all). So in production this filter never matches any row: n is always 0, insufficient_evidence always fires, and the handoff_routing feature can never accumulate promotion evidence. This replaces the old working implementation (handoff_scorecard.lineage_rows(root)) with a query that structurally cannot return data. No test seeds a kind=\"handoff\" row and checks n>0, so the regression is unguarded.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 361,
+        "issue": "scorecard --economy joins context_scorecard.by_role_task_class (keyed by (role, task_class), e.g. (\"execute\",\"localized_fix\")) against handoff_scorecard.by_start (keyed by (first_executor, task_class), e.g. (\"codex\",\"localized_fix\") \u2014 an executor id, not a role). These are different key spaces, so `set(context[...]) | set(handoffs)` and the subsequent .get(key) lookups will essentially never align real rows between the two sources. This contradicts spec v2's explicit requirement that --economy \"joins on (role, task_class) across all four sources\" \u2014 handoff_scorecard.py was left unmodified (correctly out of scope) but nothing bridges the key mismatch, so the handoffs column in the joined report will be empty/misleading for real data despite the command running without error.",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "e9c179e3cdbd",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790102138.778902,
+      "reviewed_sha": "782e6902b3f47ab52dcf2637f2307c75d881bf3e"
+    },
+    {
+      "ts": 1790102142.59475,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0842",
+      "claimed_at": 1790102142.594479
+    },
+    {
+      "ts": 1790102142.595639,
+      "account": "A"
+    },
+    {
+      "ts": 1790102143.1365,
+      "pid": 5072,
+      "account": "A"
+    },
+    {
+      "ts": 1790102296.320759,
+      "status": "done",
+      "result": {
+        "summary": "Two correctness bugs found in the promotion/scorecard join logic; tests pass because nothing seeds real production data through these paths.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/promotion.py",
+            "line": 177,
+            "issue": "collect(\"handoff_routing\") filters decision_log rows by kind==\"handoff_routing\", but the only place that actually records handoff decisions (orchestrator/executor.py:331) writes kind=\"handoff\" (the CONTEXT_KINDS value; \"handoff_routing\" is not in decision_log.KINDS at all). So in production this filter never matches any row: n is always 0, insufficient_evidence always fires, and the handoff_routing feature can never accumulate promotion evidence. This replaces the old working implementation (handoff_scorecard.lineage_rows(root)) with a query that structurally cannot return data. No test seeds a kind=\"handoff\" row and checks n>0, so the regression is unguarded.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 361,
+            "issue": "scorecard --economy joins context_scorecard.by_role_task_class (keyed by (role, task_class), e.g. (\"execute\",\"localized_fix\")) against handoff_scorecard.by_start (keyed by (first_executor, task_class), e.g. (\"codex\",\"localized_fix\") \u2014 an executor id, not a role). These are different key spaces, so `set(context[...]) | set(handoffs)` and the subsequent .get(key) lookups will essentially never align real rows between the two sources. This contradicts spec v2's explicit requirement that --economy \"joins on (role, task_class) across all four sources\" \u2014 handoff_scorecard.py was left unmodified (correctly out of scope) but nothing bridges the key mismatch, so the handoffs column in the joined report will be empty/misleading for real data despite the command running without error.",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "e9c179e3cdbd",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790102296.321685,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790102296.373216,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 2,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "782e6902b3f47ab52dcf2637f2307c75d881bf3e",
+        "packet_version": "e9c179e3cdbd",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 2,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "782e6902b3f47ab52dcf2637f2307c75d881bf3e",
+      "packet_version": "e9c179e3cdbd",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "782e6902b3f47ab52dcf2637f2307c75d881bf3e",
+  "claimed_at": 1790102142.594479,
+  "account": "A",
+  "pid": 5072,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 2,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "782e6902b3f47ab52dcf2637f2307c75d881bf3e",
+    "packet_version": "e9c179e3cdbd",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 2,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "e9c179e3cdbd",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

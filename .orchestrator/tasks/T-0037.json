@@ -1,0 +1,84 @@
+{
+  "id": "T-0037",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "B4c: bench.match normalizes display names (strip parenthetical suffix, prefer the max variant)",
+  "spec": "Why: the first live `orchestrator bench fetch` (2026-09-17 16:17 UTC) parsed 25 model names but matched 0 of 8 hints, because the site's display names carry an effort suffix: \"GPT-6 Astra (max)\", \"GPT-5.6 Luna (max)\", \"GPT-5.6 Terra (max)\", \"GPT-5.6 Sol (max)\", \"Claude Opus 5 (Adaptive Reasoning, Max Effort)\", \"Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)\", \"GPT-5.5 Pro (xhigh)\". bench.match compares whole strings.\n\nWhat (2 files: orchestrator/bench.py, tests/test_orchestrator.py; worktree off goal/T-0005 which contains B4a + T-0036):\n1. bench.py: `def norm(name) -> str`: lowercase, strip everything from the first \"(\" to the matching \")\", collapse whitespace, drop trailing punctuation. `match(records, hints)`: for each model id, candidates = records whose norm(name) == norm(hint) or norm(name).startswith(norm(hint) + \" \"); if several, prefer the one whose raw name contains \"(max)\" then \"max effort\" then \"(xhigh)\" then \"(high)\", else the first; record the chosen raw display name in the normalized record as \"display_name\" and all candidate raw names as \"variants\". Keep unmatched \u2192 None. Also: when a hint matches nothing, try a looser rule where the hint's tokens all appear in norm(name) (e.g. \"gpt 5.6 luna\" vs \"gpt-5.6 luna\" \u2014 normalize \"-\" to space on both sides).\n2. tests: extend the fixture-based tests: names with suffixes match their ids; the \"(max)\" variant wins over \"(high)\" when both exist; \"GPT-5.5 Pro (xhigh)\" must NOT match a hint \"GPT-5.5\" unless such a hint exists (guard against prefix over-matching: startswith requires a space boundary and the remaining text must be only a parenthetical, i.e. compare norm strings for equality after stripping, and the token rule requires all hint tokens and no extra alphabetic tokens except effort words).\n3. After the change run one live `uv run orchestrator bench fetch --force` and report matched/unmatched; expect \u22656 of 8 hints matched.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"bench: match display names with effort suffixes; prefer the max variant\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new matching tests",
+    "one live bench fetch --force matches at least 6 of the 8 DEFAULT_HINTS and bench show lists numbers for gpt-6-astra and gpt-5.6-luna/terra/sol",
+    "GPT-5.5 Pro does not match the gpt-6-astra or 5.6 hints (test)",
+    "git diff --stat limited to orchestrator/bench.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/bench.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0037",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean. Working tree is clean now.\n\n**Summary:** Added `norm()` (strips the first parenthetical, lowercases, collapses whitespace) and reworked `match()` in `orchestrator/bench.py` to compare normalized names, tolerate a trailing effort word outside parens, and fall back to dash/space-insensitive token matching \u2014 guarded against prefix over-matching. When multiple effort variants satisfy a hint, it now prefers `(max)` > `max effort` > `(xhigh)` > `(high)`, and records `display_name`/`variants` on the match.\n\n**Files changed:** `orchestrator/bench.py`, `tests/test_orchestrator.py` (both in scope).\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2014 59 tests, all pass, no failures. `scripts_green.sh` equivalent exited 0.\n\n**Live verification:** `uv run orchestrator bench fetch --force` matched 6/8 `DEFAULT_HINTS` (unmatched: claude-haiku-4-5, claude-sonnet-5 \u2014 not currently listed under those names on the site). `bench show` confirms numbers for `gpt-6-astra`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`.\n\nCommitted as `e29a97e` on `task/T-0037`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789662114.706591,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789662114.713511,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0037",
+      "claimed_at": 1789662114.713392
+    },
+    {
+      "ts": 1789662114.723225,
+      "pid": 35896,
+      "account": "B"
+    },
+    {
+      "ts": 1789662342.354343,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean. Working tree is clean now.\n\n**Summary:** Added `norm()` (strips the first parenthetical, lowercases, collapses whitespace) and reworked `match()` in `orchestrator/bench.py` to compare normalized names, tolerate a trailing effort word outside parens, and fall back to dash/space-insensitive token matching \u2014 guarded against prefix over-matching. When multiple effort variants satisfy a hint, it now prefers `(max)` > `max effort` > `(xhigh)` > `(high)`, and records `display_name`/`variants` on the match.\n\n**Files changed:** `orchestrator/bench.py`, `tests/test_orchestrator.py` (both in scope).\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2014 59 tests, all pass, no failures. `scripts_green.sh` equivalent exited 0.\n\n**Live verification:** `uv run orchestrator bench fetch --force` matched 6/8 `DEFAULT_HINTS` (unmatched: claude-haiku-4-5, claude-sonnet-5 \u2014 not currently listed under those names on the site). `bench show` confirms numbers for `gpt-6-astra`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`.\n\nCommitted as `e29a97e` on `task/T-0037`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789662379.772615,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "e29a97ec2c61a3ecc52fa385c05a4b66738459a4"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789662114.713392,
+  "pid": 35896,
+  "account": "B",
+  "merged_into": "goal/T-0005",
+  "sha": "e29a97ec2c61a3ecc52fa385c05a4b66738459a4"
+}

@@ -1,0 +1,206 @@
+{
+  "id": "T-0694",
+  "created_at": 1789998515.3897889,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "Q12 v2: orchestrator/jev_planner.py \u2014 Jev as a shadow routing signal for Planner tier choice: typed batched questions over redacted structured state, fail open, never bypasses hard escalation (P12)",
+  "spec": "Why: the brief (P12) allows Jev to provide probabilistic decision characteristics to the Planner router, shadow first, as a signal and never as authority. jev_points.py (T-0586) shows the pattern: typed options, redacted evidence, mode per point, fail open. Nothing asks Jev about Planner routing. Spec review T-0687's risks are folded in: the classification producer is named, state_version is an explicit parameter, the signals source is named, and cache hits still record a row.\nWhat: new module orchestrator/jev_planner.py; jev.ask injected as ask_fn so tests never hit the network. classification is the dict returned by planner_taxonomy.classify (orchestrator/planner_taxonomy.py, T-0675 on goal/T-0674): keys decision_type, architectural, ambiguous, risk_class, signals (list[str]), band, task_class. ctx is decision.route's ctx dict; goal a bus task dict. All accessed with .get().\n- QUESTIONS = OrderedDict of five typed yes/no questions keyed routine_localized, architectural_reasoning, requirements_ambiguous, long_horizon, fable_improves_outcome, each one sentence.\n- state(classification, ctx, goal) -> bounded redacted dict: decision_type, band, task_class, architectural, risk_class from classification; signals = classification.get(\"signals\", [])[:10] each jev.redact'ed and capped 100 chars; goal_title = jev.redact(goal title)[:200]; spec_excerpt = jev.redact(first 300 chars of goal spec); scope_count = len(goal scope); scout_count, failing_test_count (len(ctx failing_ids)), spec_review_request_changes, auto_fix_rounds_used, signature_repeated from ctx. Never file contents, diffs or review comment bodies; json.dumps(state) <= 4000 chars, truncating spec_excerpt then signals until it fits.\n- should_ask(router_mode, jev_mode, hard_reasons, availability, route) -> (bool, reason): False with jev_off (jev_mode == \"off\"), hard_decision (hard_reasons non-empty), single_tier (fewer than two tiers with availability[tier][\"available\"] True, ignoring the fable_reserve_ok key), deterministic (route name != \"escalate\"), cannot_affect (router_mode == \"off\"); else (True, \"eligible\"). Shadow and active both ask; applying the signal is the router's job.\n- ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route, state_version, ask_fn=jev.ask, cache=None, root=None) -> {\"asked\": bool, \"reason\", \"mode\": cfg jev_mode, \"signals\": {key: float|None}, \"soft_adjust\": float, \"confidence\": float|None, \"cached\": bool}. state_version is passed explicitly by the caller (planner_runs.state_version(goal_id)); build_ctx does not populate it. One ask_fn(state, questions, task=goal id) call carrying all five questions. Answers parsed like jev_points._answer / planner_runs._coerce_probabilities: each answer a probability in [0, 1] else None. soft_adjust = clamp(0.2 * mean(p_architectural, p_ambiguous, p_long_horizon, p_fable) - 0.2 * p_routine, -0.2, 0.2); ask_fn returning None -> asked True, reason jev_unavailable, soft_adjust 0.0; unparsable answers -> reason jev_malformed, soft_adjust 0.0. cache: dict keyed (goal id, state_version, decision_type); a hit returns the cached result with cached True and no ask_fn call. Every call (asked, skipped or cached) appends one row via schedlog.append(\"planner_jev\", {goal_id, decision_type, state_version, asked, cached, reason, signals, soft_adjust, mode}) with no question text and no state text.\n- summary(root=None) -> {\"n\", \"asked\", \"cached\", \"skip_reasons\": dict, \"mean_soft_adjust\"} tolerant of malformed lines (schedlog.read_with_malformed).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_planner.py::test_off_and_hard_and_single_tier_never_ask \u2014 jev_mode off, hard_reasons ['security'], one available tier and a routine route each give asked False with the documented reason, no ask_fn call, and still one planner_jev row",
+    "tests/test_jev_planner.py::test_batched_single_call_and_soft_adjust_bounds \u2014 exactly one ask_fn call carries five questions; p 1.0 for architectural/ambiguous/long_horizon/fable and 0 routine give soft_adjust 0.2; all routine gives -0.2; never outside [-0.2, 0.2]",
+    "tests/test_jev_planner.py::test_malformed_and_timeout_fail_open \u2014 ask_fn returning None and ask_fn returning {'answers': 'garbage'} both yield soft_adjust 0.0 with reasons jev_unavailable / jev_malformed, and a row is recorded",
+    "tests/test_jev_planner.py::test_state_is_redacted_and_bounded \u2014 a goal spec with a token-like secret and 20k chars and a classification with 30 signals yields spec_excerpt <= 300 chars, at most 10 signals, the secret redacted, no key named diff/contents/comments, json <= 4000 chars, and decision_type/band/risk_class copied from the classification",
+    "tests/test_jev_planner.py::test_cache_hit_skips_network_and_summary_counts \u2014 a second ask with the same (goal, state_version, decision_type) returns cached True with zero extra ask_fn calls and appends a row with cached True; summary counts asked, cached and skip reasons over rows including one malformed line"
+  ],
+  "scope": [
+    "orchestrator/jev_planner.py",
+    "tests/test_jev_planner.py"
+  ],
+  "depends_on": [
+    "T-0675"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/planner_taxonomy.py",
+      "orchestrator/jev_points.py",
+      "orchestrator/jev_sched.py",
+      "orchestrator/jev.py",
+      "orchestrator/planner_runs.py",
+      "orchestrator/schedlog.py",
+      "tests/test_planner_taxonomy.py",
+      "tests/test_jev_points.py",
+      "tests/test_jev_sched.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "should_ask(router_mode, jev_mode, hard_reasons, availability, route) -> (bool, reason); ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route, state_version, ask_fn=jev.ask, cache=None, root=None) -> {asked, reason, mode, signals, soft_adjust in [-0.2, 0.2], confidence, cached}; classification = planner_taxonomy.classify dict; the caller passes state_version = planner_runs.state_version(goal_id); the router (Q4) consumes soft_adjust as jev_signal and ignores it for hard decisions; rows in runs/sched/planner_jev.jsonl; cfg is the loaded [planner.routing] dict (jev_mode off|shadow|active)."
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by Q12 v3 after spec review request_changes (cache key widened with a classification fingerprint; optional task parameter; jev_mode read from the planner_router.load_cfg dict key jev_mode; confidence aggregated like jev_points._answer; availability shape cited from the router contract)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789998642.715122,
+      "pipeline": {
+        "first_ready_at": 1789998642.714925
+      }
+    },
+    {
+      "ts": 1789998642.849779,
+      "pipeline": {
+        "first_ready_at": 1789998642.714925,
+        "spec_review_at": 1789998642.8471591,
+        "spec_review_at_lease": 1789999542.8471591
+      }
+    },
+    {
+      "ts": 1789998642.857124,
+      "pipeline": {
+        "first_ready_at": 1789998642.714925,
+        "spec_review_at": 1789998642.8471591,
+        "spec_review_at_lease": 1789999542.8471591,
+        "spec_review_at_done": 1789998642.856935
+      }
+    },
+    {
+      "ts": 1789998794.057936,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "Cache key is (goal_id, state_version, decision_type) but the redacted state sent to Jev (and the classification it's built from) also carries risk_class, architectural and band, none of which are part of the key. state_version only hashes bus task rows (id, status, hold_reason, merged_into, seq) under the goal \u2014 it does not change when ctx flags like touches_auth/security_trigger/semantic_trigger change. Two invocations can share the same decision_type and state_version while risk_class or architectural differ (e.g. a security trigger toggling between calls on an unmerged goal), and the second call would silently get the first call's stale signals/soft_adjust via a cache hit instead of asking again.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "state()/ask() only take goal, not task, even though the classification producer (planner_taxonomy.classify) deliberately prefers task fields over goal fields for held_task, fix_strategy and architectural_replan \u2014 exactly the decision types this signal matters most for. Without a task parameter, goal_title/spec_excerpt sent to Jev for those decision types describe the parent goal rather than the task actually under decision, weakening the signal for the highest-stakes cases.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "should_ask()'s availability[tier]['available'] shape and the fable_reserve_ok sentinel key it says to ignore have no producer anywhere in the current codebase (grep confirms zero hits). The spec asks the executor to invent both sides of this contract; acceptance tests will be self-consistent but won't catch a mismatch against whatever the real router eventually builds.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "soft_adjust's formula is fully specified but the return field 'confidence' has no specified aggregation rule from the five per-question confidences, and no acceptance test asserts a confidence value \u2014 an inconsistent or always-None implementation ships unverified.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "should_ask() requires jev_mode as an explicit argument but ask() only receives cfg; the spec never names which cfg key ask() reads to derive jev_mode (jev_points reads cfg['jev']['points'][point], jev_route reads pool.cfg['jev']['routing']) so the pool.toml wiring path is left to the executor to guess.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789998799.738164,
+      "pipeline": {
+        "first_ready_at": 1789998642.714925,
+        "spec_review_at": 1789998642.8471591,
+        "spec_review_at_lease": 1789999542.8471591,
+        "spec_review_at_done": 1789998642.856935,
+        "spec_review_held_at": 1789998799.738101
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789998800.453532,
+      "pipeline": {
+        "first_ready_at": 1789998642.714925,
+        "spec_review_at": 1789998642.8471591,
+        "spec_review_at_lease": 1789999542.8471591,
+        "spec_review_at_done": 1789998642.856935,
+        "spec_review_held_at": 1789998799.738101,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789998800.49101,
+      "pipeline": {
+        "first_ready_at": 1789998642.714925,
+        "spec_review_at": 1789998642.8471591,
+        "spec_review_at_lease": 1789999542.8471591,
+        "spec_review_at_done": 1789998642.856935,
+        "spec_review_held_at": 1789998799.738101,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789998799.738164": true
+        }
+      }
+    },
+    {
+      "ts": 1789998867.584196,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by Q12 v3 after spec review request_changes (cache key widened with a classification fingerprint; optional task parameter; jev_mode read from the planner_router.load_cfg dict key jev_mode; confidence aggregated like jev_points._answer; availability shape cited from the router contract)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789998642.714925,
+    "spec_review_at": 1789998642.8471591,
+    "spec_review_at_lease": 1789999542.8471591,
+    "spec_review_at_done": 1789998642.856935,
+    "spec_review_held_at": 1789998799.738101,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789998799.738164": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "Cache key is (goal_id, state_version, decision_type) but the redacted state sent to Jev (and the classification it's built from) also carries risk_class, architectural and band, none of which are part of the key. state_version only hashes bus task rows (id, status, hold_reason, merged_into, seq) under the goal \u2014 it does not change when ctx flags like touches_auth/security_trigger/semantic_trigger change. Two invocations can share the same decision_type and state_version while risk_class or architectural differ (e.g. a security trigger toggling between calls on an unmerged goal), and the second call would silently get the first call's stale signals/soft_adjust via a cache hit instead of asking again.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "state()/ask() only take goal, not task, even though the classification producer (planner_taxonomy.classify) deliberately prefers task fields over goal fields for held_task, fix_strategy and architectural_replan \u2014 exactly the decision types this signal matters most for. Without a task parameter, goal_title/spec_excerpt sent to Jev for those decision types describe the parent goal rather than the task actually under decision, weakening the signal for the highest-stakes cases.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "should_ask()'s availability[tier]['available'] shape and the fable_reserve_ok sentinel key it says to ignore have no producer anywhere in the current codebase (grep confirms zero hits). The spec asks the executor to invent both sides of this contract; acceptance tests will be self-consistent but won't catch a mismatch against whatever the real router eventually builds.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "soft_adjust's formula is fully specified but the return field 'confidence' has no specified aggregation rule from the five per-question confidences, and no acceptance test asserts a confidence value \u2014 an inconsistent or always-None implementation ships unverified.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "should_ask() requires jev_mode as an explicit argument but ask() only receives cfg; the spec never names which cfg key ask() reads to derive jev_mode (jev_points reads cfg['jev']['points'][point], jev_route reads pool.cfg['jev']['routing']) so the pool.toml wiring path is left to the executor to guess.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

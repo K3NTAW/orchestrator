@@ -1,0 +1,230 @@
+{
+  "id": "T-1338",
+  "created_at": 1790191217.666378,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S1 v2: executor_identity resolves any executor field to provider/model; review rule compares models with None guard",
+  "spec": "Respec of T-1335 after spec review T-1337 (request_changes). Goal T-1334: [[executors]] provider-agnostic; S2 (T-1336) wires dispatch. No provider=\"claude\" row exists in pool.toml until after S2, so S1 must not change behaviour for today's config.\n\nWhat:\n1. orchestrator/pool.py: module function executor_identity(field, cfg) -> {\"provider\": \"codex\"|\"claude\"|None, \"model\": str|None}, reading only cfg (no Pool state, no disk writes). field: an [[executors]] row id -> row provider/model; \"claude:<tier>\" (legacy, spawn.py:1564) -> \"claude\" + cfg[\"models\"].get(tier) only if tier in (\"haiku\",\"sonnet\",\"opus\") and the value is a str, else model None; None/unknown -> both None. Pool.executor_identity(field) and Pool.is_claude_executor(field) delegate with self.cfg.\n2. pool.py eligible_executors (pool.py:522): provider=\"claude\" rows are eligible only when self.pick(\"execute\") returns an account. Claude rows compete in pick_executor (intended). codex_available (pool.py:590) keeps its meaning: True iff some eligible row with provider == \"codex\" exists (evaluate eligibility over codex rows), so a claude row outranking Codex never reads as Codex cooling. daemon._codex_available and the fallback path are S2's.\n3. orchestrator/daemon.py review_tier(t, cfg=None) (daemon.py:1070) and _security_review_tier(t, cfg=None) (daemon.py:1136): cfg defaults to pool.config() (no Pool()). Executing model = executor_identity(t[\"executor\"], cfg)[\"model\"]. Swap to _other_tier(default) only when both the executing model and cfg[\"models\"].get(default) are non-None strings and equal; otherwise keep the default, except legacy \"claude:sonnet\" -> \"opus\" and \"claude:opus\" -> \"sonnet\" as today. If the lookup raises, fail closed: return _other_tier(default).\n4. _review_plan (daemon.py:1241): the startswith(\"claude:\") test becomes is_claude_executor via executor_identity(..., cfg). Second review for a Claude executor stays on review_tier(t), today's legacy behaviour, now also for claude rows.\n5. running_claude_workers (daemon.py:470) and spawn.py:1508 are unchanged on purpose: a row-routed Claude run claims assigned_to \"claude:<acct>\" (spawn.py:1603), so it is still counted.\nTests: patch daemon.SECURITY_REVIEW_TIER and the cfg with unittest.mock (patch.object / patch.dict) and restore; build accounts with \"execute\" affinity in-test, never the shared harness pool state. Additive change; revert with git revert; legacy \"claude:<tier>\" tasks resolve unchanged with no pool.toml row. No pool.toml edit, no new dependencies.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py::ExecutorIdentity::test_row_id_legacy_tier_and_unknown: a provider=claude row id, a codex row id, 'claude:opus', 'claude:success_floor', an unknown id and None resolve to the expected provider/model (non-tier keys and unknowns give model None)",
+    "tests/test_pool.py::ExecutorIdentity::test_claude_row_needs_account_headroom: a provider=claude row is excluded from eligible_executors when every execute-affinity account is cooling and included when one has headroom",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_available_ignores_winning_claude_row: with a heavier-weight eligible claude row and an eligible codex row, codex_available() is True",
+    "tests/test_daemon.py::ReviewModelRule::test_reviewer_never_matches_executing_model: claude row on the sonnet model -> review_tier opus and _security_review_tier opus; claude row on the opus model -> sonnet, and with SECURITY_REVIEW_TIER patched to 'opus' -> sonnet; codex row -> sonnet; legacy claude:sonnet -> opus; unknown executor, None and a claude row with no model keep the default; a raising lookup returns the other tier",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1335",
+    "read_scope": [
+      "orchestrator/spawn.py",
+      "orchestrator/executor.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/attribution.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "pool.executor_identity(field, cfg) -> {'provider': 'codex'|'claude'|None, 'model': str|None} (cfg-only, no state); Pool.executor_identity(field) and Pool.is_claude_executor(field) delegate with self.cfg; daemon.review_tier(t, cfg=None), daemon._security_review_tier(t, cfg=None). S2 sets a claude-row task's executor == tier == row id and keeps assigned_to 'claude:<acct>'."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790191245.542619,
+      "pipeline": {
+        "first_ready_at": 1790191245.542581
+      }
+    },
+    {
+      "ts": 1790191245.648598,
+      "pipeline": {
+        "first_ready_at": 1790191245.542581,
+        "spec_review_at": 1790191245.648553,
+        "spec_review_at_lease": 1790192145.648553
+      }
+    },
+    {
+      "ts": 1790191245.656291,
+      "pipeline": {
+        "first_ready_at": 1790191245.542581,
+        "spec_review_at": 1790191245.648553,
+        "spec_review_at_lease": 1790192145.648553,
+        "spec_review_at_done": 1790191245.656205
+      }
+    },
+    {
+      "ts": 1790191298.458766,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Item 2 gates claude rows on self.pick('execute') inside eligible_executors. That call is not free: it reads account utilization and the daily budget, and the Executor loop already calls roll_day() as a side effect. It also ignores the claude row's own max_parallel and daily_budget_tasks unless the same loop applies them. The spec should say these checks still run for claude rows and that pick() is called once per eligibility pass, not once per row.",
+          "severity": "med",
+          "line": 522
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Item 2 says codex_available evaluates eligibility over codex rows only, but today it goes through pick_executor(task=...), which applies the scorecard cost/success-floor ranking and then checks provider. Filtering eligible_executors to codex rows is a real semantic change for today's config: the result is now just 'any eligible codex row', which is looser than 'a codex row wins'. With only codex rows the two agree on True/False, since pick_executor returns some eligible row whenever the list is non-empty. The spec should state this equivalence and add a test showing codex_available is unchanged for a codex-only config, including when the task argument is passed.",
+          "severity": "med",
+          "line": 590
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "eligible_executors_from_snapshot mirrors the eligibility rules in a snapshot and is out of scope. Its 'claude' fallback path and its snapshot rows have no notion of provider=claude rows or account headroom, so the daemon's snapshot-based eligibility can diverge from pool.eligible_executors once a claude row exists. jev_route.py:226, specialist.py:131 and executor.py:381-487 (which checks ex.provider != 'codex') also consume pick_executor or eligible_executors. This is harmless while no claude row exists, but the spec should record it as an S2 hazard and say S1 adds no claude row and no test that routes through those callers.",
+          "severity": "med",
+          "line": 54
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Item 3 keeps the legacy 'claude:sonnet' -> 'opus' and 'claude:opus' -> 'sonnet' mapping, but the current code uses startswith('claude:sonnet') in review_tier and exact equality in _security_review_tier. The spec does not say whether the legacy branch stays startswith or becomes exact. It also does not say what happens for 'claude:sonnet' when cfg['models'] lacks 'sonnet', where the identity model is None and only the legacy branch applies. Without pinning this, the rewrite could change behaviour for today's tasks.",
+          "severity": "med",
+          "line": 1070
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The fail-closed rule returns _other_tier(default) when the lookup raises. For review_tier the default is 'sonnet', so a bad cfg makes every review opus. That is acceptable, but the spec must say which exceptions are caught. A bare 'except Exception' around the whole function would also swallow a mocked or real error in the legacy branch. It should say whether the failure is logged, because a silent fallback hides a broken config.",
+          "severity": "low",
+          "line": 1136
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The default cfg = pool.config() is read on every review_tier and _security_review_tier call, including from _review_plan inside the gate loop. The spec should confirm that pool.config() is cheap and does not hit disk on each call, or say that _review_plan reads it once and passes it through. It also says 'no Pool()' but doesn't say how the daemon module reaches pool.config().",
+          "severity": "low",
+          "line": 1241
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "The acceptance test bundles about ten scenarios in one method, including a raising lookup. A single failure hides the rest, and the raising-lookup case needs a concrete injection point (patching pool.executor_identity or daemon's reference to it) that the spec doesn't name. Split it into subTests or several methods, and name the patch target so the fail-closed path is verifiable.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "tests/test_pool.py",
+          "issue": "test_claude_row_needs_account_headroom and test_codex_available_ignores_winning_claude_row need a Pool built with a provider=claude row and 'execute'-affinity accounts. The spec forbids the shared harness pool state and does not say how the rows are injected (a cfg dict passed to Pool, or direct insertion into pool.executors). Pool() also reads and writes state through save() and _reservation_file, and it must not write to the shared ORCH_ROOT during the test. Specify the construction path and that nothing calls save().",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790191321.946412,
+      "pipeline": {
+        "first_ready_at": 1790191245.542581,
+        "spec_review_at": 1790191245.648553,
+        "spec_review_at_lease": 1790192145.648553,
+        "spec_review_at_done": 1790191245.656205,
+        "spec_review_held_at": 1790191321.946357
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790191323.0744,
+      "pipeline": {
+        "first_ready_at": 1790191245.542581,
+        "spec_review_at": 1790191245.648553,
+        "spec_review_at_lease": 1790192145.648553,
+        "spec_review_at_done": 1790191245.656205,
+        "spec_review_held_at": 1790191321.946357,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790191323.176714,
+      "pipeline": {
+        "first_ready_at": 1790191245.542581,
+        "spec_review_at": 1790191245.648553,
+        "spec_review_at_lease": 1790192145.648553,
+        "spec_review_at_done": 1790191245.656205,
+        "spec_review_held_at": 1790191321.946357,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790191321.946412": true
+        }
+      }
+    },
+    {
+      "ts": 1790191366.2900631,
+      "status": "superseded",
+      "hold_reason": "respec T-1341 after spec review T-1340 request_changes"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790191245.542581,
+    "spec_review_at": 1790191245.648553,
+    "spec_review_at_lease": 1790192145.648553,
+    "spec_review_at_done": 1790191245.656205,
+    "spec_review_held_at": 1790191321.946357,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790191321.946412": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Item 2 gates claude rows on self.pick('execute') inside eligible_executors. That call is not free: it reads account utilization and the daily budget, and the Executor loop already calls roll_day() as a side effect. It also ignores the claude row's own max_parallel and daily_budget_tasks unless the same loop applies them. The spec should say these checks still run for claude rows and that pick() is called once per eligibility pass, not once per row.",
+      "severity": "med",
+      "line": 522
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Item 2 says codex_available evaluates eligibility over codex rows only, but today it goes through pick_executor(task=...), which applies the scorecard cost/success-floor ranking and then checks provider. Filtering eligible_executors to codex rows is a real semantic change for today's config: the result is now just 'any eligible codex row', which is looser than 'a codex row wins'. With only codex rows the two agree on True/False, since pick_executor returns some eligible row whenever the list is non-empty. The spec should state this equivalence and add a test showing codex_available is unchanged for a codex-only config, including when the task argument is passed.",
+      "severity": "med",
+      "line": 590
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "eligible_executors_from_snapshot mirrors the eligibility rules in a snapshot and is out of scope. Its 'claude' fallback path and its snapshot rows have no notion of provider=claude rows or account headroom, so the daemon's snapshot-based eligibility can diverge from pool.eligible_executors once a claude row exists. jev_route.py:226, specialist.py:131 and executor.py:381-487 (which checks ex.provider != 'codex') also consume pick_executor or eligible_executors. This is harmless while no claude row exists, but the spec should record it as an S2 hazard and say S1 adds no claude row and no test that routes through those callers.",
+      "severity": "med",
+      "line": 54
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Item 3 keeps the legacy 'claude:sonnet' -> 'opus' and 'claude:opus' -> 'sonnet' mapping, but the current code uses startswith('claude:sonnet') in review_tier and exact equality in _security_review_tier. The spec does not say whether the legacy branch stays startswith or becomes exact. It also does not say what happens for 'claude:sonnet' when cfg['models'] lacks 'sonnet', where the identity model is None and only the legacy branch applies. Without pinning this, the rewrite could change behaviour for today's tasks.",
+      "severity": "med",
+      "line": 1070
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The fail-closed rule returns _other_tier(default) when the lookup raises. For review_tier the default is 'sonnet', so a bad cfg makes every review opus. That is acceptable, but the spec must say which exceptions are caught. A bare 'except Exception' around the whole function would also swallow a mocked or real error in the legacy branch. It should say whether the failure is logged, because a silent fallback hides a broken config.",
+      "severity": "low",
+      "line": 1136
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The default cfg = pool.config() is read on every review_tier and _security_review_tier call, including from _review_plan inside the gate loop. The spec should confirm that pool.config() is cheap and does not hit disk on each call, or say that _review_plan reads it once and passes it through. It also says 'no Pool()' but doesn't say how the daemon module reaches pool.config().",
+      "severity": "low",
+      "line": 1241
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "The acceptance test bundles about ten scenarios in one method, including a raising lookup. A single failure hides the rest, and the raising-lookup case needs a concrete injection point (patching pool.executor_identity or daemon's reference to it) that the spec doesn't name. Split it into subTests or several methods, and name the patch target so the fail-closed path is verifiable.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "tests/test_pool.py",
+      "issue": "test_claude_row_needs_account_headroom and test_codex_available_ignores_winning_claude_row need a Pool built with a provider=claude row and 'execute'-affinity accounts. The spec forbids the shared harness pool state and does not say how the rows are injected (a cfg dict passed to Pool, or direct insertion into pool.executors). Pool() also reads and writes state through save() and _reservation_file, and it must not write to the shared ORCH_ROOT during the test. Specify the construction path and that nothing calls save().",
+      "severity": "med",
+      "line": 0
+    }
+  ],
+  "hold_reason": "respec T-1341 after spec review T-1340 request_changes"
+}

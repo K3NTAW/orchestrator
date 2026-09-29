@@ -1,0 +1,116 @@
+{
+  "id": "T-0120",
+  "parent": "T-0109",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "D1: one review per task by the other model; spec review from complexity 6 on sonnet; thresholds in pool.toml [review]",
+  "spec": "Why: 2026-09-18 every fallback-executed task got two reviews (daemon sonnet + hand-added opus), and spec reviews ran on opus at 1.26 USD each; reviews cost as much as execution. Policy: complexity 1-3 hooks only (unchanged); 4-6 exactly one review, tier = the model that did not execute (C-O6 review_tier); 7-10 two reviews, the second on the other account with the other model (spawn.run_worker avoid, from C-O6b); spec review only for complexity >= 6, tier sonnet. Implement: daemon.py reads thresholds from pool.cfg.get(\"review\", {}) with keys spec_review_min (default 6), direct_merge_max (3), two_reviews_from (7) and spec_review_tier (\"sonnet\"), replacing the SPEC_REVIEW_MIN / DIRECT_MERGE_MAX constants (keep the names as module attributes for tests, populated from cfg at tick). gate(): when a review for the task already exists (any status), do not create another unless complexity >= two_reviews_from and only one exists; merge_reviewed(): for two_reviews_from and up, merge only when every review of the task approved; for one-review tasks, on the first approve as today. Add [review] to .orchestrator/pool.toml with the defaults and a comment stating the policy and the measurement that motivated it. README.md \"Pipeline\": rewrite the review sentence. Tests in tests/test_daemon.py: one_review_only_for_mid_complexity (a second gate pass creates no second review), two_reviews_for_high_complexity_merge_waits_for_both, spec_review_threshold_from_cfg (complexity 5 dispatches without spec review, 6 gets one on sonnet), defaults_when_review_table_missing.\n(Recreated from T-0110: re-pointed at C-O3 v4)",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py gains the four named tests; all green with existing tests untouched",
+    "With the committed pool.toml a complexity-5 task dispatches without spec review and a complexity-4 done task gets exactly one review on the model the executor did not use",
+    "pool.toml has a [review] table with the four keys and a comment; README Pipeline paragraph matches the policy",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0102",
+    "T-0115"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_daemon.py",
+    "recreated_from": "T-0110"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0120",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean at `cf7ad84`.\n\n## Summary\n\nImplemented the tiered review-cost policy in `orchestrator/daemon.py`, reading thresholds from `pool.toml`'s new `[review]` table instead of hardcoded constants:\n\n- `spec_review_min` (6), `direct_merge_max` (3), `two_reviews_from` (7), `spec_review_tier` (\"sonnet\") \u2014 kept as module attributes (`daemon.SPEC_REVIEW_MIN` etc.), refreshed from `pool.cfg.get(\"review\", {})` at the top of every `tick()` via new `_load_review_cfg()`.\n- `dispatch()`: spec review only fires at complexity \u2265 `SPEC_REVIEW_MIN`, tagged with `tier=SPEC_REVIEW_TIER`.\n- `gate()`: complexity \u2264 `DIRECT_MERGE_MAX` still merges straight through; complexity above that gets one review (tiered to whichever model didn't execute, via the existing `review_tier()`); complexity \u2265 `TWO_REVIEWS_FROM` gets a second review on the opposite tier (`_other_tier()`), guarded so a re-entry never creates a duplicate. Orphaned-result tasks keep the single-review path unconditionally.\n- `merge_reviewed()`: added `_review_verdict()` to read each review's own `review_verdict`/`result` first (a second review completing overwrites the shared field on the source task, so relying on that field alone would lose the first review's verdict). For `complexity >= TWO_REVIEWS_FROM`, merge only fires once every sibling review is done and approved; a single `request_changes` still holds immediately as before.\n\n**Files changed:** `orchestrator/daemon.py`, `tests/test_daemon.py`, `.orchestrator/pool.toml`, `README.md`.\n\n**Tests added** (all in `tests/test_daemon.py`): `test_one_review_only_for_mid_complexity`, `test_two_reviews_for_high_complexity_merge_waits_for_both`, `test_spec_review_threshold_from_cfg`, `test_defaults_when_review_table_missing`.\n\nTest output: 160/160 green (`uv run python -m unittest discover -q tests`), no failures. `.claude/hooks/tests-green.sh` gate exits 0.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789739454.222868,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789739455.200453,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0120",
+      "claimed_at": 1789739455.199517
+    },
+    {
+      "ts": 1789739455.207684,
+      "pid": 4555,
+      "account": "B"
+    },
+    {
+      "ts": 1789739938.150326,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean at `cf7ad84`.\n\n## Summary\n\nImplemented the tiered review-cost policy in `orchestrator/daemon.py`, reading thresholds from `pool.toml`'s new `[review]` table instead of hardcoded constants:\n\n- `spec_review_min` (6), `direct_merge_max` (3), `two_reviews_from` (7), `spec_review_tier` (\"sonnet\") \u2014 kept as module attributes (`daemon.SPEC_REVIEW_MIN` etc.), refreshed from `pool.cfg.get(\"review\", {})` at the top of every `tick()` via new `_load_review_cfg()`.\n- `dispatch()`: spec review only fires at complexity \u2265 `SPEC_REVIEW_MIN`, tagged with `tier=SPEC_REVIEW_TIER`.\n- `gate()`: complexity \u2264 `DIRECT_MERGE_MAX` still merges straight through; complexity above that gets one review (tiered to whichever model didn't execute, via the existing `review_tier()`); complexity \u2265 `TWO_REVIEWS_FROM` gets a second review on the opposite tier (`_other_tier()`), guarded so a re-entry never creates a duplicate. Orphaned-result tasks keep the single-review path unconditionally.\n- `merge_reviewed()`: added `_review_verdict()` to read each review's own `review_verdict`/`result` first (a second review completing overwrites the shared field on the source task, so relying on that field alone would lose the first review's verdict). For `complexity >= TWO_REVIEWS_FROM`, merge only fires once every sibling review is done and approved; a single `request_changes` still holds immediately as before.\n\n**Files changed:** `orchestrator/daemon.py`, `tests/test_daemon.py`, `.orchestrator/pool.toml`, `README.md`.\n\n**Tests added** (all in `tests/test_daemon.py`): `test_one_review_only_for_mid_complexity`, `test_two_reviews_for_high_complexity_merge_waits_for_both`, `test_spec_review_threshold_from_cfg`, `test_defaults_when_review_table_missing`.\n\nTest output: 160/160 green (`uv run python -m unittest discover -q tests`), no failures. `.claude/hooks/tests-green.sh` gate exits 0.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789739991.0248,
+      "pipeline": {
+        "gated_at": 1789739991.0247118
+      }
+    },
+    {
+      "ts": 1789740166.514812,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789740172.447472,
+      "pipeline": {
+        "gated_at": 1789739991.0247118,
+        "review_held_at": 1789740172.4473789
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789753314.392601,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "hold_reason": null,
+      "merged_via": "T-0169 (D1 fix-round chain, rebased)"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789739455.199517,
+  "pid": 4555,
+  "account": "B",
+  "pipeline": {
+    "gated_at": 1789739991.0247118,
+    "review_held_at": 1789740172.4473789
+  },
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0109",
+  "merged_via": "T-0169 (D1 fix-round chain, rebased)"
+}

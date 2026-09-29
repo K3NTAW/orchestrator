@@ -1,0 +1,183 @@
+{
+  "id": "T-0432",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H4 rebase 2: rebase task/T-0427 (the fourteen-commit H4 chain) onto goal/T-0353 at ccaa601, resolving orchestrator/daemon.py against the merged H7 failure-kind and rerun changes, keeping both intents; full gate green twice (merge conflict on T-0427)",
+  "spec": "STEP 0: this worktree is cut from task/T-0427 (H4 chain: fourteen commits from 7087be9 through 3a8271e over base 9b058ab). Rebase it onto goal/T-0353 (head ccaa601, which now carries H7: failure_signature and failure_kind, flaky rerun with validated ids, worktree-scoped runner probe with timeout, resume compatibility, plus the fix-round packet changes). The daemon's merge reported rebase_conflict in exactly one file: orchestrator/daemon.py, where H7 added failure_kind, _test_ids validation, _flaky_rerun_command and its probe near the top of the module and changed auto_fix_round, while the H4 chain changed dispatch (reservation-free, slots only), reconcile_dead(t, pool), the notify-per-transition calls and the worker-call shape.\nSteps: run git rebase goal/T-0353 in this worktree; for each conflict in orchestrator/daemon.py keep both intents: all H7 helpers and the auto_fix_round changes exactly as merged, and all H4 changes from the chain; keep every test from both sides. After the rebase the branch must show the fourteen H4 commits re-applied on top of ccaa601 with no merge commit. Then run .claude/hooks/tests-green.sh from the worktree root twice (exit 0 both) and python -m unittest tests.test_daemon tests.test_pool tests.test_executor once more. If conflicts appear outside daemon.py, resolve them keeping both intents and list them. The rebase is the commit; if a resolution fix is needed, commit it with the task id. Report the new head sha, resolved files and failures only.",
+  "inputs": [
+    "T-0431"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows ccaa601 (goal/T-0353 head) below the fourteen re-applied H4 commits and no merge commit",
+    "orchestrator/daemon.py keeps H7's failure_kind, failure_signature, validated rerun ids and bounded probe together with H4's reservation-free dispatch, reconcile_dead(t, pool) and notify-per-transition calls (grep for def failure_kind, def failure_signature, def reconcile_dead(t, pool)",
+    "python -m unittest tests.test_daemon tests.test_pool tests.test_executor exits 0",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/pool.py",
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py",
+    "tests/test_pool.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0432",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/pool.py",
+        "line": 0,
+        "issue": "sweep_reservations() treats a reservation as still live if os.kill(pid,0) succeeds, but PID reuse after the original worker died would make an unrelated process pin the reservation past its lease_until indefinitely, leaking budget headroom. Low likelihood, not attacker-controlled, but worth a TTL cap independent of pid liveness.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 677,
+        "issue": "_dispatch_worker's executor_id parameter and the inspect-based kwarg-filtering in it and spawn_async are dead: no call site in daemon.py ever passes executor_id, confirmed by test_dispatch_passes_no_placeholder_ids asserting empty kwargs. Speculative plumbing with no current caller.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789914800.873547,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0432",
+      "claimed_at": 1789914800.8732438
+    },
+    {
+      "ts": 1789914800.8744361,
+      "account": "B"
+    },
+    {
+      "ts": 1789914800.905422,
+      "pid": 98154,
+      "account": "B"
+    },
+    {
+      "ts": 1789915068.089643,
+      "status": "queued",
+      "pid": null,
+      "reason": "process died; requeued",
+      "pipeline": {}
+    },
+    {
+      "ts": 1789915131.1252449,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0432",
+      "claimed_at": 1789915131.125031
+    },
+    {
+      "ts": 1789915131.12701,
+      "account": "B"
+    },
+    {
+      "ts": 1789915131.1666172,
+      "pid": 9332,
+      "account": "B"
+    },
+    {
+      "ts": 1789915144.788813,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0432",
+      "claimed_at": 1789915144.78863
+    },
+    {
+      "ts": 1789915144.790112,
+      "account": "B"
+    },
+    {
+      "ts": 1789915144.8210151,
+      "pid": 9435,
+      "account": "B"
+    },
+    {
+      "ts": 1789915376.6190028,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 720,
+            "issue": "the new `else: continue` after the dispatched_at stamp is the last statement in the for-loop body anyway, so it has no functional effect; its companion test (test_failed_dispatch_stamp_releases_reservation) never creates a reservation before calling dispatch(), so it can't actually prove a release happens on a failed stamp \u2014 the assertion passes vacuously.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "line": 300,
+            "issue": "comment says the Claude fallback 'inherits this run key's existing dispatch reservation', but start() never calls pool.reserve() before handing off to _exhausted() \u2014 no reservation exists to inherit. Harmless (run_worker makes its own reservation independently) but the comment misdescribes the handoff.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789915376.620526,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789915452.27343,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 0,
+            "issue": "sweep_reservations() treats a reservation as still live if os.kill(pid,0) succeeds, but PID reuse after the original worker died would make an unrelated process pin the reservation past its lease_until indefinitely, leaking budget headroom. Low likelihood, not attacker-controlled, but worth a TTL cap independent of pid liveness.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 677,
+            "issue": "_dispatch_worker's executor_id parameter and the inspect-based kwarg-filtering in it and spawn_async are dead: no call site in daemon.py ever passes executor_id, confirmed by test_dispatch_passes_no_placeholder_ids asserting empty kwargs. Speculative plumbing with no current caller.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789915452.275245,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789915144.78863,
+  "account": "B",
+  "pid": 9435,
+  "reason": "process died; requeued",
+  "pipeline": {},
+  "review_verdict": "approve"
+}

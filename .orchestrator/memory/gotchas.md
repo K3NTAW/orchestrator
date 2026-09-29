@@ -516,3 +516,22 @@ outcome: write acceptance as tests/test_<module>.py::test_name (write-spec alrea
 type: gotcha · goal: T-1334 · provenance: repo
 - T-1370 needed tests/_harness.py; fix rounds T-1371 and T-1372 (scope + explicit "extension granted" text) both came back with Codex asking for the scope and no change.
 outcome: when a fix needs files outside the parent scope, respec as a fresh task (cherry-pick the parent commit) instead of a fix round
+
+## 2026-09-24 `orchestrator goal start` on a repo with an open goal creates a NEW goal container; tasks the launched Planner files under it branch from main, not from the open goal's branch
+type: gotcha · goal: luna-inbox T-0001 · provenance: repo
+- Resume launch T-0018 filed T-0019/T-0021 with parent T-0018; spec reviews then saw no contracts/, tests.sh or generated tokens (all merged on goal/T-0001) and rejected them partly for that.
+outcome: when relaunching a Planner to continue a goal, say explicitly that every task gets parent <original goal id> and that the launcher goal is superseded at the end
+
+## 2026-09-24 A fix round with depends_on = [its fix_round_for parent] deadlocks: bus.ready needs merged_into, and the held parent only becomes merged when the fix round merges
+type: gotcha · goal: luna-inbox M1 T-0035 · provenance: repo
+- luna-inbox T-0051 (RLS) and T-0052 (audit) were filed by a headless Planner with depends_on on their held parents; bus.ready stayed False. The daemon's auto fix rounds carry no depends_on, and merging a fix round walks fix_round_for to set merged_into on every ancestor (daemon.py report_merge), which is what releases dependents.
+outcome: file fix rounds with fix_round_for only, never depends_on the parent; re-filed as T-0053/T-0054. Code follow-up: bus.create_task should reject depends_on containing constraints.fix_round_for
+
+## 2026-09-24 Intervening in a target repo that runs an autonomous Planner creates duplicate fixes unless the intervention is written where that Planner reads
+type: gotcha · goal: luna-inbox M2 T-0112 · provenance: repo
+- The orchestrator Planner filed T-0132 (re-land of the decision adapter) while luna's autonomous Planner filed T-0133 for the same hold; T-0132 merged first and T-0133 plus its fix round T-0138 became churn (cancelled, superseded).
+outcome: log every cross-repo intervention in the target's .orchestrator/plan.md ("Orchestrator Planner interventions" section) at the moment it is made, and check the held task for a newer fix round before filing one
+
+## 2026-09-24 Fix-round merge can mark an unlanded parent merged
+type: gotcha · goal: T-0194 · tasks: T-0174,T-0191 · provenance: repo
+- merged_into on a fix_round_for ancestor is not proof its commits landed; check the files on the target (luna T-0174 routes were lost this way, 2026-09-24)

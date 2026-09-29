@@ -1,0 +1,108 @@
+{
+  "id": "T-0456",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P0b: lifecycle stamps for time and token metrics \u2014 bus.create_task writes created_at; the gate stamps first_green_at once and counts gate attempts and reds; report_merge stamps accepted_at on the merged task and on its fix-round lineage root",
+  "spec": "Phase I P0 (brief .orchestrator/phase-i-program.md). Base goal/T-0445 after P0a (T-0449) merges. Scout facts: created_at is not a stored field, daemon derives it ad hoc from bus_events or file mtime (daemon.py:576-581); pipeline stamps are epoch floats written by daemon.stamp/complete (daemon.py:268-292): dispatched_at, spec_review_at, gated_at (daemon.gate, daemon.py:784-842 sets gated_at on success and holds on gate_red), review_held_at, merged_at via report_merge (daemon.py:847); fix-round lineage via constraints.fix_round_for and auto_round (daemon.py:139-201).\n1. bus.create_task stores created_at = time.time() as a top-level task field (bus.py:101-125); bus.get keeps working for old tasks without it (readers treat absence as unknown, never crash).\n2. daemon.gate: on every gate run increment pipeline.gate_attempts; on a red gate increment pipeline.gate_reds and keep the existing hold; on the first green set pipeline.first_green_at = time.time() only if absent (a later re-gate after rebase never moves it); when the gated task is a fix round (attribution.lineage(task).root != task id) also set first_green_at on the lineage root if absent, and always increment the root's pipeline.lineage_fix_rounds so first-pass success is decidable from the root alone (first pass = root has first_green_at, lineage_fix_rounds == 0 and gate_reds == 0). Use daemon.stamp/complete under the existing locking so concurrent stages keep their guarantees.\n3. daemon.report_merge: on a successful merge set pipeline.accepted_at = the merge time on the merged task and, for a fix round, on its lineage root (which report_merge already marks merged_into); never overwrite an existing accepted_at.\n4. Daemon.py's ad hoc created_at derivation (daemon.py:576-581) prefers the stored field when present.\nTests: tests/test_bus.py::test_create_task_sets_created_at, tests/test_daemon.py::test_gate_sets_first_green_once_and_counts_attempts, test_gate_red_increments_reds_and_keeps_hold, test_fix_round_gate_marks_root_first_green_and_lineage_count, test_report_merge_sets_accepted_at_on_task_and_root_without_overwrite, test_respawn_check_prefers_stored_created_at. Existing tests stay green; .claude/hooks/tests-green.sh exits 0; git add -A; commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0450"
+  ],
+  "acceptance": [
+    "tests/test_bus.py::test_create_task_sets_created_at passes",
+    "tests/test_daemon.py::test_gate_sets_first_green_once_and_counts_attempts, test_gate_red_increments_reds_and_keeps_hold, test_fix_round_gate_marks_root_first_green_and_lineage_count, test_report_merge_sets_accepted_at_on_task_and_root_without_overwrite, test_respawn_check_prefers_stored_created_at pass",
+    "created_at, pipeline.first_green_at, gate_attempts, gate_reds, lineage_fix_rounds and accepted_at exist with the semantics above; old tasks without them never crash a reader",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "orchestrator/daemon.py",
+    "tests/test_bus.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0456",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_daemon.py",
+        "line": 0,
+        "issue": "Acceptance requires new tests test_gate_sets_first_green_once_and_counts_attempts, test_gate_red_increments_reds_and_keeps_hold, test_fix_round_gate_marks_root_first_green_and_lineage_count, and (in tests/test_bus.py) test_create_task_sets_created_at and test_report_merge_sets_accepted_at_on_task_and_root_without_overwrite. None of these appear in the diff \u2014 only two pre-existing tests were touched (to pop created_at). The gate can't verify these acceptance-named tests because they don't exist yet.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 806,
+        "issue": "gate_attempts is incremented unconditionally at the top of every gate() pass for any done/not-yet-gated execute task, before any real gate check (worktree existence, acceptance test check, or tests-green run) happens. Since gate() runs once per daemon tick (default interval=30s), a task merely waiting on its worktree will accumulate gate_attempts once per tick rather than once per actual attempt to validate it, inflating the counter independent of real gating work.",
+        "severity": "medium"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789920009.868572,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0456",
+      "claimed_at": 1789920009.8682292
+    },
+    {
+      "ts": 1789920009.869586,
+      "account": "B"
+    },
+    {
+      "ts": 1789920009.918287,
+      "pid": 16518,
+      "account": "B"
+    },
+    {
+      "ts": 1789920208.08108,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_daemon.py",
+            "line": 0,
+            "issue": "Acceptance requires new tests test_gate_sets_first_green_once_and_counts_attempts, test_gate_red_increments_reds_and_keeps_hold, test_fix_round_gate_marks_root_first_green_and_lineage_count, and (in tests/test_bus.py) test_create_task_sets_created_at and test_report_merge_sets_accepted_at_on_task_and_root_without_overwrite. None of these appear in the diff \u2014 only two pre-existing tests were touched (to pop created_at). The gate can't verify these acceptance-named tests because they don't exist yet.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 806,
+            "issue": "gate_attempts is incremented unconditionally at the top of every gate() pass for any done/not-yet-gated execute task, before any real gate check (worktree existence, acceptance test check, or tests-green run) happens. Since gate() runs once per daemon tick (default interval=30s), a task merely waiting on its worktree will accumulate gate_attempts once per tick rather than once per actual attempt to validate it, inflating the counter independent of real gating work.",
+            "severity": "medium"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789920208.0827148,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789920009.8682292,
+  "account": "B",
+  "pid": 16518,
+  "review_verdict": "request_changes"
+}

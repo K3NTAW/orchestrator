@@ -1,0 +1,60 @@
+{
+  "id": "T-0509",
+  "created_at": 1789945663.543692,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S3: orchestrator/critical_path.py \u2014 deterministic critical-path ranking of ready tasks (downstream chain length, blocked descendants, cold-start durations) wired as the daemon's wave order",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P4 (prioritize tasks that determine goal completion time; design and test a ranking function, do not implement the sketch blindly) and P5 (cold start simple and deterministic, no false precision). Base goal/T-0503 with S2 merged (daemon._wave_order(candidate_ids, tasks) identity hook; waves.jsonl row has an empty \"priority\"). Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nFacts: tasks are dicts with id, parent, depends_on, status, merged_into, complexity, constraints; dependents of X are tasks listing X in depends_on; scorecard._band (scorecard.py:56) maps complexity to bands 1-3, 4-6, 7-10.\n1. New orchestrator/critical_path.py, pure: est_duration_s(task, durations=None) = durations[task id] if present, else durations[band] if present, else COLD_START_S = {\"1-3\": 600, \"4-6\": 1200, \"7-10\": 2400} by complexity band. explain(task_id, tasks, durations=None) -> {\"downstream_depth\": longest chain of transitive dependents (same parent) that are not merged, done or failed, counted in tasks; \"blocked_descendants\": number of such transitive dependents; \"est_duration_s\"; \"critical_path_s\": est_duration_s of the task plus the heaviest downstream chain by est_duration_s; \"priority\": critical_path_s}. Cycles are guarded (a back edge is ignored, never a hang). rank(ready_ids, tasks, durations=None) -> ids sorted by priority desc, then blocked_descendants desc, then id asc; deterministic; ids not in tasks keep their relative order at the end.\n2. daemon: _wave_order(candidate_ids, tasks) returns critical_path.rank(candidate_ids, tasks); the waves.jsonl row's \"priority\" becomes {id: explain(...)} for every candidate. In shadow mode the order is only logged (baseline_order stays first-come); in active mode the wave is dispatched in this order. The task map handed to rank covers the candidates' goal (tasks sharing the parent) so downstream chains are visible.\n3. README Pipeline paragraph: one sentence on the ranking and its cold-start durations.\n4. Tests tests/test_critical_path.py: test_rank_prefers_longer_downstream_chain, test_rank_tie_breaks_on_blocked_descendants_then_id, test_explain_cold_start_durations_by_band, test_rank_ignores_merged_and_failed_descendants, test_rank_handles_cycles, test_durations_override_cold_start; tests/test_daemon.py: test_wave_row_carries_priority_order. Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "critical_path.rank orders a ready task that unblocks a longer or heavier downstream chain before an independent one, breaks ties by blocked descendants then id, ignores merged, done and failed descendants, and terminates on cyclic depends_on",
+    "explain reports downstream_depth, blocked_descendants, est_duration_s (cold start 600/1200/2400 s by band unless durations override) and critical_path_s for any task",
+    "every waves.jsonl row carries priority explanations for all candidates and the wave order follows rank; shadow mode still dispatches first-come",
+    "tests test_rank_prefers_longer_downstream_chain, test_rank_tie_breaks_on_blocked_descendants_then_id, test_explain_cold_start_durations_by_band, test_rank_ignores_merged_and_failed_descendants, test_rank_handles_cycles, test_durations_override_cold_start, test_wave_row_carries_priority_order pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/critical_path.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_critical_path.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-0507"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 1800,
+    "task_class": "architectural",
+    "read_scope": [
+      "orchestrator/interference.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/scorecard.py",
+      ".orchestrator/adaptive-parallelism-program.md"
+    ],
+    "interface_contract": "critical_path.rank(ready_ids, tasks, durations=None) -> ordered ids; critical_path.explain(task_id, tasks, durations=None) -> {downstream_depth, blocked_descendants, est_duration_s, critical_path_s, priority}; COLD_START_S by band; durations dict keyed by task id or band string (S5 later supplies medians)"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by S3 v2: depends_on is immutable and its dependency T-0507 was superseded by S2 v2",
+    "provenance": "repo",
+    "confidence": 1
+  },
+  "events": [
+    {
+      "ts": 1789947356.261227,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by S3 v2: depends_on is immutable and its dependency T-0507 was superseded by S2 v2",
+        "provenance": "repo",
+        "confidence": 1
+      }
+    }
+  ]
+}

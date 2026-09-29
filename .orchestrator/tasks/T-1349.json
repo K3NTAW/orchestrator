@@ -1,0 +1,692 @@
+{
+  "id": "T-1349",
+  "created_at": 1790191630.480563,
+  "parent": "T-1334",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S1 v5: executor_identity resolves any executor field to provider/model; review rule compares models with None guard",
+  "spec": "Respec of T-1344 after spec review T-1345. Goal T-1334: [[executors]] provider-agnostic; S2 (depends on this) wires dispatch. S1 and S2 reach main together in one goal PR; the Planner adds the first provider=\"claude\" row to pool.toml only after both merge. Rollback: git revert (no persisted state, no pool.toml field).\n\n1. orchestrator/pool.py: factor the row source out of Pool._read_executors (pool.py:157) into executor_rows(cfg) -> list[dict]: cfg[\"executors\"] (a list of dicts keyed by \"id\") or, when absent/empty, the synthesized LEGACY_EXECUTOR_ID row exactly as today; Pool._read_executors uses it (duplicate ids: last wins, as today). Module function executor_identity(field, cfg) -> {\"provider\": \"codex\"|\"claude\"|None, \"model\": str|None}: row whose \"id\" == field in executor_rows(cfg) -> its provider/model; \"claude:<tier>\" (legacy, spawn.py:1564) -> \"claude\", model cfg.get(\"models\",{}).get(tier) only if tier in (\"haiku\",\"sonnet\",\"opus\") and a str, else None; None/unknown -> both None. No Pool state, no disk. Pool.executor_identity(field), Pool.is_claude_executor(field) delegate with self.cfg.\n2. pool.py eligible_executors (pool.py:522): claude rows pass every existing check (enabled, roles, cooling, band, roll_day, max_parallel, daily_budget_tasks) and also need headroom on any execute-affinity account: self.pick(\"execute\") at most once per call, lazily, only when a claude row reaches that check; never for codex-only configs (so pick_executor and codex_available never call pick either). Eligibility reserves nothing; S2's dispatch re-picks the account and holds when none is left. codex_available (pool.py:590): True iff some eligible row has provider \"codex\" (with codex-only rows identical to today: pick_executor returns an eligible row whenever one exists).\n3. orchestrator/daemon.py: extend line 13 to `from .pool import Pool, fallback_tier, executor_identity, config as pool_config`; add `import tomllib`.\n4. daemon.review_tier(t, cfg=None) (daemon.py:1070), _security_review_tier(t, cfg=None) (daemon.py:1136): legacy branches first, unchanged: review_tier startswith(\"claude:sonnet\") -> \"opus\", startswith(\"claude:opus\") -> \"sonnet\"; _security_review_tier exact f\"claude:{tier}\" -> _other_tier(tier). executor field None -> default, no config read. Otherwise one try: cfg = pool_config() if cfg is None; ident = executor_identity(field, cfg); swap to _other_tier(default) only if ident[\"provider\"] == \"claude\" and ident[\"model\"] is a str equal to cfg[\"models\"].get(default); else default. except (KeyError, TypeError, AttributeError, ValueError, OSError, tomllib.TOMLDecodeError) as exc: print(f\"review_tier: lookup failed ({exc}); failing closed to {other}\", file=sys.stderr); return other (other = _other_tier(default)).\n5. daemon._open_reviews(t, n_reviews, review_reason, cfg=None) (daemon.py:1212; tier selection daemon.py:1228-1244): when cfg is None, load pool_config() once at the top inside the same try/except (failure -> cfg stays None and each tier call fails closed); pass cfg to every review_tier/_security_review_tier call. daemon.py:1241 becomes: legacy startswith(\"claude:\") or (cfg is not None and executor_identity(t.get(\"executor\"), cfg)[\"provider\"] == \"claude\"); second review for a Claude executor stays on review_tier(t, cfg). Callers: gate(pool) daemon.py:1432 and sweep_leases(pool) daemon.py:1625 pass cfg=pool.cfg; _merge_reviewed_one daemon.py:1524 passes nothing.\n\nDecided, not in S1 (do not add): running_claude_workers (daemon.py:470), spawn.py:1508, executed_by (daemon.py:392), docstring daemon.py:1348, capacity.py:54, executor.py:279/:487 are S2 or unchanged (row-routed runs still claim \"claude:<acct>\"). Model-id aliasing (dated vs undated ids) is out of scope: distinct strings are distinct models. No guard test against enabling a claude row early (the goal PR ships S1+S2 together). No pool.toml byte test.\nTests: one method per scenario as named in acceptance; baselines are hard-coded expected values; cfg dicts and accounts (with \"execute\" affinity) built in-test; patched globals restored. No new dependencies.",
+  "inputs": [
+    "T-1347"
+  ],
+  "acceptance": [
+    "tests/test_pool.py::ExecutorIdentity::test_identity_row_legacy_unknown: claude row id, codex row id, 'claude:opus', 'claude:success_floor', unknown id and None resolve as specified; with no [[executors]] table the synthesized legacy row resolves to provider codex",
+    "tests/test_pool.py::ExecutorIdentity::test_claude_row_needs_account_headroom: claude row excluded when every execute-affinity account is cooling, included with headroom, excluded at max_parallel; pick called at most once per eligible_executors call",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_only_never_calls_pick: codex-only cfg -> eligible_executors, pick_executor and codex_available make zero Pool.pick calls and return hard-coded expected values with and without task",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_available_true_beside_heavier_claude_row",
+    "tests/test_daemon.py::ReviewModelRule::test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)",
+    "tests/test_daemon.py::ReviewModelRule::test_claude_row_on_opus_model_reviewed_by_sonnet (including SECURITY_REVIEW_TIER patched to 'opus')",
+    "tests/test_daemon.py::ReviewModelRule::test_codex_none_unknown_and_modelless_keep_default (None makes no pool_config call)",
+    "tests/test_daemon.py::ReviewModelRule::test_legacy_claude_tiers_unchanged_without_models_table",
+    "tests/test_daemon.py::ReviewModelRule::test_lookup_failure_fails_closed (executor_identity raising KeyError and pool_config raising OSError -> other tier plus the stderr line)",
+    "tests/test_daemon.py::ReviewModelRule::test_open_reviews_loads_config_at_most_once (cfg=None -> pool_config called <= 1 time; cfg passed -> 0 times; codex-only tiers match hard-coded values)",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1349",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "risks": [
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "Executor.running is counted from bus tasks whose executor equals the row id (pool.py:~168). The spec says row-routed runs still claim 'claude:<acct>', so a claude row's running count stays 0. That makes the max_parallel check a no-op, and the 'excluded at max_parallel' acceptance test only passes if it sets ex.running by hand. Nothing shows the check works end to end before S2 lands.",
+        "severity": "med",
+        "line": 168
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "A claude row with no model, or a model that doesn't match cfg['models'][default], silently keeps the default tier. Executor and reviewer can then be the same model, which is the self-review this rule exists to prevent. The spec fails closed on lookup errors but not on this case. The test name 'modelless_keep_default' pins the silent behaviour.",
+        "severity": "med",
+        "line": 1136
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "If pool_config() fails in _open_reviews, cfg stays None. Every codex-executed task then fails closed to 'opus' and prints a stderr line, even though nothing is wrong with the codex path. The number>0 branch (daemon.py:1241) skips the Claude check when cfg is None, and the review then becomes _other_tier(existing[0]['tier']). The two paths can end up inconsistent during a config outage.",
+        "severity": "low",
+        "line": 1241
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "_open_reviews loads pool_config() at the top even when t['executor'] is None or a legacy 'claude:' value. That adds a config read per call where review_tier itself makes none, and it is what puts the fail-closed path in reach of unrelated tasks.",
+        "severity": "low",
+        "line": 1212
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "codex_available changes meaning: it used to be 'the top-ranked pick is codex' and becomes 'some eligible row is codex'. mcp.py:155, daemon.py:1876 and Pool.status call it. The spec only checks hard-coded values for codex-only and one mixed case. Callers that use it to decide whether Codex can take the task now may get a different answer than pick_executor gives.",
+        "severity": "low",
+        "line": 590
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "executor_identity does not say which row wins when ids are duplicated. _read_executors keeps the last, but a first-match lookup over executor_rows(cfg) would return the first. This is a case where the review tier depends on which row is read.",
+        "severity": "low",
+        "line": 157
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "issue": "Acceptance ids carry parenthetical text, for example 'test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)'. The gate that extracts test ids may not strip it, and the spec conditional says ids must match exactly.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Make the max_parallel acceptance check state how ex.running is populated in the test (set directly, or via a bus task whose executor equals the row id). Say explicitly that max_parallel is not enforced for real claude runs until S2 counts 'claude:<acct>' runs against the row.",
+      "Decide what a claude row with a missing or unmatched model does in review_tier and _security_review_tier. Preferably fail closed to _other_tier(default) with the stderr line, and add that to test_lookup_failure_fails_closed. If keeping the default is intended, state why self-review is acceptable there.",
+      "In _open_reviews, load cfg lazily, only when the executor is not None and not legacy 'claude:'. This avoids failing closed for codex tasks and makes the 'at most once' rule simpler to test.",
+      "State that executor_identity resolves duplicate ids the same way _read_executors does (last wins), and add a test for it.",
+      "Move the parenthetical notes out of the acceptance ids into separate lines so the ids match the method names exactly.",
+      "Add a test or a note that Pool.status and mcp.py:155 give the same answers for codex-only configs after the codex_available rewrite."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790191632.056844,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7078,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790191632.061364,
+      "packet_meta": {
+        "chars": 6339,
+        "est_tokens": 1584,
+        "presented_tokens": 1584,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ba583357633160b8a6c23bad43663269d4b30270bc01a9794e333509113cab25"
+          },
+          "spec": {
+            "chars": 4096,
+            "est_tokens": 1024,
+            "sha256": "60d54e43306c331845c11f6e08bd3067b8018146122de2d42cd7c9a147b990a9"
+          },
+          "acceptance": {
+            "chars": 1773,
+            "est_tokens": 443,
+            "sha256": "4d171828a1d78dbddbb23834858a348958955365be4ef2f34675090d6b344894"
+          },
+          "scope": {
+            "chars": 101,
+            "est_tokens": 25,
+            "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 248,
+            "est_tokens": 62,
+            "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "787b8c4666ca",
+        "version": "787b8c4666ca",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1347 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7078,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790191634.106436,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1349",
+      "claimed_at": 1790191634.106115
+    },
+    {
+      "ts": 1790191634.107446,
+      "account": "A"
+    },
+    {
+      "ts": 1790191635.466162,
+      "pid": 2655,
+      "account": "A"
+    },
+    {
+      "ts": 1790191683.809037,
+      "packet_meta": {
+        "chars": 6339,
+        "est_tokens": 1584,
+        "presented_tokens": 1584,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ba583357633160b8a6c23bad43663269d4b30270bc01a9794e333509113cab25"
+          },
+          "spec": {
+            "chars": 4096,
+            "est_tokens": 1024,
+            "sha256": "60d54e43306c331845c11f6e08bd3067b8018146122de2d42cd7c9a147b990a9"
+          },
+          "acceptance": {
+            "chars": 1773,
+            "est_tokens": 443,
+            "sha256": "4d171828a1d78dbddbb23834858a348958955365be4ef2f34675090d6b344894"
+          },
+          "scope": {
+            "chars": 101,
+            "est_tokens": 25,
+            "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 248,
+            "est_tokens": 62,
+            "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "787b8c4666ca",
+        "version": "787b8c4666ca",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1347 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7078,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "69fcb1f2-aa07-459a-833c-96fbf1a658e9"
+      }
+    },
+    {
+      "ts": 1790191683.836125,
+      "packet_meta": {
+        "chars": 6339,
+        "est_tokens": 1584,
+        "presented_tokens": 1584,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ba583357633160b8a6c23bad43663269d4b30270bc01a9794e333509113cab25"
+          },
+          "spec": {
+            "chars": 4096,
+            "est_tokens": 1024,
+            "sha256": "60d54e43306c331845c11f6e08bd3067b8018146122de2d42cd7c9a147b990a9"
+          },
+          "acceptance": {
+            "chars": 1773,
+            "est_tokens": 443,
+            "sha256": "4d171828a1d78dbddbb23834858a348958955365be4ef2f34675090d6b344894"
+          },
+          "scope": {
+            "chars": 101,
+            "est_tokens": 25,
+            "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 248,
+            "est_tokens": 62,
+            "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "787b8c4666ca",
+        "version": "787b8c4666ca",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1347 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7078,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "69fcb1f2-aa07-459a-833c-96fbf1a658e9",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790191684.502176,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "risks": [
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "Executor.running is counted from bus tasks whose executor equals the row id (pool.py:~168). The spec says row-routed runs still claim 'claude:<acct>', so a claude row's running count stays 0. That makes the max_parallel check a no-op, and the 'excluded at max_parallel' acceptance test only passes if it sets ex.running by hand. Nothing shows the check works end to end before S2 lands.",
+            "severity": "med",
+            "line": 168
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "A claude row with no model, or a model that doesn't match cfg['models'][default], silently keeps the default tier. Executor and reviewer can then be the same model, which is the self-review this rule exists to prevent. The spec fails closed on lookup errors but not on this case. The test name 'modelless_keep_default' pins the silent behaviour.",
+            "severity": "med",
+            "line": 1136
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "If pool_config() fails in _open_reviews, cfg stays None. Every codex-executed task then fails closed to 'opus' and prints a stderr line, even though nothing is wrong with the codex path. The number>0 branch (daemon.py:1241) skips the Claude check when cfg is None, and the review then becomes _other_tier(existing[0]['tier']). The two paths can end up inconsistent during a config outage.",
+            "severity": "low",
+            "line": 1241
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "_open_reviews loads pool_config() at the top even when t['executor'] is None or a legacy 'claude:' value. That adds a config read per call where review_tier itself makes none, and it is what puts the fail-closed path in reach of unrelated tasks.",
+            "severity": "low",
+            "line": 1212
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "codex_available changes meaning: it used to be 'the top-ranked pick is codex' and becomes 'some eligible row is codex'. mcp.py:155, daemon.py:1876 and Pool.status call it. The spec only checks hard-coded values for codex-only and one mixed case. Callers that use it to decide whether Codex can take the task now may get a different answer than pick_executor gives.",
+            "severity": "low",
+            "line": 590
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "executor_identity does not say which row wins when ids are duplicated. _read_executors keeps the last, but a first-match lookup over executor_rows(cfg) would return the first. This is a case where the review tier depends on which row is read.",
+            "severity": "low",
+            "line": 157
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "issue": "Acceptance ids carry parenthetical text, for example 'test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)'. The gate that extracts test ids may not strip it, and the spec conditional says ids must match exactly.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Make the max_parallel acceptance check state how ex.running is populated in the test (set directly, or via a bus task whose executor equals the row id). Say explicitly that max_parallel is not enforced for real claude runs until S2 counts 'claude:<acct>' runs against the row.",
+          "Decide what a claude row with a missing or unmatched model does in review_tier and _security_review_tier. Preferably fail closed to _other_tier(default) with the stderr line, and add that to test_lookup_failure_fails_closed. If keeping the default is intended, state why self-review is acceptable there.",
+          "In _open_reviews, load cfg lazily, only when the executor is not None and not legacy 'claude:'. This avoids failing closed for codex tasks and makes the 'at most once' rule simpler to test.",
+          "State that executor_identity resolves duplicate ids the same way _read_executors does (last wins), and add a test for it.",
+          "Move the parenthetical notes out of the acceptance ids into separate lines so the ids match the method names exactly.",
+          "Add a test or a note that Pool.status and mcp.py:155 give the same answers for codex-only configs after the codex_available rewrite."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790191684.5034208,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Executor.running is counted from bus tasks whose executor equals the row id (pool.py:~168). The spec says row-routed runs still claim 'claude:<acct>', so a claude row's running count stays 0. That makes the max_parallel check a no-op, and the 'excluded at max_parallel' acceptance test only passes if it sets ex.running by hand. Nothing shows the check works end to end before S2 lands.",
+          "severity": "med",
+          "line": 168
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "A claude row with no model, or a model that doesn't match cfg['models'][default], silently keeps the default tier. Executor and reviewer can then be the same model, which is the self-review this rule exists to prevent. The spec fails closed on lookup errors but not on this case. The test name 'modelless_keep_default' pins the silent behaviour.",
+          "severity": "med",
+          "line": 1136
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "If pool_config() fails in _open_reviews, cfg stays None. Every codex-executed task then fails closed to 'opus' and prints a stderr line, even though nothing is wrong with the codex path. The number>0 branch (daemon.py:1241) skips the Claude check when cfg is None, and the review then becomes _other_tier(existing[0]['tier']). The two paths can end up inconsistent during a config outage.",
+          "severity": "low",
+          "line": 1241
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_open_reviews loads pool_config() at the top even when t['executor'] is None or a legacy 'claude:' value. That adds a config read per call where review_tier itself makes none, and it is what puts the fail-closed path in reach of unrelated tasks.",
+          "severity": "low",
+          "line": 1212
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "codex_available changes meaning: it used to be 'the top-ranked pick is codex' and becomes 'some eligible row is codex'. mcp.py:155, daemon.py:1876 and Pool.status call it. The spec only checks hard-coded values for codex-only and one mixed case. Callers that use it to decide whether Codex can take the task now may get a different answer than pick_executor gives.",
+          "severity": "low",
+          "line": 590
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "executor_identity does not say which row wins when ids are duplicated. _read_executors keeps the last, but a first-match lookup over executor_rows(cfg) would return the first. This is a case where the review tier depends on which row is read.",
+          "severity": "low",
+          "line": 157
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "Acceptance ids carry parenthetical text, for example 'test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)'. The gate that extracts test ids may not strip it, and the spec conditional says ids must match exactly.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 6339,
+    "est_tokens": 1584,
+    "presented_tokens": 1584,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "ba583357633160b8a6c23bad43663269d4b30270bc01a9794e333509113cab25"
+      },
+      "spec": {
+        "chars": 4096,
+        "est_tokens": 1024,
+        "sha256": "60d54e43306c331845c11f6e08bd3067b8018146122de2d42cd7c9a147b990a9"
+      },
+      "acceptance": {
+        "chars": 1773,
+        "est_tokens": 443,
+        "sha256": "4d171828a1d78dbddbb23834858a348958955365be4ef2f34675090d6b344894"
+      },
+      "scope": {
+        "chars": 101,
+        "est_tokens": 25,
+        "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 248,
+        "est_tokens": 62,
+        "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 13,
+        "est_tokens": 3,
+        "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+      }
+    },
+    "hash": "787b8c4666ca",
+    "version": "787b8c4666ca",
+    "candidate_known": false,
+    "base": "1571826d4a38",
+    "sources": "task@T-1347 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 7078,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 357,
+    "instruction_tokens_modular": 357,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "69fcb1f2-aa07-459a-833c-96fbf1a658e9",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790191634.106115,
+  "account": "A",
+  "pid": 2655,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Executor.running is counted from bus tasks whose executor equals the row id (pool.py:~168). The spec says row-routed runs still claim 'claude:<acct>', so a claude row's running count stays 0. That makes the max_parallel check a no-op, and the 'excluded at max_parallel' acceptance test only passes if it sets ex.running by hand. Nothing shows the check works end to end before S2 lands.",
+      "severity": "med",
+      "line": 168
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "A claude row with no model, or a model that doesn't match cfg['models'][default], silently keeps the default tier. Executor and reviewer can then be the same model, which is the self-review this rule exists to prevent. The spec fails closed on lookup errors but not on this case. The test name 'modelless_keep_default' pins the silent behaviour.",
+      "severity": "med",
+      "line": 1136
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "If pool_config() fails in _open_reviews, cfg stays None. Every codex-executed task then fails closed to 'opus' and prints a stderr line, even though nothing is wrong with the codex path. The number>0 branch (daemon.py:1241) skips the Claude check when cfg is None, and the review then becomes _other_tier(existing[0]['tier']). The two paths can end up inconsistent during a config outage.",
+      "severity": "low",
+      "line": 1241
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_open_reviews loads pool_config() at the top even when t['executor'] is None or a legacy 'claude:' value. That adds a config read per call where review_tier itself makes none, and it is what puts the fail-closed path in reach of unrelated tasks.",
+      "severity": "low",
+      "line": 1212
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "codex_available changes meaning: it used to be 'the top-ranked pick is codex' and becomes 'some eligible row is codex'. mcp.py:155, daemon.py:1876 and Pool.status call it. The spec only checks hard-coded values for codex-only and one mixed case. Callers that use it to decide whether Codex can take the task now may get a different answer than pick_executor gives.",
+      "severity": "low",
+      "line": 590
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "executor_identity does not say which row wins when ids are duplicated. _read_executors keeps the last, but a first-match lookup over executor_rows(cfg) would return the first. This is a case where the review tier depends on which row is read.",
+      "severity": "low",
+      "line": 157
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "Acceptance ids carry parenthetical text, for example 'test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)'. The gate that extracts test ids may not strip it, and the spec conditional says ids must match exactly.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

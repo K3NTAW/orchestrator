@@ -1,0 +1,85 @@
+{
+  "id": "T-0038",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "B4d: bench fetch identifies itself (no impersonation, no stealth headers) and records the real HTTP status, failing closed",
+  "spec": "Why: security review T-0033 on bench.py (full text: /Users/k3ntaw/code/orchestrator/.orchestrator/tasks/T-0033.json). HIGH: Fetcher.get() is called with Scrapling defaults, which mean impersonate=\"chrome\" (curl_cffi TLS/JA3 fingerprint spoofing) plus stealthy_headers=True (synthetic browser headers, fake Google referer). That is bot-detection evasion and contradicts the banner comment and the decision recorded 2026-09-17: the fetch must be identified and plain. MED: fetch() writes http_status: 200 as a literal; a 403/429/503 or challenge page would be stored as a successful fetch with empty models.\n\nWhat (2 files: orchestrator/bench.py, tests/test_orchestrator.py; worktree off goal/T-0005 which has the matcher fix e29a97e):\n1. fetch_html: call Fetcher.get with impersonate=None (or the parameter that disables it in the installed version \u2014 check inspect.signature and the source of scrapling.engines.static) and stealthy_headers=False, and pass headers={\"User-Agent\": \"orchestrator-bench/1 (+https://github.com/K3NTAW/orchestrator)\", \"Accept\": \"text/html\"}. No referer. Return (status_code, html): read the real status from the response object (page.status or equivalent; confirm the attribute name from the installed package). Keep timeout.\n2. fetch(): if status != 200 or the body is shorter than 10 KB or parse_chunks finds zero records, do NOT overwrite bench.json; return {\"error\": f\"fetch failed: status {status}, {len(html)} bytes, {n} records\"} and leave the previous file intact; record the real status in the file on success. Add \"request\": {\"user_agent\": ..., \"impersonate\": false, \"stealth_headers\": false} to the written provenance so the file itself shows how it was fetched.\n3. tests: fetch_html is monkeypatched in the existing tests; add: a fetch() with fetch_html returning (403, \"<html>blocked</html>\") leaves an existing bench.json byte-identical and returns an error dict; a successful fetch writes request.impersonate == false and http_status from the tuple. Add a test that inspects the fetch_html source (inspect.getsource) and asserts it contains \"stealthy_headers=False\" and an \"orchestrator-bench\" User-Agent.\n4. Then run one live `uv run orchestrator bench fetch --force` with the identified client and report the real status and matched count (if the site refuses the identified client, report that and do not add impersonation back; the Planner decides).\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"bench: identified plain fetch (no impersonation or stealth headers); real HTTP status; fail closed\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new fail-closed and identification tests",
+    "fetch_html passes stealthy_headers=False and no impersonation, with an orchestrator-bench User-Agent (source-inspected test)",
+    "a non-200 or empty fetch never overwrites bench.json",
+    "bench.json written by a successful fetch contains http_status from the response and request.impersonate == false",
+    "git diff --stat limited to orchestrator/bench.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/bench.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0038",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0038`.\n\n## Summary\n\n**Files changed:** `orchestrator/bench.py`, `tests/test_orchestrator.py`\n\n- `fetch_html`: now explicitly passes `impersonate=None` and `stealthy_headers=False` to `Fetcher.get` (verified against the installed scrapling's `GetRequestParams`/`_merge_request_args` that these disable TLS/JA3 impersonation and the fake-Google-referer/browser-header stealth path), sends only `{\"User-Agent\": \"orchestrator-bench/1 (...)\", \"Accept\": \"text/html\"}`, and returns `(page.status, html)` instead of just html.\n- `fetch()`: fails closed \u2014 if status != 200, body < 10KB, or zero parsed records, it returns `{\"error\": ...}` and leaves `bench.json` untouched. On success it writes the real `http_status` and a `request: {user_agent, impersonate: false, stealth_headers: false}` block.\n- Tests: updated the existing fetch test for the new `(status, html)` contract, added a fail-closed test (403 leaves the file byte-identical), a success test asserting `http_status`/`request.impersonate`, and a source-inspection test confirming `fetch_html`'s literal `stealthy_headers=False` and `orchestrator-bench` User-Agent.\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 65 tests, OK. `.claude/hooks/tests-green.sh` gate \u2192 exit 0, no failures.\n\n**Live check:** `uv run orchestrator bench fetch --force` against the identified plain client got HTTP 200 (`referer: None`, confirming no stealth headers), matched 6/8 models \u2014 the site doesn't require impersonation, so none was added back.\n\nCommitted as `913a5a9` on `task/T-0038`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789662707.4965608,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789662707.501441,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0038",
+      "claimed_at": 1789662707.5013492
+    },
+    {
+      "ts": 1789662707.510881,
+      "pid": 61575,
+      "account": "B"
+    },
+    {
+      "ts": 1789662898.98696,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0038`.\n\n## Summary\n\n**Files changed:** `orchestrator/bench.py`, `tests/test_orchestrator.py`\n\n- `fetch_html`: now explicitly passes `impersonate=None` and `stealthy_headers=False` to `Fetcher.get` (verified against the installed scrapling's `GetRequestParams`/`_merge_request_args` that these disable TLS/JA3 impersonation and the fake-Google-referer/browser-header stealth path), sends only `{\"User-Agent\": \"orchestrator-bench/1 (...)\", \"Accept\": \"text/html\"}`, and returns `(page.status, html)` instead of just html.\n- `fetch()`: fails closed \u2014 if status != 200, body < 10KB, or zero parsed records, it returns `{\"error\": ...}` and leaves `bench.json` untouched. On success it writes the real `http_status` and a `request: {user_agent, impersonate: false, stealth_headers: false}` block.\n- Tests: updated the existing fetch test for the new `(status, html)` contract, added a fail-closed test (403 leaves the file byte-identical), a success test asserting `http_status`/`request.impersonate`, and a source-inspection test confirming `fetch_html`'s literal `stealthy_headers=False` and `orchestrator-bench` User-Agent.\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 65 tests, OK. `.claude/hooks/tests-green.sh` gate \u2192 exit 0, no failures.\n\n**Live check:** `uv run orchestrator bench fetch --force` against the identified plain client got HTTP 200 (`referer: None`, confirming no stealth headers), matched 6/8 models \u2014 the site doesn't require impersonation, so none was added back.\n\nCommitted as `913a5a9` on `task/T-0038`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789663045.711829,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "913a5a96b2a08b02d2d3abbdadb3589a2fad91e1"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789662707.5013492,
+  "pid": 61575,
+  "account": "B",
+  "merged_into": "goal/T-0005",
+  "sha": "913a5a96b2a08b02d2d3abbdadb3589a2fad91e1"
+}

@@ -1,0 +1,165 @@
+{
+  "id": "T-0086",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model): C-O1 notify() portability (T-0078)",
+  "spec": "Review the diff of T-0078 (branch task/T-0078, worktree wt/T-0078) against its acceptance. Executed by claude:sonnet as the Codex fallback, so this review is on opus. Check: notify() never raises (URL malformed, connection refused, timeout); the webhook body is the message text and the method is POST; osascript is not invoked off darwin and is suppressed by ORCH_NOTIFY_DESKTOP=0; no new dependency; tests are real (they start a local server, not a mock that always passes); README paragraph present and accurate. Verdict approve or request_changes with path:line findings.",
+  "inputs": [
+    "T-0078"
+  ],
+  "acceptance": [
+    "Verdict posted with path:line findings",
+    "Each acceptance criterion of T-0078 marked met or not met with evidence"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0086",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_daemon.py",
+        "line": 23,
+        "issue": "setUp never clears ORCH_NOTIFY_URL, so the new webhook path runs for real whenever the var is exported \u2014 which is the documented deployment shape (the daemon autostarts inside the MCP server and inherits that env). Measured: one run of tests.test_daemon makes 11 outbound POSTs, including 'hi\" & do shell script \"echo pwned' from test_notify_argv_safe and fabricated T-0001/T-0002 merge+hold alerts, to the operator's real alert channel. Against an unreachable-but-not-refusing host it also adds 11x5s to every tests-green gate run. Fix: pop ORCH_NOTIFY_URL/ORCH_NOTIFY_DESKTOP in setUp and let test_webhook_posts_body set it via set_env.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 22,
+        "issue": "The webhook body is the untruncated msg while the osascript arm two lines below deliberately caps it at msg[:200]. notify() at daemon.py:188 interpolates r.get('reason') from merge stderr, so an arbitrarily large blob of untrusted git output gets POSTed to an external service. Apply the same cap to the body.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 23,
+        "issue": "urlopen's timeout=5 is per-socket-operation and does not cover getaddrinfo, so a hostname whose resolver hangs blocks notify() for the system DNS timeout. notify() is called synchronously inside tick() at ten call sites (daemon.py:113,143,163,169,186,188,215,230,233,235), several inside per-task loops, so a slow endpoint serialises into the pipeline's hot loop. The spec prescribed this shape, so flagging rather than blocking.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 293,
+        "issue": "The ORCH_NOTIFY_DESKTOP=0 half of the condition at daemon.py:26 has zero coverage \u2014 test_no_osascript_off_darwin only exercises the platform half. One of the two env vars documented in README.md:39 is untested. Not an acceptance failure (the spec named only three tests), but it is the gap.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789732473.505985,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0086",
+      "claimed_at": 1789732473.505652
+    },
+    {
+      "ts": 1789732473.5318751,
+      "pid": 85927,
+      "account": "B"
+    },
+    {
+      "ts": 1789732638.18941,
+      "status": "done",
+      "result": {
+        "summary": "Adversarial review of T-0078 (notify webhook), complexity 4. All four acceptance criteria met and verified by running the suite (90 tests OK; tests.test_daemon 20 OK) and by fuzzing notify() with 8 malformed ORCH_NOTIFY_URL values (never raised). Verdict request_changes on one med defect the criteria did not cover: the new network path fires during the test suite. With ORCH_NOTIFY_URL exported (the documented deployment shape, and the daemon autostarts inside the MCP server inheriting that env), one run of tests.test_daemon makes 11 real outbound POSTs, including the AppleScript injection probe string and fake task IDs, to the operator's alert endpoint. setUp never neutralizes the var; set_env exists but is only ever used to set. Against a blackholed host that also adds 11x5s to the gate. One-line fix in setUp. Criterion-by-criterion evidence: (1) three named tests present at tests/test_daemon.py:261,288,293, all green; (2) never-raises verified empirically across '', 'x', 'http://', '://nope', 'ftp://x/y', 'http://[::1]:1/', 'not a url at all', 'http://999.999.999.999/' plus closed-port; (3) README.md:36-39 documents both vars in one paragraph and flags the ntfy URL as shape only; (4) discover -q tests green, only stdlib urllib.request/http.server added, no dependency change.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_daemon.py",
+            "line": 23,
+            "issue": "setUp never clears ORCH_NOTIFY_URL, so the new webhook path runs for real whenever the var is exported - which is the documented deployment shape. Measured: ORCH_NOTIFY_URL=... python -m unittest tests.test_daemon makes 11 outbound POSTs, including 'hi\" & do shell script \"echo pwned' (test_notify_argv_safe) and fabricated T-0001/T-0002 merge+hold alerts, to the operator's real alert channel. Against an unreachable-but-not-refusing host it also adds 11x5s to every tests-green gate run. Fix: pop ORCH_NOTIFY_URL/ORCH_NOTIFY_DESKTOP in setUp and let test_webhook_posts_body set it via set_env.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 22,
+            "issue": "The webhook body is the untruncated msg while the osascript arm two lines below deliberately caps it at msg[:200]. notify() at daemon.py:188 interpolates r.get('reason') from merge stderr, so an arbitrarily large blob of untrusted git output gets POSTed to an external service. Apply the same cap to the body for consistency.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 23,
+            "issue": "urlopen's timeout=5 is per-socket-operation and does not cover getaddrinfo, so a hostname whose resolver hangs blocks notify() for the system DNS timeout. notify() is called synchronously inside tick() at ten call sites (daemon.py:113,143,163,169,186,188,215,230,233,235), several inside per-task loops, so a slow or blackholed endpoint serialises into the pipeline's hot loop. The spec prescribed this shape, so flagging rather than blocking; consider resolving once or firing the POST off-thread.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 293,
+            "issue": "The ORCH_NOTIFY_DESKTOP=0 half of the new condition at daemon.py:26 has zero coverage - test_no_osascript_off_darwin only exercises the platform half. One of the two env vars documented in README.md:39 is untested, so a future edit could drop the check silently. Not an acceptance failure (the spec named only three tests), but it is the gap.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ],
+        "executed_by": "claude:opus-5",
+        "review": "reviewer did not write the diff; executor was claude:sonnet"
+      }
+    },
+    {
+      "ts": 1789732650.8530948,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_daemon.py",
+            "line": 23,
+            "issue": "setUp never clears ORCH_NOTIFY_URL, so the new webhook path runs for real whenever the var is exported \u2014 which is the documented deployment shape (the daemon autostarts inside the MCP server and inherits that env). Measured: one run of tests.test_daemon makes 11 outbound POSTs, including 'hi\" & do shell script \"echo pwned' from test_notify_argv_safe and fabricated T-0001/T-0002 merge+hold alerts, to the operator's real alert channel. Against an unreachable-but-not-refusing host it also adds 11x5s to every tests-green gate run. Fix: pop ORCH_NOTIFY_URL/ORCH_NOTIFY_DESKTOP in setUp and let test_webhook_posts_body set it via set_env.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 22,
+            "issue": "The webhook body is the untruncated msg while the osascript arm two lines below deliberately caps it at msg[:200]. notify() at daemon.py:188 interpolates r.get('reason') from merge stderr, so an arbitrarily large blob of untrusted git output gets POSTed to an external service. Apply the same cap to the body.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 23,
+            "issue": "urlopen's timeout=5 is per-socket-operation and does not cover getaddrinfo, so a hostname whose resolver hangs blocks notify() for the system DNS timeout. notify() is called synchronously inside tick() at ten call sites (daemon.py:113,143,163,169,186,188,215,230,233,235), several inside per-task loops, so a slow endpoint serialises into the pipeline's hot loop. The spec prescribed this shape, so flagging rather than blocking.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 293,
+            "issue": "The ORCH_NOTIFY_DESKTOP=0 half of the condition at daemon.py:26 has zero coverage \u2014 test_no_osascript_off_darwin only exercises the platform half. One of the two env vars documented in README.md:39 is untested. Not an acceptance failure (the spec named only three tests), but it is the gap.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789732650.854555,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789732473.505652,
+  "pid": 85927,
+  "account": "B",
+  "review_verdict": "request_changes"
+}
