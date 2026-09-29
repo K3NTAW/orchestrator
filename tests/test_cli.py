@@ -553,22 +553,54 @@ class Cli(unittest.TestCase):
             self.assertEqual(self._scorecard_output(), "id\tmerged\tfailed\trounds_avg\twall_s\tusd\thits\tscore\n")
 
     def test_status_plain_and_json(self):
-        sys.argv = ["orchestrator", "status", "--plain"]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            cli.main()
+        with mock.patch.object(cli.gate, "running_gates", return_value=[]):
+            sys.argv = ["orchestrator", "status", "--plain"]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.main()
         lines = out.getvalue().splitlines()
         self.assertEqual(len(lines), 3)
         self.assertTrue(lines[0].startswith("A\tutil="))
         self.assertTrue(lines[2].startswith("codex\tavailable="))
 
-        sys.argv = ["orchestrator", "status"]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            cli.main()
+        with mock.patch.object(cli.gate, "running_gates", return_value=[]):
+            sys.argv = ["orchestrator", "status"]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.main()
         parsed = json.loads(out.getvalue())
-        self.assertEqual(set(parsed.keys()), {"accounts", "executors", "codex", "queue"})
+        self.assertEqual(set(parsed.keys()), {"accounts", "executors", "codex", "queue", "gates_near_timeout"})
+        self.assertEqual(parsed["gates_near_timeout"], [])
         self.assertEqual((len(parsed["executors"]), sum(e["enabled"] for e in parsed["executors"])), (7, 4))
+
+    def test_status_lists_gates_near_timeout(self):
+        status = {"accounts": [], "executors": [],
+                  "codex": {"available": 1, "running": 0, "day_tasks": 0, "cooling_s": 0}}
+        gate_entry = {"task_id": "T-gate", "worktree": "/tmp/gate", "pid": 123,
+                      "started_at": 1, "timeout_s": 100, "elapsed_s": 81}
+        with mock.patch.object(cli, "Pool") as pool, \
+                mock.patch.object(cli.gate, "running_gates", return_value=[gate_entry]):
+            pool.return_value.status.return_value = status
+            with mock.patch.object(sys, "argv", ["orchestrator", "status"]), contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+            parsed = json.loads(output.getvalue())
+            self.assertEqual(parsed["gates_near_timeout"], [gate_entry])
+            with mock.patch.object(sys, "argv", ["orchestrator", "status", "--plain"]), contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+        self.assertIn("gate\tT-gate\telapsed=81s\ttimeout=100s\tworktree=/tmp/gate", output.getvalue())
+
+    def test_status_no_gates_near_timeout(self):
+        status = {"accounts": [], "executors": [],
+                  "codex": {"available": 1, "running": 0, "day_tasks": 0, "cooling_s": 0}}
+        with mock.patch.object(cli, "Pool") as pool, \
+                mock.patch.object(cli.gate, "running_gates", return_value=[]):
+            pool.return_value.status.return_value = status
+            with mock.patch.object(sys, "argv", ["orchestrator", "status"]), contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+            self.assertEqual(json.loads(output.getvalue())["gates_near_timeout"], [])
+            with mock.patch.object(sys, "argv", ["orchestrator", "status", "--plain"]), contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+        self.assertNotIn("gate\t", output.getvalue())
 
     def test_scorecard_table_and_json(self):
         bus.create_task("cli-scored", "s", ["a"], ["x.py"], role="execute", complexity=3)  # ensures >=1 row exists
