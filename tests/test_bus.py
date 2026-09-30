@@ -22,6 +22,22 @@ class BusSandbox(unittest.TestCase):
 
 class Bus(BusSandbox):
 
+    def test_reindex_adds_missing_json_rows(self):
+        task = {"id": "T-0001", "status": "queued", "role": "execute", "tier": "sonnet"}
+        bus.TASKS.mkdir(parents=True)
+        (bus.TASKS / "T-0001.json").write_text(json.dumps(task))
+        bad_file = bus.TASKS / "T-0002.json"
+        bad_file.write_text("not JSON")
+
+        self.assertEqual(bus.read(status="queued", role="execute"), [])
+
+        result = bus.reindex()
+
+        self.assertEqual(result["added"], ["T-0001"])
+        self.assertEqual(result["skipped"][0]["file"], str(bad_file))
+        self.assertTrue(result["skipped"][0]["error"])
+        self.assertEqual(bus.read(status="queued", role="execute"), [task])
+
     def test_db_connection_is_per_thread(self):
         connections = []
 
