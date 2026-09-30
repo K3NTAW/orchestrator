@@ -861,6 +861,20 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(weights["terra"], 1.0)                # no bench number -> neutral
         self.assertEqual(weights["sol"], 1.0)
 
+    def test_prior_weights_cover_claude_rows(self):
+        self.assertIn("claude-opus-5-5", bench.DEFAULT_HINTS)
+        self.assertIn("claude-sonnet-5-5", bench.DEFAULT_HINTS)
+        self.write_bench({
+            "claude-opus-5-5": {"intelligence": 80.0, "speed_tps": 100.0, "price_in": 5.0},
+            "claude-sonnet-5-5": {"intelligence": 60.0, "speed_tps": 120.0, "price_in": 3.0},
+        })
+        executors = {
+            "claude:opus": P.Executor("claude:opus", "claude", "claude-opus-5-5", ["execute"]),
+            "claude:sonnet": P.Executor("claude:sonnet", "claude", "claude-sonnet-5-5", ["execute"]),
+        }
+        weights = scorecard.prior_weights(executors)
+        self.assertEqual(weights, {"claude:opus": 1.5, "claude:sonnet": 1.25})
+
     def test_prior_weights_missing_bench_file_is_neutral(self):
         bench.FILE.unlink(missing_ok=True)
         weights = scorecard.prior_weights(P.Pool().executors)
