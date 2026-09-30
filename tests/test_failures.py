@@ -28,6 +28,11 @@ class FailureEvidence(unittest.TestCase):
     def test_test_ids_reject_shell_and_traversal(self):
         self.assertEqual(failures.test_ids("FAILED tests/test_x.py::test_ok\nFAILED ../../evil.py\nFAILED $(id)"),
                          ["tests/test_x.py::test_ok"])
+        ids, rejected = failures._test_ids_with_rejections(
+            "FAILED tests/test_x.py::test_ok (missing: test not defined)\n"
+            "FAILED --rootdir=/ ../x.py::t")
+        self.assertEqual(ids, ["tests/test_x.py::test_ok"])
+        self.assertEqual(set(rejected), {"--rootdir=/", "../x.py::t"})
 
     def test_gate_red_with_cooling_test_id_is_not_quota(self):
         task = {"id": "T-test", "hold_reason": "gate_red",

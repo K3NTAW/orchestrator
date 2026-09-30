@@ -37,7 +37,7 @@ def _test_id_candidates(failures):
     candidates = []
     for line in failures.splitlines():
         if line.startswith("FAILED "):
-            candidates.extend(_TEST_ID_TOKEN.findall(line[7:].split(" - ", 1)[0]))
+            candidates.extend(line[7:].split(" - ", 1)[0].removesuffix(" (missing: test not defined)").split())
         else:
             match = re.match(r"^(?:FAIL|ERROR):\s+[^\n]*\(([^)]+)\)", line)
             if match:
