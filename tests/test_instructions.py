@@ -2,6 +2,7 @@ import _harness
 import unittest
 
 from orchestrator import instructions
+from orchestrator import spawn
 
 
 class InstructionSelection(unittest.TestCase):
@@ -22,6 +23,21 @@ class InstructionSelection(unittest.TestCase):
         choice = instructions.select({"scope": []}, "security_review")
         self.assertEqual(choice["mandatory"], ["review-security"])
         self.assertIn("review-security", choice["modules"])
+
+    def test_execute_prompt_commits_before_focused_tests(self):
+        prompts = (
+            spawn.render("execute", packet="brief"),
+            spawn.render("fix-delta", packet="brief", n=1,
+                         failing_tests="tests/test_instructions.py::test_execute_prompt_commits_before_focused_tests",
+                         assertion_lines=""),
+        )
+        for prompt in prompts:
+            self.assertLess(prompt.lower().index("commit"), prompt.index("Run only the acceptance-named tests"))
+            self.assertIn("foreground", prompt)
+            self.assertIn("never background a command", prompt)
+            self.assertIn("under 10 minutes", prompt)
+            self.assertIn("daemon runs the full gate externally", prompt)
+            self.assertNotIn("Run `.claude/hooks/tests-green.sh .`", prompt)
 
 
 if __name__ == "__main__":
