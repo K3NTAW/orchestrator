@@ -316,19 +316,12 @@ class MergeQueue(unittest.TestCase):
         wt = spawn.ensure_worktree(task["id"], base="HEAD"); bus.update(task["id"], worktree=str(wt))
         (wt / "gate.py").write_text("VALUE = 1\n")
         g("add", "-A", cwd=wt); g("commit", "-qm", "gate", cwd=wt)
-        completed = subprocess.CompletedProcess([], 0, "", "")
-        real_run = subprocess.run
-        def run_gate_only(*args, **kwargs):
-            if args[0][:1] == [str(merge.TESTS_GREEN)]:
-                return completed
-            return real_run(*args, **kwargs)
-        with patch("orchestrator.merge.subprocess.run", side_effect=run_gate_only) as gated:
+        completed = {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False,
+                     "attempts": 1, "timeouts": 0}
+        with patch("orchestrator.merge.gate.run_gate", return_value=completed) as gated:
             result = merge.merge(task["id"], target="goal/gate")
         self.assertEqual(result["status"], "merged", result)
-        gate_calls = [call for call in gated.call_args_list
-                      if call.args[0][:1] == [str(merge.TESTS_GREEN)]]
-        self.assertEqual(len(gate_calls), 1)
-        self.assertEqual(gate_calls[0].args[0], [str(merge.TESTS_GREEN), str(wt)])
+        gated.assert_called_once_with(str(wt), script=merge.TESTS_GREEN, task_id=task["id"])
 
 
 if __name__ == "__main__":

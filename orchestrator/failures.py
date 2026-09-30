@@ -1,7 +1,7 @@
 """Validated failure evidence and conservative change-risk classification."""
 import fnmatch, hashlib, json, re, subprocess, tomllib
 from pathlib import Path
-from . import gitutil, bus, spawn, merge
+from . import gitutil, bus, spawn, merge, gate
 
 _PATH_TEST_ID = re.compile(r"[A-Za-z0-9_./-]+\.py(?:::[A-Za-z0-9_.\[\]]+)*\Z")
 _DOTTED_TEST_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\Z")
@@ -149,31 +149,30 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
             command = _flaky_rerun_command(ids, worktree, probe_timeout=probe_timeout)
             if command is None:
                 return "unknown"
-            rerun = subprocess.run(command, cwd=worktree, capture_output=True, text=True,
-                                   timeout=rerun_timeout)
+            rerun = gate.run_bounded(command, cwd=worktree, timeout_s=rerun_timeout)
         except _RunnerProbeTimeout as exc:
             hint = dict(task.get("resume_hint") or {})
             hint["runner_probe"] = "timeout"
             hint["runner_probe_timeout_s"] = exc.timeout_s
             bus.update(task["id"], resume_hint=hint)
             return "unknown"
-        except subprocess.TimeoutExpired as exc:
+        except OSError:
+            return "code_defect"
+        if rerun["timed_out"]:
             hint = dict(task.get("resume_hint") or {})
             runs = list(hint.get("flaky_runs") or [])
-            output = (str(getattr(exc, "stdout", "") or getattr(exc, "output", "")) +
-                      str(getattr(exc, "stderr", "") or ""))[-4000:]
+            output = (rerun["stdout"] + rerun["stderr"])[-2000:]
             runs.append({"ids": ids, "timed_out": True, "timeout_s": rerun_timeout, "output": output})
             hint["flaky_runs"] = runs
             bus.update(task["id"], resume_hint=hint)
             return "code_defect"
-        except OSError:
-            return "code_defect"
         hint = dict(task.get("resume_hint") or {})
         runs = list(hint.get("flaky_runs") or [])
-        runs.append({"ids": ids, "returncode": rerun.returncode, "output": (rerun.stdout + rerun.stderr)[-4000:]})
+        runs.append({"ids": ids, "returncode": rerun["returncode"],
+                     "output": (rerun["stdout"] + rerun["stderr"])[-4000:]})
         hint["flaky_runs"] = runs
         bus.update(task["id"], resume_hint=hint)
-        if rerun.returncode == 0:
+        if rerun["returncode"] == 0:
             return "flaky"
     return "code_defect"
 

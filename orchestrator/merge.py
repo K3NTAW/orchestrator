@@ -1,7 +1,7 @@
 """Serial merge queue: one at a time, rebase onto target -> tests-green -> fast-forward the target branch.
 Target defaults to goal/<parent> (or 'integration'); main only ever moves via a human-approved PR."""
 import fcntl, subprocess, sys, time
-from . import ROOT, bus, scorecard
+from . import ROOT, bus, gate, scorecard
 from .repomap import build
 from .spawn import git
 
@@ -54,11 +54,16 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             return {"status": "failed", "reason": reason}
         if reviewed and before_diff != after_diff:
             return {"status": "rebase_changed_diff"}
-        tg = subprocess.run([str(TESTS_GREEN), wt], cwd=wt, capture_output=True,
-                            text=True, input="{}")
-        if tg.returncode:
-            bus.update(task_id, status="failed", reason="tests_red", resume_hint={"failures": tg.stderr[-4000:]})
-            return {"status": "tests_red", "failures": tg.stderr[-4000:]}
+        result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)
+        if result["timed_out"]:
+            bus.update(task_id, status="held", hold_reason="gate_timeout",
+                       pipeline={**(t.get("pipeline") or {}), "infra_failure": "gate_timeout"},
+                       resume_hint={"output_tail": (result["stdout"] + result["stderr"])[-4000:]})
+            return {"status": "gate_timeout", "reason": "gate_timeout"}
+        if result["returncode"]:
+            bus.update(task_id, status="failed", reason="tests_red",
+                       resume_hint={"failures": result["stderr"][-4000:]})
+            return {"status": "tests_red", "failures": result["stderr"][-4000:]}
         # fast-forward target without checking it out: safe because the task branch was just rebased onto it.
         # Exception: ROOT (the main checkout) has target checked out -> `git merge --ff-only` there instead, so
         # its HEAD, index and working tree move together (update-ref alone would leave them stale, see 2026-09-18).
