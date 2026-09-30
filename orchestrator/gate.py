@@ -60,27 +60,28 @@ def _run(argv, *, cwd, timeout_s, input, kill_grace_s):
 
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         stdout, stderr = proc.communicate(timeout=kill_grace_s)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         stdout, stderr = proc.communicate()
     else:
         # The direct child may exit on SIGTERM while a descendant remains in
         # the process group without holding our pipes open.
+        # A reaped child's group ID may also have been reused by another user.
         try:
             os.killpg(proc.pid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         else:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
     return {"returncode": None, "stdout": stdout or "", "stderr": stderr or "",
             "timed_out": True, "duration_s": time.monotonic() - started}
