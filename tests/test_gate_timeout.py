@@ -180,6 +180,20 @@ class GateTimeoutTest(unittest.TestCase):
         self.assert_gone(int(parent_file.read_text()))
         self.assert_gone(int(child_file.read_text()))
 
+    def test_deadline_counts_wall_clock_sleep(self):
+        script = self.script("sleep 60\n")
+        started = []
+        token = gate._ON_START.set(started.append)
+        try:
+            with mock.patch.object(gate.time, "time", side_effect=[100, 159.95, 161]):
+                result = gate.run_bounded([str(script)], cwd=self.root, timeout_s=60,
+                                          kill_grace_s=0.05)
+        finally:
+            gate._ON_START.reset(token)
+        self.assertTrue(result["timed_out"])
+        self.assertIsNone(result["returncode"])
+        self.assert_gone(started[0])
+
     def test_cleanup_command_runs_on_timeout(self):
         marker = self.root / "cleaned"
         script = self.script("sleep 60\n")

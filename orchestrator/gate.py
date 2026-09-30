@@ -37,43 +37,53 @@ def settings(cfg=None):
 
 def _run(argv, *, cwd, timeout_s, input, kill_grace_s):
     started = time.monotonic()
+    deadline = time.time() + timeout_s
     proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE if input is not None else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True)
     on_start = _ON_START.get()
     if on_start is not None:
         on_start(proc.pid)
+    pending_input = input
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        timeout = min(30, max(0.1, remaining))
+        try:
+            stdout, stderr = proc.communicate(input=pending_input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pending_input = None
+            continue
+        return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
+                "timed_out": False, "duration_s": time.monotonic() - started}
+
     try:
-        stdout, stderr = proc.communicate(input=input, timeout=timeout_s)
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        stdout, stderr = proc.communicate(timeout=kill_grace_s)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        stdout, stderr = proc.communicate()
+    else:
+        # The direct child may exit on SIGTERM while a descendant remains in
+        # the process group without holding our pipes open.
         try:
-            stdout, stderr = proc.communicate(timeout=kill_grace_s)
-        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            stdout, stderr = proc.communicate()
-        else:
-            # The direct child may exit on SIGTERM while a descendant remains in
-            # the process group without holding our pipes open.
-            try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        return {"returncode": None, "stdout": stdout or "", "stderr": stderr or "",
-                "timed_out": True, "duration_s": time.monotonic() - started}
-    return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr,
-            "timed_out": False, "duration_s": time.monotonic() - started}
+    return {"returncode": None, "stdout": stdout or "", "stderr": stderr or "",
+            "timed_out": True, "duration_s": time.monotonic() - started}
 
 
 def run_bounded(argv, *, cwd, timeout_s, input=None, kill_grace_s=KILL_GRACE_S):
