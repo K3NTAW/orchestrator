@@ -12,7 +12,7 @@ from . import (STATE, acceptance, bus, critical_path, decision, executor, handov
 from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier, executor_identity, config as pool_config
-from . import failures, gitutil, interference, schedlog, notify as notifications
+from . import failures, gate as gate_runner, gitutil, interference, schedlog, notify as notifications
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
                        _test_ids, _path_in_scope, _rejecting_reviews, _normal_issue, failure_signature,
                        _failure_text, _node_id_to_unittest, _RunnerProbeTimeout, _flaky_rerun_command,
@@ -149,6 +149,9 @@ def _fix_round_spec(held, round_no, failed_ids, comments):
 def auto_fix_round(pool):
     cap = pool.cfg.get("daemon", {}).get("auto_fix_rounds", 2)
     for held in bus.read(status="held", role="execute"):
+        if (held.get("hold_reason") == "gate_timeout"
+                or (held.get("pipeline") or {}).get("infra_failure")):
+            continue
         if held.get("hold_reason") == "cancelled":
             continue
         if is_goal(held):
@@ -168,7 +171,8 @@ def auto_fix_round(pool):
         reason = held.get("hold_reason", "")
         kind = failure_kind(held, held.get("worktree"),
                             rerun_max=pool.cfg.get("daemon", {}).get("flaky_rerun_max", 1),
-                            rerun_timeout=pool.cfg.get("daemon", {}).get("flaky_rerun_timeout_s", 600))
+                            rerun_timeout=min(pool.cfg.get("daemon", {}).get("flaky_rerun_timeout_s", 600),
+                                              gate.settings(pool.cfg)["timeout_s"]))
         with bus.locked():
             current = bus.get(held["id"])
             pipeline = dict(current.get("pipeline") or {})
@@ -1445,14 +1449,23 @@ def gate(pool):
                          resume_hint={"failures": failures, "missing_tests": missing}):
                     print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
                 continue
-        tg = subprocess.run([str(merge.TESTS_GREEN), worktree], capture_output=True, text=True, input="{}")
+        result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t["id"], cfg=pool.cfg)
         if _hold_stale_high(t):
             continue
-        if tg.returncode:
+        if result["timed_out"]:
+            if stamp(t["id"], "gated_at",
+                     pipeline_fields={"infra_failure": "gate_timeout",
+                                      "gate_timeouts": pipeline.get("gate_timeouts", 0) + result["timeouts"]},
+                     status="held", hold_reason="gate_timeout",
+                     resume_hint={"gate_timeout_s": gate.settings(pool.cfg)["timeout_s"],
+                                  "output_tail": (result["stdout"] + result["stderr"])[-4000:]}):
+                notify(f"{t['id']}: gate timed out twice; held as infra failure")
+            continue
+        if result["returncode"]:
             gate_reds = pipeline.get("gate_reds", 0) + 1
             if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
                      status="held", hold_reason="gate_red",
-                     resume_hint={"failures": tg.stderr[-4000:]}):
+                     resume_hint={"failures": result["stderr"][-4000:]}):
                 notify(f"{t['id']}: tests red at the gate; held")
             continue
         n_reviews, review_reason = _review_plan(t)
@@ -1481,6 +1494,12 @@ def gate(pool):
             complete(t["id"], "gated_at")
         except Exception as e:
             hold_failed(t["id"], "gated_error", "gate", e)
+
+
+# Keep the long-standing daemon.gate(pool) entry point while exposing the bounded-runner
+# seams on it for tests and callers that patch daemon.gate.run_gate/settings.
+gate.run_gate = gate_runner.run_gate
+gate.settings = gate_runner.settings
 
 
 def report_merge(task_id, r):
