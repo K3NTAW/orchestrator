@@ -5,6 +5,8 @@ from . import gitutil, bus, spawn, merge, gate
 
 _PATH_TEST_ID = re.compile(r"[A-Za-z0-9_./-]+\.py(?:::[A-Za-z0-9_.\[\]]+)*\Z")
 _DOTTED_TEST_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\Z")
+_TEST_ID_TOKEN = re.compile(r"(?<![A-Za-z0-9_./-])[A-Za-z0-9_./-]+\.py(?:::[A-Za-z0-9_.\[\]-]+)+")
+_QUOTA_MARKER = re.compile(r"\b(?:cooling|usage limit|usage-limit|quota|rate limit)\b")
 
 
 def root(task):
@@ -35,7 +37,7 @@ def _test_id_candidates(failures):
     candidates = []
     for line in failures.splitlines():
         if line.startswith("FAILED "):
-            candidates.extend(line[7:].split(" - ", 1)[0].split())
+            candidates.extend(_TEST_ID_TOKEN.findall(line[7:].split(" - ", 1)[0]))
         else:
             match = re.match(r"^(?:FAIL|ERROR):\s+[^\n]*\(([^)]+)\)", line)
             if match:
@@ -83,6 +85,9 @@ def _failure_text(task):
     return "\n".join(str(x) for x in (hint.get("failures") or "")) if isinstance(hint.get("failures"), list) \
         else str(hint.get("failures") or "")
 
+def _strip_test_ids(text):
+    return _TEST_ID_TOKEN.sub(" ", text)
+
 def _node_id_to_unittest(node_id):
     if not _valid_test_id(node_id):
         return None
@@ -125,7 +130,7 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
         return "environment"
     if any(marker in text for marker in ("eacces", "permission denied", "sandbox")):
         return "permissions"
-    if any(marker in text for marker in ("cooling", "usage limit", "usage-limit", "quota", "rate limit")):
+    if reason != "gate_red" and _QUOTA_MARKER.search(_strip_test_ids(text)):
         return "quota"
     comments = _rejecting_reviews(task)
     issues = "\n".join(str(c.get("issue") or "").lower() for _, cs in comments for c in cs)

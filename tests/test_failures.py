@@ -28,3 +28,12 @@ class FailureEvidence(unittest.TestCase):
     def test_test_ids_reject_shell_and_traversal(self):
         self.assertEqual(failures.test_ids("FAILED tests/test_x.py::test_ok\nFAILED ../../evil.py\nFAILED $(id)"),
                          ["tests/test_x.py::test_ok"])
+
+    def test_gate_red_with_cooling_test_id_is_not_quota(self):
+        task = {"id": "T-test", "hold_reason": "gate_red",
+                "resume_hint": {"failures": "FAILED tests/test_gate_timeout.py::test_gate_timeout_ctx_wins_over_cooling_account (missing: test not defined)"}}
+        self.assertEqual(failures.failure_kind(task, None), "code_defect")
+
+        quota_task = {"id": "T-quota", "hold_reason": "codex usage limit",
+                      "resume_hint": {"failures": "FAILED tests/test_gate_timeout.py::test_gate_timeout_ctx_wins_over_cooling_account"}}
+        self.assertEqual(failures.failure_kind(quota_task, None), "quota")
