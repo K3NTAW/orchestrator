@@ -110,6 +110,21 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(executor.model, cfg["models"]["opus"])
         self.assertEqual(executor.model, "claude-opus-5-5")
 
+    def test_repo_config_has_claude_rows(self):
+        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        rows = {row["id"]: row for row in cfg["executors"]}
+        self.assertEqual((rows["claude:sonnet"]["complexity_min"], rows["claude:sonnet"]["complexity_max"]), (1, 5))
+        self.assertEqual(rows["claude:sonnet"]["model"], "claude-sonnet-5-5")
+        self.assertEqual((rows["claude:opus"]["complexity_min"], rows["claude:opus"]["complexity_max"]), (6, 10))
+
+        codex_disabled = {**cfg, "executors": [
+            {**row, "enabled": False} if row["provider"] == "codex" else row
+            for row in cfg["executors"]
+        ]}
+        pool = P.Pool(codex_disabled)
+        self.assertEqual(pool.pick_executor("execute", 3).id, "claude:sonnet")
+        self.assertEqual(pool.pick_executor("execute", 8).id, "claude:opus")
+
     def test_daemon_respawn_max_documented(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
         self.assertEqual(cfg["daemon"]["respawn_max"], 3)
