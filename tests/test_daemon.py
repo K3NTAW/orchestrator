@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
 from _harness import REPO, TMP, FakeProc, g, scratch_repo  # noqa: F401
-from orchestrator import bus, daemon, executor, merge, pool as P, spawn
+from orchestrator import bus, daemon, executor, failures, merge, pool as P, spawn
 from orchestrator import jev_route
 
 REAL_GATE = daemon.gate
@@ -1536,18 +1536,17 @@ class Daemon(unittest.TestCase):
         return pool
 
     def gate_green(self, green):
-        """daemon.subprocess.run covers the tests-green gate, notify()'s osascript, and already_merged()'s git
-        ancestry check (daemon.subprocess IS the stdlib subprocess module, shared with spawn.git); the first two
-        never need a real run, but the git check does, so only those two are faked and everything else -- git
-        calls -- passes through to the real subprocess.run."""
+        """Fake the bounded tests-green gate and notify's osascript, passing git through unchanged."""
         def fake(*a, **k):
             argv = a[0]
-            if argv[:1] == [str(merge.TESTS_GREEN)]:
-                return FakeProc("", 0 if green else 1)
             if argv[:1] == ["osascript"]:
                 return FakeProc("", 0)
             return REAL_RUN(*a, **k)
+        def fake_gate(worktree, *, script, task_id=None, cfg=None):
+            return {"returncode": 0 if green else 1, "stdout": "", "stderr": "",
+                    "timed_out": False, "attempts": 1, "timeouts": 0}
         self.swap(daemon.subprocess, "run", fake)
+        self.swap(daemon.gate, "run_gate", fake_gate)
 
     def task(self, title, complexity=2, role="execute", **fields):
         t = bus.create_task(title, "spec", ["works"], ["x.py"], role=role, complexity=complexity,
@@ -1754,11 +1753,16 @@ class Daemon(unittest.TestCase):
         bus.update(tid, worktree=str(self.sandbox))
         calls = []
 
-        def rerun(cmd, **kwargs):
+        def probe(cmd, **kwargs):
             calls.append((cmd, kwargs))
             return FakeProc("", 1)
+        def rerun(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return {"returncode": 1, "stdout": "", "stderr": "", "timed_out": False,
+                    "duration_s": 0.1}
 
-        self.swap(daemon.subprocess, "run", rerun)
+        self.swap(daemon.subprocess, "run", probe)
+        self.swap(daemon.failures.gate, "run_bounded", rerun)
         self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox)), "code_defect")
         self.assertEqual(calls[0][0], ["uv", "run", "--project", str(self.sandbox), "python", "-c", "import pytest"])
         self.assertEqual(calls[1][0][-1], "tests.test_x.test_x")
@@ -1845,12 +1849,16 @@ class Daemon(unittest.TestCase):
         pool = P.Pool()
         pool.cfg.setdefault("daemon", {})["flaky_rerun_max"] = 1
         pool.cfg["daemon"]["flaky_rerun_timeout_s"] = 17
-        def rerun(cmd, **kwargs):
+        def probe(cmd, **kwargs):
             if cmd[-2:] == ["-c", "import pytest"]:
                 return FakeProc("", 0)
+            self.fail(f"unexpected subprocess.run: {cmd}")
+        def rerun(cmd, **kwargs):
             runs.append((cmd, kwargs))
-            return FakeProc("1 passed", 0)
-        self.swap(daemon.subprocess, "run", rerun)
+            return {"returncode": 0, "stdout": "1 passed", "stderr": "", "timed_out": False,
+                    "duration_s": 0.1}
+        self.swap(daemon.subprocess, "run", probe)
+        self.swap(daemon.failures.gate, "run_bounded", rerun)
         for _ in range(3):
             daemon.auto_fix_round(pool)
         task = bus.get(tid)
@@ -1864,7 +1872,7 @@ class Daemon(unittest.TestCase):
         self.assertNotIn(".", command)
         self.assertNotIn("tests", command)
         self.assertEqual(kwargs["cwd"], str(self.sandbox))
-        self.assertEqual(kwargs["timeout"], 17)
+        self.assertEqual(kwargs["timeout_s"], 17)
         self.assertEqual(task["resume_hint"]["failures"], failures)
         self.assertEqual(task["resume_hint"]["flaky_runs"], [{
             "ids": ["tests/test_x.py::test_x"], "returncode": 0, "output": "1 passed"}])
@@ -1879,13 +1887,17 @@ class Daemon(unittest.TestCase):
         pool.cfg.setdefault("daemon", {})["flaky_rerun_max"] = 2
         runs = []
 
-        def rerun(cmd, **kwargs):
+        def probe(cmd, **kwargs):
             if cmd[-2:] == ["-c", "import pytest"]:
                 return FakeProc("", 0)
+            self.fail(f"unexpected subprocess.run: {cmd}")
+        def rerun(cmd, **kwargs):
             runs.append((cmd, kwargs))
-            return FakeProc("still failing", 1)
+            return {"returncode": 1, "stdout": "still failing", "stderr": "", "timed_out": False,
+                    "duration_s": 0.1}
 
-        self.swap(daemon.subprocess, "run", rerun)
+        self.swap(daemon.subprocess, "run", probe)
+        self.swap(daemon.failures.gate, "run_bounded", rerun)
         self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox), rerun_max=2), "code_defect")
         self.assertEqual(daemon.failure_kind(bus.get(tid), str(self.sandbox), rerun_max=2), "code_defect")
         daemon.auto_fix_round(pool)
@@ -1910,13 +1922,18 @@ class Daemon(unittest.TestCase):
         pool = P.Pool()
         pool.cfg.setdefault("daemon", {})["flaky_rerun_timeout_s"] = 17
 
-        def timed_out(cmd, **kwargs):
+        def probe(cmd, **kwargs):
             if cmd[-2:] == ["-c", "import pytest"]:
                 return FakeProc("", 1)
-            self.assertEqual(kwargs["timeout"], 17)
-            raise subprocess.TimeoutExpired(cmd, 17, output="hung test")
+            self.fail(f"unexpected subprocess.run: {cmd}")
 
-        self.swap(daemon.subprocess, "run", timed_out)
+        def timed_out(cmd, *, cwd, timeout_s, **kwargs):
+            self.assertEqual(timeout_s, 17)
+            return {"returncode": None, "stdout": "hung test", "stderr": "", "timed_out": True,
+                    "duration_s": 17.0}
+
+        self.swap(daemon.subprocess, "run", probe)
+        self.swap(failures.gate, "run_bounded", timed_out)
         daemon.auto_fix_round(pool)
 
         task = bus.get(tid)
@@ -3128,21 +3145,20 @@ class Daemon(unittest.TestCase):
                 ready = self.task("ready to gate")
                 bus.update(skipped, status="done", worktree=worktree)
                 bus.update(ready, status="done", worktree=str(self.sandbox))
-                calls = []
-                previous = daemon.subprocess.run
+                gate_calls = []
+                previous = daemon.gate.run_gate
 
-                def run(argv, **kwargs):
-                    if argv[:1] == [str(merge.TESTS_GREEN)]:
-                        calls.append(argv)
-                    return previous(argv, **kwargs)
+                def run_gate(worktree, *, script, task_id=None, cfg=None):
+                    gate_calls.append((worktree, script, task_id))
+                    return previous(worktree, script=script, task_id=task_id, cfg=cfg)
 
-                self.swap(daemon.subprocess, "run", run)
+                daemon.gate.run_gate = run_gate
                 try:
                     daemon.gate(P.Pool())
                 finally:
-                    daemon.subprocess.run = previous
+                    daemon.gate.run_gate = previous
 
-                self.assertEqual(calls, [[str(merge.TESTS_GREEN), str(self.sandbox)]])
+                self.assertEqual(gate_calls, [(str(self.sandbox), merge.TESTS_GREEN, ready)])
                 self.assertFalse((bus.get(skipped).get("pipeline") or {}).get("gated_at"))
                 self.assertTrue(bus.get(ready)["pipeline"]["gated_at_done"])
 
@@ -3151,10 +3167,10 @@ class Daemon(unittest.TestCase):
             "tests/not_defined.py::test_missing and ::test_also_missing pass"], ["x.py"],
             role="execute", complexity=2, parent="T-0043")["id"]
         bus.update(t, status="done", worktree=str(TMP))
-        calls = []
-        previous = daemon.subprocess.run
-        self.swap(daemon.subprocess, "run", lambda *a, **k:
-                  (calls.append(a[0]), previous(*a, **k))[1])
+        gate_calls = []
+        previous = daemon.gate.run_gate
+        self.swap(daemon.gate, "run_gate", lambda worktree, **kwargs:
+                  (gate_calls.append((worktree, kwargs)), previous(worktree, **kwargs))[1])
 
         daemon.tick()
 
@@ -3168,7 +3184,7 @@ class Daemon(unittest.TestCase):
             "FAILED tests/not_defined.py::test_missing (missing: test not defined)",
             "FAILED tests/not_defined.py::test_also_missing (missing: test not defined)",
         ])
-        self.assertFalse(any(call[:1] == [str(merge.TESTS_GREEN)] for call in calls))
+        self.assertEqual(gate_calls, [])
 
     def test_gate_hold_message_names_not_collected_tests(self):
         test_file = self.sandbox / "tests" / "test_not_collected.py"
@@ -3197,14 +3213,14 @@ class Daemon(unittest.TestCase):
                             ["tests/test_gate_named.py::test_exists passes"], ["x.py"],
                             role="execute", complexity=2, parent="T-0043")["id"]
         bus.update(t, status="done", worktree=str(self.sandbox))
-        calls = []
-        previous = daemon.subprocess.run
-        self.swap(daemon.subprocess, "run", lambda *a, **k:
-                  (calls.append(a[0]), previous(*a, **k))[1])
+        gate_calls = []
+        previous = daemon.gate.run_gate
+        self.swap(daemon.gate, "run_gate", lambda worktree, **kwargs:
+                  (gate_calls.append((worktree, kwargs)), previous(worktree, **kwargs))[1])
 
         daemon.tick()
 
-        self.assertTrue(any(call[:1] == [str(merge.TESTS_GREEN)] for call in calls))
+        self.assertEqual(len(gate_calls), 1)
 
     def test_auto_fix_round_fires_on_missing_test_ids(self):
         failures = ["FAILED tests/test_x.py::test_missing (missing: test not defined)"]
@@ -3222,13 +3238,12 @@ class Daemon(unittest.TestCase):
         bus.update(t, status="done", worktree=str(TMP))
         (TMP / "x.py").write_text("dirty = 1\n")
         self.addCleanup(lambda: (TMP / "x.py").unlink(missing_ok=True))
-        tests_green_calls = []
-        already_faked = daemon.subprocess.run
-        def counting_run(*a, **k):
-            if a[0][:1] == [str(merge.TESTS_GREEN)]:
-                tests_green_calls.append(a)
-            return already_faked(*a, **k)
-        self.swap(daemon.subprocess, "run", counting_run)
+        gate_calls = []
+        already_faked = daemon.gate.run_gate
+        def counting_gate(worktree, **kwargs):
+            gate_calls.append((worktree, kwargs))
+            return already_faked(worktree, **kwargs)
+        self.swap(daemon.gate, "run_gate", counting_gate)
 
         daemon.tick()
 
@@ -3236,7 +3251,7 @@ class Daemon(unittest.TestCase):
         self.assertEqual((held["status"], held["hold_reason"]), ("held", "executor did not commit"))
         self.assertIn("x.py", held["resume_hint"]["dirty"])
         self.assertEqual(self.merged, [])
-        self.assertEqual(tests_green_calls, [])          # never gated against the stale HEAD
+        self.assertEqual(gate_calls, [])          # never gated against the stale HEAD
 
     def test_already_merged_ignores_branch_equal_to_target(self):
         """A task/<id> branch cut from goal/<parent> but never committed to has a HEAD identical to the
@@ -3299,13 +3314,12 @@ class Daemon(unittest.TestCase):
         g("commit", "-qm", "unrelated work")
         g("checkout", "main")
 
-        tests_green_calls = []
-        already_faked = daemon.subprocess.run          # gate_green(True)'s fake, installed in setUp
-        def counting_run(*a, **k):
-            if a[0][:1] == [str(merge.TESTS_GREEN)]:
-                tests_green_calls.append(a)
-            return already_faked(*a, **k)
-        self.swap(daemon.subprocess, "run", counting_run)
+        gate_calls = []
+        already_faked = daemon.gate.run_gate
+        def counting_gate(worktree, **kwargs):
+            gate_calls.append((worktree, kwargs))
+            return already_faked(worktree, **kwargs)
+        self.swap(daemon.gate, "run_gate", counting_gate)
 
         # code_review="always": pending_id's direct merge here is meant to exercise DIRECT_MERGE_MAX (complexity
         # 2), not the security_paths diff check -- TMP's HEAD at this point is "main", not either task's own
@@ -3317,7 +3331,7 @@ class Daemon(unittest.TestCase):
         self.assertEqual(merged["merged_via"], "ancestor")
         self.assertFalse((merged.get("pipeline") or {}).get("gated_at"))
         self.assertEqual(self.workers, [])                 # no review spawned for either task
-        self.assertEqual(len(tests_green_calls), 1)         # tests-green ran once, for pending_id only
+        self.assertEqual(len(gate_calls), 1)         # tests-green ran once, for pending_id only
 
         pending = bus.get(pending_id)
         self.assertEqual(self.merged, [pending_id])         # non-ancestor task still gated and merged as before

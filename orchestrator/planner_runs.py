@@ -1023,6 +1023,9 @@ def build_ctx(point, pool=None):
     for source in [*pool.accounts, *getattr(pool, "executors", {}).values()]:
         if source.id in involved and (source.cooling() or "usage" in source.hold_reason.lower()):
             infra = _infra_kind(source.hold_reason) or infra
+    pipeline_infra = (task.get("pipeline") or {}).get("infra_failure")
+    if pipeline_infra:
+        infra = pipeline_infra
     ctx = {"routes": cfg.get("planner", {}).get("routes", {}), "infra_failure_kind": infra,
            "premium_launches": _premium_launches(goal["id"]), "blocked_scouts": blocked}
     if point["kind"] == "held":

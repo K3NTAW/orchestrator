@@ -2,7 +2,7 @@
 import argparse, json, os, random, re, sys
 from collections import defaultdict
 from datetime import datetime
-from . import ROOT, bus, scorecard, worker_registry
+from . import ROOT, bus, gate, scorecard, worker_registry
 from .bus import RUNS
 from .pool import Pool
 
@@ -537,6 +537,10 @@ def main():
         else:
             print(json.dumps({"summary": report["summary"], "complete": report["complete"]}, indent=2))
     elif a.cmd == "status":
+        try:
+            gates_near_timeout = gate.running_gates()
+        except Exception:
+            gates_near_timeout = []
         if a.plain:
             s = Pool().status()
             for acc in s["accounts"]:
@@ -544,8 +548,11 @@ def main():
                      f"reason={acc['reason'] or '-'}\tplanner_day_tokens={acc['planner_day_tokens']}")
             c = s["codex"]
             print(f"codex\tavailable={c['available']}\trunning={c['running']}\tday_tasks={c['day_tasks']}\tcooling={c['cooling_s']}s")
+            for entry in gates_near_timeout:
+                print(f"gate\t{entry['task_id']}\telapsed={int(entry['elapsed_s'])}s\ttimeout={int(entry['timeout_s'])}s\tworktree={entry['worktree']}")
         else:
-            print(json.dumps({**Pool().status(), "queue": {s: len(bus.read(status=s)) for s in ("queued", "held", "running")}}, indent=1))
+            print(json.dumps({**Pool().status(), "queue": {s: len(bus.read(status=s)) for s in ("queued", "held", "running")},
+                              "gates_near_timeout": gates_near_timeout}, indent=1))
     elif a.cmd == "baseline":
         from . import baseline
         try:
