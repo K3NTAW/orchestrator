@@ -120,8 +120,26 @@ def spawn_spec_review(task_id: str) -> dict:
 
 
 @srv.tool()
+def execute(task_id: str, prompt: str, executor_id: str | None = None) -> dict:
+    """Executor: dispatch one atomic execute task to the cheapest eligible executor row (Claude or Codex) in its worktree."""
+    result = executor.start(task_id, prompt, executor_id=executor_id)
+    posted, reason = executor.post_tool_result(task_id, result)
+    return {**result, "posted": posted, "posted_reason": reason}
+
+
+def _has_codex_row(pool):
+    return bool(executor.codex_rows(pool))
+
+
+def _codex_refused():
+    return {"status": "refused", "reason": "no enabled codex row; use execute"}
+
+
+@srv.tool()
 def codex(task_id: str, prompt: str) -> dict:
     """Executor: start a fresh GPT-6 Astra thread (`codex exec`) for one atomic execute task in its worktree. Returns thread id + final message; held if Codex is cooling."""
+    if not _has_codex_row(Pool()):
+        return _codex_refused()
     result = executor.start(task_id, prompt)
     posted, reason = executor.post_tool_result(task_id, result)
     return {**result, "posted": posted, "posted_reason": reason}
@@ -130,6 +148,8 @@ def codex(task_id: str, prompt: str) -> dict:
 @srv.tool()
 def codex_reply(task_id: str, delta: str) -> dict:
     """Fix-loop round on the task's existing thread (`codex exec resume`). Send deltas only: failing test names + assertion lines. Max 5 rounds."""
+    if not _has_codex_row(Pool()):
+        return _codex_refused()
     result = executor.reply(task_id, delta)
     posted, reason = executor.post_tool_result(task_id, result, replace_result=True)
     return {**result, "posted": posted, "posted_reason": reason}
@@ -152,9 +172,16 @@ def status() -> dict:
 def executor_fallback(complexity: int) -> dict:
     """When Codex is exhausted: which Claude tier may execute (per on_exhausted policy), or hold."""
     p = Pool()
-    if p.codex_available():
+    if _has_codex_row(p) and p.codex_available():
         return {"use": "codex"}
-    pol = p.cfg["codex"]["on_exhausted"]
+    if not _has_codex_row(p):
+        rows = [row.id for row in p.executors.values()
+                if row.enabled and row.provider == "claude" and "execute" in row.roles
+                and p.row_covers(row, complexity)]
+        if rows:
+            return {"use": "execute", "rows": rows}
+        return {"use": "hold", "hint": "no row covers this complexity"}
+    pol = p.cfg.get("codex", {}).get("on_exhausted", "hold")
     if pol == "fallback_claude" and (tier := fallback_tier(complexity)):
         return {"use": f"claude:{tier}", "review": "other account, different model; label PR same-family-review"}
     return {"use": "hold", "policy": pol, "hint": "refill pipeline: scouts, specs, reviews, retrospect"}
