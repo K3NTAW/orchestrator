@@ -9,7 +9,7 @@ srv = MCPServer("bus")
 def bus_create_task(title: str, spec: str, acceptance: list[str], scope: list[str], role: str = "scout",
                     tier: str = "sonnet", complexity: int = 3, parent: str | None = None, inputs: list | None = None,
                     depends_on: list[str] | None = None, constraints: dict | None = None) -> dict:
-    """Planner only. Create a task; rejected without acceptance criteria and scope paths."""
+    """Planner only. Create a task; depends_on accepts task ids or plan labels of siblings."""
     return bus.create_task(title, spec, acceptance, scope, role, tier, complexity, parent, inputs, constraints, depends_on)
 
 

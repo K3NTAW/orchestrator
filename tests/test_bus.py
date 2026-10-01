@@ -1,5 +1,5 @@
 """Bus rules: acceptance is required, immutable fields, oversize results rejected, events, id sequencing."""
-import contextlib, gc, io, json, sys, tempfile, threading, unittest, warnings
+import contextlib, gc, io, json, sys, tempfile, threading, time, unittest, warnings
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_bus.py` doesn't add this dir itself
@@ -363,9 +363,57 @@ class Bus(BusSandbox):
         self.assertTrue(bus.ready(b))
         with self.assertRaises(ValueError):
             bus.create_task("C", "spec c", ["ok"], ["src/**"], depends_on=["T-9999"])
+        b = bus.update(b["id"], pipeline={"dispatched_at": time.time()})
         with self.assertRaises(PermissionError):
             bus.update(b["id"], depends_on=[])
         self.assertEqual(bus.dependents(a["id"]), [b])
+
+    def test_update_depends_on_before_dispatch_records_event(self):
+        dependency = bus.create_task("Dependency", "spec", ["ok"], ["src/**"])
+        task = bus.create_task("Task", "spec", ["ok"], ["src/**"])
+        updated = bus.update(task["id"], depends_on=[dependency["id"]])
+        self.assertEqual(updated["depends_on"], [dependency["id"]])
+        event = [event for event in bus.events() if event["task"] == task["id"]][-1]
+        self.assertEqual(event["kind"], "depends_on_changed")
+        self.assertEqual(event["data"], {"from": [], "to": [dependency["id"]]})
+
+        with self.assertRaises(ValueError):
+            bus.update(task["id"], depends_on=["T-9999"])
+        with self.assertRaises(ValueError):
+            bus.update(task["id"], depends_on=[task["id"]])
+        dependency["depends_on"] = [task["id"]]
+        (bus.TASKS / f"{dependency['id']}.json").write_text(json.dumps(dependency))
+        with self.assertRaises(ValueError):
+            bus.update(task["id"], depends_on=[dependency["id"]])
+        fix_parent = bus.create_task("Fix parent", "spec", ["ok"], ["src/**"])
+        fix = bus.create_task("Fix", "spec", ["ok"], ["src/**"],
+                              constraints={"fix_round_for": fix_parent["id"]})
+        with self.assertRaises(ValueError):
+            bus.update(fix["id"], depends_on=[fix_parent["id"]])
+        bus.update(task["id"], pipeline={"dispatched_at": time.time()})
+        with self.assertRaises(PermissionError):
+            bus.update(task["id"], depends_on=[])
+        other = bus.create_task("Other", "spec", ["ok"], ["src/**"])
+        bus.update(other["id"], status="running")
+        with self.assertRaises(PermissionError):
+            bus.update(other["id"], depends_on=[])
+
+    def test_create_task_resolves_plan_label_depends_on(self):
+        parent = bus.create_task("Parent", "spec", ["ok"], ["src/**"])
+        labeled = bus.create_task("Labeled", "spec", ["ok"], ["src/**"], parent=parent["id"],
+                                  constraints={"plan_label": "B1"})
+        task = bus.create_task("Child", "spec", ["ok"], ["src/**"], parent=parent["id"], depends_on=["B1"])
+        self.assertEqual(task["depends_on"], [labeled["id"]])
+        event = [event for event in bus.events() if event["task"] == task["id"]][-1]
+        self.assertEqual(event["kind"], "depends_on_resolved")
+        self.assertEqual(event["data"], {"B1": labeled["id"]})
+        with self.assertRaises(ValueError):
+            bus.create_task("Unknown", "spec", ["ok"], ["src/**"], parent=parent["id"], depends_on=["B2"])
+        bus.create_task("Duplicate", "spec", ["ok"], ["src/**"], parent=parent["id"],
+                        constraints={"plan_label": "B1"})
+        with self.assertRaises(ValueError) as raised:
+            bus.create_task("Ambiguous", "spec", ["ok"], ["src/**"], parent=parent["id"], depends_on=["B1"])
+        self.assertIn(labeled["id"], str(raised.exception))
 
     def test_fix_round_drops_own_parent_from_depends_on(self):
         parent = bus.create_task("Parent", "spec", ["ok"], ["src/**"], role="execute")
