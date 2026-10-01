@@ -45,7 +45,7 @@ def bus_read(task_id: str | None = None, status: str | None = None, status_not: 
                     parent=parent, ids=ids)
     if parent is None and ids is None:
         try:
-            warn_rows = bus.pool_config().get("bus", {}).get("read_warn_rows", 200)
+            warn_rows = int(bus.pool_config().get("bus", {}).get("read_warn_rows", 200))
         except (AttributeError, TypeError, ValueError):
             warn_rows = 200
         if len(rows) > warn_rows:
