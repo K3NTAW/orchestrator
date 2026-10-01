@@ -23,6 +23,7 @@ def snapshot(pool, running_claude=0, inflight_claude=0, now=None, claude_free=No
         if claude_free is not None and executor.provider == "claude" and "execute" in executor.roles:
             free = max(0, claude_free.get(executor_id, 0))
         executors[executor_id] = {
+            "free": free,
             "cooling_s": max(0, executor.cooldown_until - now),
             "enabled": executor.enabled,
             "roles": list(executor.roles),
