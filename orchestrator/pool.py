@@ -307,15 +307,20 @@ class Pool:
             row_or_usage["est_usd_source"] = "tokens"
         cache_read_weight = float(self.cfg.get("limits", {}).get("cache_read_weight", 0.1))
         cache_reads = sum(usage.get(k, 0) or 0 for k in ("cached_input_tokens", "cache_read_input_tokens"))
-        return (self._usage_tokens(usage) - cache_reads + cache_reads * cache_read_weight) * float(ratio)
+        # Codex includes cached input in input_tokens. Some partial reports have
+        # more cached tokens than input tokens; uncached input cannot be negative.
+        uncached_input = max(0, (usage.get("input_tokens", 0) or 0) - (usage.get("cached_input_tokens", 0) or 0))
+        full_rate_tokens = uncached_input + sum(usage.get(k, 0) or 0 for k in
+                                                ("output_tokens", "cache_creation_input_tokens"))
+        return (full_rate_tokens + cache_reads * cache_read_weight) * float(ratio)
 
     @staticmethod
     def _usage_tokens(usage):
         if not isinstance(usage, dict):
             return 0
+        # Codex cached_input_tokens is a subset of input_tokens; Claude cache
+        # reads and creation are separate buckets and still contribute in full.
         keys = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-        if "cached_input_tokens" not in usage:
-            keys += ("cached_input_tokens",)
         return int(sum(usage.get(k, 0) or 0 for k in keys))
 
     def _reservation_file(self, mutate=None):

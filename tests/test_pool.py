@@ -39,12 +39,30 @@ class PoolSel(unittest.TestCase):
 
     def test_derived_usd_weights_cache_reads(self):
         self.p.cfg["limits"]["default_tokens_per_usd"] = 100
+        self.p.cfg["limits"].pop("cache_read_weight", None)
         usage = {"input_tokens": 1000, "cached_input_tokens": 900,
                  "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20,
                  "output_tokens": 80}
         self.assertAlmostEqual(self.p.usd_of(usage), 3.0)
+        claude_usage = {"input_tokens": 100, "cache_read_input_tokens": 900,
+                        "cache_creation_input_tokens": 10, "output_tokens": 50}
+        self.assertAlmostEqual(self.p.usd_of(claude_usage), 2.5)
+        self.assertAlmostEqual(self.p.usd_of({
+            "input_tokens": 5, "cached_input_tokens": 7, "output_tokens": 1,
+        }), 0.017)
+        self.p.cfg["limits"]["cache_read_weight"] = 0.25
+        self.assertAlmostEqual(self.p.usd_of(usage), 4.5)
+        self.assertAlmostEqual(self.p.usd_of(claude_usage), 3.85)
+        self.assertAlmostEqual(self.p.usd_of(usage, {"usd_per_token": 0.02}), 9.0)
         self.assertEqual(self.p.usd_of({"input_tokens": 1, "usd": 3.5}), 3.5)
         self.assertEqual(self.p.usd_of({"input_tokens": 1, "total_cost_usd": 4.5}), 4.5)
+        for key in ("usd", "total_cost_usd"):
+            for cost in (0, 2.0):
+                for row in ({"usage": {**usage, key: cost}},
+                            {"output": {"usage": usage, key: cost}},
+                            {"usage": usage, key: cost}):
+                    with self.subTest(key=key, cost=cost, row=row):
+                        self.assertEqual(self.p.usd_of(row), cost)
 
     def test_affinity_reserve_cooldown_budget(self):
         self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
