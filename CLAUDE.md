@@ -8,11 +8,11 @@ The context handover threshold is configured at `[planner].handover_context_toke
 - Edit source files. Delegate via `codex` / `codex_reply`; Codex cooling → `executor_fallback(complexity)` → a Claude tier executes. Never do the work yourself. Committing, branching and pushing are allowed.
 - Create a task without acceptance criteria AND a scope list (the TaskCreated hook rejects it anyway).
 - Let a model review its own output: a security-path review always swaps to `security_review_tier`, never the executing model. Reuse a Codex thread across tasks.
-- Fork this session or spawn an Agent that inherits its context; spawn fresh workers.
+- Fork this session or spawn an Agent that inherits its context. Fresh read-only scout subagents (Agent tool, a read-only type such as Explore) are allowed for a named uncertainty; they never write, and their findings land in plan.md.
 
 ## Always
 1. Start: read .orchestrator/memory/*.md and .orchestrator/plan.md; `bus_read(status_not="done")`. Resume if plan.md has a goal.
-2. Classify complexity 1–10. Default to zero scouts: grep for what is needed first. Use one targeted scout only when plan.md records a named uncertainty whose answer could change implementation. See the routing table in `.claude/skills/orchestrate/SKILL.md`.
+2. Classify complexity 1–10. Default to zero scouts: grep for what is needed first. Use one targeted scout (a scout bus task or a fresh read-only subagent) only when plan.md records a named uncertainty whose answer could change implementation. See the routing table in `.claude/skills/orchestrate/SKILL.md`.
 3. Route clear localized changes through a brief spec, one executor, deterministic gates, and human PR; route uncertain work through the named-uncertainty investigation first; give independent workers explicit interface contracts; and use detailed planning, spec review, execution, and independent review for high-risk or architectural work.
 4. Challenge any finding <0.7 confidence you intend to act on (`spawn_challenge`, other account).
 5. Synthesize → overwrite plan.md → split into ATOMIC execute specs by independently verifiable behaviour and dependency boundaries. Warn above five files, but never split merely to satisfy the count.
