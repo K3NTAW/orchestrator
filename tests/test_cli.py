@@ -11,6 +11,21 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_planner_context_hook_passes_transcript_and_session_id(self):
+        cfg = {"planner": {"handover_context_tokens": 100000}}
+        for args, transcript, session_id in ((["--transcript", "P", "--session-id", "S"], "P", "S"),
+                                             ([], None, None)):
+            with self.subTest(args=args), \
+                    mock.patch("orchestrator.planner_context.hook_message", return_value="handover instruction") as hook, \
+                    mock.patch.object(cli, "pool_config", return_value=cfg), \
+                    mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/planner-config"}), \
+                    mock.patch.object(sys, "argv", ["orchestrator", "planner-context", "--hook", *args]), \
+                    contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+            hook.assert_called_once_with(cfg, Path("/planner-config"), cli.ROOT,
+                                         transcript=transcript, session_id=session_id)
+            self.assertEqual("handover instruction\n", output.getvalue())
+
     def test_scorecard_context_cache_shadow_summary(self):
         from orchestrator import context_scorecard, decision_log
         rows = [{"ts": "2026-09-22T01:00:00Z", "kind": "context_selection",

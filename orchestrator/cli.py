@@ -190,6 +190,7 @@ def main():
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true")
+    pc.add_argument("--transcript"); pc.add_argument("--session-id")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
     rm.add_argument("--stdout", action="store_true")
@@ -621,11 +622,13 @@ def main():
         from . import planner_context
         config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
         if a.hook:
-            message = planner_context.hook_message(pool_config(), config_dir, ROOT)
+            message = planner_context.hook_message(pool_config(), config_dir, ROOT,
+                                                   transcript=a.transcript, session_id=a.session_id)
             if message:
                 print(message)
         else:
-            tokens = planner_context.context_tokens(config_dir, ROOT)
+            tokens = planner_context.context_tokens(config_dir, ROOT,
+                                                    transcript=a.transcript, session_id=a.session_id)
             if tokens is not None:
                 print(tokens)
     elif a.cmd == "merge":
