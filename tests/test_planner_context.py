@@ -8,6 +8,40 @@ from orchestrator.pool import encode_project_dir
 
 
 class PlannerContext(unittest.TestCase):
+    def test_context_tokens_prefers_session_transcript_over_newest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, root = Path(directory) / "config", Path(directory) / "repo"
+            sid = "current-session"
+            self._transcript(config_dir, root, f"{sid}.jsonl", {
+                "input_tokens": 10000, "cache_read_input_tokens": 20000,
+                "cache_creation_input_tokens": 10000}, 1)
+            self._transcript(config_dir, root, "other.jsonl", {"input_tokens": 190000}, 2)
+            older = config_dir / "projects" / encode_project_dir(str(root)) / f"{sid}.jsonl"
+            self.assertEqual(40000, planner_context.context_tokens(config_dir, root, session_id=sid))
+            for transcript in (older, str(older)):
+                with self.subTest(transcript=transcript):
+                    self.assertEqual(40000, planner_context.context_tokens(
+                        config_dir, root, transcript=transcript))
+            self.assertEqual(40000, planner_context.context_tokens(
+                config_dir, root, transcript=older, session_id="other"))
+            self.assertEqual(190000, planner_context.context_tokens(config_dir, root))
+
+    def test_fresh_session_reports_none_not_another_sessions_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, root = Path(directory) / "config", Path(directory) / "repo"
+            cfg = {"planner": {"handover_context_tokens": 100000}}
+            self._transcript(config_dir, root, "fresh.jsonl", None, 1)
+            self._transcript(config_dir, root, "other.jsonl", {"input_tokens": 190000}, 2)
+            transcripts = config_dir / "projects" / encode_project_dir(str(root))
+            for kwargs in ({"session_id": "fresh"}, {"session_id": "missing"},
+                           {"transcript": transcripts / "fresh.jsonl"},
+                           {"transcript": transcripts / "missing.jsonl"},
+                           {"transcript": transcripts / "fresh.jsonl", "session_id": "other"},
+                           {"transcript": transcripts / "missing.jsonl", "session_id": "other"}):
+                with self.subTest(**kwargs):
+                    self.assertIsNone(planner_context.context_tokens(config_dir, root, **kwargs))
+                    self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, **kwargs))
+
     def _transcript(self, config_dir, root, name, usage, modified):
         directory = config_dir / "projects" / encode_project_dir(str(root))
         directory.mkdir(parents=True, exist_ok=True)
