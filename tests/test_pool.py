@@ -77,6 +77,23 @@ class PoolSel(unittest.TestCase):
         B.day_tokens = B.daily_budget; self.assertIsNone(self.p.pick("review"))
         self.assertEqual(P.Pool().get("A").window_tokens, A.window_tokens)  # persisted across restarts
 
+    def test_pick_planner_honours_pinned_account(self):
+        A, B = self.p.get("A"), self.p.get("B")
+        B.window_tokens = self.p.cap - 1
+        self.p.cfg["planner"] = {"account": "B"}
+        self.assertEqual(self.p.pick("planner").id, "B")
+        B.cooldown_until = time.time() + 600
+        self.assertEqual(self.p.pick("planner").id, "B")
+        B.cooldown_until = 0
+        B.day_tokens = B.daily_budget
+        self.assertEqual(self.p.pick("planner").id, "B")
+        self.assertEqual(self.p.pick("scout").id, "A")
+
+        self.p.cfg["planner"] = {"account": "unknown"}
+        self.assertEqual(self.p.pick("planner").id, "A")
+        self.p.cfg["planner"] = {}
+        self.assertEqual(self.p.pick("planner").id, "A")
+
     def test_pick_review_avoids_executing_account(self):
         self.assertEqual(self.p.pick("review", avoid="B").id, "A")   # B executed it; A has headroom
         self.assertEqual(self.p.pick("review", avoid="A").id, "B")

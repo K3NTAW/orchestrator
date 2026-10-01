@@ -673,6 +673,20 @@ class Cli(unittest.TestCase):
         self.assertEqual(config_dir, os.path.expanduser(P.Pool().get(acct_id).config_dir))
         self.assertNotIn("~", config_dir)
 
+    def test_pick_planner_prints_pinned_account_with_notice(self):
+        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
+        pl = P.Pool()
+        pl.cfg["planner"] = {"account": "B"}
+        pl.get("B").cooldown_until = time.time() + 600
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(cli, "Pool", return_value=pl), \
+                mock.patch.object(pl, "tally_planner"), \
+                mock.patch.object(sys, "argv", ["orchestrator", "pick", "planner"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            cli.main()
+        self.assertEqual(out.getvalue().strip(), f"B\t{os.path.expanduser(pl.get('B').config_dir)}")
+        self.assertIn("pinned planner account B", err.getvalue())
+
     def test_pick_planner_model_flag(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
         pl = P.Pool()
