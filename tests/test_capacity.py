@@ -67,6 +67,7 @@ class Capacity(unittest.TestCase):
 
     def test_account_fallback_uses_claude_worker_headroom(self):
         pool = FakePool([executor(cooldown_until=time.time() + 60)], workers=3)
+        pool.cfg["codex"] = {"on_exhausted": "fallback_claude"}
         snap = capacity.snapshot(pool, running_claude=1, inflight_claude=1)
         tasks = {name: task(name) for name in ("A", "B")}
         result = capacity.admit(["A", "B"], tasks, snap, {})
