@@ -603,9 +603,9 @@ class Render(unittest.TestCase):
 
     def test_templates_with_packet_placeholder_put_rules_before_it(self):
         import hashlib
-        # SHA-256 of the full rule text, stripped, before T-1172's template move.
+        # SHA-256 of the full rule text, stripped, before the packet.
         original_rules = {
-            "execute": "29766ef48a700fd953e5e478f3c100c717ede45fe7c48f59be11d0647d143b3a",
+            "execute": "beef4166897436ad282c1be195688cb64c20bd18eb4d6a6e895099860cfbef41",
             "review": "70478706c75c8f28ba934828b48fda936c1e50106b2e930fc4f43fffa7c8c441",
             "scout": "9b100cc1172ed403faf0ef156df48993238f1dbf4e2c8294b604ec7120cc75cc",
             "spec-review": "2315aa294cf56a5601c21c8905f3ba9c97c575beafc24b01fa8c3086c2e122b6",
@@ -1078,15 +1078,21 @@ class Render(unittest.TestCase):
 
     def test_execute_prompt_names_gate_and_commit(self):
         text = spawn.render("execute", packet="")
-        self.assertIn(".claude/hooks/tests-green.sh", text)
-        self.assertIn("git commit", text)
-        self.assertNotIn("scripts/tests_green.sh", text)
+        self.assertIn("commit", text.lower())
+        self.assertLess(text.lower().index("commit"), text.index("Run only the acceptance-named tests"))
+        self.assertIn("Run only the acceptance-named tests in the foreground", text)
+        self.assertIn("never background a command", text)
+        self.assertIn("daemon runs the full gate externally", text)
+        self.assertNotIn(".claude/hooks/tests-green.sh", text)
 
     def test_fix_delta_prompt_names_gate_and_commit(self):
         text = spawn.render("fix-delta", packet="brief", n=1, failing_tests="x", assertion_lines="y")
-        self.assertIn(".claude/hooks/tests-green.sh", text)
-        self.assertIn("git commit", text)
-        self.assertNotIn("scripts/tests_green.sh", text)
+        self.assertIn("commit", text.lower())
+        self.assertLess(text.lower().index("commit"), text.index("Run only the acceptance-named tests"))
+        self.assertIn("Run only the acceptance-named tests in the foreground", text)
+        self.assertIn("never background a command", text)
+        self.assertIn("daemon runs the full gate externally", text)
+        self.assertNotIn(".claude/hooks/tests-green.sh", text)
 
     def test_packet_gotcha_match_by_path(self):
         task = self.packet_fixture()

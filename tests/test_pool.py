@@ -28,6 +28,42 @@ class PoolSel(unittest.TestCase):
     def setUp(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
 
+    def test_codex_usage_counts_cached_input_once(self):
+        self.assertEqual(self.p._usage_tokens({
+            "input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50,
+        }), 1050)
+        self.assertEqual(self.p._usage_tokens({
+            "input_tokens": 100, "cache_read_input_tokens": 900,
+            "cache_creation_input_tokens": 10, "output_tokens": 50,
+        }), 1060)
+
+    def test_derived_usd_weights_cache_reads(self):
+        self.p.cfg["limits"]["default_tokens_per_usd"] = 100
+        self.p.cfg["limits"].pop("cache_read_weight", None)
+        usage = {"input_tokens": 1000, "cached_input_tokens": 900,
+                 "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20,
+                 "output_tokens": 80}
+        self.assertAlmostEqual(self.p.usd_of(usage), 3.0)
+        claude_usage = {"input_tokens": 100, "cache_read_input_tokens": 900,
+                        "cache_creation_input_tokens": 10, "output_tokens": 50}
+        self.assertAlmostEqual(self.p.usd_of(claude_usage), 2.5)
+        self.assertAlmostEqual(self.p.usd_of({
+            "input_tokens": 5, "cached_input_tokens": 7, "output_tokens": 1,
+        }), 0.017)
+        self.p.cfg["limits"]["cache_read_weight"] = 0.25
+        self.assertAlmostEqual(self.p.usd_of(usage), 4.5)
+        self.assertAlmostEqual(self.p.usd_of(claude_usage), 3.85)
+        self.assertAlmostEqual(self.p.usd_of(usage, {"usd_per_token": 0.02}), 9.0)
+        self.assertEqual(self.p.usd_of({"input_tokens": 1, "usd": 3.5}), 3.5)
+        self.assertEqual(self.p.usd_of({"input_tokens": 1, "total_cost_usd": 4.5}), 4.5)
+        for key in ("usd", "total_cost_usd"):
+            for cost in (0, 2.0):
+                for row in ({"usage": {**usage, key: cost}},
+                            {"output": {"usage": usage, key: cost}},
+                            {"usage": usage, key: cost}):
+                    with self.subTest(key=key, cost=cost, row=row):
+                        self.assertEqual(self.p.usd_of(row), cost)
+
     def test_affinity_reserve_cooldown_budget(self):
         self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
         A, B = self.p.get("A"), self.p.get("B")
@@ -109,6 +145,21 @@ class PoolSel(unittest.TestCase):
         self.assertTrue(executor.enabled)
         self.assertEqual(executor.model, cfg["models"]["opus"])
         self.assertEqual(executor.model, "claude-opus-5-5")
+
+    def test_repo_config_has_claude_rows(self):
+        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        rows = {row["id"]: row for row in cfg["executors"]}
+        self.assertEqual((rows["claude:sonnet"]["complexity_min"], rows["claude:sonnet"]["complexity_max"]), (1, 5))
+        self.assertEqual(rows["claude:sonnet"]["model"], "claude-sonnet-5-5")
+        self.assertEqual((rows["claude:opus"]["complexity_min"], rows["claude:opus"]["complexity_max"]), (6, 10))
+
+        codex_disabled = {**cfg, "executors": [
+            {**row, "enabled": False} if row["provider"] == "codex" else row
+            for row in cfg["executors"]
+        ]}
+        pool = P.Pool(codex_disabled)
+        self.assertEqual(pool.pick_executor("execute", 3).id, "claude:sonnet")
+        self.assertEqual(pool.pick_executor("execute", 8).id, "claude:opus")
 
     def test_daemon_respawn_max_documented(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())

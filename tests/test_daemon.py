@@ -2511,6 +2511,16 @@ class Daemon(unittest.TestCase):
         self.assertEqual(len(reviews), 1)
         self.assertEqual(reviews[0]["tier"], "opus")
 
+    def test_security_review_crosses_claude_tiers(self):
+        for executor, expected_tier in (("claude:sonnet", "opus"), ("claude:opus", "sonnet")):
+            t = self.task(f"hardening {executor}", complexity=5)
+            bus.update(t, status="done", worktree=str(TMP), executor=executor)
+            self.swap(daemon, "changed_paths", lambda task: [".claude/hooks/tests-green.sh"])
+            daemon.tick(self.review_pool("security_paths"))
+            reviews = [r for r in bus.read(role="review") if r["inputs"] == [t]]
+            self.assertEqual(len(reviews), 1)
+            self.assertEqual(reviews[0]["tier"], expected_tier)
+
     def test_diff_unavailable_fails_closed(self):
         """changed_paths() returning None (non-git worktree, no base, git error) must fail closed: treated as a
         security match, exactly one review, never a silent direct merge."""

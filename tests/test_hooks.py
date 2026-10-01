@@ -1,6 +1,6 @@
 """The .claude/hooks/*.sh scripts: acceptance gating, scope guard, loop guard, retrospect/uncommitted checks,
 tests-green, guardrails (destructive/protected command blocking), and planner-mode (Planner may not edit source)."""
-import os, shutil, subprocess, sys, time, unittest
+import os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_hooks.py` doesn't add this dir itself
 from _harness import HOOKS, REPO, TMP, hook
@@ -119,8 +119,29 @@ class PlannerMode(unittest.TestCase):
     def test_prompt_hook(self):
         r = hook("planner-prompt.sh", {"prompt": "add a flag"}, cwd=TMP, env=self.P)
         self.assertEqual(r.returncode, 0); self.assertIn("Skill(orchestrate)", r.stdout)
+        self.assertEqual(len(r.stdout.splitlines()), 1)
         self.assertEqual(hook("planner-prompt.sh", {"prompt": "/orchestrate x"}, cwd=TMP, env=self.P).stdout, "")
         self.assertEqual(hook("planner-prompt.sh", {"prompt": "x"}, cwd=TMP, env={"ORCH_TASK_ID": "T-0001"}).stdout, "")
+
+    def test_prompt_hook_context_threshold(self):
+        import json
+        from orchestrator.pool import encode_project_dir
+        reminder = "Planner mode: goals go through Skill(orchestrate); never edit source; see CLAUDE.md\n"
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "projects" / encode_project_dir(str(REPO))
+            project.mkdir(parents=True)
+            transcript = project / "session.jsonl"
+            env = {**self.P, "ORCH_ROOT": str(REPO), "CLAUDE_CONFIG_DIR": directory}
+            for tokens in (149999, 150000):
+                transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": tokens}}}) + "\n")
+                result = hook("planner-prompt.sh", {"prompt": "continue"}, cwd=TMP, env=env)
+                self.assertEqual(result.returncode, 0)
+                if tokens < 150000:
+                    self.assertEqual(result.stdout, reminder)
+                else:
+                    self.assertTrue(result.stdout.startswith(reminder))
+                    self.assertEqual(len(result.stdout.splitlines()), 2)
+                    self.assertIn("uv run orchestrator handover --reason context", result.stdout)
 
 
 class SessionRules(unittest.TestCase):
