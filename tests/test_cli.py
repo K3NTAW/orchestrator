@@ -11,6 +11,29 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_handover_cli_forwards_session_id(self):
+        from orchestrator import handover, planner_context
+        for tokens in (310000, None):
+            with self.subTest(tokens=tokens), \
+                    mock.patch.object(planner_context, "context_tokens", return_value=tokens) as context_tokens, \
+                    mock.patch.object(handover, "write", return_value="plan.md") as write, \
+                    mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/planner-config"}), \
+                    mock.patch.object(sys, "argv", ["orchestrator", "handover", "--reason", "context", "--session-id", "S"]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                cli.main()
+            write.assert_called_once_with("context", session_id="S", tokens_at=tokens)
+            context_tokens.assert_called_once_with(Path("/planner-config"), cli.ROOT, session_id="S")
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(cli, "ROOT", Path(directory)), \
+                mock.patch.object(planner_context, "context_tokens", return_value=310000), \
+                mock.patch.object(planner_context, "user_turns", return_value=12), \
+                mock.patch.object(cli, "pool_config", return_value={}), \
+                mock.patch.object(sys, "argv", ["orchestrator", "planner-context", "--hook", "--session-id", "S"]), \
+                contextlib.redirect_stdout(output := io.StringIO()):
+            cli.main()
+        self.assertIn("hand over now", output.getvalue())
+        self.assertIn("--session-id S", output.getvalue())
+
     def test_planner_context_hook_passes_transcript_and_session_id(self):
         cfg = {"planner": {"handover_context_tokens": 100000}}
         for args, transcript, session_id in ((["--transcript", "P", "--session-id", "S"], "P", "S"),
