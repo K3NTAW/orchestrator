@@ -194,10 +194,10 @@ def _compact_row(t):
     }
 
 
-def read(tid=None, status=None, status_not=None, role=None, compact=False):
+def read(tid=None, status=None, status_not=None, role=None, compact=False, *, parent=None, ids=None):
     if tid:
         return get(tid)
-    rows = db().execute("select id from tasks order by id").fetchall()
+    rows = [(task_id,) for task_id in ids] if ids is not None else db().execute("select id from tasks order by id").fetchall()
     out = []
     skipped = 0
     for row in rows:
@@ -211,7 +211,8 @@ def read(tid=None, status=None, status_not=None, role=None, compact=False):
             skipped += 1
     if skipped:
         print(f"bus.read: skipped {skipped} unreadable rows", file=sys.stderr)
-    filtered = [t for t in out if (status is None or t["status"] == status)
+    filtered = [t for t in out if (parent is None or t.get("parent") == parent)
+                and (status is None or t["status"] == status)
                 and (status_not is None or t["status"] != status_not) and (role is None or t["role"] == role)]
     return [_compact_row(t) for t in filtered] if compact else filtered
 

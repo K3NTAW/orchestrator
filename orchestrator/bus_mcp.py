@@ -10,7 +10,10 @@ def bus_create_task(title: str, spec: str, acceptance: list[str], scope: list[st
                     tier: str = "sonnet", complexity: int = 3, parent: str | None = None, inputs: list | None = None,
                     depends_on: list[str] | None = None, constraints: dict | None = None) -> dict:
     """Planner only. Create a task; rejected without acceptance criteria and scope paths."""
-    return bus.create_task(title, spec, acceptance, scope, role, tier, complexity, parent, inputs, constraints, depends_on)
+    created = bus.create_task(title, spec, acceptance, scope, role, tier, complexity, parent, inputs, constraints, depends_on)
+    echo = bus._compact_row(created)
+    echo.update({"acceptance_count": len(acceptance), "scope_count": len(scope), "spec_chars": len(spec)})
+    return echo
 
 
 @srv.tool()
@@ -27,17 +30,27 @@ def bus_post_result(task_id: str, result: dict, status: str = "done") -> dict:
 
 @srv.tool()
 def bus_read(task_id: str | None = None, status: str | None = None, status_not: str | None = None,
-             role: str | None = None, compact: bool = True, full: bool = False) -> list | dict:
-    """Read one task, or filter tasks by status / status_not / role.
+             role: str | None = None, compact: bool = True, full: bool = False,
+             parent: str | None = None, ids: list[str] | None = None) -> list | dict:
+    """Read one task, or filter tasks by status / status_not / role / parent / ids.
     task_id always returns that one task in full (spec, acceptance, scope, events, result -- one task is small
     enough). A filtered read defaults to compact rows -- {id, parent, role, status, complexity, tier, title
     (first 90 chars), depends_on, hold_reason, reason (first 120 chars), merged_into, assigned_to, has_result,
     result_summary (first 160 chars of result.summary)} -- so scanning many tasks doesn't pull every spec and
-    event into context. Pass full=True (or compact=False) for the old shape, then bus_read(task_id=...) on the
-    ones you need to inspect closely."""
+    event into context. Pass parent=<goal id> for a goal scan, or ids=[...] for a handful of tasks. Pass full=True
+    (or compact=False) for the old shape, then bus_read(task_id=...) on the ones you need to inspect closely."""
     if task_id:
         return bus.read(task_id)
-    return bus.read(status=status, status_not=status_not, role=role, compact=compact and not full)
+    rows = bus.read(status=status, status_not=status_not, role=role, compact=compact and not full,
+                    parent=parent, ids=ids)
+    if parent is None and ids is None:
+        try:
+            warn_rows = bus.pool_config().get("bus", {}).get("read_warn_rows", 200)
+        except (AttributeError, TypeError, ValueError):
+            warn_rows = 200
+        if len(rows) > warn_rows:
+            rows.insert(0, {"notice": f"{len(rows)} rows; pass parent=<goal id> or ids=[...] to narrow"})
+    return rows
 
 
 @srv.tool()

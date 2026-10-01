@@ -423,6 +423,39 @@ class Bus(BusSandbox):
         self.assertEqual(bus.read(t["id"]), t)
         self.assertEqual(bus.read(t["id"], compact=True), t)  # compact never applies to a single-task read
 
+    def test_bus_create_task_echoes_compact_row(self):
+        from orchestrator import bus_mcp
+        spec = "s" * 4000
+        reply = bus_mcp.bus_create_task("Echo", spec, ["one", "two"], ["src/**"], parent="T-goal")
+        self.assertTrue({"id", "title", "parent", "depends_on", "status", "acceptance_count", "scope_count", "spec_chars"} <= set(reply))
+        self.assertEqual(reply["spec_chars"], 4000)
+        self.assertEqual(reply["status"], "queued")
+        self.assertEqual(bus.get(reply["id"])["spec"], spec)
+        for key in ("spec", "events", "acceptance"):
+            self.assertNotIn(key, reply)
+
+    def test_bus_read_parent_and_ids_filters(self):
+        from orchestrator import bus_mcp
+        parent = bus.create_task("Parent", "s", ["a"], ["x"])
+        other = bus.create_task("Other", "s", ["a"], ["x"])
+        child_a = bus.create_task("A", "s", ["a"], ["x"], parent=parent["id"])
+        child_b = bus.create_task("B", "s", ["a"], ["x"], parent=parent["id"])
+        bus.update(child_b["id"], status="done")
+        self.assertEqual({row["id"] for row in bus.read(parent=parent["id"], status_not="done")}, {child_a["id"]})
+        self.assertEqual([row["id"] for row in bus.read(ids=[child_b["id"], other["id"], "T-9999"])],
+                         [child_b["id"], other["id"]])
+        self.assertEqual([row["id"] for row in bus_mcp.bus_read(parent=parent["id"])], [child_a["id"], child_b["id"]])
+
+    def test_bus_read_unfiltered_notice_above_warn_rows(self):
+        from orchestrator import bus_mcp
+        for index in range(4):
+            bus.create_task(f"Task {index}", "s", ["a"], ["x"])
+        with patch.object(bus, "pool_config", return_value={"bus": {"read_warn_rows": 3}}):
+            rows = bus_mcp.bus_read()
+            narrowed = bus_mcp.bus_read(parent="T-goal")
+        self.assertEqual(rows[0], {"notice": "4 rows; pass parent=<goal id> or ids=[...] to narrow"})
+        self.assertEqual(narrowed, [])
+
 
 class ContextLog(BusSandbox):
     def test_log_run_carries_routed_keys(self):
