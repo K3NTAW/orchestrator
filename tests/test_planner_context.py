@@ -42,3 +42,11 @@ class PlannerContext(unittest.TestCase):
                     contextlib.redirect_stdout(output := io.StringIO()):
                 cli.main()
             self.assertEqual(expected + "\n", output.getvalue())
+            for tokens in (99, None):
+                with self.subTest(tokens=tokens), \
+                        mock.patch.object(planner_context, "context_tokens", return_value=tokens), \
+                        mock.patch.object(cli, "pool_config", return_value=cfg), \
+                        mock.patch.object(sys, "argv", ["orchestrator", "planner-context", "--hook"]), \
+                        contextlib.redirect_stdout(output := io.StringIO()):
+                    cli.main()
+                self.assertEqual("", output.getvalue())

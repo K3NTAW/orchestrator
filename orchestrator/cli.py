@@ -607,6 +607,7 @@ def main():
         from . import handover
         print(handover.write(a.reason))
     elif a.cmd == "planner-context":
+        from pathlib import Path
         from . import planner_context
         config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
         if a.hook:
