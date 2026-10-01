@@ -106,6 +106,7 @@ class Executor(unittest.TestCase):
         P.PERSIST.unlink(missing_ok=True)
         self.addCleanup(P.PERSIST.unlink, True)
         tid = self.exec_task()
+        self.addCleanup(bus.update, tid, status="done")
         bus.update(tid, pipeline={"claude_capacity_requeues": 7,
                                   "claude_capacity_until": time.time() + 60, "preserved": True})
         with patch.object(executor, "_run", return_value={"status": "done"}) as worker:
