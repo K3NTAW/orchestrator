@@ -2,11 +2,76 @@
 import subprocess
 from pathlib import Path
 
+from . import scopes
+
 class GitError(RuntimeError):
     pass
 
-def _git_in(worktree, *args):
-    return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+def _git_in(worktree, *args, timeout=None):
+    return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True, timeout=timeout)
+
+
+def parse_porcelain_z(output):
+    """Return changed repository paths from ``git status --porcelain -z`` output."""
+    paths = []
+    entries = iter(output.split("\0"))
+    for entry in entries:
+        if not entry:
+            continue
+        path = entry[3:]
+        if "R" in entry[:2] or "C" in entry[:2]:
+            next(entries, "")
+        if not path or path.split("/", 1)[0] in (".orchestrator", ".venv"):
+            continue
+        paths.append(path)
+    return paths
+
+
+def head_sha(worktree, timeout=60):
+    try:
+        result = _git_in(worktree, "rev-parse", "HEAD", timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def execute_outcome(worktree, parent, scope, *, since=None):
+    """Collect read-only git evidence for an executed task."""
+    if not Path(worktree).is_dir():
+        return None
+    try:
+        candidates = ([f"goal/{parent}"] if parent else []) + ["origin/main", "main"]
+        base = None
+        for candidate in candidates:
+            result = _git_in(worktree, "merge-base", "HEAD", candidate, timeout=60)
+            if result.returncode == 0:
+                base = result.stdout.strip()
+                break
+        if not base:
+            return None
+
+        ahead_result = _git_in(worktree, "rev-list", "--count", f"{since or base}..HEAD", timeout=60)
+        if ahead_result.returncode != 0:
+            return None
+        status_result = _git_in(worktree, "status", "--porcelain", "-z", "--untracked-files=all", timeout=60)
+        if status_result.returncode != 0:
+            return None
+        head_result = _git_in(worktree, "rev-parse", "HEAD", timeout=60)
+        if head_result.returncode != 0:
+            return None
+        paths = parse_porcelain_z(status_result.stdout)
+        dirty_in_scope = sorted(path for path in paths if scopes.matches(path, scope))
+        dirty_out_of_scope = sorted(path for path in paths if not scopes.matches(path, scope))
+        return {
+            "ahead": int(ahead_result.stdout.strip()),
+            "head": head_result.stdout.strip(),
+            "dirty_in_scope": dirty_in_scope,
+            "dirty_out_of_scope": dirty_out_of_scope,
+        }
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
 
 def _resolve_base(worktree, parent):
     """The trunk a worktree's HEAD should be compared against: the first of goal/<parent>, origin/main or main

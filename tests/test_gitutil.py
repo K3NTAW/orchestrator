@@ -1,5 +1,6 @@
 """Tests for strict stale-work git evidence."""
 import subprocess, sys, tempfile, unittest
+from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import scratch_repo
@@ -7,6 +8,51 @@ from orchestrator import gitutil
 
 
 class GitUtilTests(unittest.TestCase):
+    def test_execute_outcome_reports_ahead_head_and_dirty_split_by_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = scratch_repo(Path(directory) / "repo")
+            subprocess.run(["git", "branch", "goal/P"], cwd=repo, check=True)
+            (repo / "in.txt").write_text("committed\n")
+            subprocess.run(["git", "add", "in.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "task change"], cwd=repo, check=True)
+            older = subprocess.run(["git", "rev-parse", "HEAD~1"], cwd=repo, check=True,
+                                   capture_output=True, text=True).stdout.strip()
+            (repo / "in.txt").write_text("dirty\n")
+            (repo / "out.txt").write_text("untracked\n")
+            (repo / "deleted.txt").write_text("delete me\n")
+            subprocess.run(["git", "add", "deleted.txt"], cwd=repo, check=True)
+            (repo / "deleted.txt").unlink()
+            (repo / ".orchestrator").mkdir(exist_ok=True)
+            (repo / ".orchestrator" / "state").write_text("ignored\n")
+            (repo / ".venv").mkdir(exist_ok=True)
+            (repo / ".venv" / "state").write_text("ignored\n")
+
+            outcome = gitutil.execute_outcome(repo, "P", ["in.txt"])
+            self.assertEqual(outcome["ahead"], 1)
+            self.assertEqual(outcome["head"], subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                capture_output=True, text=True).stdout.strip())
+            self.assertEqual(outcome["dirty_in_scope"], ["in.txt"])
+            self.assertEqual(outcome["dirty_out_of_scope"], ["deleted.txt", "out.txt"])
+            self.assertEqual(gitutil.execute_outcome(repo, "P", ["in.txt"], since=older)["ahead"], 1)
+            self.assertIsNone(gitutil.execute_outcome(Path(directory) / "missing", "P", ["in.txt"]))
+
+            with mock.patch.object(gitutil, "_git_in", side_effect=subprocess.TimeoutExpired("git", 60)):
+                self.assertIsNone(gitutil.execute_outcome(repo, "P", ["in.txt"]))
+
+    def test_parse_porcelain_z_matches_daemon_dirty_scope_paths(self):
+        from orchestrator import daemon
+
+        sample = "R  new/name.txt\0old/name.txt\0D  removed.txt\0?? untracked.txt\0?? .orchestrator/state\0?? .venv/bin/x\0"
+        result = type("Result", (), {"returncode": 0, "stdout": sample, "stderr": ""})()
+        scope = ["new/name.txt", "removed.txt", "untracked.txt"]
+        with mock.patch.object(daemon, "_git_in", return_value=result):
+            parsed = gitutil.parse_porcelain_z(sample)
+            daemon_paths = daemon._dirty_scope_paths(Path("."), scope)
+        self.assertEqual(set(parsed), {"new/name.txt", "removed.txt", "untracked.txt"})
+        self.assertEqual(set(parsed), set(daemon_paths))
+        self.assertFalse(hasattr(gitutil, "daemon"))
+
     def test_moved_paths_lists_files_changed_on_target_since_merge_base(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = scratch_repo(Path(directory))
