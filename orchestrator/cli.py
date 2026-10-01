@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from . import ROOT, bus, gate, scorecard, worker_registry
 from .bus import RUNS
-from .pool import Pool
+from .pool import Pool, config as pool_config
 
 
 def _percentile(values, percentile):
@@ -189,6 +189,7 @@ def main():
     pk.add_argument("--model", action="store_true")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
+    pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
     rm.add_argument("--stdout", action="store_true")
@@ -605,6 +606,18 @@ def main():
     elif a.cmd == "handover":
         from . import handover
         print(handover.write(a.reason))
+    elif a.cmd == "planner-context":
+        from pathlib import Path
+        from . import planner_context
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
+        if a.hook:
+            message = planner_context.hook_message(pool_config(), config_dir, ROOT)
+            if message:
+                print(message)
+        else:
+            tokens = planner_context.context_tokens(config_dir, ROOT)
+            if tokens is not None:
+                print(tokens)
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
     elif a.cmd == "repomap":

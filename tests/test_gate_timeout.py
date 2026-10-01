@@ -180,6 +180,41 @@ class GateTimeoutTest(unittest.TestCase):
         self.assert_gone(int(parent_file.read_text()))
         self.assert_gone(int(child_file.read_text()))
 
+    def test_deadline_counts_wall_clock_sleep(self):
+        script = self.script("sleep 60\n")
+        started = []
+        token = gate._ON_START.set(started.append)
+        try:
+            with mock.patch.object(gate.time, "time", side_effect=[100, 159.95, 161]):
+                result = gate.run_bounded([str(script)], cwd=self.root, timeout_s=60,
+                                          kill_grace_s=0.05)
+        finally:
+            gate._ON_START.reset(token)
+        self.assertTrue(result["timed_out"])
+        self.assertIsNone(result["returncode"])
+        self.assert_gone(started[0])
+
+    def test_killpg_permission_error_is_treated_as_gone(self):
+        script = self.script("exec sleep 60\n")
+        real_killpg = os.killpg
+        for denied_signal in (0, gate.signal.SIGKILL):
+            with self.subTest(denied_signal=denied_signal):
+                def killpg(pgid, sig):
+                    if sig == gate.signal.SIGTERM:
+                        return real_killpg(pgid, sig)
+                    if sig == denied_signal:
+                        raise PermissionError("process group ID reused")
+                    return None
+
+                with mock.patch.object(gate.os, "killpg", side_effect=killpg) as signals:
+                    result = gate.run_bounded([str(script)], cwd=self.root,
+                                              timeout_s=0.1, kill_grace_s=1)
+                self.assertTrue(result["timed_out"])
+                self.assertIsNone(result["returncode"])
+                pid = signals.call_args_list[0].args[0]
+                signals.assert_any_call(pid, denied_signal)
+                self.assert_gone(pid)
+
     def test_cleanup_command_runs_on_timeout(self):
         marker = self.root / "cleaned"
         script = self.script("sleep 60\n")

@@ -320,7 +320,7 @@ class Executor(unittest.TestCase):
         self.assertEqual(bus.get(t5["id"])["tier"], "sonnet")
         time.sleep(0.2); self.assertEqual(sorted(ran), sorted([t5["id"], t7["id"]]))
         pool.codex.cooldown_until = 0; pool.save()
-        self.assertIn(".claude/hooks/tests-green.sh .", spawn.render("execute", packet="brief", spec="s", acceptance=["a"], scope=["x"]))
+        self.assertIn("daemon runs the full gate externally", spawn.render("execute", packet="brief", spec="s", acceptance=["a"], scope=["x"]))
 
     def test_start_routes_through_pick_executor(self):
         P.PERSIST.unlink(missing_ok=True); self.addCleanup(P.PERSIST.unlink, True)

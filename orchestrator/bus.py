@@ -216,6 +216,25 @@ def read(tid=None, status=None, status_not=None, role=None, compact=False):
     return [_compact_row(t) for t in filtered] if compact else filtered
 
 
+def reindex():
+    """Add index rows for task files that were written without one."""
+    added = []
+    skipped = []
+    with locked():
+        TASKS.mkdir(parents=True, exist_ok=True)
+        indexed = {row[0] for row in db().execute("select id from tasks")}
+        for path in sorted(TASKS.glob("T-*.json")):
+            if path.stem in indexed:
+                continue
+            try:
+                _save(json.loads(path.read_text()))
+            except Exception as exc:
+                skipped.append({"file": str(path), "error": str(exc)})
+            else:
+                added.append(path.stem)
+    return {"added": added, "skipped": skipped}
+
+
 def events(since=0, limit=200, role=None, task_ids=None):
     """Events in sequence order, optionally filtered without changing their cursor."""
     rows = db().execute("select seq,task_id,ts,kind,data from events where seq>? order by seq limit ?",
