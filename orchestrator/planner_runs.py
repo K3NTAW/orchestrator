@@ -165,6 +165,28 @@ def _held_key(t):
     return f"{t['id']}:{held_at!r}"
 
 
+def hold_fingerprint(task):
+    """Return the stable state fingerprint used to suppress retries of an unchanged hold."""
+    task_id = task["id"]
+    related = []
+    for other in bus.read():
+        constraints = other.get("constraints") or {}
+        if (constraints.get("fix_round_for") == task_id or
+                constraints.get("respec_for") == task_id or
+                task_id in (other.get("depends_on") or [])):
+            related.append((other["id"], other.get("status"), other.get("merged_into")))
+    payload = {
+        "id": task_id,
+        "status": task.get("status"),
+        "hold_reason": task.get("hold_reason"),
+        "resume_hint": task.get("resume_hint"),
+        "commit": (task.get("result") or {}).get("commit"),
+        "related": sorted(related),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:12]
+
+
 def decision_points():
     """Yield (goal_id, kind, payload_key) for every currently-unblocked decision: scouts_done (a goal has scout
     children, all done or failed, and no execute child yet -- the specs haven't been split off), held (each held
@@ -200,6 +222,18 @@ def decision_points():
                 continue
             key = _held_key(c)
             if key is None:
+                continue
+            fingerprint = hold_fingerprint(c)
+            unchanged = next((r for r in records if r.get("kind") == "held" and
+                              r.get("payload_key", "").startswith(f"{c['id']}:") and
+                              r.get("status") in ("exited_early", "gave_up", "exited_ok") and
+                              r.get("hold_fingerprint") == fingerprint), None)
+            if unchanged is not None:
+                if not unchanged.get("hold_unchanged_notified"):
+                    notify.notify_once(goal_id, f"hold_unchanged:{c['id']}:{fingerprint}",
+                                       f"{goal_id}: held task {c['id']} is unchanged after Planner exit")
+                    unchanged["hold_unchanged_notified"] = True
+                    _save_records(records)
                 continue
             if not _blocked(goal_id, "held", key, records):
                 yield goal_id, "held", key
@@ -302,6 +336,10 @@ def _record_running(goal_id, kind, payload_key, launched, acct_id, attempts, jev
         r.update(pid=launched["pid"], pid_start=launched["pid_start"], started_at=time.time(),
                  account=acct_id, log=launched["log"], stderr_log=launched.get("stderr_log"),
                  status="running", jev=jev_result, agreement=None)
+        if kind == "held":
+            task = _decision_task(goal_id, kind, payload_key)
+            if task is not None:
+                r["hold_fingerprint"] = hold_fingerprint(task)
         r.setdefault("launches", []).append({k: v for k, v in r.items() if k != "launches"})
         _save_records(records)
 
@@ -1440,6 +1478,10 @@ def run_group(sections, pool):
                      packet_hash=packet_meta["hash"], packet_delta=packet_meta["delta"],
                      packet_truncated=packet_meta["truncated"],
                      decision_type=classification["decision_type"], **shadow_fields)
+            if point["kind"] == "held":
+                task = _decision_task(goal_id, point["kind"], point["payload_key"])
+                if task is not None:
+                    r["hold_fingerprint"] = hold_fingerprint(task)
             r.setdefault("launches", []).append({k: v for k, v in r.items() if k != "launches"})
         guards = _goal_launches()
         guards[goal_id] = {"last_state_version": version, "cursor": cursor, "launch_id": launch_id}
