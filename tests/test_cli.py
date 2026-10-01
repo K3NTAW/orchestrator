@@ -11,6 +11,21 @@ from orchestrator import pool as P
 
 
 class Cli(unittest.TestCase):
+    def test_planner_context_hook_passes_transcript_and_session_id(self):
+        cfg = {"planner": {"handover_context_tokens": 100000}}
+        for args, transcript, session_id in ((["--transcript", "P", "--session-id", "S"], "P", "S"),
+                                             ([], None, None)):
+            with self.subTest(args=args), \
+                    mock.patch("orchestrator.planner_context.hook_message", return_value="handover instruction") as hook, \
+                    mock.patch.object(cli, "pool_config", return_value=cfg), \
+                    mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/planner-config"}), \
+                    mock.patch.object(sys, "argv", ["orchestrator", "planner-context", "--hook", *args]), \
+                    contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+            hook.assert_called_once_with(cfg, Path("/planner-config"), cli.ROOT,
+                                         transcript=transcript, session_id=session_id)
+            self.assertEqual("handover instruction\n", output.getvalue())
+
     def test_scorecard_context_cache_shadow_summary(self):
         from orchestrator import context_scorecard, decision_log
         rows = [{"ts": "2026-09-22T01:00:00Z", "kind": "context_selection",
@@ -672,6 +687,20 @@ class Cli(unittest.TestCase):
         self.assertIn(acct_id, {"A", "B"})
         self.assertEqual(config_dir, os.path.expanduser(P.Pool().get(acct_id).config_dir))
         self.assertNotIn("~", config_dir)
+
+    def test_pick_planner_prints_pinned_account_with_notice(self):
+        P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)
+        pl = P.Pool()
+        pl.cfg["planner"] = {"account": "B"}
+        pl.get("B").cooldown_until = time.time() + 600
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(cli, "Pool", return_value=pl), \
+                mock.patch.object(pl, "tally_planner"), \
+                mock.patch.object(sys, "argv", ["orchestrator", "pick", "planner"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            cli.main()
+        self.assertEqual(out.getvalue().strip(), f"B\t{os.path.expanduser(pl.get('B').config_dir)}")
+        self.assertIn("pinned planner account B", err.getvalue())
 
     def test_pick_planner_model_flag(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True)

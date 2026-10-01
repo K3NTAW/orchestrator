@@ -1,5 +1,5 @@
 """orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
-import argparse, json, os, random, re, sys
+import argparse, json, os, random, re, sys, time
 from collections import defaultdict
 from datetime import datetime
 from . import ROOT, bus, gate, scorecard, worker_registry
@@ -190,6 +190,7 @@ def main():
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
     pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true")
+    pc.add_argument("--transcript"); pc.add_argument("--session-id")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
     rm.add_argument("--stdout", action="store_true")
@@ -588,6 +589,16 @@ def main():
         if picked is None:
             print("hold: no account with headroom", file=sys.stderr)
             raise SystemExit(3)
+        pinned = pl.planner_pin() if a.role == "planner" else None
+        if pinned:
+            if picked.cooling():
+                state = f"cooling for {max(0, int(picked.cooldown_until - time.time()))}s"
+            elif picked.daily_budget and (picked.day_tokens + picked.planner_day_tokens) >= picked.daily_budget:
+                state = "over daily budget"
+            else:
+                state = None
+            if state:
+                print(f"pick: pinned planner account {picked.id} is {state}; continuing on it", file=sys.stderr)
         print(f"{picked.id}\t{os.path.expanduser(picked.config_dir)}")
         if a.model:
             from . import planner_router
@@ -611,11 +622,13 @@ def main():
         from . import planner_context
         config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
         if a.hook:
-            message = planner_context.hook_message(pool_config(), config_dir, ROOT)
+            message = planner_context.hook_message(pool_config(), config_dir, ROOT,
+                                                   transcript=a.transcript, session_id=a.session_id)
             if message:
                 print(message)
         else:
-            tokens = planner_context.context_tokens(config_dir, ROOT)
+            tokens = planner_context.context_tokens(config_dir, ROOT,
+                                                    transcript=a.transcript, session_id=a.session_id)
             if tokens is not None:
                 print(tokens)
     elif a.cmd == "merge":

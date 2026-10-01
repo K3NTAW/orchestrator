@@ -456,10 +456,19 @@ class Pool:
         return self._reservation_file(mutate)
 
     # selection ---------------------------------------------------------------------------------
+    def planner_pin(self):
+        """Return the configured planner account id when it names a known account, else None."""
+        account_id = self.cfg.get("planner", {}).get("account")
+        return account_id if any(a.id == account_id for a in self.accounts) else None
+
     def pick(self, role, avoid=None):
         """least-loaded-with-headroom. avoid: for role="review", the account id that executed the task under
         review; skipped so a fallback execution doesn't get reviewed on the same account, unless it's the only
-        one with headroom. None -> caller must HOLD the task, never fail it."""
+        one with headroom. A valid [planner].account pin is returned unconditionally for the planner role,
+        including when that account is cooling or over budget. None -> caller must HOLD the task, never fail it."""
+        pinned = self.planner_pin() if role == "planner" else None
+        if pinned:
+            return self.get(pinned)
         ok = []
         for a in self.accounts:
             if role not in a.affinity or a.cooling():
