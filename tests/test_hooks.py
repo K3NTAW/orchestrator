@@ -22,6 +22,35 @@ class Hooks(unittest.TestCase):
         # planner session (no task id) is never blocked
         self.assertEqual(hook("scope-guard.sh", {"tool_input": {"file_path": "/x/y.ts"}}, cwd=TMP, env={"ORCH_TASK_ID": ""}).returncode, 0)
 
+    def test_scope_guard_child_worktree(self):
+        t = bus.create_task("edit child", "s", ["a"], ["src/**"], role="execute")
+        env = {"ORCH_TASK_ID": t["id"], "ORCH_ROOT": str(TMP)}
+        wt = TMP / "wt" / t["id"]
+        wt.mkdir(parents=True)
+        for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            subprocess.run(["git", *args], cwd=wt, check=True)
+        (wt / "README").write_text("init\n")
+        subprocess.run(["git", "add", "README"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=wt, check=True)
+        child = TMP / "wt" / f"{t['id']}-child"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "child", str(child)], cwd=wt, check=True)
+        bus.update(t["id"], worktree=str(wt))
+
+        unrelated = TMP / "unrelated"
+        unrelated.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=unrelated, check=True)
+        (unrelated / "README").write_text("unrelated\n")
+        subprocess.run(["git", "add", "README"], cwd=unrelated, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], cwd=unrelated, check=True)
+
+        for cwd in (wt, child):
+            ok = hook("scope-guard.sh", {"cwd": str(cwd), "tool_input": {"file_path": str(child / "src" / "in.ts")}}, cwd=cwd, env=env)
+            bad = hook("scope-guard.sh", {"cwd": str(cwd), "tool_input": {"file_path": str(child / "docs" / "out.ts")}}, cwd=cwd, env=env)
+            self.assertEqual(ok.returncode, 0, (cwd, ok.stderr))
+            self.assertEqual(bad.returncode, 2, (cwd, bad.stderr))
+        foreign = hook("scope-guard.sh", {"cwd": str(child), "tool_input": {"file_path": str(unrelated / "src" / "foreign.ts")}}, cwd=child, env=env)
+        self.assertEqual(foreign.returncode, 2, foreign.stderr)
+
     def test_loop_guard(self):
         log = TMP / ".orchestrator" / "runs"; log.mkdir(exist_ok=True)
         (log / "loop-s1.log").write_text("abc\nabc\nabc\n"); (log / "loop-s2.log").write_text("abc\nabd\nabc\n")
