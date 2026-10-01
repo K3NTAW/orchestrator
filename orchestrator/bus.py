@@ -406,8 +406,7 @@ def log_run(*, attempt=1, **fields):
             fields.setdefault("goal_id", task.get("parent") or task_id)
         except Exception:
             fields.setdefault("goal_id", None)
-        fields.setdefault("provider", "codex" if fields.get("account") == "codex" else "claude")
-    from . import attribution
+    from . import attribution, pool
     task = {}
     if task_id:
         try:
@@ -421,10 +420,16 @@ def log_run(*, attempt=1, **fields):
     cfg = pool_config()
     provider = fields.get("provider") or ("codex" if fields.get("account") == "codex" else "claude")
     tier = fields.get("tier", task.get("tier"))
+    label = attribution.executor_label(fields.get("executor") or task.get("executor"), tier, cfg)
+    codex_ids = {row.get("id") for row in pool.executor_rows(cfg)
+                 if row.get("provider") == "codex"}
+    if fields.get("provider") is None and fields.get("account") is None and label in codex_ids:
+        provider = fields["provider"] = "codex"
+    elif fields.get("provider") is None:
+        fields.setdefault("provider", provider)
     fields.setdefault("bucket", attribution.bucket_of(fields.get("role", task.get("role")), task))
     fields.setdefault("band", attribution.band(fields.get("complexity", task.get("complexity"))))
-    fields.setdefault("executor", task.get("executor") or (
-        tier if provider == "codex" else f"claude:{tier}" if tier else None))
+    fields.setdefault("executor", label)
     fields.setdefault("model", attribution.model_of(fields["executor"], tier, cfg))
     usage = fields.get("usage")
     if not isinstance(usage, dict):

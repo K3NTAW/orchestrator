@@ -434,6 +434,20 @@ class Scorecard(unittest.TestCase):
         card = scorecard.build(root=self.root)
         self.assertEqual(card["claude:sonnet"]["review_request_changes"], 1)
 
+    def test_legacy_codex_tier_rows_keep_codex_label(self):
+        from unittest.mock import patch
+        self.write_task("T-legacy", executor=None, tier="astra", status="done", merged_into="goal/G")
+        self.write_runs({"task": "T-legacy", "role": "execute", "executor": "claude:astra",
+                         "tier": "astra"})
+        cfg = {"executors": [{"id": "astra", "provider": "codex"}]}
+        with patch.object(P, "config", return_value=cfg):
+            card = scorecard.build(root=self.root)
+        self.assertIn("astra", card)
+        self.assertNotIn("claude:astra", card)
+        self.write_task("T-claude", tier="sonnet", status="done", merged_into="goal/G")
+        with patch.object(P, "config", return_value=cfg):
+            self.assertIn("claude:sonnet", scorecard.build(root=self.root))
+
     def test_scout_run_does_not_create_executor_row(self):
         self.write_runs({"role": "scout", "executor": "x", "outcome": "usage_limit", "duration_s": 1.0})
         card = scorecard.build(root=self.root)

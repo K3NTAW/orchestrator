@@ -231,6 +231,15 @@ class Bus(BusSandbox):
         self.assertEqual(row["goal_id"], goal["id"])
         self.assertEqual(row["provider"], "codex")
 
+    def test_log_run_without_account_labels_codex_tier_as_codex(self):
+        task = bus.create_task("Legacy Codex", "spec", ["ok"], ["src/**"], role="execute")
+        task.update(executor=None, tier="astra")
+        bus._save(task)
+        bus.log_run(task=task["id"])
+        row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(row["executor"], "astra")
+        self.assertEqual(row["provider"], "codex")
+
     def test_log_run_missing_task_still_appends(self):
         bus.log_run(task="T-9999", account="codex")
         row = json.loads(next(bus.RUNS.glob("*.jsonl")).read_text().splitlines()[-1])
