@@ -62,7 +62,7 @@ class PlannerContext(unittest.TestCase):
     def test_hook_message_over_threshold(self):
         with tempfile.TemporaryDirectory() as directory:
             config_dir, root = Path(directory) / "config", Path(directory) / "repo"
-            cfg = {"planner": {"handover_context_tokens": 100}}
+            cfg = {"planner": {"handover_context_tokens": 100, "handover_grace_turns": 0}}
             self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))
             self._transcript(config_dir, root, "session.jsonl", {"input_tokens": 99}, time.time())
             self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))

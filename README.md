@@ -258,7 +258,8 @@ the daemon) and `.orchestrator/planner_session.json` (written atomically by that
 named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
 interactive Planner session ever attaches -- leave it off anywhere one might.
 Each run receives a compact decision packet assembled from bus and run data; the interactive handover threshold is
-`[planner].handover_context_tokens` and packet size is bounded by `[planner].decision_packet_chars`.
+`[planner].handover_context_tokens` (default `300000`; set to `0` to disable) and packet size is bounded by
+`[planner].decision_packet_chars`.
 
 ### Jev
 Jev (TypeSafe AI) answers typed questions about a piece of state with calibrated probabilities instead of free
