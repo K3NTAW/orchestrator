@@ -161,6 +161,30 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(pool.pick_executor("execute", 3).id, "claude:sonnet")
         self.assertEqual(pool.pick_executor("execute", 8).id, "claude:opus")
 
+    def test_claude_split_moves_line_by_evidence(self):
+        cfg = {"models": {"success_floor": 0.6}, "routing": {"sonnet_max_complexity": 5,
+                "split_min": 4, "split_max": 7, "split_min_samples": 10}}
+        good = {"merged": 6, "failed": 4}
+        self.assertEqual(P.claude_split(cfg, {}), 5)
+        self.assertEqual(P.claude_split(cfg, {"claude:sonnet": {"by_complexity": {"4-6": good}},
+                                               "claude:opus": {"by_complexity": {"4-6": {"merged": 5, "failed": 5}}}}), 6)
+        self.assertEqual(P.claude_split(cfg, {"claude:sonnet": {"by_complexity": {"4-6": {"merged": 5, "failed": 5}}}}), 4)
+        bounded = {**cfg, "routing": {**cfg["routing"], "sonnet_max_complexity": 99}}
+        self.assertEqual(P.claude_split(bounded, {}), 7)
+
+        shipped = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        paired = {**shipped, "executors": [row for row in shipped["executors"]
+                   if row["id"] in ("claude:sonnet", "claude:opus")]}
+        pool = P.Pool(paired)
+        pool._claude_split = 6
+        self.assertEqual(pool.pick_executor("execute", 6).id, "claude:sonnet")
+        self.assertEqual(pool.pick_executor("execute", 7).id, "claude:opus")
+
+    def test_status_without_codex_table(self):
+        cfg = {**self.p.cfg}
+        cfg.pop("codex", None)
+        self.assertEqual(P.Pool(cfg).status()["codex"]["on_exhausted"], "hold")
+
     def test_daemon_respawn_max_documented(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
         self.assertEqual(cfg["daemon"]["respawn_max"], 3)
@@ -510,7 +534,7 @@ class ExecutorIdentity(unittest.TestCase):
             pick.assert_called_once_with("execute")
             pick.reset_mock()
             self.p.accounts[0].cooldown_until = 0
-            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["claude:sonnet", "x", "claude:opus"])
+            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["claude:sonnet", "x"])
             pick.assert_called_once_with("execute")
             pick.reset_mock()
             for eid in ("claude:sonnet", "claude:opus"):
