@@ -1,16 +1,18 @@
+import _harness
 """Capacity snapshots and deterministic admission."""
 
 import copy
 import sys
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import REPO  # noqa: F401
-from orchestrator import capacity
-from orchestrator.pool import Account, Executor, WINDOW_S
+from orchestrator import capacity, executor as executor_module
+from orchestrator.pool import Account, Executor, Pool, WINDOW_S
 
 
 class FakePool:
@@ -35,6 +37,48 @@ def task(task_id, complexity=3):
 
 
 class Capacity(unittest.TestCase):
+    def test_snapshot_fallback_flag_and_pure_claude_free(self):
+        now = 1000
+        codex = executor(enabled=False, cooldown_until=now + 60)
+        sonnet = executor("claude:sonnet", provider="claude", max_parallel=4,
+                          running=1, cooldown_until=now + 60)
+        opus = executor("claude:opus", provider="claude", max_parallel=2,
+                        running=1, cooldown_until=now + 60)
+        pool = FakePool([codex, sonnet, opus], workers=3)
+        before = copy.deepcopy(pool.__dict__)
+        with patch.object(Pool, "claude_has_headroom", side_effect=AssertionError("headroom read")), \
+                patch.object(Pool, "pick", side_effect=AssertionError("account selection")), \
+                patch.object(capacity.time, "time", side_effect=AssertionError("clock read")):
+            snap = capacity.snapshot(pool, now=now)
+            self.assertFalse(snap["fallback"])
+            self.assertFalse(executor_module.fallback_mode(pool, now=now))
+            self.assertEqual(snap["executors"][sonnet.id]["free"], 3)
+            self.assertEqual(snap["executors"][opus.id]["free"], 1)
+            self.assertEqual(snap["claude_free_total"], 3)
+            self.assertEqual(pool.__dict__, before)
+            with patch.object(executor_module, "fallback_mode", return_value=True) as predicate:
+                self.assertTrue(capacity.snapshot(pool, now=now)["fallback"])
+                predicate.assert_called_once_with(pool, now=now)
+            codex.enabled = True
+            pool.cfg["codex"] = {"on_exhausted": "fallback_claude"}
+            self.assertTrue(executor_module.fallback_mode(pool, now=now))
+            self.assertTrue(capacity.snapshot(pool, now=now)["fallback"])
+            for running, inflight, expected in ((0, 0, 2), (1, 1, 1), (3, 1, 0)):
+                snap = capacity.snapshot(pool, running, inflight, now=now,
+                                         claude_free={sonnet.id: 2, opus.id: 0})
+                self.assertEqual(snap["executors"][sonnet.id]["free"], 2)
+                self.assertEqual(snap["executors"][opus.id]["free"], 0)
+                self.assertEqual(snap["claude_workers_free"], max(0, 3 - running - inflight))
+                self.assertEqual(snap["claude_free_total"], expected)
+                self.assertEqual(snap["executors"][codex.id]["free"], 1)
+            del pool.executors[codex.id]
+            snap = capacity.snapshot(pool, now=now, claude_free={sonnet.id: -2})
+            self.assertFalse(snap["fallback"])
+            self.assertEqual(snap["executors"][sonnet.id]["free"], 0)
+            self.assertEqual(snap["executors"][opus.id]["free"], 0)
+            self.assertEqual(snap["claude_free_total"], 0)
+            self.assertEqual(capacity._reason(task("T"), snap, {sonnet.id: 0, opus.id: 0}), "cooldown")
+
     def test_snapshot_is_read_only_across_day_and_window_rollover(self):
         now = time.time()
         ex = executor(day="yesterday", day_tasks=5)

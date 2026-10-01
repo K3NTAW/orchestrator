@@ -25,6 +25,32 @@ def _user(ts):
 
 
 class PoolSel(unittest.TestCase):
+    def test_row_covers_and_claude_has_headroom_extracted(self):
+        pool = self.p
+        sonnet = P.Executor("claude:sonnet", "claude", "sonnet", ["execute"], complexity_max=5)
+        opus = P.Executor("claude:opus", "claude", "opus", ["execute"], complexity_min=6)
+        pool.executors = {row.id: row for row in (sonnet, opus)}
+        pool._claude_split = 6
+        with mock.patch.object(pool, "pick", return_value=object()) as pick:
+            self.assertTrue(pool.claude_has_headroom())
+            pick.assert_called_once_with("execute")
+            for complexity in range(1, 11):
+                expected = sonnet if complexity <= 6 else opus
+                self.assertEqual([row for row in (sonnet, opus) if pool.row_covers(row, complexity)],
+                                 [expected])
+                self.assertEqual(pool.eligible_executors("execute", complexity), [expected])
+            opus.enabled = False
+            self.assertFalse(pool.row_covers(sonnet, 6))
+            pool.executors = {sonnet.id: sonnet}
+            for complexity in range(1, 11):
+                covers = complexity <= 5
+                self.assertEqual(pool.row_covers(sonnet, complexity), covers)
+                self.assertEqual(pool.eligible_executors("execute", complexity), [sonnet] if covers else [])
+        with mock.patch.object(pool, "pick", return_value=None) as pick:
+            self.assertFalse(pool.claude_has_headroom())
+            pick.assert_called_once_with("execute")
+            self.assertEqual(pool.eligible_executors("execute", 3), [])
+
     def setUp(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
 

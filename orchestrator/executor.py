@@ -36,7 +36,11 @@ def fallback_mode(pool, now=None):
 
 
 def claude_row_free(pool, row, now=None, headroom=None):
-    """Return free parallelism without rolling counters or consulting account selection."""
+    """Return free parallelism without rolling counters or consulting account selection.
+
+    Unknown headroom (None) assumes True; the daemon supplies account headroom
+    computed once per tick via Pool.claude_has_headroom().
+    """
     now = time.time() if now is None else now
     if not row.enabled or row.cooldown_until > now:
         return 0
@@ -606,7 +610,7 @@ def _exhausted(pool, t, run=None, tier=None):
             bus.update(t["id"], status="held", hold_reason=reason)
             return {"status": "held", "hold_reason": reason}
         pipeline = dict(t.get("pipeline") or {})
-        n = pipeline.get("claude_capacity_requeues", 0) + 1
+        n = (pipeline.get("claude_capacity_requeues") or 0) + 1
         maximum = pool.cfg.get("daemon", {}).get("claude_capacity_max_requeues", 20)
         if n > maximum:
             reason = f"claude_capacity: no Claude row free after {n} requeues"

@@ -24,6 +24,114 @@ class FakeCodexPopen(FakeProc):
 class Executor(unittest.TestCase):
     LIVE = {"astra", "luna", "terra", "sol"}
 
+    def test_codex_rows_and_fallback_mode_predicates(self):
+        pool = self.claude_pool()
+        pool.cfg.pop("codex")
+        now = 1000
+        pool.executors["claude:opus"].cooldown_until = now + 60
+        row = P.Executor("astra", "codex", "test", ["execute"], cooldown_until=now + 60)
+        disabled = P.Executor("disabled", "codex", "test", ["execute"], enabled=False)
+        review = P.Executor("review", "codex", "test", ["review"])
+        with patch.object(executor.time, "time", side_effect=AssertionError("clock read")):
+            self.assertEqual(executor.codex_rows(pool), [])
+            self.assertFalse(executor.fallback_mode(pool, now=now))
+            pool.executors.update({ex.id: ex for ex in (row, disabled, review)})
+            self.assertEqual(executor.codex_rows(pool), [row])
+            self.assertFalse(executor.fallback_mode(pool, now=now))
+            pool.cfg["codex"] = {"on_exhausted": "fallback_claude"}
+            self.assertTrue(executor.fallback_mode(pool, now=now))
+            row.cooldown_until = now
+            self.assertFalse(executor.fallback_mode(pool, now=now))
+            row.cooldown_until = now + 60
+            pool.cfg["codex"]["on_exhausted"] = "hold"
+            self.assertFalse(executor.fallback_mode(pool, now=now))
+
+    def test_claude_row_free_counts_free_parallelism(self):
+        pool = self.claude_pool()
+        row = pool.executors["claude:opus"]
+        row.max_parallel, row.running = 4, 1
+        row.cooldown_until, row.daily_budget_tasks = 0, 0
+        with patch.object(executor.time, "time", side_effect=AssertionError("clock read")), \
+                patch.object(P.Pool, "pick", side_effect=AssertionError("account selection")), \
+                patch.object(P.Executor, "roll_day", side_effect=AssertionError("counter roll")):
+            self.assertEqual(executor.claude_row_free(pool, row, now=100, headroom=True), 3)
+            self.assertEqual(executor.claude_row_free(pool, row, now=100), 3)
+            self.assertEqual(executor.claude_row_free(pool, row, now=100, headroom=False), 0)
+            for field, value in (("enabled", False), ("cooldown_until", 101), ("running", 4),
+                                 ("running", 5)):
+                with self.subTest(field=field, value=value):
+                    previous = getattr(row, field)
+                    setattr(row, field, value)
+                    self.assertEqual(executor.claude_row_free(pool, row, now=100, headroom=True), 0)
+                    setattr(row, field, previous)
+            row.day, row.day_tasks, row.daily_budget_tasks = "yesterday", 2, 2
+            self.assertEqual(executor.claude_row_free(pool, row, now=100, headroom=True), 0)
+            self.assertEqual(row.day_tasks, 2)
+
+    def test_no_codex_row_requeues_bounded_or_holds_visibly(self):
+        pool = self.claude_pool()
+        pool.cfg.pop("codex")
+        pool.cfg["daemon"] = {"claude_capacity_max_requeues": 2, "claude_capacity_backoff_s": 90}
+        pool.executors["claude:opus"].complexity_max = 8
+        tid = self.exec_task(complexity=5)
+        bus.update(tid, pipeline={"dispatched_at": time.time(), "preserved": True})
+        before = time.time()
+        with patch.object(pool, "pick_executor", return_value=None), \
+                patch.object(pool, "status", side_effect=AssertionError("legacy status")), \
+                patch.object(spawn, "run_worker") as worker:
+            for count in (1, 2):
+                result = executor.start(tid, "do it")
+                self.assertEqual(result, {"status": "claude_capacity", "reason": "no claude row free"})
+                task = bus.get(tid)
+                self.assertEqual(task["status"], "queued")
+                self.assertEqual(task["pipeline"]["hold_note"], "claude_capacity")
+                self.assertEqual(task["pipeline"]["claude_capacity_requeues"], count)
+                self.assertGreaterEqual(task["pipeline"]["claude_capacity_until"], before + 90)
+                self.assertTrue(task["pipeline"]["preserved"])
+                self.assertNotIn("dispatched_at", task["pipeline"])
+                self.assertNotIn("hold_reason", task)
+            result = executor.start(tid, "do it")
+            reason = "claude_capacity: no Claude row free after 3 requeues"
+            self.assertEqual(result, {"status": "held", "hold_reason": reason})
+            self.assertEqual(bus.get(tid)["hold_reason"], reason)
+            self.assertEqual(bus.get(tid)["status"], "held")
+            uncovered = self.exec_task(complexity=9)
+            result = executor.start(uncovered, "do it")
+            self.assertEqual(result, {"status": "held", "hold_reason": "no executor row covers complexity 9"})
+            self.assertEqual(bus.get(uncovered)["hold_reason"], result["hold_reason"])
+            self.assertNotIn("pol", bus.get(uncovered))
+            worker.assert_not_called()
+
+    def test_successful_claim_resets_claude_capacity_counters(self):
+        P.PERSIST.unlink(missing_ok=True)
+        self.addCleanup(P.PERSIST.unlink, True)
+        tid = self.exec_task()
+        bus.update(tid, pipeline={"claude_capacity_requeues": 7,
+                                  "claude_capacity_until": time.time() + 60, "preserved": True})
+        with patch.object(executor, "_run", return_value={"status": "done"}) as worker:
+            self.assertEqual(executor.start(tid, "do it", executor_id="astra")["status"], "done")
+            worker.assert_called_once()
+        task = bus.get(tid)
+        self.assertEqual(task["status"], "running")
+        self.assertEqual(task["executor"], "astra")
+        self.assertNotIn("claude_capacity_requeues", task["pipeline"])
+        self.assertNotIn("claude_capacity_until", task["pipeline"])
+        self.assertTrue(task["pipeline"]["preserved"])
+
+    def test_executed_by_from_row_provider(self):
+        cfg = {"executors": [{"id": "astra", "provider": "codex", "model": "test"},
+                              {"id": "claude:opus", "provider": "claude", "model": "opus"}]}
+        for field, tier, expected in (("astra", "sonnet", "codex:astra"),
+                                      ("claude:opus", "sonnet", "claude:opus"),
+                                      ("codex:x", "sonnet", "codex:x"),
+                                      (None, "sonnet", "claude:sonnet"),
+                                      ("", None, "claude:sonnet")):
+            with self.subTest(field=field):
+                self.assertEqual(executor.executed_by(field, tier, cfg), expected)
+        cfg["executors"] = [{"id": "other", "provider": "codex", "model": "test"}]
+        self.assertEqual(executor.executed_by("astra", "sonnet", cfg), "codex:astra")
+        self.assertEqual(executor.executed_by("claude:opus", "sonnet", cfg), "claude:opus")
+
     def test_start_refuses_goal_container(self):
         tid = self.exec_task(title="goal container")
         bus.update(tid, constraints={"goal": True}, status="queued")
