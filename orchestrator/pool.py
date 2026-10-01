@@ -305,15 +305,18 @@ class Pool:
             ratio = 1 / float(self.cfg.get("limits", {}).get("default_tokens_per_usd", 250000))
         if isinstance(row_or_usage, dict):
             row_or_usage["est_usd_source"] = "tokens"
-        return self._usage_tokens(usage) * float(ratio)
+        cache_read_weight = float(self.cfg.get("limits", {}).get("cache_read_weight", 0.1))
+        cache_reads = sum(usage.get(k, 0) or 0 for k in ("cached_input_tokens", "cache_read_input_tokens"))
+        return (self._usage_tokens(usage) - cache_reads + cache_reads * cache_read_weight) * float(ratio)
 
     @staticmethod
     def _usage_tokens(usage):
         if not isinstance(usage, dict):
             return 0
-        return int(sum(usage.get(k, 0) or 0 for k in
-                       ("input_tokens", "output_tokens", "cache_creation_input_tokens",
-                        "cache_read_input_tokens", "cached_input_tokens")))
+        keys = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        if "cached_input_tokens" not in usage:
+            keys += ("cached_input_tokens",)
+        return int(sum(usage.get(k, 0) or 0 for k in keys))
 
     def _reservation_file(self, mutate=None):
         PERSIST.parent.mkdir(parents=True, exist_ok=True)

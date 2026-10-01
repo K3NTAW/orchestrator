@@ -28,6 +28,24 @@ class PoolSel(unittest.TestCase):
     def setUp(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
 
+    def test_codex_usage_counts_cached_input_once(self):
+        self.assertEqual(self.p._usage_tokens({
+            "input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50,
+        }), 1050)
+        self.assertEqual(self.p._usage_tokens({
+            "input_tokens": 100, "cache_read_input_tokens": 900,
+            "cache_creation_input_tokens": 10, "output_tokens": 50,
+        }), 1060)
+
+    def test_derived_usd_weights_cache_reads(self):
+        self.p.cfg["limits"]["default_tokens_per_usd"] = 100
+        usage = {"input_tokens": 1000, "cached_input_tokens": 900,
+                 "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20,
+                 "output_tokens": 80}
+        self.assertAlmostEqual(self.p.usd_of(usage), 3.0)
+        self.assertEqual(self.p.usd_of({"input_tokens": 1, "usd": 3.5}), 3.5)
+        self.assertEqual(self.p.usd_of({"input_tokens": 1, "total_cost_usd": 4.5}), 4.5)
+
     def test_affinity_reserve_cooldown_budget(self):
         self.assertEqual(self.p.pick("review").id, "A")            # both have review affinity, ties break to A
         A, B = self.p.get("A"), self.p.get("B")
