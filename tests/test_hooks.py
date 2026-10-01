@@ -119,6 +119,7 @@ class PlannerMode(unittest.TestCase):
     def test_prompt_hook(self):
         r = hook("planner-prompt.sh", {"prompt": "add a flag"}, cwd=TMP, env=self.P)
         self.assertEqual(r.returncode, 0); self.assertIn("Skill(orchestrate)", r.stdout)
+        self.assertEqual(len(r.stdout.splitlines()), 1)
         self.assertEqual(hook("planner-prompt.sh", {"prompt": "/orchestrate x"}, cwd=TMP, env=self.P).stdout, "")
         self.assertEqual(hook("planner-prompt.sh", {"prompt": "x"}, cwd=TMP, env={"ORCH_TASK_ID": "T-0001"}).stdout, "")
 

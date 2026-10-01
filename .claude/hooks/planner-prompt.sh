@@ -7,3 +7,6 @@ in=$(cat)
 p=$(jq -r '.prompt // ""' <<<"$in")
 case "$p" in /*) exit 0;; esac   # already a skill invocation
 echo "Planner mode: goals go through Skill(orchestrate); never edit source; see CLAUDE.md"
+# Keep prompt submission responsive and fail open if the local transcript cannot be read.
+root=$(orch_root)
+out=$(cd "$root" && perl -e 'alarm shift; exec @ARGV' 3 uv run orchestrator planner-context --hook 2>/dev/null) && [ -n "$out" ] && echo "$out"
