@@ -253,6 +253,20 @@ class Pool:
     def is_claude_executor(self, field):
         return self.executor_identity(field)["provider"] == "claude"
 
+    def row_covers(self, ex, complexity):
+        """Return whether an executor row covers *complexity* under today's bands."""
+        paired_claude = all(self.executors.get(eid) and self.executors[eid].enabled
+                            for eid in ("claude:sonnet", "claude:opus"))
+        if paired_claude and ex.id == "claude:sonnet":
+            return ex.complexity_min <= complexity <= self.claude_split()
+        if paired_claude and ex.id == "claude:opus":
+            return self.claude_split() < complexity <= ex.complexity_max
+        return ex.complexity_min <= complexity <= ex.complexity_max
+
+    def claude_has_headroom(self):
+        """Return whether at least one Claude account can execute."""
+        return self.pick("execute") is not None
+
     # persistence -------------------------------------------------------------------------------
     def _load(self):
         if PERSIST.exists():
@@ -617,19 +631,10 @@ class Pool:
         """Return executors satisfying every hard routing constraint, without ranking them."""
         ok = []
         claude_headroom = None
-        paired_claude = all(self.executors.get(eid) and self.executors[eid].enabled
-                            for eid in ("claude:sonnet", "claude:opus"))
-        split = self.claude_split() if paired_claude else None
         for ex in self.executors.values():
             if not ex.enabled or role not in ex.roles or ex.cooling():
                 continue
-            if paired_claude and ex.id == "claude:sonnet":
-                in_band = ex.complexity_min <= complexity <= split
-            elif paired_claude and ex.id == "claude:opus":
-                in_band = split < complexity <= ex.complexity_max
-            else:
-                in_band = ex.complexity_min <= complexity <= ex.complexity_max
-            if not in_band:
+            if not self.row_covers(ex, complexity):
                 continue
             ex.roll_day()
             if ex.running >= ex.max_parallel:
@@ -638,7 +643,7 @@ class Pool:
                 continue
             if ex.provider == "claude":
                 if claude_headroom is None:
-                    claude_headroom = self.pick("execute") is not None
+                    claude_headroom = self.claude_has_headroom()
                 if not claude_headroom:
                     continue
             ok.append(ex)

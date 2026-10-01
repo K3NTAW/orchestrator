@@ -385,7 +385,7 @@ class Executor(unittest.TestCase):
         self.assertEqual(executor.start(tid, "do it")["status"], "held")
         self.assertNotIn(tid, P.Pool().reservations)
 
-    def claude_pool(self, policy="fallback_claude"):
+    def claude_pool(self, policy="fallback_claude", with_codex_row=False):
         P.PERSIST.unlink(missing_ok=True)
         self.addCleanup(P.PERSIST.unlink, True)
         cfg = P.config()
@@ -393,6 +393,9 @@ class Executor(unittest.TestCase):
         cfg["allocation"] = {"mode": "off"}
         cfg["handoff"] = {"mode": "off"}
         cfg["executors"] = [{"id": "claude:opus", "provider": "claude", "roles": ["execute"]}]
+        if with_codex_row:
+            cfg["executors"].append({"id": "codex:cooling", "provider": "codex", "model": "test",
+                                      "roles": ["execute"], "cooldown_until": time.time() + 3600})
         pool = P.Pool(cfg)
         patcher = patch.object(executor, "Pool", return_value=pool)
         patcher.start()
@@ -445,7 +448,7 @@ class Executor(unittest.TestCase):
         self.assertNotIn(tid, pool.reservations)
 
     def test_claude_dispatch_requeues_at_worker_cap(self):
-        pool = self.claude_pool()
+        pool = self.claude_pool(with_codex_row=True)
         pool.cfg.setdefault("limits", {})["max_parallel_claude_workers"] = 1
         tid = self.exec_task(title="fallback at worker cap")
         bus.update(tid, pipeline={"dispatched_at": time.time()})
@@ -461,7 +464,7 @@ class Executor(unittest.TestCase):
         self.assertNotIn("dispatched_at", task["pipeline"])
 
     def test_complexity_nine_fallback_still_held(self):
-        pool = self.claude_pool()
+        pool = self.claude_pool(with_codex_row=True)
         tid = self.exec_task(complexity=9, title="complexity nine fallback")
         with patch.object(pool, "pick_executor", return_value=None), \
                 patch.object(spawn, "run_worker") as worker:
@@ -472,7 +475,7 @@ class Executor(unittest.TestCase):
                          "codex unavailable; policy=fallback_claude; no Claude fallback for complexity 9")
 
     def test_claude_dispatch_below_cap_dispatches(self):
-        pool = self.claude_pool()
+        pool = self.claude_pool(with_codex_row=True)
         pool.cfg.setdefault("limits", {})["max_parallel_claude_workers"] = 2
         tid = self.exec_task(title="fallback below worker cap")
         account = pool.pick("execute")

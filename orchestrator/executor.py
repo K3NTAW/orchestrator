@@ -12,12 +12,56 @@ from pathlib import Path
 from . import ROOT, bus, contracts, worker_registry, env_policy, worker_control
 import threading
 from . import scorecard, allocation, critical_path, duration, jev_route, decision_log, promotion, skill_router
+from . import pool as pool_module
 from .pool import Pool, fallback_tier, is_rate_limited, parse_reset_hint
 
 MAX_ROUNDS = 5
 FALLBACK_JOIN_TIMEOUT_S = 5
 _fallback_threads = []
 _fallback_threads_lock = threading.Lock()
+
+
+def codex_rows(pool):
+    """Return enabled execute rows provided by Codex, using pool rows only."""
+    return [row for row in pool.executors.values()
+            if row.enabled and "execute" in row.roles and row.provider == "codex"]
+
+
+def fallback_mode(pool, now=None):
+    """Return whether Codex exhaustion permits Claude fallback at *now*."""
+    now = time.time() if now is None else now
+    rows = codex_rows(pool)
+    return bool(rows) and all(row.cooldown_until > now for row in rows) \
+        and pool.cfg.get("codex", {}).get("on_exhausted", "hold") == "fallback_claude"
+
+
+def claude_row_free(pool, row, now=None, headroom=None):
+    """Return free parallelism without rolling counters or consulting account selection."""
+    now = time.time() if now is None else now
+    if not row.enabled or row.cooldown_until > now:
+        return 0
+    if row.max_parallel - row.running <= 0:
+        return 0
+    if row.daily_budget_tasks and row.day_tasks >= row.daily_budget_tasks:
+        return 0
+    if headroom is False:
+        return 0
+    return row.max_parallel - row.running
+
+
+def executed_by(field, tier, cfg):
+    """Normalize a persisted executor field to its provider-qualified identity."""
+    if not field:
+        return f"claude:{tier or 'sonnet'}"
+    identity = pool_module.executor_identity(field, cfg)
+    provider = identity.get("provider")
+    if provider == "codex":
+        return f"codex:{field}"
+    if provider == "claude":
+        return field
+    if isinstance(field, str) and ":" in field and field.startswith(("codex:", "claude:")):
+        return field
+    return f"codex:{field}"
 
 
 def _route_skills(task, cfg, exposure, choice=None):
@@ -529,7 +573,11 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
         except Exception:
             pass
         bus.update(task_id, packet_meta=t["packet_meta"])
-        bus.claim(task_id, "codex", str(wt)); bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id)
+        bus.claim(task_id, "codex", str(wt))
+        pipeline = dict(bus.get(task_id).get("pipeline") or {})
+        pipeline.pop("claude_capacity_requeues", None)
+        pipeline.pop("claude_capacity_until", None)
+        bus.update(task_id, rounds=0, executor=ex.id, tier=ex.id, pipeline=pipeline)
         ex.roll_day(); ex.day_tasks += 1
         pool.codex.day_tasks += 1; pool.save()       # legacy mirror, until B3 drops pool.codex
         result = _run(pool, {**t, "_launch_epoch": epoch}, ["-m", ex.model, prompt], wt, t["constraints"].get("timeout_s", 1800), ex=ex)
@@ -545,10 +593,34 @@ def start(task_id, prompt, executor_id=None, packet_meta=None):
 def _exhausted(pool, t, run=None, tier=None):
     """§4.10: hold by default; with on_exhausted=fallback_claude dispatch to sonnet (<=5) / opus (6-8) on an account with headroom.
     An explicit tier routes a Claude row independently of the Codex exhaustion policy.
-    Review of a Claude-executed task must be another model on the other account."""
+    Review of a Claude-executed task must be another model on the other account.
+    The legacy Claude requeue remains unbounded; daemon.retry_held handling of
+    ``claude_capacity:`` holds resets the consecutive-requeue counters too."""
     routed = tier is not None
+    if not routed and not codex_rows(pool):
+        complexity = t["complexity"]
+        claude_rows = [row for row in pool.executors.values()
+                       if row.enabled and row.provider == "claude" and "execute" in row.roles]
+        if not any(pool.row_covers(row, complexity) for row in claude_rows):
+            reason = f"no executor row covers complexity {complexity}"
+            bus.update(t["id"], status="held", hold_reason=reason)
+            return {"status": "held", "hold_reason": reason}
+        pipeline = dict(t.get("pipeline") or {})
+        n = pipeline.get("claude_capacity_requeues", 0) + 1
+        maximum = pool.cfg.get("daemon", {}).get("claude_capacity_max_requeues", 20)
+        if n > maximum:
+            reason = f"claude_capacity: no Claude row free after {n} requeues"
+            bus.update(t["id"], status="held", hold_reason=reason)
+            return {"status": "held", "hold_reason": reason}
+        now = time.time()
+        pipeline["hold_note"] = "claude_capacity"
+        pipeline["claude_capacity_until"] = now + pool.cfg.get("daemon", {}).get("claude_capacity_backoff_s", 60)
+        pipeline["claude_capacity_requeues"] = n
+        pipeline.pop("dispatched_at", None)
+        bus.update(t["id"], status="queued", pipeline=pipeline)
+        return {"status": "claude_capacity", "reason": "no claude row free"}
     if not routed:
-        pol = pool.cfg["codex"]["on_exhausted"]
+        pol = pool.cfg.get("codex", {}).get("on_exhausted", "hold")
         tier = fallback_tier(t["complexity"]) if pol == "fallback_claude" else None
     if tier is None:
         bus.update(t["id"], status="held", hold_reason=f"codex unavailable; policy={pol}; no Claude fallback for complexity {t['complexity']}")

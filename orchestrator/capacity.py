@@ -4,18 +4,25 @@ from datetime import datetime
 import time
 
 from . import pool as pool_module
+from . import executor as executor_module
 
 
-def snapshot(pool, running_claude=0, inflight_claude=0, now=None):
-    """Return capacity at *now* without invoking state-rolling pool methods."""
+def snapshot(pool, running_claude=0, inflight_claude=0, now=None, claude_free=None):
+    """Return a pure capacity snapshot at *now*.
+
+    When ``claude_free`` is absent, Claude row free slots use snapshot fields
+    directly and assume account headroom; no pool selection is performed.
+    """
     now = time.time() if now is None else now
     today = datetime.fromtimestamp(now).astimezone().date().isoformat()
     executors = {}
     for executor_id, executor in pool.executors.items():
         effective_day_tasks = executor.day_tasks if executor.day == today else 0
         budget = executor.daily_budget_tasks
+        free = max(0, executor.max_parallel - executor.running)
+        if claude_free is not None and executor.provider == "claude" and "execute" in executor.roles:
+            free = max(0, claude_free.get(executor_id, 0))
         executors[executor_id] = {
-            "free": max(0, executor.max_parallel - executor.running),
             "cooling_s": max(0, executor.cooldown_until - now),
             "enabled": executor.enabled,
             "roles": list(executor.roles),
@@ -36,13 +43,16 @@ def snapshot(pool, running_claude=0, inflight_claude=0, now=None):
         }
 
     max_workers = pool.cfg.get("limits", {}).get("max_parallel_claude_workers", 4)
-    enabled_execute = [row for row in executors.values()
-                       if row["enabled"] and "execute" in row["roles"]]
+    claude_rows = [executor_id for executor_id, row in executors.items()
+                   if row["enabled"] and "execute" in row["roles"]
+                   and pool.executors[executor_id].provider == "claude"]
+    claude_workers_free = max(0, max_workers - running_claude - inflight_claude)
     return {
         "executors": executors,
-        "claude_workers_free": max(0, max_workers - running_claude - inflight_claude),
+        "claude_workers_free": claude_workers_free,
+        "claude_free_total": min(sum(executors[eid]["free"] for eid in claude_rows), claude_workers_free),
         "accounts": accounts,
-        "fallback": bool(enabled_execute) and all(row["cooling_s"] > 0 for row in enabled_execute),
+        "fallback": executor_module.fallback_mode(pool, now=now),
         "ts": now,
     }
 
