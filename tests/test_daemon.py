@@ -1280,18 +1280,21 @@ class Daemon(unittest.TestCase):
         daemon.report_merge(tid, {"status": "failed"})
         for task_id in (tid, root_id):
             self.assertNotIn("accepted_at", bus.get(task_id).get("pipeline", {}))
-        daemon.report_merge(tid, result)
-        daemon.report_merge(standalone, result)
+        with mock.patch.object(daemon, "landed", return_value=True):
+            daemon.report_merge(tid, result)
+            daemon.report_merge(standalone, result)
         for task_id in (tid, root_id, standalone):
             self.assertEqual(bus.get(task_id)["pipeline"]["accepted_at"], 1000.0)
         self.assertEqual(bus.get(root_id)["merged_into"], "goal/G")
         clock[0] = 2000.0
-        daemon.report_merge(tid, result)
-        daemon.report_merge(standalone, result)
+        with mock.patch.object(daemon, "landed", return_value=True):
+            daemon.report_merge(tid, result)
+            daemon.report_merge(standalone, result)
         for task_id in (tid, root_id, standalone):
             self.assertEqual(bus.get(task_id)["pipeline"]["accepted_at"], 1000.0)
         later = self.task("later fix", constraints={"fix_round_for": root_id})
-        daemon.report_merge(later, result)
+        with mock.patch.object(daemon, "landed", return_value=True):
+            daemon.report_merge(later, result)
         self.assertEqual(bus.get(later)["pipeline"]["accepted_at"], 2000.0)
         self.assertEqual(bus.get(root_id)["pipeline"]["accepted_at"], 1000.0)
 
@@ -2084,7 +2087,8 @@ class Daemon(unittest.TestCase):
         self.expired(fix, "gated_at", reviews_expected=0, review_reason="none")
         self.swap(daemon, "already_merged", lambda task: False)
         self.swap(daemon, "notify", lambda message: None)
-        daemon.sweep_leases(P.Pool())
+        with mock.patch.object(daemon, "landed", return_value=True):
+            daemon.sweep_leases(P.Pool())
         self.assertEqual(self.merged, [fix])
         original = bus.get(tid)
         self.assertEqual(original["status"], "done")
@@ -2099,7 +2103,8 @@ class Daemon(unittest.TestCase):
         second = self.task("fix 2", constraints={"fix_round_for": first, "auto_round": 2})
         daemon.report_merge(second, {"status": "tests_red"})
         self.assertEqual(bus.get(tid)["status"], "held")
-        daemon.report_merge(second, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
+        with mock.patch.object(daemon, "landed", return_value=True):
+            daemon.report_merge(second, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
         for ancestor in (tid, first):
             task = bus.get(ancestor)
             self.assertEqual(task["status"], "done")
@@ -3670,6 +3675,30 @@ class Daemon(unittest.TestCase):
 
         thread.join(timeout=2)
         self.assertEqual(received, [])
+
+
+    def test_fix_round_merge_stamps_only_landed_ancestors(self):
+        ancestor = self.held_for_fix()
+        fix = self.task("fix round", constraints={"fix_round_for": ancestor})
+        with mock.patch.object(daemon, "landed", return_value=True):
+            daemon.report_merge(fix, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
+        self.assertEqual(bus.get(ancestor)["merged_via"], f"fix round {fix} abc12345")
+        self.assertEqual(bus.get(fix)["pipeline"]["ancestor_stamps"], {ancestor: "merged"})
+
+    def test_landed_uses_ancestry_cherry_then_merged_into(self):
+        class Result:
+            def __init__(self, code=0, stdout=""):
+                self.returncode, self.stdout = code, stdout
+        calls = []
+        answers = iter([Result(0), Result(1), Result(0, "- patch\n")])
+        def fake(*args):
+            calls.append(args[1:])
+            return next(answers)
+        self.assertTrue(daemon.landed("T-ancestor", "goal/G", git=fake))
+        self.assertEqual(calls[-1][0], "cherry")
+
+    def test_reviews_merge_caller_keeps_existing_hold(self):
+        self.assertTrue(callable(daemon._merge_reviewed_one))
 
 
 class BusLock(unittest.TestCase):

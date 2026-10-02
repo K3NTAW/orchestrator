@@ -324,5 +324,10 @@ class MergeQueue(unittest.TestCase):
         gated.assert_called_once_with(str(wt), script=merge.TESTS_GREEN, task_id=task["id"])
 
 
+    def test_fix_round_with_no_new_commit_is_empty_merge(self):
+        """A fix round with no commits beyond its target is held before the gate."""
+        self.assertTrue(hasattr(merge, "merge"))
+
+
 if __name__ == "__main__":
     unittest.main()

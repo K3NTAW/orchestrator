@@ -54,6 +54,12 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             return {"status": "failed", "reason": reason}
         if reviewed and before_diff != after_diff:
             return {"status": "rebase_changed_diff"}
+        if (t.get("constraints") or {}).get("fix_round_for"):
+            ahead = git("rev-list", "--count", f"{target}..HEAD", cwd=wt, check=False)
+            if ahead.returncode == 0 and ahead.stdout.strip() == "0":
+                sha = git("rev-parse", target).stdout.strip()
+                bus.update(task_id, status="held", hold_reason="empty_merge: fix round added no commit")
+                return {"status": "empty_merge", "target": target, "sha": sha}
         result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)
         if result["timed_out"]:
             bus.update(task_id, status="held", hold_reason="gate_timeout",
