@@ -423,6 +423,63 @@ class Bus(BusSandbox):
         self.assertEqual(bus.read(t["id"]), t)
         self.assertEqual(bus.read(t["id"], compact=True), t)  # compact never applies to a single-task read
 
+    def test_bus_create_task_echoes_compact_row(self):
+        from orchestrator import bus_mcp
+        spec = "s" * 4000
+        reply = bus_mcp.bus_create_task("Echo", spec, ["one", "two"], ["src/**"], parent="T-goal")
+        self.assertTrue({"id", "title", "parent", "depends_on", "status", "acceptance_count", "scope_count", "spec_chars"} <= set(reply))
+        self.assertEqual(reply["spec_chars"], 4000)
+        self.assertEqual(reply["status"], "queued")
+        self.assertEqual(bus.get(reply["id"])["spec"], spec)
+        for key in ("spec", "events", "acceptance"):
+            self.assertNotIn(key, reply)
+
+    def test_bus_read_parent_and_ids_filters(self):
+        from orchestrator import bus_mcp
+        parent = "T-1000"
+        child_a = bus.create_task("A", "s", ["a"], ["x"], parent=parent)
+        child_b = bus.create_task("B", "s", ["a"], ["x"], parent=parent)
+        bus.create_task("Other child", "s", ["a"], ["x"], parent="T-2000")
+        bus.update(child_b["id"], status="done")
+        self.assertEqual([row["id"] for row in bus.read(parent=parent, status_not="done")], [child_a["id"]])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rows = bus.read(ids=["T-0002", "T-0001", "T-0001", "T-9999"])
+        self.assertEqual([row["id"] for row in rows], ["T-0001", "T-0002"])
+        self.assertEqual(stderr.getvalue(), "bus.read: skipped 1 unreadable rows\n")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), patch.object(bus, "get") as get:
+            self.assertEqual(bus.read(ids=["../../etc/passwd"]), [])
+        get.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "bus.read: skipped 1 unreadable rows\n")
+        for content in ("{", "[]", "null", "{}"):
+            with self.subTest(content=content):
+                (bus.TASKS / "T-9998.json").write_text(content)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(bus.read(ids=["T-9998"]), [])
+                self.assertEqual(stderr.getvalue(), "bus.read: skipped 1 unreadable rows\n")
+        rows = bus_mcp.bus_read(parent=parent)
+        self.assertEqual([row["id"] for row in rows], [child_a["id"], child_b["id"]])
+        self.assertTrue(all("spec" not in row for row in rows))
+
+    def test_bus_read_unfiltered_notice_above_warn_rows(self):
+        from orchestrator import bus_mcp
+        for index in range(4):
+            bus.create_task(f"Task {index}", "s", ["a"], ["x"])
+        with patch.object(bus, "pool_config", return_value={"bus": {"read_warn_rows": 3}}):
+            rows = bus_mcp.bus_read()
+            narrowed = bus_mcp.bus_read(parent="T-goal")
+        self.assertEqual(rows[0], {"notice": "4 rows; pass parent=<goal id> or ids=[...] to narrow"})
+        self.assertEqual(narrowed, [])
+        with patch.object(bus, "pool_config", return_value={"bus": {"read_warn_rows": "x"}}):
+            self.assertEqual(len(bus_mcp.bus_read()), 4)
+            with patch.object(bus, "read", return_value=[{} for _ in range(200)]):
+                self.assertEqual(len(bus_mcp.bus_read()), 200)
+            with patch.object(bus, "read", return_value=[{} for _ in range(201)]):
+                self.assertEqual(bus_mcp.bus_read()[0],
+                                 {"notice": "201 rows; pass parent=<goal id> or ids=[...] to narrow"})
+
 
 class ContextLog(BusSandbox):
     def test_log_run_carries_routed_keys(self):

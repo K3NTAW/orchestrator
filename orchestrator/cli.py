@@ -188,7 +188,7 @@ def main():
     pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
     pk.add_argument("--model", action="store_true")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
-    ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual")
+    ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual"); ho.add_argument("--session-id")
     pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true")
     pc.add_argument("--transcript"); pc.add_argument("--session-id")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
@@ -616,7 +616,12 @@ def main():
         from .daemon import main as d; d(once=a.once)
     elif a.cmd == "handover":
         from . import handover
-        print(handover.write(a.reason))
+        from pathlib import Path
+        from . import planner_context
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
+        tokens_at = planner_context.context_tokens(config_dir, ROOT, session_id=a.session_id) \
+            if a.session_id else None
+        print(handover.write(a.reason, session_id=a.session_id, tokens_at=tokens_at))
     elif a.cmd == "planner-context":
         from pathlib import Path
         from . import planner_context
