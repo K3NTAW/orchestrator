@@ -323,6 +323,43 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(result["status"], "merged", result)
         gated.assert_called_once_with(str(wt), script=merge.TESTS_GREEN, task_id=task["id"])
 
+    def test_merge_reuses_daemon_gate_when_target_unmoved(self):
+        with tempfile.TemporaryDirectory(prefix="orch-reuse-gate-") as directory:
+            repo = scratch_repo(Path(directory))
+            state = repo / ".orchestrator"
+            state.mkdir(exist_ok=True)
+
+            def git(*args, cwd=repo, check=True):
+                result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+                if check:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                return result
+
+            git("branch", "goal/reuse")
+            wt = repo / "worktree"
+            git("worktree", "add", "-b", "task/reuse", str(wt), "goal/reuse")
+            (wt / "feature.py").write_text("VALUE = 1\n")
+            git("add", "feature.py", cwd=wt)
+            git("commit", "-qm", "feature", cwd=wt)
+            target_sha = git("rev-parse", "goal/reuse").stdout.strip()
+            head_sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+            with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
+                    patch.multiple(merge, ROOT=repo, git=git), \
+                    patch("orchestrator.pool.config", return_value={"merge": {"skip_regate_when_unmoved": True}}), \
+                    patch.object(merge.gate, "run_gate") as gated, \
+                    patch.object(bus, "commit_state"), patch.object(merge.scorecard, "write"), \
+                    patch.object(merge.scorecard, "build", return_value={}):
+                task = bus.create_task("reuse gate", "s", ["a"], ["feature.py"], role="execute")
+                bus.update(task["id"], worktree=str(wt), parent="G",
+                           pipeline={"gated_at": 1, "gated_target_sha": target_sha,
+                                     "gated_head": head_sha})
+                result = merge.merge(task["id"], target="goal/reuse", refresh_repomap=False)
+                stored_pipeline = bus.get(task["id"])["pipeline"]
+
+            self.assertEqual(result["gate"], "reused_green")
+            gated.assert_not_called()
+            self.assertEqual(stored_pipeline["merge_gate"]["mode"], "reused_green")
+
 
     def test_fix_round_with_no_new_commit_is_empty_merge(self):
         with tempfile.TemporaryDirectory(prefix="empty-fix-") as directory:

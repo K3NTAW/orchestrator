@@ -1507,6 +1507,13 @@ def gate(pool):
         green_fields = {"first_green_at": pipeline.get("first_green_at", now),
                         "gate_reds": pipeline.get("gate_reds", 0),
                         "reviews_expected": n_reviews, "review_reason": review_reason}
+        target_ref = f"goal/{t['parent']}" if t.get("parent") else "integration"
+        target_sha = _git_in(worktree, "rev-parse", target_ref)
+        head_sha = _git_in(worktree, "rev-parse", "HEAD")
+        if target_sha.returncode == 0:
+            green_fields["gated_target_sha"] = target_sha.stdout.strip()
+        if head_sha.returncode == 0:
+            green_fields["gated_head"] = head_sha.stdout.strip()
         with bus.locked():
             if not stamp(t["id"], "gated_at", pipeline_fields=green_fields):
                 continue
@@ -1603,6 +1610,8 @@ def report_merge(task_id, r):
                 bus.update(task_id, pipeline=task_pipeline)
         unlanded = next((ancestor_id for ancestor_id, stamp in ancestor_stamps.items()
                          if stamp == "unlanded"), None)
+        if r.get("gate") == "reused_green":
+            notify(f"{task_id}: merge reused the daemon gate (target unmoved)")
         if unlanded:
             notify(f"{task_id} merged but ancestor {unlanded} commits are not on {r['target']}; held")
         else:

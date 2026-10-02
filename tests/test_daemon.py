@@ -1230,6 +1230,28 @@ class Daemon(unittest.TestCase):
         self.assertEqual(pipeline["gate_reds"], 0)
         self.assertIn("first_green_at", pipeline)
 
+    def test_gate_records_target_sha_and_head_on_green(self):
+        def git(worktree, command, ref):
+            if command == "rev-parse" and ref == "goal/T-0043":
+                return FakeProc("goal-head\n")
+            if command == "rev-parse" and ref == "HEAD":
+                return FakeProc("worktree-head\n")
+            return FakeProc("", 1)
+
+        self.swap(daemon, "_git_in", git)
+        red = self.metric_gate_task()
+        self.gate_green(False)
+        daemon.gate(P.Pool())
+        self.assertNotIn("gated_target_sha", bus.get(red)["pipeline"])
+        self.assertNotIn("gated_head", bus.get(red)["pipeline"])
+
+        green = self.metric_gate_task()
+        self.gate_green(True)
+        daemon.gate(P.Pool())
+        pipeline = bus.get(green)["pipeline"]
+        self.assertEqual(pipeline["gated_target_sha"], "goal-head")
+        self.assertEqual(pipeline["gated_head"], "worktree-head")
+
     def test_gate_red_increments_reds_and_keeps_hold(self):
         tid = self.metric_gate_task()
         self.gate_green(False)
