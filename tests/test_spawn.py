@@ -1384,6 +1384,44 @@ class SpawnBase(unittest.TestCase):
                                       constraints={"fix_round_for": "T-9999"})
         self.assertEqual(spawn.base_for(fix_missing), "goal/G")   # named branch doesn't exist: falls back
 
+    def test_base_for_follows_fix_chain_to_nearest_existing_branch(self):
+        a = bus.create_task("fix A", "s", ["a"], ["a.py"], role="execute", parent="G")
+        b = bus.create_task("fix B", "s", ["a"], ["a.py"], role="execute", parent="G",
+                            constraints={"fix_round_for": a["id"]})
+        c = bus.create_task("fix C", "s", ["a"], ["a.py"], role="execute", parent="G",
+                            constraints={"fix_round_for": b["id"]})
+        self.assertEqual(spawn.base_for(c), "goal/G")
+        self.assertEqual(spawn.base_choice(c), {"base": "goal/G", "via": "goal", "chain": [b["id"], a["id"]]})
+
+        wt = spawn.ensure_worktree(a["id"], base="HEAD")
+        bus.update(a["id"], worktree=str(wt))
+        self.assertEqual(spawn.base_for(c), f"task/{a['id']}")
+        self.assertEqual(spawn.base_choice(c)["chain"], [b["id"], a["id"]])
+
+        wt_b = spawn.ensure_worktree(b["id"], base="HEAD")
+        bus.update(b["id"], worktree=str(wt_b))
+        self.assertEqual(spawn.base_for(c), f"task/{b['id']}")
+        self.assertEqual(spawn.base_choice(c)["chain"], [b["id"]])
+
+        cycle_a = bus.create_task("cycle A", "s", ["a"], ["a.py"], role="execute", parent="missing",
+                                  constraints={"fix_round_for": "missing-id"})
+        cycle_b = bus.create_task("cycle B", "s", ["a"], ["a.py"], role="execute", parent="missing",
+                                  constraints={"fix_round_for": cycle_a["id"]})
+        self.assertEqual(spawn.base_for(cycle_a), "origin/main")
+        self.assertEqual(spawn.base_choice(cycle_a)["chain"], ["missing-id"])
+        self.assertEqual(spawn.base_for(cycle_b), "origin/main")
+
+    def test_ensure_worktree_records_worktree_base(self):
+        original = bus.create_task("record source", "s", ["a"], ["record.py"], role="execute", parent="G")
+        source_wt = spawn.ensure_worktree(original["id"], base="HEAD")
+        bus.update(original["id"], worktree=str(source_wt))
+        fix = bus.create_task("record fix", "s", ["a"], ["record.py"], role="execute", parent="G",
+                              constraints={"fix_round_for": original["id"]})
+        spawn.ensure_worktree(fix["id"])
+        recorded = bus.get(fix["id"])["pipeline"]["worktree_base"]
+        self.assertEqual(recorded["base"], f"task/{original['id']}")
+        self.assertEqual(recorded["via"], "fix_chain")
+
     def test_ensure_worktree_resolves_base_when_none_given(self):
         t = bus.create_task("stacked-exec", "s", ["a"], ["stacked.py"], role="execute", parent="G")
         wt = spawn.ensure_worktree(t["id"])

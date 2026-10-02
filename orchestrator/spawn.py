@@ -277,7 +277,7 @@ def branch_exists(name):
     return git("rev-parse", "--verify", name, check=False).returncode == 0
 
 
-def base_for(task):
+def base_choice(task):
     """Pick the base branch for a new worktree. review tasks whose inputs[0] is a task id: base on that task's
     own branch so the reviewer sees the code under review, not a worktree cut from origin/main before the
     reviewed task (or its dependency, B1-style) ever landed (review T-0026). Fall back to the reviewed task's
@@ -289,6 +289,7 @@ def base_for(task):
     cuts from that task's own task/<id> branch when it still exists, so the fix round starts on the code it is
     fixing rather than the goal branch the original may have already been merged past (gotchas.md 2026-09-19)."""
     role, parent = task["role"], task.get("parent")
+    chain = []
     if role == "review" and task.get("inputs") and isinstance(task["inputs"][0], str):
         try:
             src = bus.get(task["inputs"][0])
@@ -297,16 +298,33 @@ def base_for(task):
         if src is not None:
             branch = f"task/{task['inputs'][0]}"
             if branch_exists(branch):
-                return branch
+                return {"base": branch, "via": "fix_chain", "chain": [task["inputs"][0]]}
             src_parent = src.get("parent")
             if src_parent and branch_exists(f"goal/{src_parent}"):
-                return f"goal/{src_parent}"
-    elif role == "execute" and (task.get("constraints") or {}).get("fix_round_for") and \
-            branch_exists(f"task/{task['constraints']['fix_round_for']}"):
-        return f"task/{task['constraints']['fix_round_for']}"
-    elif role in ("challenge", "execute", "spec_review", "scout", "triage") and parent and branch_exists(f"goal/{parent}"):
-        return f"goal/{parent}"
-    return "origin/main"
+                return {"base": f"goal/{src_parent}", "via": "goal", "chain": [task["inputs"][0]]}
+    elif role == "execute":
+        current_id = (task.get("constraints") or {}).get("fix_round_for")
+        seen = set()
+        for _ in range(20):
+            if not isinstance(current_id, str) or current_id in seen:
+                break
+            seen.add(current_id)
+            chain.append(current_id)
+            try:
+                src = bus.get(current_id)
+            except KeyError:
+                break
+            branch = f"task/{current_id}"
+            if branch_exists(branch):
+                return {"base": branch, "via": "fix_chain", "chain": chain}
+            current_id = (src.get("constraints") or {}).get("fix_round_for")
+    if role in ("challenge", "execute", "spec_review", "scout", "triage") and parent and branch_exists(f"goal/{parent}"):
+        return {"base": f"goal/{parent}", "via": "goal", "chain": chain}
+    return {"base": "origin/main", "via": "trunk", "chain": chain}
+
+
+def base_for(task):
+    return base_choice(task)["base"]
 
 
 def ensure_worktree(task_id, base=None):
@@ -321,8 +339,10 @@ def ensure_worktree(task_id, base=None):
     if not wt.exists():
         wt.parent.mkdir(exist_ok=True)
         git("fetch", "origin", check=False)
+        choice = None
         if base is None:
-            base = base_for(bus.get(task_id))
+            choice = base_choice(bus.get(task_id))
+            base = choice["base"]
         if git("rev-parse", "--verify", base, check=False).returncode:
             base = "HEAD"  # no remote yet
         branch = f"task/{task_id}"
@@ -330,6 +350,16 @@ def ensure_worktree(task_id, base=None):
             git("worktree", "add", str(wt), branch)
         else:
             git("worktree", "add", str(wt), "-b", branch, base)
+        if choice is None:
+            choice = {"base": base, "via": "trunk", "chain": []}
+        try:
+            with bus.locked():
+                task = bus.get(task_id)
+                pipeline = dict(task.get("pipeline") or {})
+                pipeline["worktree_base"] = choice
+                bus.update(task_id, pipeline=pipeline)
+        except KeyError:
+            pass
     return wt
 
 
