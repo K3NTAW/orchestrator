@@ -253,7 +253,14 @@ def _render_section(reason, all_tasks, events5):
     return "\n".join(header + body + footer)
 
 
-def write(reason: str = "manual"):
+def _save_handover_session(session_id, reason, tokens_at):
+    path = STATE / "checkpoint" / "handover-session.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session_id": session_id, "ts": time.time(), "reason": reason,
+                                "tokens_at": tokens_at}, indent=1))
+
+
+def write(reason: str = "manual", *, session_id=None, tokens_at=None):
     """Replace (or append when absent) the trailing "## Auto-handover" section of plan.md. Idempotent: a second
     call with the same repo state replaces the section in place and leaves everything above it byte-identical.
     Matches the LAST "## Auto-handover " heading, not the first, so Planner prose that quotes the heading text
@@ -275,6 +282,7 @@ def write(reason: str = "manual"):
     snapshot = [{key: task.get(key) for key in ("id", "status", "hold_reason", "merged_into")}
                 for task in sorted(all_tasks, key=lambda item: item["id"])]
     snapshot_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+    _save_handover_session(session_id, reason, tokens_at)
     state_path = STATE / "handover_state.json"
     try:
         handover_state = json.loads(state_path.read_text())
