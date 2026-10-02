@@ -343,22 +343,59 @@ class MergeQueue(unittest.TestCase):
             git("commit", "-qm", "feature", cwd=wt)
             target_sha = git("rev-parse", "goal/reuse").stdout.strip()
             head_sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
-            with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
-                    patch.multiple(merge, ROOT=repo, git=git), \
-                    patch("orchestrator.pool.config", return_value={"merge": {"skip_regate_when_unmoved": True}}), \
-                    patch.object(merge.gate, "run_gate") as gated, \
-                    patch.object(bus, "commit_state"), patch.object(merge.scorecard, "write"), \
-                    patch.object(merge.scorecard, "build", return_value={}):
-                task = bus.create_task("reuse gate", "s", ["a"], ["feature.py"], role="execute")
-                bus.update(task["id"], worktree=str(wt), parent="G",
-                           pipeline={"gated_at": 1, "gated_target_sha": target_sha,
-                                     "gated_head": head_sha})
-                result = merge.merge(task["id"], target="goal/reuse", refresh_repomap=False)
-                stored_pipeline = bus.get(task["id"])["pipeline"]
-
-            self.assertEqual(result["gate"], "reused_green")
-            gated.assert_not_called()
-            self.assertEqual(stored_pipeline["merge_gate"]["mode"], "reused_green")
+            cases = ("reuse", "target_moved", "head_differs", "stamp_absent",
+                     "synthetic_commit", "disabled", "red", "timeout")
+            for case in cases:
+                with self.subTest(case=case):
+                    target = f"goal/case-{case}"
+                    # Advancing the target to the task HEAD keeps the rebase a no-op,
+                    # so target movement independently tests the target SHA guard.
+                    git("branch", target, head_sha if case == "target_moved" else target_sha)
+                    pipeline = {"gated_at": 1, "gated_target_sha": target_sha,
+                                "gated_head": head_sha}
+                    if case == "head_differs":
+                        pipeline["gated_head"] = target_sha
+                    if case in ("stamp_absent", "red", "timeout"):
+                        pipeline.pop("gated_at")
+                    cfg = {"merge": {"skip_regate_when_unmoved": False}} if case == "disabled" else {}
+                    completed = {"returncode": 1 if case == "red" else 0,
+                                 "timed_out": case == "timeout", "stdout": "",
+                                 "stderr": "gate failure" if case == "red" else ""}
+                    with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
+                            patch.multiple(merge, ROOT=repo, git=git), \
+                            patch("orchestrator.pool.config", return_value=cfg), \
+                            patch.object(merge.gate, "run_gate", return_value=completed) as gated, \
+                            patch.object(bus, "commit_state"), patch.object(merge.scorecard, "write"), \
+                            patch.object(merge.scorecard, "build", return_value={}):
+                        task = bus.create_task("reuse gate", "s", ["a"], ["feature.py"], role="execute")
+                        bus.update(task["id"], worktree=str(wt), pipeline=pipeline,
+                                   result={"synthetic_commit": case == "synthetic_commit"})
+                        result = merge.merge(task["id"], target=target, refresh_repomap=False)
+                        stored = bus.get(task["id"])
+                    self.assertEqual(git("rev-parse", "HEAD", cwd=wt).stdout.strip(), head_sha)
+                    if case == "reuse":
+                        gated.assert_not_called()
+                        self.assertEqual(result["gate"], "reused_green")
+                        self.assertEqual(stored["pipeline"]["merge_gate"],
+                                         {"mode": "reused_green", "gated_target_sha": target_sha,
+                                          "gated_head": head_sha})
+                    else:
+                        gated.assert_called_once_with(str(wt), script=merge.TESTS_GREEN, task_id=task["id"])
+                        self.assertEqual(stored["pipeline"]["merge_gate"], {"mode": "ran"})
+                        self.assertNotIn("gate", result)
+                    if case in ("red", "timeout"):
+                        self.assertFalse(stored.get("merged_into"))
+                        self.assertEqual(git("rev-parse", target).stdout.strip(), target_sha)
+                        if case == "red":
+                            self.assertEqual(result["status"], "tests_red")
+                            self.assertEqual((stored["status"], stored["reason"]), ("failed", "tests_red"))
+                        else:
+                            self.assertEqual(result["status"], "gate_timeout")
+                            self.assertEqual((stored["status"], stored["hold_reason"]), ("held", "gate_timeout"))
+                    else:
+                        self.assertEqual(result["status"], "merged")
+                        self.assertEqual(stored["merged_into"], target)
+                        self.assertEqual(git("rev-parse", target).stdout.strip(), head_sha)
 
 
     def test_fix_round_with_no_new_commit_is_empty_merge(self):
