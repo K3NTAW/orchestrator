@@ -1104,7 +1104,9 @@ def _section(name, value):
 
 def _base_sha(task, worktree=None):
     wt = Path(worktree or task.get("worktree") or ROOT)
-    return git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()[:12] or "(unavailable)"
+    base = scoped_diff_base(task)
+    result = git("merge-base", base, "HEAD", cwd=wt, check=False)
+    return result.stdout.strip()[:12] or "(unavailable)"
 
 
 def _acceptance_test_ids(acceptance):
@@ -1119,7 +1121,10 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
     raw_diff = scoped_diff(src)
-    hint = f"git -C {wt} diff -- {' '.join(src.get('scope', []))}"
+    base = scoped_diff_base(src)
+    head = git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()[:12] or "(unavailable)"
+    branch = src.get("branch") or f"task/{src.get('id', '(none)')}"
+    hint = f"git -C {wt} diff -U3 {base}...HEAD -- {' '.join(src.get('scope', []))}"
     changed = sorted(set(re.findall(r"^[+\-]{3} [ab]/(tests/\S+)", raw_diff, re.M)))
     tests = [f"{path}: present" for path in changed]
     for test_id in _acceptance_test_ids(src.get("acceptance", [])):
@@ -1139,7 +1144,8 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     sections = ([_section("skills", skills["section"].removeprefix("## skills\n"))]
                 if skills and skills.get("section") else []) + [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
                 _section("scope", src.get("scope", [])), None,
-                _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines)]
+                _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines),
+                _section("review branch", f"{branch} @ {head}")]
     reviewer_role = (task.get("constraints") or {}).get("reviewer_role")
     role_focus = {
         "acceptance": ("Focus: every acceptance criterion met by the diff, functional correctness, regressions "
@@ -1195,7 +1201,7 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     other_chars = len("\n".join(section for section in sections if section is not None)) + 1
     diff_heading_chars = len("## diff\n")
     configured_cap = cfg.get("limits", {}).get("review_diff_chars", 12000)
-    diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
+    diff_budget = max(1, configured_cap)
     sections[sections.index(None)] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
@@ -1867,13 +1873,17 @@ def code_excerpts(scope, base_dir, cap=12000):
     return "".join(out) or "(no matching files)"
 
 
+def scoped_diff_base(src):
+    parent = src.get("parent")
+    return f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
+
+
 def scoped_diff(src):
     """Reviewers see -U3 hunks for the scoped paths of the task under review, never the repo. Diffs against the
     reviewed task's goal branch (when it exists) instead of origin/main, so a stacked task's review doesn't
     include its predecessor's already-merged hunks."""
     wt = src.get("worktree") or ROOT
-    parent = src.get("parent")
-    base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
+    base = scoped_diff_base(src)
     r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"
 

@@ -1230,7 +1230,7 @@ class Render(unittest.TestCase):
 
     def test_bounded_diff_expansion_hint(self):
         diff = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(2000))
-        hint = f"git -C {TMP} diff -- widget.py"
+        hint = f"git -C {TMP} diff -U3 {spawn.scoped_diff_base(reviewed)}...HEAD -- widget.py"
         bounded = spawn.bounded_diff(diff, 300, hint)
         self.assertLessEqual(len(bounded), 300)
         self.assertTrue(bounded.endswith(f"expand with: {hint}"))
@@ -1258,7 +1258,9 @@ class Render(unittest.TestCase):
         prompt = captured["prompt"]
         hint = f"git -C {TMP} diff -- widget.py"
         self.assertIn("Diffstat: ", prompt)
-        self.assertLessEqual(len(prompt), P.Pool().cfg["limits"].get("review_diff_chars", 12000) + 2000)
+        cap = P.Pool().cfg["limits"].get("review_diff_chars", 12000)
+        non_diff = len(prompt) - len(prompt.split("## diff\n", 1)[1].split("\n## ", 1)[0])
+        self.assertLessEqual(len(prompt), cap + non_diff + 64)
         self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
 
     def test_bounded_diff_hunk_header_once(self):
@@ -1266,7 +1268,7 @@ class Render(unittest.TestCase):
         self.assertEqual(sum(line.startswith("@@") for line in spawn.bounded_diff(diff).splitlines()), 1)
 
     def test_render_does_not_rebound_diff(self):
-        hint = f"git -C {TMP} diff -- widget.py"
+        hint = f"git -C {TMP} diff -U3 {spawn.scoped_diff_base(task)}...HEAD -- widget.py"
         raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(1000))
         task = {**self.packet_fixture(), "spec": "ordinary", "complexity": 1}
         cfg = {**P.config(), "limits": {**P.config().get("limits", {}), "review_diff_chars": 100}}
@@ -1443,6 +1445,38 @@ class SpawnBase(unittest.TestCase):
         diff = spawn.scoped_diff(bus.get(t["id"]))
         self.assertIn("+B = 1", diff)
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
+
+    def test_review_packet_hint_names_base_range_and_branch(self):
+        task = bus.create_task("review hint", "s", ["a"], ["hint.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(task["id"], base="goal/G")
+        bus.update(task["id"], worktree=str(wt))
+        (wt / "hint.py").write_text("hint = True\n")
+        self.g("add", "hint.py", cwd=wt); self.g("commit", "-qm", "review hint", cwd=wt)
+        task = {**bus.get(task["id"]), "branch": "review/custom"}
+        base_sha = self.g("rev-parse", "goal/G", cwd=TMP).stdout.strip()[:12]
+        head_sha = self.g("rev-parse", "HEAD", cwd=wt).stdout.strip()[:12]
+        raw = "diff --git a/hint.py b/hint.py\n" + "\n".join(f"+line {i:05d}" for i in range(1500))
+        with mock.patch.object(spawn, "scoped_diff", return_value=raw):
+            packet = spawn.review_packet(task, task, cfg={"context_router": {"mode": "shadow"}})
+        hint = f"git -C {wt} diff -U3 goal/G...HEAD -- hint.py"
+        self.assertIn(hint, packet)
+        self.assertIn(f"base {base_sha} ", packet.splitlines()[0])
+        self.assertIn("review/custom @ " + head_sha, packet)
+
+    def test_review_packet_diff_budget_honours_review_diff_chars(self):
+        task = bus.create_task("review budget", "s", ["a"], ["budget.py"], role="execute", parent="G")
+        wt = spawn.ensure_worktree(task["id"], base="goal/G")
+        bus.update(task["id"], worktree=str(wt))
+        task = bus.get(task["id"])
+        raw = "diff --git a/budget.py b/budget.py\n" + "\n".join(f"+line {i:05d}" for i in range(1500))
+        hint = f"git -C {wt} diff -U3 goal/G...HEAD -- budget.py"
+        for cap, truncated in ((20000, False), (3000, True)):
+            with self.subTest(cap=cap), mock.patch.object(spawn, "scoped_diff", return_value=raw):
+                packet = spawn.review_packet(task, task, cfg={"context_router": {"mode": "shadow"},
+                                                               "limits": {"review_diff_chars": cap}})
+            self.assertEqual("more lines" in packet, truncated)
+            if truncated:
+                self.assertIn(hint, packet)
 
 
 class SecretsForRole(unittest.TestCase):
