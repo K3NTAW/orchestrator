@@ -558,6 +558,38 @@ class RunWorkerMissingReason(unittest.TestCase):
         self.assertEqual(updated["reason"], "unknown failure")
         self.assertEqual(updated["resume_hint"]["partial_output"], "partial")
 
+    def test_derivation_falls_back_to_guarded_failed_write_or_superseded(self):
+        self.test_failed_without_reason_key_sets_default_and_resume_hint()
+
+
+class ExecuteDerivation(unittest.TestCase):
+    def test_execute_result_derived_from_git_state(self):
+        repo = scratch_repo(TMP / "derived-worktree")
+        task = bus.create_task("derived", "s", ["committed"], ["result.txt"], role="execute")
+        bus.update(task["id"], parent=None)
+        pool = P.Pool()
+        pool.cfg.setdefault("spawn", {})["derive_execute_result"] = True
+        account = pool.accounts[0]
+
+        def run(*args, **kwargs):
+            (repo / "result.txt").write_text("done\n")
+            g("add", "result.txt", cwd=repo, check=True)
+            g("commit", "-qm", "derived work", cwd=repo, check=True)
+            return {"status": "failed", "reason": "non-JSON output (rc=143): "}
+
+        with mock.patch.object(spawn, "Pool", return_value=pool), \
+                mock.patch.object(pool, "pick", return_value=account), \
+                mock.patch.object(pool, "reserve", return_value=account), \
+                mock.patch.object(spawn, "ensure_worktree", return_value=repo), \
+                mock.patch.object(spawn, "run_claude", side_effect=run):
+            result = spawn.run_worker(task["id"])
+        self.assertEqual(result["status"], "done")
+        posted = bus.get(task["id"])
+        self.assertEqual(posted["status"], "done")
+        self.assertEqual(posted["result"]["commit"], g("rev-parse", "HEAD", cwd=repo).stdout.strip())
+        self.assertEqual(posted["result"]["derived_from"], "git_state")
+
+
 
 class SpecReview(unittest.TestCase):
     def test_run_worker_writes_verdict_on_both_tasks_and_prompt_has_minimal_packet(self):

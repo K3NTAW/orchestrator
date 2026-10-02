@@ -4,7 +4,7 @@ import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import contracts, worker_registry, env_policy, worker_control
+from . import contracts, worker_registry, env_policy, worker_control, gitutil
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -14,6 +14,9 @@ _PACKET_BUILD_META_MAX = 512
 _PACKET_BUILD_META = OrderedDict()
 _INSTRUCTION_RENDER_META = OrderedDict()
 NEEDS_TOOL_PREFIX = "needs_tool:"
+
+execute_outcome = gitutil.execute_outcome
+head_sha = gitutil.head_sha
 
 _SKILL_EVIDENCE_WINDOW_S = 7 * 24 * 60 * 60
 _SKILL_PRESENTATION_CAP = 2400
@@ -1511,7 +1514,14 @@ def _account_from_assigned_to(assigned_to):
 
 
 def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None, session_id=None):
-    """Scout / triage / review / challenge: pick account, render prompt, run, post result. Holds instead of failing when no headroom."""
+    """Run a worker and post its result.
+
+    An rc=143 non-JSON result may be a timeout, reaper kill, or external kill that
+    never went through cancel(). When enabled, clean commits since the claim may
+    therefore be posted as done; the relative count, tests gate, and derived
+    markers are the intentional backstops. The registry remains failed after a
+    derived write, and an unposted contract decision is accepted.
+    """
     pool = Pool(); t = dict(resume_task or bus.get(task_id)); role = t["role"]
     epoch = t.get("_launch_epoch", worker_control.launch_epoch(task_id))
     t["_launch_epoch"] = epoch
@@ -1536,6 +1546,11 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
         return {"status": "held"}
     lim = pool.cfg["limits"]
     model = pool.cfg["models"][t["tier"]]
+    derive = pool.cfg.get("spawn", {}).get("derive_execute_result", False)
+    pre_head = None
+    goal_id = None
+    scope = None
+    wt = None
     if resume_task:
         prompt = resume_prompt
         t["_resume_session"] = session_id
@@ -1600,7 +1615,15 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
             pipeline.pop("dispatched_at", None)
             worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="queued", pipeline=pipeline)
             return {"status": "budget"}
-        bus.claim(task_id, f"claude:{acct.id}", str(ensure_worktree(task_id)))
+        wt = Path(ensure_worktree(task_id))
+        bus.claim(task_id, f"claude:{acct.id}", str(wt))
+        if role == "execute" and derive:
+            goal_id = t.get("parent")
+            scope = list(t.get("scope") or [])
+            try:
+                pre_head = head_sha(wt)
+            except Exception:
+                pre_head = None
         worker_control.write_if_current(task_id, epoch, bus.update, task_id, account=acct.id)  # explicit account, alongside assigned_to, for the avoid-derivation above
     r = None
     release_usage = None
@@ -1709,11 +1732,83 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
         elif r["status"] == "held":
             worker_control.write_if_current(task_id, epoch, bus.update, task_id, status="held", hold_reason=r.get("reason", "unknown failure"))
         else:
-            update_fields = {"status": "failed", "reason": r.get("reason", "unknown failure")}
-            result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
-            if isinstance(result, str):
-                update_fields["resume_hint"] = {"partial_output": result[:2000]}
-            worker_control.write_if_current(task_id, epoch, bus.update, task_id, **update_fields)
+            reason = r.get("reason", "unknown failure")
+            triggered = (role == "execute" and derive and resume_task is None
+                         and pre_head is not None and r.get("status") == "failed"
+                         and str(reason).startswith("non-JSON output")
+                         and not worker_control.cancel_or_steer_pending(task_id, epoch))
+            if triggered:
+                derived = False
+                try:
+                    outcome = execute_outcome(wt, goal_id, scope, since=pre_head)
+                    if outcome is None:
+                        posted = worker_control.post_if_current(task_id, epoch, "failed", {"reason": reason})
+                        if not posted:
+                            r = {"status": "superseded", "reason": reason}
+                        else:
+                            r = {"status": "failed", **{key: value for key, value in r.items() if key != "status"}, "reason": reason}
+                        derived = True
+                    if outcome["ahead"] == 0:
+                        payload = {"hold_reason": "execute_incomplete: no commits",
+                                   "resume_hint": {"partial_output": reason,
+                                                   "dirty_in_scope": outcome["dirty_in_scope"],
+                                                   "dirty_out_of_scope": outcome["dirty_out_of_scope"],
+                                                   "head": outcome["head"]}}
+                        derived = worker_control.post_if_current(task_id, epoch, "held", payload)
+                        if derived:
+                            r = {"status": "held", "derived_from": "git_state", "reason": reason}
+                            bus.log_run(task=task_id, role="execute", outcome="execute_incomplete",
+                                        executor=t["executor"], tier=t["tier"], account=acct.id,
+                                        derived_from="git_state")
+                    elif outcome is not None and (outcome["dirty_in_scope"] or outcome["dirty_out_of_scope"]):
+                        payload = {"hold_reason": "execute_incomplete: uncommitted changes",
+                                   "resume_hint": {"partial_output": reason,
+                                                   "dirty_in_scope": outcome["dirty_in_scope"],
+                                                   "dirty_out_of_scope": outcome["dirty_out_of_scope"],
+                                                   "head": outcome["head"]}}
+                        derived = worker_control.post_if_current(task_id, epoch, "held", payload)
+                        if derived:
+                            r = {"status": "held", "derived_from": "git_state", "reason": reason}
+                            bus.log_run(task=task_id, role="execute", outcome="execute_incomplete",
+                                        executor=t["executor"], tier=t["tier"], account=acct.id,
+                                        derived_from="git_state")
+                    elif outcome is not None:
+                        candidate = {"summary": "derived from git state after " + str(reason)[:300],
+                                     "commit": outcome["head"], "executed_by": t["executor"],
+                                     "derived_from": "git_state",
+                                     "review": "derived from git state; other account, different model; label PR same-family-review"}
+                        fitted = fit_result(candidate)
+                        processed = dict(contracts.process(task_id, role, fitted, cfg=pool.cfg, session=None))
+                        processed.update({key: candidate[key] for key in ("commit", "derived_from", "executed_by", "review")})
+                        processed.setdefault("confidence", 0.0)
+                        processed.setdefault("provenance", ["repo"])
+                        if len(json.dumps(processed)) <= bus.MAX_RESULT_CHARS:
+                            derived = worker_control.post_if_current(task_id, epoch, "done", processed)
+                            if derived:
+                                r = {"status": "done", "derived_from": "git_state", "reason": reason}
+                                bus.log_run(task=task_id, role="execute", outcome="derived_done",
+                                            executor=t["executor"], tier=t["tier"], account=acct.id,
+                                            derived_from="git_state")
+                except Exception as exc:
+                    notify.notify(f"{task_id}: derivation failed: {exc}")
+                    reason = f"{reason} (derivation failed: {type(exc).__name__})"
+                if not derived:
+                    posted = worker_control.post_if_current(task_id, epoch, "failed", {"reason": reason})
+                    if not posted:
+                        r = {"status": "superseded", "reason": reason}
+                    else:
+                        r = {"status": "failed", **{key: value for key, value in r.items() if key != "status"}, "reason": reason}
+            elif derive and role == "execute" and resume_task is None and r.get("status") == "failed":
+                reason = str(reason)
+                posted = worker_control.post_if_current(task_id, epoch, "failed", {"reason": reason})
+                if not posted:
+                    r = {"status": "superseded", "reason": reason}
+            else:
+                update_fields = {"status": "failed", "reason": reason}
+                result = r.get("output", {}).get("result") if isinstance(r.get("output"), dict) else None
+                if isinstance(result, str):
+                    update_fields["resume_hint"] = {"partial_output": result[:2000]}
+                worker_control.write_if_current(task_id, epoch, bus.update, task_id, **update_fields)
     except Exception as e:
         bus.log_run(task=task_id, role=role, outcome="post_failed",
                     executor=t.get("executor") or f"claude:{t['tier']}", complexity=t["complexity"])

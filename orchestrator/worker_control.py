@@ -218,6 +218,50 @@ def write_if_current(task_id, epoch, method, *args, **fields):
             return method(*args, **fields)
 
 
+def cancel_or_steer_pending(task_id, epoch):
+    """Return whether a terminal write is being cancelled, steered, or superseded."""
+    try:
+        worker = worker_registry.get(task_id) or {}
+        if worker.get("status") in {"cancelling", "cancelled", "steering"}:
+            return True
+        task = bus.get(task_id)
+        if task.get("status") == "held" and task.get("hold_reason") == "cancelled":
+            return True
+        return not is_current(task_id, epoch)
+    except Exception:
+        return False
+
+
+def post_if_current(task_id, epoch, status, payload):
+    """Guard one terminal bus write and retain the failed worker registry entry."""
+    required = {
+        "done": ("summary", "derived_done"),
+        "held": ("hold_reason", "resume_hint", "execute_incomplete"),
+        "failed": ("reason", "non_json"),
+    }
+    if status not in required:
+        raise KeyError(status)
+    fields = required[status]
+    for key in fields[:-1]:
+        if key not in payload:
+            raise KeyError(key)
+    with bus.locked():
+        fresh = bus.get(task_id)
+        entry = worker_registry.get(task_id) or {}
+        if (fresh.get("status") != "running" or not is_current(task_id, epoch)
+                or entry.get("status") in {"cancelling", "cancelled", "steering"}):
+            return False
+        if status == "done":
+            bus.update(task_id, status="done", result=payload, hold_reason=None)
+        elif status == "held":
+            bus.update(task_id, status="held", hold_reason=payload["hold_reason"],
+                       resume_hint=payload["resume_hint"])
+        else:
+            bus.update(task_id, status="failed", reason=payload["reason"])
+        worker_registry.upsert(task_id, status_reason=fields[-1])
+        return True
+
+
 def steer(task_id, message, *, reason, source="planner", grace_s=20,
           sleep=time.sleep, alive=None, signal_fn=os.kill):
     """Record steering separately from the immutable contract, interrupt, and resume."""
