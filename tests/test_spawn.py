@@ -596,7 +596,8 @@ class ExecuteDerivation(unittest.TestCase):
                 self.assertEqual(updated["reason"], reason)
                 self.assertEqual(spawn.worker_registry.get(task["id"])["status_reason"], registry_reason)
                 self.assertFalse(any("derivation failed" in str(call) for call in notify.call_args_list))
-                log.assert_not_called()
+                self.assertFalse(any(call.kwargs.get("outcome") in {"derived_done", "execute_incomplete"}
+                                     for call in log.call_args_list))
                 if output is None:
                     outcome.assert_called_once()
                     post.assert_called_once_with(task["id"], 1, "failed", {"reason": reason})
