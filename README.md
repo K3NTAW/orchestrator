@@ -43,6 +43,7 @@ Build the sandbox: `devcontainer build .` and copy `codex.config.toml.example` t
 `orchestrator pick planner|scout|review|execute` tallies Planner usage fresh, then prints `<account_id>\t<config_dir>`
 for `pool.pick(role)`, or exits 3 with `hold: no account with headroom`; a launcher not running the daemon calls this
 so its account choice still reflects current Planner usage.
+`[planner].account` pins the Planner account, and `pick planner` then always prints that account.
 `orchestrator scorecard --by task|goal` rolls runs/*.jsonl up by task or by goal (role split in percent of usd,
 with an `other` bucket for any role outside execute/review/spec_review/scout so the percentages always cover
 every child task). Each goal row's `planner_runs` column is that goal's own decision-run count from
@@ -257,7 +258,8 @@ the daemon) and `.orchestrator/planner_session.json` (written atomically by that
 named by pid so a stale file is never mistaken for a live session). Meant for the executor container, where no
 interactive Planner session ever attaches -- leave it off anywhere one might.
 Each run receives a compact decision packet assembled from bus and run data; the interactive handover threshold is
-`[planner].handover_context_tokens` and packet size is bounded by `[planner].decision_packet_chars`.
+`[planner].handover_context_tokens` (default `300000`; set to `0` to disable) and packet size is bounded by
+`[planner].decision_packet_chars`.
 
 ### Jev
 Jev (TypeSafe AI) answers typed questions about a piece of state with calibrated probabilities instead of free

@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import atexit, contextlib, fcntl, hashlib, json, sqlite3, subprocess, sys, threading, time
+import atexit, contextlib, fcntl, hashlib, json, re, sqlite3, subprocess, sys, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -238,24 +238,29 @@ def _compact_row(t):
     }
 
 
-def read(tid=None, status=None, status_not=None, role=None, compact=False):
+def read(tid=None, status=None, status_not=None, role=None, compact=False, *, parent=None, ids=None):
     if tid:
         return get(tid)
-    rows = db().execute("select id from tasks order by id").fetchall()
+    rows = [(task_id,) for task_id in sorted(set(ids))] if ids is not None else db().execute("select id from tasks order by id").fetchall()
     out = []
     skipped = 0
     for row in rows:
         task_id = row[0]
-        if not isinstance(task_id, str) or not task_id:
+        if not isinstance(task_id, str) or not re.fullmatch(r"T-[0-9]+", task_id):
             skipped += 1
             continue
         try:
-            out.append(get(task_id))
-        except KeyError:
+            task = get(task_id)
+            if not isinstance(task, dict) or not {"id", "status", "role"} <= task.keys():
+                skipped += 1
+                continue
+            out.append(task)
+        except (KeyError, OSError, ValueError, TypeError):
             skipped += 1
     if skipped:
         print(f"bus.read: skipped {skipped} unreadable rows", file=sys.stderr)
-    filtered = [t for t in out if (status is None or t["status"] == status)
+    filtered = [t for t in out if (parent is None or t.get("parent") == parent)
+                and (status is None or t["status"] == status)
                 and (status_not is None or t["status"] != status_not) and (role is None or t["role"] == role)]
     return [_compact_row(t) for t in filtered] if compact else filtered
 

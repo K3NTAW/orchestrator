@@ -8,6 +8,105 @@ from orchestrator.pool import encode_project_dir
 
 
 class PlannerContext(unittest.TestCase):
+    def _prompt_transcript(self, config_dir, root, tokens, turns):
+        path = config_dir / "projects" / encode_project_dir(str(root)) / "S.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        records = [{"type": "user", "message": {"content": "continue"}} for _ in range(turns)]
+        records += [{"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}}
+                    for _ in range(12)]
+        records.append({"type": "assistant", "message": {"usage": {"input_tokens": tokens}}})
+        path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+        return path
+
+    def test_hook_message_grace_turns_suppresses_early_handover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, root = Path(directory) / "config", Path(directory) / "repo"
+            cfg = {"planner": {"handover_context_tokens": 100, "handover_grace_turns": 12}}
+            transcript = self._prompt_transcript(config_dir, root, 200, 3)
+            self.assertEqual(planner_context.user_turns(transcript), 3)
+            self.assertEqual(planner_context.user_turns(transcript.parent / "missing"), 0)
+            for kwargs in ({"transcript": transcript, "session_id": "S"}, {"session_id": "S"}):
+                self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, **kwargs))
+            self.assertIn("hand over now", planner_context.hook_message(cfg, config_dir, root))
+            self._prompt_transcript(config_dir, root, 200, 12)
+            self.assertEqual(planner_context.user_turns(transcript), 12)
+            message = planner_context.hook_message(cfg, config_dir, root, transcript=transcript, session_id="S")
+            self.assertIn("hand over now", message)
+            self.assertIn("--session-id S", message)
+
+    def test_hook_message_short_line_after_handover_for_this_session(self):
+        from orchestrator import handover
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, root = Path(directory) / "config", Path(directory) / "repo"
+            cfg = {"planner": {"handover_context_tokens": 100}}
+            tokens_at = 1000
+            transcript = self._prompt_transcript(config_dir, root, tokens_at + 1000, 12)
+            with mock.patch.object(handover, "STATE", root / ".orchestrator"), \
+                    mock.patch.object(handover.bus, "read", return_value=[]), \
+                    mock.patch.object(handover, "_last_events", return_value=[]), \
+                    mock.patch.object(handover, "_render_section", return_value="## Auto-handover test"), \
+                    mock.patch.object(handover.time, "time", return_value=1700000000):
+                handover.write("context", session_id="S", tokens_at=tokens_at)
+            record = json.loads((root / ".orchestrator/checkpoint/handover-session.json").read_text())
+            self.assertEqual(record, {"session_id": "S", "ts": 1700000000,
+                                      "reason": "context", "tokens_at": tokens_at})
+            message = planner_context.hook_message(cfg, config_dir, root, session_id="S")
+            self.assertRegex(message, r"^handover written \d{2}:\d{2}; restart with f orch$")
+            self.assertNotIn("hand over now", message)
+            self.assertIn("hand over now", planner_context.hook_message(
+                cfg, config_dir, root, transcript=transcript, session_id="other"))
+            self._prompt_transcript(config_dir, root, tokens_at + 30000, 12)
+            self.assertIn("hand over now", planner_context.hook_message(cfg, config_dir, root, session_id="S"))
+
+    def test_default_threshold_when_key_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, root = Path(directory) / "config", Path(directory) / "repo"
+            for tokens in (290000, 310000):
+                with self.subTest(tokens=tokens):
+                    self._prompt_transcript(config_dir, root, tokens, 12)
+                    message = planner_context.hook_message({}, config_dir, root, session_id="S")
+                    if tokens > 300000:
+                        self.assertIn("threshold 300000", message)
+                        self.assertIn("hand over now", message)
+                    else:
+                        self.assertIsNone(message)
+                    self.assertIsNone(planner_context.hook_message(
+                        {"planner": {"handover_context_tokens": 0}}, config_dir, root, session_id="S"))
+
+    def test_context_tokens_prefers_session_transcript_over_newest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, root = Path(directory) / "config", Path(directory) / "repo"
+            sid = "current-session"
+            self._transcript(config_dir, root, f"{sid}.jsonl", {
+                "input_tokens": 10000, "cache_read_input_tokens": 20000,
+                "cache_creation_input_tokens": 10000}, 1)
+            self._transcript(config_dir, root, "other.jsonl", {"input_tokens": 190000}, 2)
+            older = config_dir / "projects" / encode_project_dir(str(root)) / f"{sid}.jsonl"
+            self.assertEqual(40000, planner_context.context_tokens(config_dir, root, session_id=sid))
+            for transcript in (older, str(older)):
+                with self.subTest(transcript=transcript):
+                    self.assertEqual(40000, planner_context.context_tokens(
+                        config_dir, root, transcript=transcript))
+            self.assertEqual(40000, planner_context.context_tokens(
+                config_dir, root, transcript=older, session_id="other"))
+            self.assertEqual(190000, planner_context.context_tokens(config_dir, root))
+
+    def test_fresh_session_reports_none_not_another_sessions_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_dir, root = Path(directory) / "config", Path(directory) / "repo"
+            cfg = {"planner": {"handover_context_tokens": 100000}}
+            self._transcript(config_dir, root, "fresh.jsonl", None, 1)
+            self._transcript(config_dir, root, "other.jsonl", {"input_tokens": 190000}, 2)
+            transcripts = config_dir / "projects" / encode_project_dir(str(root))
+            for kwargs in ({"session_id": "fresh"}, {"session_id": "missing"},
+                           {"transcript": transcripts / "fresh.jsonl"},
+                           {"transcript": transcripts / "missing.jsonl"},
+                           {"transcript": transcripts / "fresh.jsonl", "session_id": "other"},
+                           {"transcript": transcripts / "missing.jsonl", "session_id": "other"}):
+                with self.subTest(**kwargs):
+                    self.assertIsNone(planner_context.context_tokens(config_dir, root, **kwargs))
+                    self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, **kwargs))
+
     def _transcript(self, config_dir, root, name, usage, modified):
         directory = config_dir / "projects" / encode_project_dir(str(root))
         directory.mkdir(parents=True, exist_ok=True)
@@ -28,7 +127,7 @@ class PlannerContext(unittest.TestCase):
     def test_hook_message_over_threshold(self):
         with tempfile.TemporaryDirectory() as directory:
             config_dir, root = Path(directory) / "config", Path(directory) / "repo"
-            cfg = {"planner": {"handover_context_tokens": 100}}
+            cfg = {"planner": {"handover_context_tokens": 100, "handover_grace_turns": 0}}
             self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))
             self._transcript(config_dir, root, "session.jsonl", {"input_tokens": 99}, time.time())
             self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))
