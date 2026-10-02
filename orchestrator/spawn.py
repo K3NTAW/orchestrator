@@ -1748,7 +1748,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
                         else:
                             r = {"status": "failed", **{key: value for key, value in r.items() if key != "status"}, "reason": reason}
                         derived = True
-                    if outcome["ahead"] == 0:
+                    elif outcome["ahead"] == 0:
                         payload = {"hold_reason": "execute_incomplete: no commits",
                                    "resume_hint": {"partial_output": reason,
                                                    "dirty_in_scope": outcome["dirty_in_scope"],
@@ -1798,7 +1798,8 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
                         r = {"status": "superseded", "reason": reason}
                     else:
                         r = {"status": "failed", **{key: value for key, value in r.items() if key != "status"}, "reason": reason}
-            elif derive and role == "execute" and resume_task is None and r.get("status") == "failed":
+            elif (derive and role == "execute" and resume_task is None
+                  and r.get("status") == "failed" and str(reason).startswith("non-JSON output")):
                 reason = str(reason)
                 posted = worker_control.post_if_current(task_id, epoch, "failed", {"reason": reason})
                 if not posted:

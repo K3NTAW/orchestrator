@@ -558,11 +558,56 @@ class RunWorkerMissingReason(unittest.TestCase):
         self.assertEqual(updated["reason"], "unknown failure")
         self.assertEqual(updated["resume_hint"]["partial_output"], "partial")
 
-    def test_derivation_falls_back_to_guarded_failed_write_or_superseded(self):
-        self.test_failed_without_reason_key_sets_default_and_resume_hint()
-
-
 class ExecuteDerivation(unittest.TestCase):
+    def test_derivation_falls_back_to_guarded_failed_write_or_superseded(self):
+        pool = P.Pool()
+        pool.cfg.setdefault("spawn", {})["derive_execute_result"] = True
+        account = pool.accounts[0]
+        for reason, output, registry_reason in (
+                ("non-JSON output (rc=143): ", None, "non_json"),
+                ("budget cap", {"result": "partial implementation"}, "budget_cap")):
+            with self.subTest(reason=reason):
+                task = bus.create_task("fallback", "s", ["a"], ["result.txt"], role="execute")
+                failure = {"status": "failed", "reason": reason}
+                if output is not None:
+                    failure["output"] = output
+
+                def run(*args, **kwargs):
+                    spawn.worker_registry.upsert(task["id"], status="failed", status_reason=registry_reason)
+                    return dict(failure)
+
+                with mock.patch.object(spawn, "Pool", return_value=pool), \
+                        mock.patch.object(pool, "pick", return_value=account), \
+                        mock.patch.object(pool, "reserve", return_value=account), \
+                        mock.patch.object(spawn, "ensure_worktree", return_value=TMP), \
+                        mock.patch.object(spawn, "head_sha", return_value="pre-head"), \
+                        mock.patch.object(spawn, "execute_outcome", return_value=None) as outcome, \
+                        mock.patch.object(spawn, "run_claude", side_effect=run), \
+                        mock.patch.object(spawn.notify, "notify") as notify, \
+                        mock.patch.object(spawn.worker_control, "post_if_current",
+                                          wraps=spawn.worker_control.post_if_current) as post, \
+                        mock.patch.object(spawn.worker_control, "write_if_current",
+                                          wraps=spawn.worker_control.write_if_current) as write, \
+                        mock.patch.object(bus, "log_run") as log:
+                    result = spawn.run_worker(task["id"])
+                self.assertEqual(result, failure)
+                updated = bus.get(task["id"])
+                self.assertEqual(updated["status"], "failed")
+                self.assertEqual(updated["reason"], reason)
+                self.assertEqual(spawn.worker_registry.get(task["id"])["status_reason"], registry_reason)
+                self.assertFalse(any("derivation failed" in str(call) for call in notify.call_args_list))
+                log.assert_not_called()
+                if output is None:
+                    outcome.assert_called_once()
+                    post.assert_called_once_with(task["id"], 1, "failed", {"reason": reason})
+                else:
+                    outcome.assert_not_called()
+                    post.assert_not_called()
+                    self.assertEqual(updated["resume_hint"]["partial_output"], output["result"])
+                    write.assert_any_call(task["id"], 1, bus.update, task["id"],
+                                          status="failed", reason=reason,
+                                          resume_hint={"partial_output": output["result"]})
+
     def test_execute_result_derived_from_git_state(self):
         repo = scratch_repo(TMP / "derived-worktree")
         task = bus.create_task("derived", "s", ["committed"], ["result.txt"], role="execute")
