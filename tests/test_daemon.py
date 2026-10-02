@@ -3196,6 +3196,26 @@ class Daemon(unittest.TestCase):
         ])
         self.assertEqual(gate_calls, [])
 
+    def test_gate_holds_when_acceptance_test_file_missing_from_diff(self):
+        t = bus.create_task("missing acceptance test file", "spec", [
+            "backend/test/oauth.test.ts is required"], ["x.py"],
+            role="execute", complexity=2, parent="T-0043")["id"]
+        bus.update(t, status="done", worktree=str(self.sandbox))
+        gate_calls = []
+        self.swap(daemon, "changed_paths", lambda task: [])
+        self.swap(daemon.gate, "run_gate", lambda *args, **kwargs: gate_calls.append(True))
+
+        daemon.gate(self.review_pool("always"))
+
+        held = bus.get(t)
+        self.assertEqual((held["status"], held["hold_reason"]), ("held", "gate_red"))
+        self.assertEqual(held["resume_hint"]["missing_test_files"], ["backend/test/oauth.test.ts"])
+        self.assertIn(
+            "FAILED backend/test/oauth.test.ts (missing: test file not in task diff)",
+            held["resume_hint"]["failures"],
+        )
+        self.assertEqual(gate_calls, [])
+
     def test_gate_hold_message_names_not_collected_tests(self):
         test_file = self.sandbox / "tests" / "test_not_collected.py"
         test_file.parent.mkdir(exist_ok=True)

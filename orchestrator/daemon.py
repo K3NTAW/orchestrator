@@ -1435,7 +1435,8 @@ def gate(pool):
             if already_merged(t):
                 continue
             missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
-            if missing:
+            files = acceptance.missing_test_files(worktree, t.get("acceptance") or [], changed_paths(t))
+            if missing or files:
                 if _hold_stale_high(t):
                     continue
                 failures = [
@@ -1443,10 +1444,14 @@ def gate(pool):
                     f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
                     for entry in missing for path, name in [entry]
                 ]
+                failures.extend(
+                    f"FAILED {path} (missing: test file not in task diff)" for path in files
+                )
                 gate_reds = pipeline.get("gate_reds", 0) + 1
                 if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
                          status="held", hold_reason="gate_red",
-                         resume_hint={"failures": failures, "missing_tests": missing}):
+                         resume_hint={"failures": failures, "missing_tests": missing,
+                                     "missing_test_files": files}):
                     print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
                 continue
         result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t["id"], cfg=pool.cfg)
