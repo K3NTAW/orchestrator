@@ -325,8 +325,50 @@ class MergeQueue(unittest.TestCase):
 
 
     def test_fix_round_with_no_new_commit_is_empty_merge(self):
-        """A fix round with no commits beyond its target is held before the gate."""
-        self.assertTrue(hasattr(merge, "merge"))
+        with tempfile.TemporaryDirectory(prefix="empty-fix-") as directory:
+            repo = scratch_repo(Path(directory))
+            state = repo / ".orchestrator"
+            state.mkdir()
+            def git(*args, cwd=repo, check=True):
+                return subprocess.run(["git", *args], cwd=cwd, check=check,
+                                      capture_output=True, text=True)
+            base = git("rev-parse", "HEAD").stdout.strip()
+            git("checkout", "-qb", "goal/empty")
+            (repo / "upstream").write_text("upstream\n")
+            git("add", "upstream")
+            git("commit", "-qm", "advance target")
+            target_sha = git("rev-parse", "HEAD").stdout.strip()
+            green = {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
+            with patch.multiple(bus, STATE=state, TASKS=state / "tasks", RUNS=state / "runs"), \
+                    patch.multiple(merge, ROOT=repo, git=git), \
+                    patch.object(bus, "commit_state"), patch.object(merge.scorecard, "write"), \
+                    patch.object(merge.scorecard, "build", return_value={}):
+                for fix in (True, False):
+                    with self.subTest(fix=fix):
+                        task = bus.create_task("empty", "s", ["a"], ["x.py"], role="execute",
+                                               constraints={"fix_round_for": "T-parent"} if fix else {})
+                        wt = repo / "wt" / task["id"]
+                        git("worktree", "add", "-b", f"task/{task['id']}", str(wt), base)
+                        bus.update(task["id"], worktree=str(wt))
+                        self.assertEqual(git("rev-parse", "HEAD", cwd=wt).stdout.strip(), base)
+                        with patch.object(merge.gate, "run_gate", return_value=green) as gate:
+                            result = merge.merge(task["id"], target="goal/empty", refresh_repomap=False)
+                        self.assertEqual(git("rev-parse", "HEAD", cwd=wt).stdout.strip(), target_sha)
+                        self.assertNotEqual(base, target_sha)
+                        self.assertEqual(git("rev-parse", "goal/empty").stdout.strip(), target_sha)
+                        stored = bus.get(task["id"])
+                        if fix:
+                            self.assertEqual(result, {"status": "empty_merge", "target": "goal/empty",
+                                                      "sha": target_sha})
+                            gate.assert_not_called()
+                            self.assertEqual((stored["status"], stored["hold_reason"]),
+                                             ("held", "empty_merge: fix round added no commit"))
+                            self.assertFalse(stored.get("merged_into"))
+                        else:
+                            self.assertEqual(result["status"], "merged")
+                            gate.assert_called_once()
+                            self.assertEqual((stored["status"], stored["merged_into"]),
+                                             ("done", "goal/empty"))
 
 
 if __name__ == "__main__":

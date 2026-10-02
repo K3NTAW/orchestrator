@@ -1571,7 +1571,8 @@ def report_merge(task_id, r):
             if (current.get("constraints") or {}).get("fix_round_for"):
                 while (current.get("constraints") or {}).get("fix_round_for"):
                     ancestor = bus.get(current["constraints"]["fix_round_for"])
-                    if ancestor.get("merged_into"):
+                    if ancestor.get("merged_into") or ancestor["id"] not in verdicts:
+                        # The chain may have changed while git ran; absence is not negative evidence.
                         ancestor_stamps[ancestor["id"]] = "skipped"
                         current = ancestor
                         continue
