@@ -1736,6 +1736,52 @@ class Daemon(unittest.TestCase):
                 daemon.auto_fix_round(P.Pool())
                 self.assertEqual(len(self.fixes_for(tid)), 1)
 
+    def test_auto_fix_round_files_round_for_execute_incomplete_hold(self):
+        tid = self.task("incomplete")
+        bus.update(tid, status="held", hold_reason="execute_incomplete: no commits",
+                   resume_hint={"partial_output": "non-JSON output (rc=143): ", "head": "abc"})
+        pool = P.Pool()
+        daemon.auto_fix_round(pool)
+        fix, = self.fixes_for(tid)
+        self.assertEqual(fix["constraints"]["fix_round_for"], tid)
+        self.assertEqual(bus.get(tid)["pipeline"]["failure_kind"], "incomplete")
+        self.assertEqual(bus.get(tid)["pipeline"]["auto_fix_route"], "routine_incomplete")
+        daemon.auto_fix_round(pool)
+        self.assertEqual(len(self.fixes_for(tid)), 1)
+
+    def test_fix_round_note_fences_leftovers_and_guards_missing_worktree(self):
+        worktree = self.sandbox / "worktree"
+        worktree.mkdir()
+        held = self.task("incomplete note")
+        bus.update(held, status="held", worktree=str(worktree), hold_reason="execute_incomplete: uncommitted changes",
+                   head_sha="head-sha", resume_hint={"partial_output": "partial output",
+                   "head": "head", "dirty_in_scope": ["a.py"], "dirty_out_of_scope": ["weird```name.py"]})
+        daemon.auto_fix_round(P.Pool())
+        fix, = self.fixes_for(held)
+        self.assertIn("execute_incomplete: uncommitted changes", fix["spec"])
+        self.assertIn(f"worktree: {worktree}", fix["spec"])
+        self.assertIn("a.py", fix["spec"])
+        self.assertIn("weird[backticks omitted]name.py", fix["spec"])
+        self.assertIn("partial output", fix["spec"])
+        self.assertNotIn("diff --git", fix["spec"])
+
+        missing = self.task("missing incomplete note")
+        missing_path = self.sandbox / "gone"
+        bus.update(missing, status="held", worktree=str(missing_path), hold_reason="execute_incomplete: no commits",
+                   resume_hint={"partial_output": "partial", "head": "head"})
+        daemon.auto_fix_round(P.Pool())
+        missing_fix, = self.fixes_for(missing)
+        self.assertIn("worktree: missing", missing_fix["spec"])
+        self.assertIn("not recoverable", missing_fix["spec"])
+        self.assertNotIn(str(missing_path), missing_fix["spec"])
+
+        gate = self.task("gate note")
+        bus.update(gate, status="held", hold_reason="gate_red",
+                   resume_hint={"failures": "FAILED tests/test_x.py::test_x"})
+        daemon.auto_fix_round(P.Pool())
+        gate_fix, = self.fixes_for(gate)
+        self.assertNotIn("previous run ended early", gate_fix["spec"])
+
     def test_auto_fix_round_survives_missing_goal_under_autonomous(self):
         tid = self.held_for_fix()
         pool = P.Pool()

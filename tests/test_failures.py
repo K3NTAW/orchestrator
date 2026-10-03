@@ -72,3 +72,34 @@ class FailureEvidence(unittest.TestCase):
                            "comments": [{"path": "x.py", "line": 4,
                                           "issue": "the spec contradicts itself"}]})
                 self.assertEqual(failures.failure_kind(bus.get(invalid["id"]), None), "invalid_spec")
+
+    def test_failure_kind_incomplete_for_execute_incomplete_holds(self):
+        ordinary = "non-JSON output (rc=143): conflict"
+        for reason in ("execute_incomplete: no commits", "execute_incomplete: uncommitted changes"):
+            self.assertEqual(failures.failure_kind({"hold_reason": reason,
+                                                     "resume_hint": {"partial_output": ordinary}}, None), "incomplete")
+        cases = [("usage limit reached", "quota"), ("permission denied", "permissions"),
+                 ("ModuleNotFoundError: missing", "environment")]
+        for partial_output, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(failures.failure_kind({"hold_reason": "execute_incomplete: no commits",
+                                                         "resume_hint": {"partial_output": partial_output}}, None), expected)
+        self.assertEqual(failures.failure_kind({"hold_reason": "execute_incomplete: no commits"}, None), "incomplete")
+        self.assertEqual(failures.failure_kind({"hold_reason": "gate_red",
+                                                 "resume_hint": {"failures": "FAILED tests/test_x.py::test_x"}}, None),
+                         "code_defect")
+
+    def test_failure_signature_for_incomplete_uses_head_and_dirty_set(self):
+        def task(head="h1", in_scope=None, out_scope=None):
+            return {"hold_reason": "execute_incomplete: no commits", "pipeline": {"failure_kind": "incomplete"},
+                    "resume_hint": {"head": head, "dirty_in_scope": in_scope or [],
+                                     "dirty_out_of_scope": out_scope or []}}
+        base = task(in_scope=["b.py", "a.py"], out_scope=["z.py"])
+        self.assertEqual(failures.failure_signature(base),
+                         failures.failure_signature(task(in_scope=["a.py", "b.py"], out_scope=["z.py"])))
+        self.assertNotEqual(failures.failure_signature(base), failures.failure_signature(task(head="h2")))
+        self.assertNotEqual(failures.failure_signature(base), failures.failure_signature(task(in_scope=["a.py"])))
+        self.assertEqual(failures.failure_signature(task(head=None)), failures.failure_signature(task(head="")))
+        gate = {"hold_reason": "gate_red", "pipeline": {"failure_kind": "code_defect"},
+                "resume_hint": {"failures": "FAILED tests/test_x.py::test_x"}}
+        self.assertEqual(failures.failure_signature(gate), failures.failure_signature({**gate, "resume_hint": dict(gate["resume_hint"])}))

@@ -237,6 +237,9 @@ output escalates. Review holds are routine only when every rejecting review comm
 the fix lineage and stop at `[daemon].auto_fix_rounds` (default 2). Each hold uses `planner_runs._held_at(task)` as
 its deduplication key; skipped/escalated holds notify once per key.
 
+`execute_incomplete` holds get kind `incomplete` unless their partial output shows an environment, permissions, or
+quota marker; they are routine, and their fix round lists recorded leftovers. Failed execute tasks are not yet handled (B5b).
+
 ### Autonomous decisions
 `pool.toml`'s `[planner] autonomous` (default `false`) lets `daemon.tick()` launch a short-lived headless Planner on
 its own, without an interactive session, to act on one of three decision points: `scouts_done` (a goal's scouts are
