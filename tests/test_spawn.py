@@ -1028,7 +1028,7 @@ class Render(unittest.TestCase):
         self.assertLess(len(diff_section), len(raw))
         self.assertGreater(len(text), 8200)
         self.assertEqual(text.count("expand with:"), 1)
-        self.assertIn(f"expand with: git -C {TMP} diff -U3 goal/G...HEAD -- widget.py {'x' * 1500}", text)
+        self.assertIn(f"expand with: git -C {TMP} diff -U3 origin/main...HEAD -- widget.py {'x' * 1500}", text)
 
     def test_review_packet_excludes_other_tasks_and_memory(self):
         task = {**self.packet_fixture(), "spec": "only this task"}
