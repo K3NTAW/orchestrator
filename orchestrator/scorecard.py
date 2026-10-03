@@ -190,7 +190,12 @@ def build(root=STATE, by="executor"):
     def key_of(entry):
         if by == "tier":
             return entry.get("tier") or entry.get("executor") or "?"
-        return entry.get("executor") or (f"claude:{entry['tier']}" if entry.get("tier") else None)
+        try:
+            from . import pool
+            cfg = pool.config()
+        except Exception:
+            return entry.get("executor") or (f"claude:{entry['tier']}" if entry.get("tier") else None)
+        return attribution.executor_label(entry.get("executor"), entry.get("tier"), cfg)
 
     for p, e in _read_jsonl_entries(root):
         is_today = p.stem == today

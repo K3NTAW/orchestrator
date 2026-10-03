@@ -226,6 +226,16 @@ class SkillScorecardTests(unittest.TestCase):
         self.assertEqual(card['skill_overhead_ratio'], .1)
         self.assertIsNone(card['skill_utility'])
 
+    def test_economy_tolerates_none_skills_used(self):
+        metrics = skill_scorecard.economy(rows=[
+            {'context': {'skills_used': None}},
+            {},
+        ])
+        self.assertEqual(set(metrics), {
+            'skill_reuse_rate', 'skill_overhead_ratio',
+            'skill_utility', 'skill_recovery_rate',
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -158,6 +158,9 @@ def auto_fix_round(pool):
             continue
         if held.get("hold_reason", "").startswith("render_error"):
             continue
+        if held.get("hold_reason", "").startswith("unlanded_after_fix_round"):
+            # A done fix child with an unlanded ancestor is expected here; Planner re-lands the ancestor.
+            continue
         if stale(held):
             continue
         held_at = planner_runs._held_at(held)
@@ -454,6 +457,32 @@ def already_merged(t):
         bus.update(t["id"], merged_into=target, merged_via="ancestor")
         return True
     return False
+
+
+def landed(ancestor_id, target, *, git=None):
+    """Return whether an ancestor's commits are already represented on target."""
+    git = git or gitutil._git_in
+    try:
+        branch = f"task/{ancestor_id}"
+        ref = git(spawn.ROOT, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        if ref.returncode != 0:
+            if ref.returncode == 1:
+                try:
+                    return bool(bus.get(ancestor_id).get("merged_into"))
+                except (KeyError, OSError):
+                    return False
+            return False
+        ancestry = git(spawn.ROOT, "merge-base", "--is-ancestor", branch, target)
+        if ancestry.returncode == 0:
+            return True
+        if ancestry.returncode != 1:
+            return False
+        cherry = git(spawn.ROOT, "cherry", target, branch)
+        if cherry.returncode != 0:
+            return False
+        return all(not line or line.startswith("-") for line in cherry.stdout.splitlines())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _codex_available(pool):
@@ -1435,7 +1464,8 @@ def gate(pool):
             if already_merged(t):
                 continue
             missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
-            if missing:
+            files = acceptance.missing_test_files(worktree, t.get("acceptance") or [], changed_paths(t))
+            if missing or files:
                 if _hold_stale_high(t):
                     continue
                 failures = [
@@ -1443,10 +1473,14 @@ def gate(pool):
                     f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
                     for entry in missing for path, name in [entry]
                 ]
+                failures.extend(
+                    f"FAILED {path} (missing: test file not in task diff)" for path in files
+                )
                 gate_reds = pipeline.get("gate_reds", 0) + 1
                 if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
                          status="held", hold_reason="gate_red",
-                         resume_hint={"failures": failures, "missing_tests": missing}):
+                         resume_hint={"failures": failures, "missing_tests": missing,
+                                     "missing_test_files": files}):
                     print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
                 continue
         result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t["id"], cfg=pool.cfg)
@@ -1473,6 +1507,13 @@ def gate(pool):
         green_fields = {"first_green_at": pipeline.get("first_green_at", now),
                         "gate_reds": pipeline.get("gate_reds", 0),
                         "reviews_expected": n_reviews, "review_reason": review_reason}
+        target_ref = f"goal/{t['parent']}" if t.get("parent") else "integration"
+        target_sha = _git_in(worktree, "rev-parse", target_ref)
+        head_sha = _git_in(worktree, "rev-parse", "HEAD")
+        if target_sha.returncode == 0:
+            green_fields["gated_target_sha"] = target_sha.stdout.strip()
+        if head_sha.returncode == 0:
+            green_fields["gated_head"] = head_sha.stdout.strip()
         with bus.locked():
             if not stamp(t["id"], "gated_at", pipeline_fields=green_fields):
                 continue
@@ -1518,27 +1559,63 @@ def report_merge(task_id, r):
             pass
     if r.get("status") == "merged":
         merged_at = time.time()
+        task = bus.get(task_id)
+        fix_id = task_id
+        verdicts = {}
+        ancestor_ids = []
+        current = task
+        while (current.get("constraints") or {}).get("fix_round_for"):
+            ancestor_id = current["constraints"]["fix_round_for"]
+            ancestor_ids.append(ancestor_id)
+            current = bus.get(ancestor_id)
+        for ancestor_id in ancestor_ids:
+            verdicts[ancestor_id] = landed(ancestor_id, r["target"])
         with bus.locked():
             current = bus.get(task_id)
             task_pipeline = dict(current.get("pipeline") or {})
             task_pipeline.setdefault("accepted_at", merged_at)
-            bus.update(task_id, pipeline=task_pipeline)
+            ancestor_stamps = {}
             if (current.get("constraints") or {}).get("fix_round_for"):
-                fix_id = task_id
-                lineage_root = root(current)
-                root_pipeline = dict(lineage_root.get("pipeline") or {})
-                root_pipeline.setdefault("accepted_at", merged_at)
                 while (current.get("constraints") or {}).get("fix_round_for"):
                     ancestor = bus.get(current["constraints"]["fix_round_for"])
+                    if ancestor.get("merged_into") or ancestor["id"] not in verdicts:
+                        # The chain may have changed while git ran; absence is not negative evidence.
+                        ancestor_stamps[ancestor["id"]] = "skipped"
+                        current = ancestor
+                        continue
+                    if not verdicts.get(ancestor["id"], False):
+                        prior_hint = ancestor.get("resume_hint")
+                        bus.update(ancestor["id"], status="held",
+                                   hold_reason=f"unlanded_after_fix_round: {fix_id}",
+                                   resume_hint={"fix_round": fix_id, "target": r["target"],
+                                               "target_sha": r["sha"],
+                                               "prior_status": ancestor.get("status"),
+                                               "prior_hold_reason": ancestor.get("hold_reason"),
+                                               "prior_resume_hint": prior_hint})
+                        ancestor_stamps[ancestor["id"]] = "unlanded"
+                        break
                     fields = {"status": "done", "merged_into": r["target"],
                               "merged_via": f"fix round {fix_id} {r['sha']}", "hold_reason": None}
-                    if ancestor["id"] == lineage_root["id"]:
-                        fields["pipeline"] = root_pipeline
+                    if not (ancestor.get("constraints") or {}).get("fix_round_for"):
+                        pipeline = dict(ancestor.get("pipeline") or {})
+                        pipeline.setdefault("accepted_at", merged_at)
+                        fields["pipeline"] = pipeline
                     bus.update(ancestor["id"], **fields)
+                    ancestor_stamps[ancestor["id"]] = "merged"
                     current = ancestor
-                bus.update(task_id, status="done", merged_into=r["target"],
+                task_pipeline["ancestor_stamps"] = ancestor_stamps
+                bus.update(task_id, pipeline=task_pipeline, status="done", merged_into=r["target"],
                            merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
-        notify(f"{task_id} merged into {r['target']} ({r['sha'][:8]})")
+            else:
+                bus.update(task_id, pipeline=task_pipeline)
+        unlanded = next((ancestor_id for ancestor_id, stamp in ancestor_stamps.items()
+                         if stamp == "unlanded"), None)
+        if r.get("gate") == "reused_green":
+            notify(f"{task_id}: merge reused the daemon gate (target unmoved)")
+        if unlanded:
+            notify(f"{task_id} merged but ancestor {unlanded} commits are not on {r['target']}; held")
+        else:
+            notify(f"{task_id} merged into {r['target']} ({r['sha'][:8]})")
         strategy.record_outcome(bus.get(task_id), root=STATE)
     else:                                  # merge.merge already set the task failed with a resume_hint
         notify(f"{task_id} merge failed: {r.get('status')} {r.get('reason', '')}".strip())
@@ -1627,7 +1704,9 @@ def _merge_reviewed_one(t):
                 if result.get("status") != "merged":
                     if result.get("status") == "tests_red":
                         clear_stage(t["id"], "merged_at")
-                    bus.update(t["id"], status="held", hold_reason=f"merge {result.get('status')}")
+                    fresh = bus.get(t["id"])
+                    if fresh.get("status") != "held":
+                        bus.update(t["id"], status="held", hold_reason=f"merge {result.get('status')}")
             except Exception as e:
                 hold_failed(t["id"], "merged_error", "merge", e)
         return

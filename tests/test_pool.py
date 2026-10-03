@@ -25,6 +25,32 @@ def _user(ts):
 
 
 class PoolSel(unittest.TestCase):
+    def test_row_covers_and_claude_has_headroom_extracted(self):
+        pool = self.p
+        sonnet = P.Executor("claude:sonnet", "claude", "sonnet", ["execute"], complexity_max=5)
+        opus = P.Executor("claude:opus", "claude", "opus", ["execute"], complexity_min=6)
+        pool.executors = {row.id: row for row in (sonnet, opus)}
+        pool._claude_split = 6
+        with mock.patch.object(pool, "pick", return_value=object()) as pick:
+            self.assertTrue(pool.claude_has_headroom())
+            pick.assert_called_once_with("execute")
+            for complexity in range(1, 11):
+                expected = sonnet if complexity <= 6 else opus
+                self.assertEqual([row for row in (sonnet, opus) if pool.row_covers(row, complexity)],
+                                 [expected])
+                self.assertEqual(pool.eligible_executors("execute", complexity), [expected])
+            opus.enabled = False
+            self.assertFalse(pool.row_covers(sonnet, 6))
+            pool.executors = {sonnet.id: sonnet}
+            for complexity in range(1, 11):
+                covers = complexity <= 5
+                self.assertEqual(pool.row_covers(sonnet, complexity), covers)
+                self.assertEqual(pool.eligible_executors("execute", complexity), [sonnet] if covers else [])
+        with mock.patch.object(pool, "pick", return_value=None) as pick:
+            self.assertFalse(pool.claude_has_headroom())
+            pick.assert_called_once_with("execute")
+            self.assertEqual(pool.eligible_executors("execute", 3), [])
+
     def setUp(self):
         P.PERSIST.unlink(missing_ok=True); P.PLANNER_USAGE.unlink(missing_ok=True); self.p = P.Pool()
 
@@ -177,6 +203,30 @@ class PoolSel(unittest.TestCase):
         pool = P.Pool(codex_disabled)
         self.assertEqual(pool.pick_executor("execute", 3).id, "claude:sonnet")
         self.assertEqual(pool.pick_executor("execute", 8).id, "claude:opus")
+
+    def test_claude_split_moves_line_by_evidence(self):
+        cfg = {"models": {"success_floor": 0.6}, "routing": {"sonnet_max_complexity": 5,
+                "split_min": 4, "split_max": 7, "split_min_samples": 10}}
+        good = {"merged": 6, "failed": 4}
+        self.assertEqual(P.claude_split(cfg, {}), 5)
+        self.assertEqual(P.claude_split(cfg, {"claude:sonnet": {"by_complexity": {"4-6": good}},
+                                               "claude:opus": {"by_complexity": {"4-6": {"merged": 5, "failed": 5}}}}), 6)
+        self.assertEqual(P.claude_split(cfg, {"claude:sonnet": {"by_complexity": {"4-6": {"merged": 5, "failed": 5}}}}), 4)
+        bounded = {**cfg, "routing": {**cfg["routing"], "sonnet_max_complexity": 99}}
+        self.assertEqual(P.claude_split(bounded, {}), 7)
+
+        shipped = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        paired = {**shipped, "executors": [row for row in shipped["executors"]
+                   if row["id"] in ("claude:sonnet", "claude:opus")]}
+        pool = P.Pool(paired)
+        pool._claude_split = 6
+        self.assertEqual(pool.pick_executor("execute", 6).id, "claude:sonnet")
+        self.assertEqual(pool.pick_executor("execute", 7).id, "claude:opus")
+
+    def test_status_without_codex_table(self):
+        cfg = {**self.p.cfg}
+        cfg.pop("codex", None)
+        self.assertEqual(P.Pool(cfg).status()["codex"]["on_exhausted"], "hold")
 
     def test_daemon_respawn_max_documented(self):
         cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
@@ -527,7 +577,7 @@ class ExecutorIdentity(unittest.TestCase):
             pick.assert_called_once_with("execute")
             pick.reset_mock()
             self.p.accounts[0].cooldown_until = 0
-            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["claude:sonnet", "x", "claude:opus"])
+            self.assertEqual([e.id for e in self.p.eligible_executors("execute", 3)], ["claude:sonnet", "x"])
             pick.assert_called_once_with("execute")
             pick.reset_mock()
             for eid in ("claude:sonnet", "claude:opus"):

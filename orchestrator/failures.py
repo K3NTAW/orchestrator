@@ -136,6 +136,8 @@ def failure_kind(task, worktree, *, rerun_max=1, rerun_timeout=600):
     issues = "\n".join(str(c.get("issue") or "").lower() for _, cs in comments for c in cs)
     if ("spec" in issues and ("contradict" in issues or "impossible" in issues)) or "acceptance cannot" in issues:
         return "invalid_spec"
+    if reason.startswith("review request_changes") and comments:
+        return "code_defect"
     ids, rejected = _test_ids_with_rejections((task.get("resume_hint") or {}).get("failures"))
     if rejected:
         hint = dict(task.get("resume_hint") or {})

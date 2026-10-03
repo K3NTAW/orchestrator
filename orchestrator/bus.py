@@ -107,13 +107,25 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
         raise ValueError("acceptance and scope must be non-empty lists")
     tid = next_id()
     deps = list(depends_on or [])
+    resolved = {}
     for dep in deps:
         if dep == tid:
             raise ValueError(f"task cannot depend on itself: {dep}")
         try:
             get(dep)
         except KeyError:
-            raise ValueError(f"depends_on references unknown task: {dep}")
+            candidates = [candidate for candidate in read()
+                          if candidate.get("parent") == parent
+                          and candidate.get("status") != "superseded"
+                          and candidate.get("constraints", {}).get("plan_label") == dep]
+            if not candidates:
+                raise ValueError(f"depends_on references unknown task or plan label: {dep}")
+            if len(candidates) > 1:
+                ids = ", ".join(candidate["id"] for candidate in candidates)
+                raise ValueError(f"depends_on plan label {dep} matches multiple tasks: {ids}")
+            resolved[dep] = candidates[0]["id"]
+    if resolved:
+        deps = [resolved.get(dep, dep) for dep in deps]
     fix_round_for = (constraints or {}).get("fix_round_for")
     normalized_dep = fix_round_for if fix_round_for in deps else None
     if normalized_dep:
@@ -124,22 +136,54 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
          "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
          "status": "queued", "assigned_to": None, "worktree": None, "codex_thread": None, "result": None, "events": []}
     _save(t); _event(t["id"], "created")
+    if resolved:
+        _event(t["id"], "depends_on_resolved", resolved)
     if normalized_dep:
         _event(t["id"], "depends_on_normalized", {"dropped": normalized_dep})
     return t
 
 
 def update(tid, **fields):
-    """Non-Planner fields only: status, assigned_to, worktree, codex_thread, executor, pid, resume_hint.
+    """Update worker fields, or depends_on on a queued, undispatched task.
     executor is the routed model id ("astra", "luna", ...) or "claude:<tier>" for a Claude fallback run."""
     with locked():   # read-modify-write: without the lock a concurrent update drops the other's fields
         t = get(tid)
+        old_depends_on = t.get("depends_on", [])
+        new_depends_on = fields.get("depends_on")
+        if "depends_on" in fields:
+            if t.get("status") != "queued" or t.get("pipeline", {}).get("dispatched_at") is not None:
+                raise PermissionError("depends_on may only be changed before dispatch on a queued task")
+            if not isinstance(new_depends_on, list) or not all(isinstance(dep, str) for dep in new_depends_on):
+                raise ValueError("depends_on must be a list of task ids")
+            fix_round_for = t.get("constraints", {}).get("fix_round_for")
+            for dep in new_depends_on:
+                if dep == tid:
+                    raise ValueError(f"task cannot depend on itself: {dep}")
+                try:
+                    dependency = get(dep)
+                except KeyError:
+                    raise ValueError(f"depends_on references unknown task: {dep}")
+                if dep == fix_round_for:
+                    raise ValueError(f"task cannot depend on its fix_round_for parent: {dep}")
+                pending = [dep]
+                seen = set()
+                while pending:
+                    current = pending.pop()
+                    if current in seen:
+                        continue
+                    seen.add(current)
+                    if current == tid:
+                        raise ValueError(f"depends_on cycle: {dep}")
+                    current_task = dependency if current == dep else get(current)
+                    pending.extend(current_task.get("depends_on", []))
         for k, v in fields.items():
-            if k in {"spec", "acceptance", "scope", "complexity", "depends_on"}:
+            if k in {"spec", "acceptance", "scope", "complexity"}:
                 raise PermissionError(f"only the Planner may set {k}; create a new task instead")
             t[k] = v
         t["events"].append({"ts": time.time(), **fields})
         _save(t); _event(tid, "update", fields)
+        if "depends_on" in fields:
+            _event(tid, "depends_on_changed", {"from": old_depends_on, "to": new_depends_on})
     return t
 
 
@@ -367,8 +411,7 @@ def log_run(*, attempt=1, **fields):
             fields.setdefault("goal_id", task.get("parent") or task_id)
         except Exception:
             fields.setdefault("goal_id", None)
-        fields.setdefault("provider", "codex" if fields.get("account") == "codex" else "claude")
-    from . import attribution
+    from . import attribution, pool
     task = {}
     if task_id:
         try:
@@ -382,10 +425,16 @@ def log_run(*, attempt=1, **fields):
     cfg = pool_config()
     provider = fields.get("provider") or ("codex" if fields.get("account") == "codex" else "claude")
     tier = fields.get("tier", task.get("tier"))
+    label = attribution.executor_label(fields.get("executor") or task.get("executor"), tier, cfg)
+    codex_ids = {row.get("id") for row in pool.executor_rows(cfg)
+                 if row.get("provider") == "codex"}
+    if fields.get("provider") is None and fields.get("account") is None and label in codex_ids:
+        provider = fields["provider"] = "codex"
+    elif fields.get("provider") is None:
+        fields.setdefault("provider", provider)
     fields.setdefault("bucket", attribution.bucket_of(fields.get("role", task.get("role")), task))
     fields.setdefault("band", attribution.band(fields.get("complexity", task.get("complexity"))))
-    fields.setdefault("executor", task.get("executor") or (
-        tier if provider == "codex" else f"claude:{tier}" if tier else None))
+    fields.setdefault("executor", label)
     fields.setdefault("model", attribution.model_of(fields["executor"], tier, cfg))
     usage = fields.get("usage")
     if not isinstance(usage, dict):

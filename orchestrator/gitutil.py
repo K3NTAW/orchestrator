@@ -2,13 +2,77 @@
 import subprocess
 from pathlib import Path
 
+from . import scopes
+
 class GitError(RuntimeError):
     pass
 
-def _git_in(worktree, *args):
-    return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+def _git_in(worktree, *args, timeout=None):
+    return subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True, timeout=timeout)
 
-def _resolve_base(worktree, parent):
+
+def parse_porcelain_z(output):
+    """Return changed paths, including both rename/copy endpoints like daemon's scope check."""
+    paths = []
+    entries = iter(output.split("\0"))
+    for entry in entries:
+        if not entry:
+            continue
+        changed = [entry[3:]]
+        if "R" in entry[:2] or "C" in entry[:2]:
+            changed.append(next(entries, ""))  # destination first, then source
+        for path in changed:
+            if path and path.split("/", 1)[0] not in (".orchestrator", ".venv"):
+                paths.append(path)
+    return paths
+
+
+def head_sha(worktree, timeout=60):
+    try:
+        result = _git_in(worktree, "rev-parse", "HEAD", timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def execute_outcome(worktree, parent, scope, *, since=None):
+    """Collect git evidence, rejecting a HEAD change during the reads.
+
+    This detects concurrent commits; it is not an atomic snapshot of working files.
+    """
+    if not worktree or not Path(worktree).is_dir():
+        return None
+    try:
+        head = head_sha(worktree, timeout=60)
+        if not head:
+            return None
+        base = _resolve_base(worktree, parent, timeout=60)
+        if not base:
+            return None
+
+        ahead_result = _git_in(worktree, "rev-list", "--count", f"{since or base}..HEAD", timeout=60)
+        if ahead_result.returncode != 0:
+            return None
+        status_result = _git_in(worktree, "status", "--porcelain", "-z", "--untracked-files=all", timeout=60)
+        if status_result.returncode != 0:
+            return None
+        if head_sha(worktree, timeout=60) != head:
+            return None
+        paths = parse_porcelain_z(status_result.stdout)
+        dirty_in_scope = sorted(path for path in paths if scopes.matches(path, scope))
+        dirty_out_of_scope = sorted(path for path in paths if not scopes.matches(path, scope))
+        return {
+            "ahead": int(ahead_result.stdout.strip()),
+            "head": head,
+            "dirty_in_scope": dirty_in_scope,
+            "dirty_out_of_scope": dirty_out_of_scope,
+        }
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+def _resolve_base(worktree, parent, *, timeout=None):
     """The trunk a worktree's HEAD should be compared against: the first of goal/<parent>, origin/main or main
     that resolves via merge-base, in that order -- a parentless task, or the first execute task of a goal that
     hasn't cut its goal branch yet, falls through to whichever trunk the worktree was actually cut from. None
@@ -16,7 +80,9 @@ def _resolve_base(worktree, parent):
     detection) and changed_paths() (security-path review routing) so both use the same fallback order."""
     candidates = ([f"goal/{parent}"] if parent else []) + ["origin/main", "main"]
     for candidate in candidates:
-        r = _git_in(worktree, "merge-base", "HEAD", candidate)
+        # Preserve the call shape for existing callers and injected git runners.
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        r = _git_in(worktree, "merge-base", "HEAD", candidate, **kwargs)
         if r.returncode == 0:
             return r.stdout.strip()
     return None

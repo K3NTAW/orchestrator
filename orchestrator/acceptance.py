@@ -11,6 +11,52 @@ _TEST_ID = re.compile(
 )
 
 
+_TEST_FILE_SUFFIXES = ("js", "jsx", "ts", "tsx", "mjs", "cjs")
+
+
+def test_file_paths(acceptance):
+    """Return acceptance-named test file paths, including non-Python test files."""
+    paths = set()
+    for criterion in acceptance or []:
+        if not isinstance(criterion, str):
+            continue
+        for token in criterion.split():
+            token = token.strip("\"'`[](){}")
+            token = token.rstrip(":,;.")
+            if not token or "*" in token or token.endswith("/"):
+                continue
+            if "::" in token:
+                left, _ = token.split("::", 1)
+                if left.endswith(".py"):
+                    continue
+                token = left
+            path = Path(token)
+            if not path.suffix:
+                continue
+            parts = path.parts
+            name = path.name
+            in_test_directory = any(part in {"test", "tests", "__tests__"} for part in parts[:-1])
+            stem = path.stem
+            language_test_name = (
+                any(name.endswith(f".test.{suffix}") or name.endswith(f".spec.{suffix}")
+                    for suffix in _TEST_FILE_SUFFIXES)
+                or name.endswith("Test.swift") or name.endswith("Tests.swift")
+                or name.endswith("Test.kt") or name.endswith("Tests.kt")
+                or name.endswith("Test.java") or name.endswith("Tests.java")
+            )
+            if in_test_directory or language_test_name:
+                paths.add(token)
+    return sorted(paths)
+
+
+def missing_test_files(worktree, acceptance, changed=None):
+    """Return named test files absent from the worktree or task diff."""
+    root = Path(worktree)
+    changed_set = set(changed) if isinstance(changed, list) else None
+    return [path for path in test_file_paths(acceptance)
+            if not (root / path).is_file() or (changed_set is not None and path not in changed_set)]
+
+
 class NotCollectedTest(tuple):
     """A two-item missing-test result whose definition unittest will not collect."""
 

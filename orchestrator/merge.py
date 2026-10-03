@@ -34,6 +34,7 @@ def merge(task_id, target=None, *, refresh_repomap=True):
         if git("rev-parse", "--verify", target, check=False).returncode:
             base = "origin/main" if not git("rev-parse", "--verify", "origin/main", check=False).returncode else "HEAD"
             git("branch", target, base)
+        target_sha_before = git("rev-parse", target, check=False).stdout.strip()
         reviewed = (t.get("pipeline") or {}).get("reviewed_sha")
         before_diff = _diff_hash(target, wt) if reviewed else None
         if reviewed and before_diff is None:
@@ -54,10 +55,37 @@ def merge(task_id, target=None, *, refresh_repomap=True):
             return {"status": "failed", "reason": reason}
         if reviewed and before_diff != after_diff:
             return {"status": "rebase_changed_diff"}
-        result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)
+        if (t.get("constraints") or {}).get("fix_round_for"):
+            ahead = git("rev-list", "--count", f"{target}..HEAD", cwd=wt, check=False)
+            if ahead.returncode == 0 and ahead.stdout.strip() == "0":
+                sha = git("rev-parse", target).stdout.strip()
+                bus.update(task_id, status="held", hold_reason="empty_merge: fix round added no commit")
+                return {"status": "empty_merge", "target": target, "sha": sha}
+        pipeline = t.get("pipeline") or {}
+        gated_target_sha = pipeline.get("gated_target_sha")
+        gated_head = pipeline.get("gated_head")
+        from .pool import config as pool_config
+        merge_cfg = pool_config().get("merge", {})
+        after_rebase_head = git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()
+        can_reuse = (merge_cfg.get("skip_regate_when_unmoved", True)
+                     and pipeline.get("gated_at")
+                     and not (t.get("result") or {}).get("synthetic_commit")
+                     and gated_target_sha == target_sha_before
+                     and after_rebase_head == gated_head)
+        if can_reuse:
+            result = {"returncode": 0, "timed_out": False, "stdout": "", "stderr": ""}
+            gate_mode = {"mode": "reused_green", "gated_target_sha": gated_target_sha,
+                         "gated_head": gated_head}
+        else:
+            result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)
+            gate_mode = {"mode": "ran"}
+        with bus.locked():
+            pipeline = dict(bus.get(task_id).get("pipeline") or {})
+            pipeline["merge_gate"] = gate_mode
+            bus.update(task_id, pipeline=pipeline)
         if result["timed_out"]:
             bus.update(task_id, status="held", hold_reason="gate_timeout",
-                       pipeline={**(t.get("pipeline") or {}), "infra_failure": "gate_timeout"},
+                       pipeline={**pipeline, "infra_failure": "gate_timeout"},
                        resume_hint={"output_tail": (result["stdout"] + result["stderr"])[-4000:]})
             return {"status": "gate_timeout", "reason": "gate_timeout"}
         if result["returncode"]:
@@ -71,6 +99,8 @@ def merge(task_id, target=None, *, refresh_repomap=True):
         previous_sha = git("rev-parse", target).stdout.strip()
         checked_out = git("symbolic-ref", "-q", "HEAD", cwd=ROOT, check=False).stdout.strip() == f"refs/heads/{target}"
         result = {"status": "merged", "target": target, "sha": sha}
+        if gate_mode["mode"] == "reused_green":
+            result["gate"] = "reused_green"
         if checked_out:
             mff = git("merge", "--ff-only", sha, cwd=ROOT, check=False)
             if mff.returncode == 0:
