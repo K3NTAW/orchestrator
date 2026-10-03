@@ -1746,8 +1746,41 @@ class Daemon(unittest.TestCase):
         self.assertEqual(fix["constraints"]["fix_round_for"], tid)
         self.assertEqual(bus.get(tid)["pipeline"]["failure_kind"], "incomplete")
         self.assertEqual(bus.get(tid)["pipeline"]["auto_fix_route"], "routine_incomplete")
+        self.assertTrue(fix["title"].startswith("fix round 1:"))
         daemon.auto_fix_round(pool)
         self.assertEqual(len(self.fixes_for(tid)), 1)
+        messages = self.enterContext(mock.patch.object(daemon, "notify"))
+        bus.update(fix["id"], status="held", hold_reason="execute_incomplete: no commits",
+                   resume_hint={"head": "abc"})
+        daemon.auto_fix_round(pool)
+        self.assertEqual(self.fixes_for(fix["id"]), [])
+        self.assertIn("unchanged failure repeated", messages.call_args.args[0])
+        pool.cfg.setdefault("daemon", {})["auto_fix_rounds"] = 2
+        pool.cfg.setdefault("planner", {}).update(autonomous=True, routes={"enabled": True})
+        bus.update(fix["id"], resume_hint={"head": "changed"})
+        with mock.patch.object(daemon.decision, "route") as route:
+            daemon.auto_fix_round(pool)
+            route.assert_not_called()
+        second, = self.fixes_for(fix["id"])
+        self.assertEqual(second["constraints"]["auto_round"], 2)
+        bus.update(second["id"], status="held", hold_reason="execute_incomplete: no commits",
+                   resume_hint={"head": "third"})
+        daemon.auto_fix_round(pool)
+        self.assertEqual(self.fixes_for(second["id"]), [])
+        pool.cfg["planner"]["autonomous"] = False
+        quota = self.task("quota incomplete")
+        bus.update(quota, status="held", hold_reason="execute_incomplete: no commits",
+                   resume_hint={"partial_output": "usage limit reached"})
+        failed = self.task("failed execute")
+        bus.update(failed, status="failed", reason="non-JSON output (rc=1): ")
+        before = bus.get(failed)
+        messages.reset_mock()
+        daemon.auto_fix_round(pool)
+        messages.assert_not_called()
+        self.assertEqual(self.fixes_for(quota), [])
+        self.assertEqual(bus.get(quota)["pipeline"]["failure_kind"], "quota")
+        self.assertEqual(self.fixes_for(failed), [])
+        self.assertEqual(bus.get(failed), before)
 
     def test_fix_round_note_fences_leftovers_and_guards_missing_worktree(self):
         worktree = self.sandbox / "worktree"
@@ -1763,6 +1796,11 @@ class Daemon(unittest.TestCase):
         self.assertIn("a.py", fix["spec"])
         self.assertIn("weird[backticks omitted]name.py", fix["spec"])
         self.assertIn("partial output", fix["spec"])
+        blocks = [part.split("\n```", 1)[0] for part in fix["spec"].split("```data\n")[1:]]
+        self.assertEqual(blocks[0], "partial output")
+        self.assertEqual(blocks[1], "execute_incomplete: uncommitted changes\nhead: head\n"
+                         f"worktree: {worktree}\na.py\nweird[backticks omitted]name.py")
+        self.assertIn("Finish the acceptance, commit, and do not run the full gate.", fix["spec"])
         self.assertNotIn("diff --git", fix["spec"])
 
         missing = self.task("missing incomplete note")

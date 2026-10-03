@@ -74,6 +74,7 @@ class FailureEvidence(unittest.TestCase):
                 self.assertEqual(failures.failure_kind(bus.get(invalid["id"]), None), "invalid_spec")
 
     def test_failure_kind_incomplete_for_execute_incomplete_holds(self):
+        self.enterContext(patch.object(bus, "read", return_value=[]))
         ordinary = "non-JSON output (rc=143): conflict"
         for reason in ("execute_incomplete: no commits", "execute_incomplete: uncommitted changes"):
             self.assertEqual(failures.failure_kind({"hold_reason": reason,
@@ -85,21 +86,30 @@ class FailureEvidence(unittest.TestCase):
                 self.assertEqual(failures.failure_kind({"hold_reason": "execute_incomplete: no commits",
                                                          "resume_hint": {"partial_output": partial_output}}, None), expected)
         self.assertEqual(failures.failure_kind({"hold_reason": "execute_incomplete: no commits"}, None), "incomplete")
-        self.assertEqual(failures.failure_kind({"hold_reason": "gate_red",
+        self.assertEqual(failures.failure_kind({"id": "T-incomplete-kind", "hold_reason": "gate_red",
                                                  "resume_hint": {"failures": "FAILED tests/test_x.py::test_x"}}, None),
                          "code_defect")
 
     def test_failure_signature_for_incomplete_uses_head_and_dirty_set(self):
+        import hashlib
+        import json
+        self.enterContext(patch.object(bus, "read", return_value=[]))
         def task(head="h1", in_scope=None, out_scope=None):
-            return {"hold_reason": "execute_incomplete: no commits", "pipeline": {"failure_kind": "incomplete"},
+            return {"id": "T-incomplete-signature", "hold_reason": "execute_incomplete: no commits", "pipeline": {"failure_kind": "incomplete"},
                     "resume_hint": {"head": head, "dirty_in_scope": in_scope or [],
                                      "dirty_out_of_scope": out_scope or []}}
         base = task(in_scope=["b.py", "a.py"], out_scope=["z.py"])
         self.assertEqual(failures.failure_signature(base),
                          failures.failure_signature(task(in_scope=["a.py", "b.py"], out_scope=["z.py"])))
-        self.assertNotEqual(failures.failure_signature(base), failures.failure_signature(task(head="h2")))
+        self.assertNotEqual(failures.failure_signature(base), failures.failure_signature(
+            task(head="h2", in_scope=["b.py", "a.py"], out_scope=["z.py"])))
         self.assertNotEqual(failures.failure_signature(base), failures.failure_signature(task(in_scope=["a.py"])))
         self.assertEqual(failures.failure_signature(task(head=None)), failures.failure_signature(task(head="")))
-        gate = {"hold_reason": "gate_red", "pipeline": {"failure_kind": "code_defect"},
+        missing_head = task()
+        missing_head["resume_hint"].pop("head")
+        self.assertEqual(failures.failure_signature(missing_head), failures.failure_signature(task(head="")))
+        gate = {"id": "T-gate-signature", "hold_reason": "gate_red", "pipeline": {"failure_kind": "code_defect"},
                 "resume_hint": {"failures": "FAILED tests/test_x.py::test_x"}}
-        self.assertEqual(failures.failure_signature(gate), failures.failure_signature({**gate, "resume_hint": dict(gate["resume_hint"])}))
+        legacy_payload = json.dumps({"kind": "code_defect", "tests": ["tests/test_x.py::test_x"],
+                                     "comments": []}, separators=(",", ":"), sort_keys=True)
+        self.assertEqual(failures.failure_signature(gate), hashlib.sha256(legacy_payload.encode()).hexdigest()[:12])
