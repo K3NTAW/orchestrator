@@ -29,7 +29,7 @@ END_MARKER = "<!-- end auto-handover -->"
 
 
 def _one_line(value):
-    return " ".join(str(value).split())
+    return re.sub(r"\s*[\r\n]\s*", " ", str(value))
 
 
 def _title(value, limit=160):
