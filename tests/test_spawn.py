@@ -1485,6 +1485,21 @@ class SpawnBase(unittest.TestCase):
             if truncated:
                 self.assertIn(hint, packet)
 
+    def test_review_diff_includes_grant_scope_paths(self):
+        t = bus.create_task("grant review", "s", ["a"], ["shared.py"], role="execute", parent="G",
+                            constraints={"grant_scope": ["grant.py"]})
+        wt = spawn.ensure_worktree(t["id"])
+        bus.update(t["id"], worktree=str(wt))
+        (wt / "shared.py").write_text("shared = 1\n")
+        (wt / "grant.py").write_text("granted = 1\n")
+        self.g("add", "-A", cwd=wt)
+        self.g("commit", "-qm", "scoped grant", cwd=wt)
+
+        diff = spawn.scoped_diff(bus.get(t["id"]))
+        self.assertIn("grant.py", diff)
+        packet = spawn.review_packet(bus.get(t["id"]), bus.get(t["id"]))
+        self.assertIn("grant.py", packet)
+
 
 class SecretsForRole(unittest.TestCase):
     """env-form secrets (headless hosts, T-0079): ENV_NAME = "env:OTHER_NAME" reads OTHER_NAME from os.environ;

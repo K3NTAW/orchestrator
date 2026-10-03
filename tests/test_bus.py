@@ -22,6 +22,18 @@ class BusSandbox(unittest.TestCase):
 
 class Bus(BusSandbox):
 
+    def test_create_task_validates_grant_scope(self):
+        for value in ([1], [""], ["/absolute.py"], ["a/../b.py"]):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    bus.create_task("invalid grant", "s", ["a"], ["x.py"],
+                                    constraints={"grant_scope": value})
+        task = bus.create_task("valid grant", "s", ["a"], ["x.py"],
+                               constraints={"grant_scope": ["tests/test_bus.py"]})
+        self.assertEqual(task["constraints"]["grant_scope"], ["tests/test_bus.py"])
+        row = bus.db().execute("select data from events where task_id=? and kind='created'", (task["id"],)).fetchone()
+        self.assertIn("tests/test_bus.py", row[0])
+
     def test_reindex_adds_missing_json_rows(self):
         task = {"id": "T-0001", "status": "queued", "role": "execute", "tier": "sonnet"}
         bus.TASKS.mkdir(parents=True)

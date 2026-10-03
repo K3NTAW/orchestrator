@@ -82,13 +82,13 @@ PY
   fi
 fi
 if [ "$rel" = "$file" ] && { [ -z "${containing:-}" ] || [ "$common" != "$task_common" ]; }; then
-  echo "scope-guard: $rel is outside task $task scope: $(jq -c '.scope' "$tj"). Edit only in-scope paths or report blocked." >&2
+  echo "scope-guard: $rel is outside task $task scope: $(jq -c '{scope: .scope, grant_scope: (.constraints.grant_scope // [])}' "$tj"). Edit only in-scope paths or report blocked." >&2
   exit 2
 fi
 while IFS= read -r glob; do
   [ -z "$glob" ] && continue
   # bash [[ == ]] pattern: * also matches '/', so src/auth/** matches any depth
   [[ "$rel" == $glob ]] && exit 0
-done < <(jq -r '.scope[]?' "$tj")
-echo "scope-guard: $rel is outside task $task scope: $(jq -c '.scope' "$tj"). Edit only in-scope paths or report blocked." >&2
+done < <(jq -r '.scope[]?, .constraints.grant_scope[]?' "$tj")
+echo "scope-guard: $rel is outside task $task scope: $(jq -c '{scope: .scope, grant_scope: (.constraints.grant_scope // [])}' "$tj"). Edit only in-scope paths or report blocked." >&2
 exit 2

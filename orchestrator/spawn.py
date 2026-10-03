@@ -8,6 +8,7 @@ from . import contracts, worker_registry, env_policy, worker_control, gitutil
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
+from .scopes import effective_scope
 
 _MEMORY_RECALL = None
 _PACKET_BUILD_META_MAX = 512
@@ -703,7 +704,8 @@ def _memory_tokens(sections):
 
 def _packet_body(task, worktree, *, cfg=None, skills=None, provider=None) -> tuple[str, dict]:
     """Build the executor's bounded, deterministic briefing solely from task/repository data."""
-    from .steering_policy import read_scope as derive_read_scope, safe_scope
+    from .scopes import safe_scope
+    from .steering_policy import read_scope as derive_read_scope
     wt = Path(worktree)
     cfg = Pool().cfg if cfg is None else cfg
     scope = safe_scope(task, worktree)
@@ -1120,11 +1122,12 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     cfg = cache_config if cache_config is not None else _packet_cache_config(task, cfg, skills, pool)
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
+    scope = effective_scope(src)
     raw_diff = scoped_diff(src)
     base = scoped_diff_base(src)
     head = git("rev-parse", "HEAD", cwd=wt, check=False).stdout.strip()[:12] or "(unavailable)"
     branch = src.get("branch") or f"task/{src.get('id', '(none)')}"
-    hint = f"git -C {wt} diff -U3 {base}...HEAD -- {' '.join(src.get('scope', []))}"
+    hint = f"git -C {wt} diff -U3 {base}...HEAD -- {' '.join(scope)}"
     changed = sorted(set(re.findall(r"^[+\-]{3} [ab]/(tests/\S+)", raw_diff, re.M)))
     tests = [f"{path}: present" for path in changed]
     for test_id in _acceptance_test_ids(src.get("acceptance", [])):
@@ -1143,7 +1146,7 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
         gate_lines.append("last_failure_head: " + str(failure).splitlines()[0][:500])
     sections = ([_section("skills", skills["section"].removeprefix("## skills\n"))]
                 if skills and skills.get("section") else []) + [_section("spec", src.get("spec")), _section("acceptance", src.get("acceptance", [])),
-                _section("scope", src.get("scope", [])), None,
+                _section("scope", scope), None,
                 _section("changed tests", tests or ["(none)"]), _section("gate", gate_lines),
                 _section("review branch", f"{branch} @ {head}")]
     reviewer_role = (task.get("constraints") or {}).get("reviewer_role")
@@ -1655,7 +1658,7 @@ def run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None
         bus.claim(task_id, f"claude:{acct.id}", str(wt))
         if role == "execute" and derive:
             goal_id = t.get("parent")
-            scope = list(t.get("scope") or [])
+            scope = effective_scope(t)
             try:
                 pre_head = head_sha(wt)
             except Exception:
@@ -1884,7 +1887,7 @@ def scoped_diff(src):
     include its predecessor's already-merged hunks."""
     wt = src.get("worktree") or ROOT
     base = scoped_diff_base(src)
-    r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
+    r = git("diff", "-U3", f"{base}...HEAD", "--", *effective_scope(src), cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"
 
 

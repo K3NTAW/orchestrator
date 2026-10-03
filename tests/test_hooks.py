@@ -22,6 +22,25 @@ class Hooks(unittest.TestCase):
         # planner session (no task id) is never blocked
         self.assertEqual(hook("scope-guard.sh", {"tool_input": {"file_path": "/x/y.ts"}}, cwd=TMP, env={"ORCH_TASK_ID": ""}).returncode, 0)
 
+    def test_scope_guard_accepts_grant_scope(self):
+        t = bus.create_task("grant", "s", ["a"], ["src/**"], role="execute",
+                            constraints={"grant_scope": ["tests/extra.py"]})
+        env = {"ORCH_TASK_ID": t["id"], "ORCH_ROOT": str(TMP)}
+        wt = TMP / "wt" / t["id"]; wt.mkdir(parents=True); subprocess.run(["git", "init", "-q"], cwd=wt)
+        ok = hook("scope-guard.sh", {"tool_input": {"file_path": str(wt / "tests/extra.py")}}, cwd=wt, env=env)
+        bad = hook("scope-guard.sh", {"tool_input": {"file_path": str(wt / "docs/out.py")}}, cwd=wt, env=env)
+        self.assertEqual(ok.returncode, 0)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("scope", bad.stderr)
+        self.assertIn("grant_scope", bad.stderr)
+        foreign = TMP / "foreign-worktree"
+        foreign.mkdir()
+        outside = hook("scope-guard.sh", {"tool_input": {"file_path": str(foreign / "src" / "x.py")}},
+                       cwd=wt, env=env)
+        self.assertEqual(outside.returncode, 2)
+        self.assertIn('"scope":["src/**"]', outside.stderr)
+        self.assertIn('"grant_scope":["tests/extra.py"]', outside.stderr)
+
     def test_scope_guard_child_worktree(self):
         t = bus.create_task("edit child", "s", ["a"], ["src/**"], role="execute")
         env = {"ORCH_TASK_ID": t["id"], "ORCH_ROOT": str(TMP)}

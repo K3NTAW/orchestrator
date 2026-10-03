@@ -13,6 +13,7 @@ from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pr
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier, executor_identity, config as pool_config
 from . import failures, gate as gate_runner, gitutil, interference, schedlog, notify as notifications
+from .scopes import effective_scope
 from .failures import (root, lineage, _valid_test_id, _test_id_candidates, _test_ids_with_rejections,
                        _test_ids, _path_in_scope, _rejecting_reviews, _normal_issue, failure_signature,
                        _failure_text, _node_id_to_unittest, _RunnerProbeTimeout, _flaky_rerun_command,
@@ -217,7 +218,7 @@ def auto_fix_round(pool):
             routine = ids is not None
         elif kind == "code_defect" and reason.startswith("review request_changes"):
             comments = _rejecting_reviews(held)
-            routine = bool(comments) and all(_path_in_scope(c.get("path"), held.get("scope") or [])
+            routine = bool(comments) and all(_path_in_scope(c.get("path"), effective_scope(held))
                                              for _, cs in comments for c in cs)
         rounds = sum(1 for t in chain if (t.get("constraints") or {}).get("auto_round") is not None)
         # A fix task's own constraint records the failure it was created to repair.
@@ -1363,7 +1364,7 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
         constraints = None
         if globals().get("REVIEW_COMPLEMENTARY", False) and n_reviews == 2:
             constraints = {"reviewer_role": "acceptance" if number == 0 else "adversarial"}
-        r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
+        r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], effective_scope(t), role="review",
                             inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier,
                             constraints=constraints)
         if reviewed_sha:
@@ -1492,7 +1493,7 @@ def gate(pool):
         if not worktree or not Path(worktree).is_dir():
             continue
         if worktree:
-            dirty = _dirty_scope_paths(worktree, t.get("scope") or [])
+            dirty = _dirty_scope_paths(worktree, effective_scope(t))
             if dirty:
                 if stamp(t["id"], "gated_at", status="held", hold_reason="executor did not commit",
                          resume_hint={"dirty": dirty}):

@@ -2105,6 +2105,20 @@ class Daemon(unittest.TestCase):
         self.assertIn("x.py:12 also fix this", fix["spec"])
         self.assertIn("- works", fix["spec"])
 
+    def test_routine_review_comment_on_granted_path_is_in_scope(self):
+        tid = self.held_for_fix(constraints={"grant_scope": ["grant.py"]})
+        review = self.rejecting_review(tid, path="grant.py")
+        bus.update(tid, hold_reason=f"review request_changes: {review}")
+        daemon.auto_fix_round(P.Pool())
+        fix, = self.fixes_for(tid)
+        self.assertEqual(fix["inputs"], [tid, review])
+
+        outside = self.held_for_fix(constraints={"grant_scope": ["grant.py"]})
+        review = self.rejecting_review(outside, path="outside.py")
+        bus.update(outside, hold_reason=f"review request_changes: {review}")
+        daemon.auto_fix_round(P.Pool())
+        self.assertEqual(self.fixes_for(outside), [])
+
     def test_auto_fix_round_on_review_hold_without_test_ids(self):
         tid = self.task("review hold")
         bus.update(tid, status="held", hold_reason="review request_changes: T-review")
@@ -3433,6 +3447,23 @@ class Daemon(unittest.TestCase):
         self.assertIn("x.py", held["resume_hint"]["dirty"])
         self.assertEqual(self.merged, [])
         self.assertEqual(gate_calls, [])          # never gated against the stale HEAD
+
+    def test_gate_dirty_check_and_fix_round_honour_grant_scope(self):
+        scratch_repo(TMP)
+        t = self.task("grant dirty", complexity=2, constraints={"grant_scope": ["grant.py"]})
+        bus.update(t, status="done", worktree=str(TMP))
+        (TMP / "grant.py").write_text("dirty = 1\n")
+        daemon.gate(self.review_pool("always"))
+        held = bus.get(t)
+        self.assertEqual(held["hold_reason"], "executor did not commit")
+        self.assertIn("grant.py", held["resume_hint"]["dirty"])
+        # The gate hold is the first half of this regression; provide the held-at marker
+        # consumed by the periodic fix-round scheduler for the second half.
+        bus.update(t, hold_reason="execute_incomplete: no commits",
+                   pipeline={"review_held_at": time.time()})
+        daemon.auto_fix_round(P.Pool())
+        fix, = self.fixes_for(t)
+        self.assertEqual(fix["constraints"]["grant_scope"], ["grant.py"])
 
     def test_already_merged_ignores_branch_equal_to_target(self):
         """A task/<id> branch cut from goal/<parent> but never committed to has a HEAD identical to the

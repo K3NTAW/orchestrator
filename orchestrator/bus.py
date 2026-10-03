@@ -105,6 +105,13 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
         raise ValueError(f"role must be one of {sorted(ROLES)}")
     if not acceptance or not scope:
         raise ValueError("acceptance and scope must be non-empty lists")
+    if constraints is not None and "grant_scope" in constraints:
+        grant_scope = constraints["grant_scope"]
+        if (not isinstance(grant_scope, list)
+                or any(not isinstance(entry, str) or not entry
+                       or entry.startswith("/") or ".." in entry.split("/")
+                       for entry in grant_scope)):
+            raise ValueError("constraints.grant_scope must be a list of non-empty relative paths without '..'")
     tid = next_id()
     deps = list(depends_on or [])
     resolved = {}
@@ -135,7 +142,7 @@ def create_task(title, spec, acceptance, scope, role="scout", tier="sonnet", com
          "depends_on": deps,
          "constraints": {"read_only": role != "execute", "budget_turns": 20, "timeout_s": 900, **(constraints or {})},
          "status": "queued", "assigned_to": None, "worktree": None, "codex_thread": None, "result": None, "events": []}
-    _save(t); _event(t["id"], "created")
+    _save(t); _event(t["id"], "created", {"grant_scope": (constraints or {}).get("grant_scope", [])})
     if resolved:
         _event(t["id"], "depends_on_resolved", resolved)
     if normalized_dep:
