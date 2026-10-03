@@ -1023,7 +1023,10 @@ class Render(unittest.TestCase):
         raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i} " + "x" * 80 for i in range(400))
         with mock.patch.object(spawn, "scoped_diff", return_value=raw):
             text = spawn.review_packet(task, task, cfg={"limits": {"review_diff_chars": 8000}})
-        self.assertLessEqual(len(text), 8200)
+        diff_section = text.split("## diff\n", 1)[1].split("\n## ", 1)[0]
+        self.assertLessEqual(len(diff_section), 8000 + 600)
+        self.assertLess(len(diff_section), len(raw))
+        self.assertGreater(len(text), 8200)
         self.assertEqual(text.count("expand with:"), 1)
         self.assertIn(f"expand with: git -C {TMP} diff -U3 goal/G...HEAD -- widget.py {'x' * 1500}", text)
 
