@@ -17,7 +17,7 @@ Resume, interrupted, restart, or an existing goal in plan.md.
 Continue the goal safely from recorded state.
 
 ## Procedure
-Read plan.md '## Now' and the goal sections, not .orchestrator/plan-log.md (only when a needed fact is missing, and then grep it). Call `bus_read(status_not="done")`: held → `status()` and re-spawn; running with `codex_thread` → one `codex_reply` with `resume_hint`; failed → read `reason`/`resume_hint`, then re-spec or escalate. Continue at “next step”.
+Read plan.md '## Now' and the goal sections; status lines are in .orchestrator/plan-log.md. Call `bus_read(status_not="done")`: held → `status()` and re-spawn; running with `codex_thread` → one `codex_reply` with `resume_hint`; failed → read `reason`/`resume_hint`, then re-spec or escalate. Continue at “next step”.
 
 ## Tools
 Read; bus_read, status, codex_reply.

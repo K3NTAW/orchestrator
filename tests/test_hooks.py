@@ -190,8 +190,10 @@ class SessionRules(unittest.TestCase):
         b = (REPO / "skills" / "planner" / "orchestrate" / "SKILL.md").read_text()
         self.assertEqual(a, b)
 
-    def test_claude_md_has_150k_handover_rule(self):
-        self.assertIn("150k", (REPO / "CLAUDE.md").read_text())
+    def test_claude_md_has_compact_in_place_rule(self):
+        text = (REPO / "CLAUDE.md").read_text()
+        self.assertIn("compacts in place", text)
+        self.assertIn("handover_context_tokens", text)
 
 
 if __name__ == "__main__":
