@@ -99,6 +99,7 @@ class Handover(unittest.TestCase):
         self.assertIn(f"- merged: {merged}", section)
         self.assertIn("sha=abc12345", section)
         self.assertIn(handover.RESUME_SENTENCE, section)
+        self.assertTrue(section.rstrip().endswith(handover.END_MARKER))
         self.assertIn("test", section.splitlines()[0])
 
     def test_failed_group_and_other_bucket(self):
@@ -194,6 +195,111 @@ class Handover(unittest.TestCase):
         self.assertEqual(before1, before2)                 # everything above the section is byte-identical
         self.assertIn("first pass", section1.splitlines()[0])
         self.assertEqual(section2, section1)               # reason alone is not a goal-state change
+
+    def test_write_keeps_sections_after_handover(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        tail = "## B\nplanner body\n\nexact trailing whitespace  \n"
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover 2026-01-01T00:00:00+01:00 — old\nold generated body\n"
+            "<!-- end auto-handover -->\n"
+            + tail
+        )
+
+        text = handover.write("replacement").read_text()
+
+        self.assertNotIn("old generated body", text)
+        self.assertIn("replacement", text)
+        self.assertTrue(text.endswith(tail))
+
+    def test_write_with_multiline_goal_title_does_not_grow(self):
+        goal = self.goal("Ship it\n\n## Evidence\nx")
+        plan = handover.write("first")
+        for reason in ("second", "third"):
+            child = self.child(goal, reason)
+            bus.update(child, status="held", hold_reason=reason)
+            handover.write(reason)
+
+        text = plan.read_text()
+        self.assertEqual(text.count("## Auto-handover "), 1)
+        self.assertEqual(text.count(handover.END_MARKER), 1)
+        self.assertNotIn("\n## Evidence", text)
+        self.assertIn("Ship it ## Evidence x", text)
+        self.assertEqual([line for line in text.splitlines() if line.startswith("## ")],
+                         [text.splitlines()[0]])
+
+    def test_render_sanitizes_reason_hold_reason_and_events(self):
+        injection = "\n## Foo\n<!-- end auto-handover -->"
+        goal = self.goal()
+        failed = self.child(goal, "Failed task")
+        bus.update(failed, status="failed", reason="failure" + injection)
+        held = self.child(goal, "Held task")
+        bus.update(held, status="held", hold_reason="hold" + injection)
+        running = self.child(goal, "Running task")
+        bus.update(running, status="running", executor="executor" + injection)
+        events = [{"seq": 1, "ts": 1700000000, "task": "task" + injection,
+                   "kind": "event" + injection, "data": {}}]
+
+        def keep_all(items, *args, **kwargs):
+            return [{**item, "p_relevant": None} for item in items]
+
+        with mock.patch.object(handover.jev_rank, "rank", side_effect=keep_all):
+            section = handover._render_section("manual" + injection, bus.read(), events)
+
+        lines = section.splitlines()
+        self.assertEqual([line for line in lines if line.startswith("## ")], [lines[0]])
+        self.assertEqual(lines.count(handover.END_MARKER), 1)
+        self.assertEqual(lines[-1], handover.END_MARKER)
+        for label in ("failure", "hold", "executor", "task", "event", "manual"):
+            self.assertIn(label + " ## Foo <!-- end auto-handover -->", section)
+
+    def test_write_keeps_sections_after_marker(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        tail = "\n## B\nplanner body\n\nexact trailing whitespace  \n"
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover old\nold generated body\n"
+            "<!-- end auto-handover -->" + tail
+        )
+
+        text = handover.write("replacement").read_text()
+
+        self.assertTrue(text.endswith(tail))
+        self.assertNotIn("old generated body", text)
+
+    def test_write_legacy_section_without_marker_runs_to_eof(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover old\nold generated body\n\n"
+            "## B\nlegacy content that is part of the old render\n"
+        )
+
+        text = handover.write("replacement").read_text()
+
+        self.assertNotIn("old generated body", text)
+        self.assertNotIn("## B", text)
+        self.assertEqual(text.count(handover.END_MARKER), 1)
+
+    def test_write_twice_stays_idempotent_with_tail(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover 2026-01-01T00:00:00+01:00 — old\nold generated body\n\n"
+            "<!-- end auto-handover -->\n"
+            "## B\nplanner conclusion\n"
+        )
+
+        handover.write("replacement")
+        first = plan.read_bytes()
+        handover.write("replacement")
+
+        self.assertEqual(plan.read_bytes(), first)
+        self.assertEqual(plan.read_text().count("## Auto-handover "), 1)
 
     def test_daemon_throttles_to_15_min(self):
         calls = []

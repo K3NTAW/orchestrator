@@ -8,6 +8,46 @@ from orchestrator import bus
 
 
 class Hooks(unittest.TestCase):
+    def test_planner_compact_hook(self):
+        from orchestrator import planner_context
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".orchestrator").mkdir()
+            (root / ".orchestrator/plan.md").write_text("## Now\nfinish LS1\n## Other\nold history\n")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            uv = bin_dir / "uv"
+            # Exercise the real CLI while checking the hook's invocation and cwd.
+            uv.write_text(f"#!{sys.executable}\n"
+                          "import os, sys\n"
+                          "assert sys.argv[1:] == ['run', 'orchestrator', 'planner-context', '--brief']\n"
+                          "assert os.getcwd() == os.path.realpath(os.environ['ORCH_ROOT'])\n"
+                          "if os.environ.get('FAIL_BRIEF'): sys.exit(1)\n"
+                          f"sys.path.insert(0, {str(REPO)!r})\n"
+                          "sys.argv = sys.argv[2:]\n"
+                          "from orchestrator.cli import main\nmain()\n")
+            uv.chmod(0o755)
+            env = {"ORCH_TASK_ID": "", "ORCH_PLANNER_MODE": "1", "ORCH_ROOT": str(root),
+                   "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+            result = hook("planner-compact.sh", {}, cwd=root, env=env)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, planner_context.compact_brief(root) + "\n")
+            self.assertTrue(os.access(HOOKS / "planner-compact.sh", os.X_OK))
+            for extra, payload in (({"ORCH_TASK_ID": "T-0001"}, {}),
+                                   ({}, {"task_id": "T-0001"}),
+                                   ({"ORCH_PLANNER_MODE": "0"}, {}),
+                                   ({"FAIL_BRIEF": "1"}, {})):
+                with self.subTest(extra=extra, payload=payload):
+                    result = hook("planner-compact.sh", payload, cwd=root, env={**env, **extra})
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+            worker = root / "T-0002"
+            worker.mkdir()
+            subprocess.run(["git", "init", "-q", str(worker)], check=True)
+            result = hook("planner-compact.sh", {}, cwd=worker, env=env)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+
     def test_require_acceptance(self):
         self.assertEqual(hook("require-acceptance.sh", {"task_input": {"subject": "do x", "description": "just do it"}}).returncode, 2)
         self.assertEqual(hook("require-acceptance.sh", {"task_input": {"description": "Acceptance: tests pass\nScope: src/**"}}).returncode, 0)
@@ -150,8 +190,10 @@ class SessionRules(unittest.TestCase):
         b = (REPO / "skills" / "planner" / "orchestrate" / "SKILL.md").read_text()
         self.assertEqual(a, b)
 
-    def test_claude_md_has_150k_handover_rule(self):
-        self.assertIn("150k", (REPO / "CLAUDE.md").read_text())
+    def test_claude_md_has_compact_in_place_rule(self):
+        text = (REPO / "CLAUDE.md").read_text()
+        self.assertIn("compacts in place", text)
+        self.assertIn("handover_context_tokens", text)
 
 
 if __name__ == "__main__":

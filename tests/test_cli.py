@@ -31,7 +31,8 @@ class Cli(unittest.TestCase):
                 mock.patch.object(sys, "argv", ["orchestrator", "planner-context", "--hook", "--session-id", "S"]), \
                 contextlib.redirect_stdout(output := io.StringIO()):
             cli.main()
-        self.assertIn("hand over now", output.getvalue())
+        self.assertIn("write the checkpoint", output.getvalue())
+        self.assertIn("compacts in place", output.getvalue())
         self.assertIn("--session-id S", output.getvalue())
 
     def test_planner_context_hook_passes_transcript_and_session_id(self):

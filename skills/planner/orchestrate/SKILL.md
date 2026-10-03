@@ -21,7 +21,7 @@ Read `.orchestrator/plan.md`; memory `recall.sh index "<goal terms>"`; `bus_read
 
 Routes: localized → brief spec/one executor/gates/human PR; uncertain → one named investigation; independent → disjoint specs with interface contracts; high-risk/architectural → detailed plan, spec review, execution, independent review.
 
-For uncertainty: `bus_create_task(role="scout")`, then `spawn_scout` or Agent Teams task containing `bus:<id>`; batch `bus_events(since)`, read once, summarize into plan.md. Acted-on confidence <0.7 → `spawn_challenge`. Overwrite plan.md; use `write-spec` per atomic task; warn over five files; split only on behavior/dependency boundaries; name `depends_on` and `tests/test_<module>.py`.
+For uncertainty: `bus_create_task(role="scout")`, then `spawn_scout` or Agent Teams task containing `bus:<id>`; batch `bus_events(since)`, read once, summarize into plan.md. Acted-on confidence <0.7 → `spawn_challenge`. Overwrite plan.md (keep ## Now current; status lines go to .orchestrator/plan-log.md). Use `write-spec` per atomic task; warn over five files; split only on behavior/dependency boundaries; name `depends_on` and `tests/test_<module>.py`.
 
 Start `orchestrator daemon` or `orchestrator daemon --once`; for held spec_review/review request_changes/gate_red, write a fix-round spec depending on the held task. Accept only when `.claude/hooks/tests-green.sh wt/<id>` exits 0 locally. Security-path diffs get exactly one `security_review_tier` review, never the executing model, checklist always; record `pipeline.review_reason`. `merge(id)`, then `graph.sh update`.
 

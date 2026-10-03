@@ -1,11 +1,52 @@
 """Read the current Planner transcript's context usage for the prompt hook."""
 import json
+import re
 from pathlib import Path
 
 from .pool import encode_project_dir
 
 
 DEFAULT_HANDOVER_CONTEXT_TOKENS = 300000
+DEFAULT_PLAN_MAX_CHARS = 12000
+COMPACT_HEADER = ("Session compacted; continue in place. Planner mode: goals go through "
+                  "Skill(orchestrate); never edit source; see CLAUDE.md.")
+COMPACT_FOOTER = ("Full state: .orchestrator/plan.md; history: "
+                  ".orchestrator/plan-log.md (do not read by default).")
+_HANDOVER_HEADING_RE = re.compile(r"(?m)^## Auto-handover ")
+_HANDOVER_END_RE = re.compile(r"(?m)^<!-- end auto-handover -->$")
+
+
+def _plan_without_handover(plan):
+    matches = list(_HANDOVER_HEADING_RE.finditer(plan))
+    if not matches:
+        return plan
+    heading = matches[-1]
+    marker = _HANDOVER_END_RE.search(plan, heading.end())
+    end = marker.end() if marker else len(plan)
+    return plan[:heading.start()] + plan[end:]
+
+
+def compact_brief(root, limit=4000) -> str:
+    """Return the current Planner state suitable for a post-compaction hook."""
+    path = Path(root) / ".orchestrator" / "plan.md"
+    try:
+        plan = path.read_text()
+    except (FileNotFoundError, OSError, UnicodeError):
+        return f"{COMPACT_HEADER}\nplan.md missing; run the resume skill."
+
+    lines = plan.splitlines(keepends=True)
+    now = next((index for index, line in enumerate(lines) if line.startswith("## Now")), None)
+    if now is not None:
+        end = next((index for index in range(now + 1, len(lines))
+                    if lines[index].startswith("## ")), len(lines))
+        text = "".join(lines[now:end])
+    else:
+        text = plan
+    if len(text) > limit:
+        cut = text.rfind("\n", 0, limit + 1)
+        cut = cut if cut >= 0 else limit
+        text = text[:cut].rstrip("\n") + "\n[cut; read .orchestrator/plan.md]"
+    return f"{COMPACT_HEADER}\n{text}\n{COMPACT_FOOTER}"
 
 
 def _transcript_path(config_dir: Path, root: Path, *, transcript=None, session_id=None):
@@ -94,13 +135,24 @@ def hook_message(cfg, config_dir: Path, root: Path, *, transcript=None, session_
     tokens = context_tokens(config_dir, root, transcript=transcript, session_id=session_id)
     planner = cfg.get("planner", {})
     threshold = planner.get("handover_context_tokens", DEFAULT_HANDOVER_CONTEXT_TOKENS)
+    messages = []
+    plan_max = planner.get("plan_max_chars", DEFAULT_PLAN_MAX_CHARS)
+    plan_path = Path(root) / ".orchestrator" / "plan.md"
+    try:
+        plan_chars = len(_plan_without_handover(plan_path.read_text()))
+    except (FileNotFoundError, OSError, UnicodeError):
+        plan_chars = None
+    if isinstance(plan_max, int) and plan_max > 0 and plan_chars is not None and plan_chars > plan_max:
+        messages.append(f"plan.md is {plan_chars} chars (max {plan_max}): move history to "
+                        ".orchestrator/plan-log.md and keep ## Now current.")
+
     if tokens is None or not isinstance(threshold, int) or threshold == 0 or tokens < threshold:
-        return None
+        return "\n".join(messages) or None
     if transcript is not None or session_id is not None:
         grace = planner.get("handover_grace_turns", 12)
         if isinstance(grace, int) and user_turns(_transcript_path(
                 config_dir, root, transcript=transcript, session_id=session_id)) < grace:
-            return None
+            return "\n".join(messages) or None
     record = _last_handover(root)
     if session_id is not None and record and record.get("session_id") == session_id:
         recorded_tokens = record.get("tokens_at")
@@ -108,8 +160,11 @@ def hook_message(cfg, config_dir: Path, root: Path, *, transcript=None, session_
             stamp = record.get("ts")
             from datetime import datetime
             when = datetime.fromtimestamp(stamp).strftime("%H:%M") if isinstance(stamp, (int, float)) else "??:??"
-            return f"handover written {when}; restart with f orch"
+            messages.append(f"handover written {when}; the session compacts in place (auto-compact or /compact), no restart needed")
+            return "\n".join(messages)
     command = "uv run orchestrator handover --reason context"
     if session_id is not None:
         command += f" --session-id {session_id}"
-    return f"Planner context is {tokens} tokens (threshold {threshold}); hand over now: {command}"
+    messages.append(f"Planner context is {tokens} tokens (threshold {threshold}); write the checkpoint: {command}; "
+                    "then keep working, the session compacts in place (auto-compact or /compact).")
+    return "\n".join(messages)

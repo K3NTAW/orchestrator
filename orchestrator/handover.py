@@ -24,6 +24,18 @@ HANDOVER_INTERVAL_S = 15 * 60  # matches daemon.HANDOVER_INTERVAL_S; kept in syn
                                 # imports this module, so the reverse import would be circular)
 
 _HEADING_RE = re.compile(r"(?m)^## Auto-handover ")
+_END_MARKER_RE = re.compile(r"(?m)^<!-- end auto-handover -->$")
+END_MARKER = "<!-- end auto-handover -->"
+
+
+def _one_line(value):
+    return re.sub(r"\s*[\r\n]\s*", " ", str(value))
+
+
+def _title(value, limit=160):
+    """Keep bus-provided titles from introducing structure into the generated Markdown."""
+    text = _one_line(value)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _join_truncated(items, limit=MAX_ITEMS):
@@ -38,7 +50,7 @@ def _join_truncated(items, limit=MAX_ITEMS):
 
 
 def _task_ref(t, extra=None):
-    ref = f"{t['id']} {t['title']}"
+    ref = f"{t['id']} {_title(t['title'])}"
     if extra:
         ref += f" ({extra})"
     return ref
@@ -106,7 +118,7 @@ def _prune_many(named_lists, goal_text, budget):
 def _goal_lines(goal, children, budget):
     groups = _status_groups(children)
     goal_text = _goal_text(goal)
-    lines = [f"### {goal['id']} {goal['title']}"]
+    lines = [f"### {goal['id']} {_title(goal['title'])}"]
     if groups["queued"]:
         refs = [_task_ref(t, f"depends_on={t.get('depends_on') or []}") for t in groups["queued"]]
         lines.append(f"- queued: {_join_truncated(refs)}")
@@ -199,7 +211,7 @@ def _render_section(reason, all_tasks, events5):
     after releasing the bus lock. `budget` caps the number of Jev requests placed at MAX_JEV_REQUESTS for the
     whole call, split across goals and the events tail."""
     ts = datetime.now(TZ).isoformat(timespec="seconds")
-    footer = ["", RESUME_SENTENCE]
+    footer = ["", RESUME_SENTENCE, "", END_MARKER]
     budget = {"n": MAX_JEV_REQUESTS}
 
     tasks_by_id = {t["id"]: t for t in all_tasks}
@@ -250,7 +262,9 @@ def _render_section(reason, all_tasks, events5):
     if len(body) > line_budget:
         extra = len(body) - (line_budget - 1)
         body = body[:line_budget - 1] + [f"… and {extra} more lines truncated"]
-    return "\n".join(header + body + footer)
+    # Every entry is one logical Markdown line. Normalize all interpolated fields,
+    # including reasons, executors and event metadata, before adding line breaks.
+    return "\n".join(_one_line(line) for line in header + body + footer)
 
 
 def _save_handover_session(session_id, reason, tokens_at):
@@ -261,7 +275,7 @@ def _save_handover_session(session_id, reason, tokens_at):
 
 
 def write(reason: str = "manual", *, session_id=None, tokens_at=None):
-    """Replace (or append when absent) the trailing "## Auto-handover" section of plan.md. Idempotent: a second
+    """Replace (or append when absent) the "## Auto-handover" section of plan.md. Idempotent: a second
     call with the same repo state replaces the section in place and leaves everything above it byte-identical.
     Matches the LAST "## Auto-handover " heading, not the first, so Planner prose that quotes the heading text
     earlier in the file (e.g. inside a fenced code block) is never mistaken for the real section and deleted.
@@ -298,12 +312,15 @@ def write(reason: str = "manual", *, session_id=None, tokens_at=None):
         matches = list(_HEADING_RE.finditer(existing))
         m = matches[-1] if matches else None
         head = existing[:m.start()] if m else existing
-        old_section = existing[m.start():].rstrip("\n") if m else None
+        marker = _END_MARKER_RE.search(existing, m.end()) if m else None
+        old_section_end = marker.end() if marker else len(existing)
+        tail = existing[old_section_end:] if marker else ""
+        old_section = existing[m.start():old_section_end].rstrip("\n") if m else None
         head = head.rstrip("\n")
         if section == old_section:
             return plan
         body = section if not head else f"{head}\n\n{section}"
-        text = body + "\n"
+        text = body + tail if tail else body + "\n"
 
         fd, tmp_name = tempfile.mkstemp(dir=str(plan.parent), prefix=".plan.md.")
         try:
