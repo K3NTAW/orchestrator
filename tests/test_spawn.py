@@ -1022,10 +1022,10 @@ class Render(unittest.TestCase):
                 "pipeline": {"last_failure_text": "g" * 1500}}
         raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i} " + "x" * 80 for i in range(400))
         with mock.patch.object(spawn, "scoped_diff", return_value=raw):
-            text = spawn.review_packet(task, task)
+            text = spawn.review_packet(task, task, cfg={"limits": {"review_diff_chars": 8000}})
         self.assertLessEqual(len(text), 8200)
         self.assertEqual(text.count("expand with:"), 1)
-        self.assertIn(f"expand with: git -C {TMP} diff -- widget.py {'x' * 1500}", text)
+        self.assertIn(f"expand with: git -C {TMP} diff -U3 goal/G...HEAD -- widget.py {'x' * 1500}", text)
 
     def test_review_packet_excludes_other_tasks_and_memory(self):
         task = {**self.packet_fixture(), "spec": "only this task"}
@@ -1230,6 +1230,7 @@ class Render(unittest.TestCase):
 
     def test_bounded_diff_expansion_hint(self):
         diff = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(2000))
+        reviewed = {}
         hint = f"git -C {TMP} diff -U3 {spawn.scoped_diff_base(reviewed)}...HEAD -- widget.py"
         bounded = spawn.bounded_diff(diff, 300, hint)
         self.assertLessEqual(len(bounded), 300)
@@ -1254,11 +1255,13 @@ class Render(unittest.TestCase):
         self.addCleanup(lambda: setattr(P.Pool, "pick", orig_pick))
         self.addCleanup(lambda: setattr(spawn, "run_claude", orig_run))
 
-        spawn.run_worker(review["id"])
+        cfg = {**P.config(), "limits": {**P.config().get("limits", {}), "review_diff_chars": 8000}}
+        with mock.patch.object(P, "config", return_value=cfg):
+            spawn.run_worker(review["id"])
         prompt = captured["prompt"]
-        hint = f"git -C {TMP} diff -- widget.py"
+        hint = f"git -C {TMP} diff -U3 origin/main...HEAD -- widget.py"
         self.assertIn("Diffstat: ", prompt)
-        cap = P.Pool().cfg["limits"].get("review_diff_chars", 12000)
+        cap = 8000
         non_diff = len(prompt) - len(prompt.split("## diff\n", 1)[1].split("\n## ", 1)[0])
         self.assertLessEqual(len(prompt), cap + non_diff + 64)
         self.assertEqual(prompt.count(f"expand with: {hint}"), 1)
@@ -1268,9 +1271,9 @@ class Render(unittest.TestCase):
         self.assertEqual(sum(line.startswith("@@") for line in spawn.bounded_diff(diff).splitlines()), 1)
 
     def test_render_does_not_rebound_diff(self):
-        hint = f"git -C {TMP} diff -U3 {spawn.scoped_diff_base(task)}...HEAD -- widget.py"
         raw = "diff --git a/widget.py b/widget.py\n" + "\n".join(f"+line {i}" for i in range(1000))
         task = {**self.packet_fixture(), "spec": "ordinary", "complexity": 1}
+        hint = f"git -C {TMP} diff -U3 {spawn.scoped_diff_base(task)}...HEAD -- widget.py"
         cfg = {**P.config(), "limits": {**P.config().get("limits", {}), "review_diff_chars": 100}}
         with mock.patch.object(P, "config", return_value=cfg), \
                 mock.patch.object(spawn, "scoped_diff", return_value=raw):
