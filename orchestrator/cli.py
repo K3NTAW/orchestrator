@@ -189,7 +189,7 @@ def main():
     pk.add_argument("--model", action="store_true")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual"); ho.add_argument("--session-id")
-    pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true")
+    pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true"); pc.add_argument("--brief", action="store_true")
     pc.add_argument("--transcript"); pc.add_argument("--session-id")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
     rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
@@ -626,7 +626,9 @@ def main():
         from pathlib import Path
         from . import planner_context
         config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
-        if a.hook:
+        if a.brief:
+            print(planner_context.compact_brief(ROOT))
+        elif a.hook:
             message = planner_context.hook_message(pool_config(), config_dir, ROOT,
                                                    transcript=a.transcript, session_id=a.session_id)
             if message:
