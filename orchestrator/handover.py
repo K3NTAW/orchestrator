@@ -261,7 +261,7 @@ def _save_handover_session(session_id, reason, tokens_at):
 
 
 def write(reason: str = "manual", *, session_id=None, tokens_at=None):
-    """Replace (or append when absent) the trailing "## Auto-handover" section of plan.md. Idempotent: a second
+    """Replace (or append when absent) the "## Auto-handover" section of plan.md. Idempotent: a second
     call with the same repo state replaces the section in place and leaves everything above it byte-identical.
     Matches the LAST "## Auto-handover " heading, not the first, so Planner prose that quotes the heading text
     earlier in the file (e.g. inside a fenced code block) is never mistaken for the real section and deleted.
@@ -298,12 +298,15 @@ def write(reason: str = "manual", *, session_id=None, tokens_at=None):
         matches = list(_HEADING_RE.finditer(existing))
         m = matches[-1] if matches else None
         head = existing[:m.start()] if m else existing
-        old_section = existing[m.start():].rstrip("\n") if m else None
+        next_heading = existing.find("\n## ", m.end()) if m else -1
+        tail = existing[next_heading + 1:] if next_heading != -1 else ""
+        old_section_end = next_heading + 1 if next_heading != -1 else len(existing)
+        old_section = existing[m.start():old_section_end].rstrip("\n") if m else None
         head = head.rstrip("\n")
         if section == old_section:
             return plan
         body = section if not head else f"{head}\n\n{section}"
-        text = body + "\n"
+        text = f"{body}\n\n{tail}" if tail else body + "\n"
 
         fd, tmp_name = tempfile.mkstemp(dir=str(plan.parent), prefix=".plan.md.")
         try:

@@ -195,6 +195,38 @@ class Handover(unittest.TestCase):
         self.assertIn("first pass", section1.splitlines()[0])
         self.assertEqual(section2, section1)               # reason alone is not a goal-state change
 
+    def test_write_keeps_sections_after_handover(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        tail = "## B\nplanner body\n\nexact trailing whitespace  \n"
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover 2026-01-01T00:00:00+01:00 — old\nold generated body\n\n"
+            + tail
+        )
+
+        text = handover.write("replacement").read_text()
+
+        self.assertNotIn("old generated body", text)
+        self.assertIn("replacement", text)
+        self.assertTrue(text.endswith(tail))
+
+    def test_write_twice_stays_idempotent_with_tail(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover 2026-01-01T00:00:00+01:00 — old\nold generated body\n\n"
+            "## B\nplanner conclusion\n"
+        )
+
+        handover.write("replacement")
+        first = plan.read_bytes()
+        handover.write("replacement")
+
+        self.assertEqual(plan.read_bytes(), first)
+        self.assertEqual(plan.read_text().count("## Auto-handover "), 1)
+
     def test_daemon_throttles_to_15_min(self):
         calls = []
         self.swap(handover, "write", lambda reason: calls.append(reason))
