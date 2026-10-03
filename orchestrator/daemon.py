@@ -672,8 +672,16 @@ def _fix_round_delta(parent, fix):
     acceptance_ids = _test_ids(failures) or []
     selected = [criterion for criterion in fix.get("acceptance") or []
                 if not acceptance_ids or any(test_id in criterion for test_id in acceptance_ids)]
-    return "Failures:\n" + str(failures)[:3000] + "\n\nAcceptance:\n" + "\n".join(
+    delta = "Failures:\n" + str(failures)[:3000] + "\n\nAcceptance:\n" + "\n".join(
         f"- {criterion}" for criterion in (selected or fix.get("acceptance") or []))
+    constraints = fix.get("constraints") or {}
+    if "auto_round" not in constraints:
+        spec = str(fix.get("spec") or "")
+        if len(spec) > 6000:
+            spec = spec[:6000] + "\n[spec truncated]"
+        delta = ("Fix-round instructions from the Planner (follow these; they supersede the failure text below):\n"
+                 + spec + "\n\n" + delta)
+    return delta
 
 
 def _dispatch_fresh_fix(task_id, reason):

@@ -1177,6 +1177,29 @@ class Daemon(unittest.TestCase):
         self.assertEqual(bus.get(fix_id)["pipeline"]["resume"]["mode"], "resume")
         self.assertEqual(bus.get(fix_id)["worktree"], str(self.sandbox))
 
+    def test_fix_round_delta_includes_planner_fix_spec(self):
+        parent = {"resume_hint": {"failures": "FAILED tests/test_x.py::test_x - assertion"}}
+        fix = {"spec": "Remove the bus.read stubs", "acceptance": ["tests/test_x.py::test_x passes"]}
+        delta = daemon._fix_round_delta(parent, fix)
+        heading = "Fix-round instructions from the Planner (follow these; they supersede the failure text below):"
+        self.assertTrue(delta.startswith(heading))
+        self.assertLess(delta.index(fix["spec"]), delta.index("Failures:"))
+        self.assertIn(parent["resume_hint"]["failures"], delta)
+        self.assertIn("tests/test_x.py::test_x passes", delta)
+
+        long_spec = "x" * 7000
+        long_delta = daemon._fix_round_delta(parent, {"spec": long_spec, "acceptance": []})
+        self.assertIn("x" * 6000 + "\n[spec truncated]", long_delta)
+        self.assertNotIn("x" * 6001, long_delta)
+
+        auto_delta = daemon._fix_round_delta(
+            parent, {"spec": "FULL SPEC MUST NOT BE SENT", "acceptance": ["works"],
+                     "constraints": {"auto_round": 1}})
+        expected_auto_delta = "Failures:\n" + parent["resume_hint"]["failures"] + "\n\nAcceptance:\n- works"
+        self.assertEqual(auto_delta, expected_auto_delta)
+        self.assertNotIn(heading, auto_delta)
+        self.assertNotIn("FULL SPEC MUST NOT BE SENT", auto_delta)
+
     def test_fix_round_dispatch_fresh_when_worktree_incompatible_records_reason(self):
         parent_id = self.held_for_fix()
         bus.update(parent_id, codex_thread="thread-1", executor="astra", rounds=1, worktree=str(self.sandbox))
