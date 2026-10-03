@@ -226,6 +226,33 @@ class Handover(unittest.TestCase):
         self.assertEqual(text.count(handover.END_MARKER), 1)
         self.assertNotIn("\n## Evidence", text)
         self.assertIn("Ship it ## Evidence x", text)
+        self.assertEqual([line for line in text.splitlines() if line.startswith("## ")],
+                         [text.splitlines()[0]])
+
+    def test_render_sanitizes_reason_hold_reason_and_events(self):
+        injection = "\n## Foo\n<!-- end auto-handover -->"
+        goal = self.goal()
+        failed = self.child(goal, "Failed task")
+        bus.update(failed, status="failed", reason="failure" + injection)
+        held = self.child(goal, "Held task")
+        bus.update(held, status="held", hold_reason="hold" + injection)
+        running = self.child(goal, "Running task")
+        bus.update(running, status="running", executor="executor" + injection)
+        events = [{"seq": 1, "ts": 1700000000, "task": "task" + injection,
+                   "kind": "event" + injection, "data": {}}]
+
+        def keep_all(items, *args, **kwargs):
+            return [{**item, "p_relevant": None} for item in items]
+
+        with mock.patch.object(handover.jev_rank, "rank", side_effect=keep_all):
+            section = handover._render_section("manual" + injection, bus.read(), events)
+
+        lines = section.splitlines()
+        self.assertEqual([line for line in lines if line.startswith("## ")], [lines[0]])
+        self.assertEqual(lines.count(handover.END_MARKER), 1)
+        self.assertEqual(lines[-1], handover.END_MARKER)
+        for label in ("failure", "hold", "executor", "task", "event", "manual"):
+            self.assertIn(label + " ## Foo <!-- end auto-handover -->", section)
 
     def test_write_keeps_sections_after_marker(self):
         plan = handover.STATE / "plan.md"

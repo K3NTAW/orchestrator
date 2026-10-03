@@ -28,9 +28,13 @@ _END_MARKER_RE = re.compile(r"(?m)^<!-- end auto-handover -->$")
 END_MARKER = "<!-- end auto-handover -->"
 
 
+def _one_line(value):
+    return " ".join(str(value).split())
+
+
 def _title(value, limit=160):
     """Keep bus-provided titles from introducing structure into the generated Markdown."""
-    text = " ".join(str(value).split())
+    text = _one_line(value)
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -258,7 +262,9 @@ def _render_section(reason, all_tasks, events5):
     if len(body) > line_budget:
         extra = len(body) - (line_budget - 1)
         body = body[:line_budget - 1] + [f"… and {extra} more lines truncated"]
-    return "\n".join(header + body + footer)
+    # Every entry is one logical Markdown line. Normalize all interpolated fields,
+    # including reasons, executors and event metadata, before adding line breaks.
+    return "\n".join(_one_line(line) for line in header + body + footer)
 
 
 def _save_handover_session(session_id, reason, tokens_at):
