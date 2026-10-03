@@ -14,6 +14,14 @@ from orchestrator import bus, daemon, handover, jev
 from orchestrator import pool as P
 
 
+def test_write_keeps_sections_after_handover():
+    Handover("test_write_keeps_sections_after_handover").debug()
+
+
+def test_write_twice_stays_idempotent_with_tail():
+    Handover("test_write_twice_stays_idempotent_with_tail").debug()
+
+
 class Handover(unittest.TestCase):
     def test_unchanged_state_writes_nothing(self):
         goal = self.goal()
