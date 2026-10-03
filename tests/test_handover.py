@@ -99,6 +99,7 @@ class Handover(unittest.TestCase):
         self.assertIn(f"- merged: {merged}", section)
         self.assertIn("sha=abc12345", section)
         self.assertIn(handover.RESUME_SENTENCE, section)
+        self.assertTrue(section.rstrip().endswith(handover.END_MARKER))
         self.assertIn("test", section.splitlines()[0])
 
     def test_failed_group_and_other_bucket(self):
@@ -201,7 +202,8 @@ class Handover(unittest.TestCase):
         tail = "## B\nplanner body\n\nexact trailing whitespace  \n"
         plan.write_text(
             "## A\nplanner introduction\n\n"
-            "## Auto-handover 2026-01-01T00:00:00+01:00 — old\nold generated body\n\n"
+            "## Auto-handover 2026-01-01T00:00:00+01:00 — old\nold generated body\n"
+            "<!-- end auto-handover -->\n"
             + tail
         )
 
@@ -211,12 +213,57 @@ class Handover(unittest.TestCase):
         self.assertIn("replacement", text)
         self.assertTrue(text.endswith(tail))
 
+    def test_write_with_multiline_goal_title_does_not_grow(self):
+        goal = self.goal("Ship it\n\n## Evidence\nx")
+        plan = handover.write("first")
+        for reason in ("second", "third"):
+            child = self.child(goal, reason)
+            bus.update(child, status="held", hold_reason=reason)
+            handover.write(reason)
+
+        text = plan.read_text()
+        self.assertEqual(text.count("## Auto-handover "), 1)
+        self.assertEqual(text.count(handover.END_MARKER), 1)
+        self.assertNotIn("\n## Evidence", text)
+        self.assertIn("Ship it ## Evidence x", text)
+
+    def test_write_keeps_sections_after_marker(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        tail = "\n## B\nplanner body\n\nexact trailing whitespace  \n"
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover old\nold generated body\n"
+            "<!-- end auto-handover -->" + tail
+        )
+
+        text = handover.write("replacement").read_text()
+
+        self.assertTrue(text.endswith(tail))
+        self.assertNotIn("old generated body", text)
+
+    def test_write_legacy_section_without_marker_runs_to_eof(self):
+        plan = handover.STATE / "plan.md"
+        handover.STATE.mkdir(parents=True, exist_ok=True)
+        plan.write_text(
+            "## A\nplanner introduction\n\n"
+            "## Auto-handover old\nold generated body\n\n"
+            "## B\nlegacy content that is part of the old render\n"
+        )
+
+        text = handover.write("replacement").read_text()
+
+        self.assertNotIn("old generated body", text)
+        self.assertNotIn("## B", text)
+        self.assertEqual(text.count(handover.END_MARKER), 1)
+
     def test_write_twice_stays_idempotent_with_tail(self):
         plan = handover.STATE / "plan.md"
         handover.STATE.mkdir(parents=True, exist_ok=True)
         plan.write_text(
             "## A\nplanner introduction\n\n"
             "## Auto-handover 2026-01-01T00:00:00+01:00 — old\nold generated body\n\n"
+            "<!-- end auto-handover -->\n"
             "## B\nplanner conclusion\n"
         )
 

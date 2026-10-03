@@ -24,6 +24,14 @@ HANDOVER_INTERVAL_S = 15 * 60  # matches daemon.HANDOVER_INTERVAL_S; kept in syn
                                 # imports this module, so the reverse import would be circular)
 
 _HEADING_RE = re.compile(r"(?m)^## Auto-handover ")
+_END_MARKER_RE = re.compile(r"(?m)^<!-- end auto-handover -->$")
+END_MARKER = "<!-- end auto-handover -->"
+
+
+def _title(value, limit=160):
+    """Keep bus-provided titles from introducing structure into the generated Markdown."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _join_truncated(items, limit=MAX_ITEMS):
@@ -38,7 +46,7 @@ def _join_truncated(items, limit=MAX_ITEMS):
 
 
 def _task_ref(t, extra=None):
-    ref = f"{t['id']} {t['title']}"
+    ref = f"{t['id']} {_title(t['title'])}"
     if extra:
         ref += f" ({extra})"
     return ref
@@ -106,7 +114,7 @@ def _prune_many(named_lists, goal_text, budget):
 def _goal_lines(goal, children, budget):
     groups = _status_groups(children)
     goal_text = _goal_text(goal)
-    lines = [f"### {goal['id']} {goal['title']}"]
+    lines = [f"### {goal['id']} {_title(goal['title'])}"]
     if groups["queued"]:
         refs = [_task_ref(t, f"depends_on={t.get('depends_on') or []}") for t in groups["queued"]]
         lines.append(f"- queued: {_join_truncated(refs)}")
@@ -199,7 +207,7 @@ def _render_section(reason, all_tasks, events5):
     after releasing the bus lock. `budget` caps the number of Jev requests placed at MAX_JEV_REQUESTS for the
     whole call, split across goals and the events tail."""
     ts = datetime.now(TZ).isoformat(timespec="seconds")
-    footer = ["", RESUME_SENTENCE]
+    footer = ["", RESUME_SENTENCE, "", END_MARKER]
     budget = {"n": MAX_JEV_REQUESTS}
 
     tasks_by_id = {t["id"]: t for t in all_tasks}
@@ -298,15 +306,15 @@ def write(reason: str = "manual", *, session_id=None, tokens_at=None):
         matches = list(_HEADING_RE.finditer(existing))
         m = matches[-1] if matches else None
         head = existing[:m.start()] if m else existing
-        next_heading = existing.find("\n## ", m.end()) if m else -1
-        tail = existing[next_heading + 1:] if next_heading != -1 else ""
-        old_section_end = next_heading + 1 if next_heading != -1 else len(existing)
+        marker = _END_MARKER_RE.search(existing, m.end()) if m else None
+        old_section_end = marker.end() if marker else len(existing)
+        tail = existing[old_section_end:] if marker else ""
         old_section = existing[m.start():old_section_end].rstrip("\n") if m else None
         head = head.rstrip("\n")
         if section == old_section:
             return plan
         body = section if not head else f"{head}\n\n{section}"
-        text = f"{body}\n\n{tail}" if tail else body + "\n"
+        text = body + tail if tail else body + "\n"
 
         fd, tmp_name = tempfile.mkstemp(dir=str(plan.parent), prefix=".plan.md.")
         try:

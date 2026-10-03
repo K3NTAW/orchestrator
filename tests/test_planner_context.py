@@ -93,6 +93,20 @@ class PlannerContext(unittest.TestCase):
             plan.write_text("x" * 12001)
             self.assertIn("12001 chars (max 12000)", planner_context.hook_message({}, config_dir, root))
 
+    def test_plan_size_nag_ignores_auto_handover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_dir = Path(directory) / "repo", Path(directory) / "config"
+            plan = root / ".orchestrator/plan.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text(
+                "short plan\n\n"
+                "## Auto-handover old\n" + "x" * 100 + "\n"
+                "<!-- end auto-handover -->\n"
+            )
+            cfg = {"planner": {"handover_context_tokens": 0, "plan_max_chars": 20}}
+
+            self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))
+
     def _prompt_transcript(self, config_dir, root, tokens, turns):
         path = config_dir / "projects" / encode_project_dir(str(root)) / "S.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)

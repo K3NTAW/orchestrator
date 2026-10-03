@@ -1,5 +1,6 @@
 """Read the current Planner transcript's context usage for the prompt hook."""
 import json
+import re
 from pathlib import Path
 
 from .pool import encode_project_dir
@@ -11,6 +12,18 @@ COMPACT_HEADER = ("Session compacted; continue in place. Planner mode: goals go 
                   "Skill(orchestrate); never edit source; see CLAUDE.md.")
 COMPACT_FOOTER = ("Full state: .orchestrator/plan.md; history: "
                   ".orchestrator/plan-log.md (do not read by default).")
+_HANDOVER_HEADING_RE = re.compile(r"(?m)^## Auto-handover ")
+_HANDOVER_END_RE = re.compile(r"(?m)^<!-- end auto-handover -->$")
+
+
+def _plan_without_handover(plan):
+    matches = list(_HANDOVER_HEADING_RE.finditer(plan))
+    if not matches:
+        return plan
+    heading = matches[-1]
+    marker = _HANDOVER_END_RE.search(plan, heading.end())
+    end = marker.end() if marker else len(plan)
+    return plan[:heading.start()] + plan[end:]
 
 
 def compact_brief(root, limit=4000) -> str:
@@ -126,7 +139,7 @@ def hook_message(cfg, config_dir: Path, root: Path, *, transcript=None, session_
     plan_max = planner.get("plan_max_chars", DEFAULT_PLAN_MAX_CHARS)
     plan_path = Path(root) / ".orchestrator" / "plan.md"
     try:
-        plan_chars = len(plan_path.read_text())
+        plan_chars = len(_plan_without_handover(plan_path.read_text()))
     except (FileNotFoundError, OSError, UnicodeError):
         plan_chars = None
     if isinstance(plan_max, int) and plan_max > 0 and plan_chars is not None and plan_chars > plan_max:
