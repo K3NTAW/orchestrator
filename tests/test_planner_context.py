@@ -101,12 +101,12 @@ class PlannerContext(unittest.TestCase):
             state = root / ".orchestrator/handover_state.json"
             state.parent.mkdir(parents=True)
             state.write_text(json.dumps({"snapshot_hash": "h", "auto_handover_bands": {"S": 0}}))
-            self._prompt_transcript(config_dir, root, 180000, 12)
+            transcript = self._prompt_transcript(config_dir, root, 180000, 12)
             for _ in range(3):
                 self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
             self.popen.assert_not_called()
-            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, session_id="other"),
-                             self._started(180000))
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, transcript=transcript,
+                                                          session_id="other"), self._started(180000))
             data = json.loads(state.read_text())
             self.assertEqual(data, {"snapshot_hash": "h", "auto_handover_bands": {"S": 0, "other": 0}})
 
