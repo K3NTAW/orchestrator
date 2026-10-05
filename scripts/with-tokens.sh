@@ -107,7 +107,7 @@ for i in "${!ids[@]}"; do
     echo "with-tokens: missing or empty token: ${ids[$i]}" >&2
     exit 1
   fi
-  printf -v "values[$i]" '%s' "${value}"
+  values+=("${value}")
 done
 unset value
 for i in "${!names[@]}"; do
