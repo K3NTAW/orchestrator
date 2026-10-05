@@ -200,8 +200,9 @@ def hook_message(cfg, config_dir: Path, root: Path, *, transcript=None, session_
         except Exception as exc:
             messages.append(f"Context {tokens} tokens: auto handover failed ({type(exc).__name__}: {' '.join(str(exc).split())}).")
         else:
-            messages.append(f"Context {tokens} tokens: handover started (auto); checkpoint goes to "
-                            ".orchestrator/plan.md.")
+            messages.append(f"Context {tokens} tokens: handover started (auto) to write the checkpoint: "
+                            f"uv run orchestrator handover --reason context --session-id {session_id}; "
+                            "keep working, the session compacts in place (auto-compact or /compact).")
         return "\n".join(messages)
     messages.append(f"Planner context is {tokens} tokens (threshold {threshold}); write the checkpoint: "
                     "uv run orchestrator handover --reason context; then keep working, "

@@ -51,8 +51,10 @@ class PlannerContext(unittest.TestCase):
             with mock.patch.object(Path, "read_text", side_effect=PermissionError):
                 self.assertEqual(planner_context.compact_brief(root), missing)
 
-    def _started(self, tokens):
-        return f"Context {tokens} tokens: handover started (auto); checkpoint goes to .orchestrator/plan.md."
+    def _started(self, tokens, session_id="S"):
+        return (f"Context {tokens} tokens: handover started (auto) to write the checkpoint: "
+                f"uv run orchestrator handover --reason context --session-id {session_id}; "
+                "keep working, the session compacts in place (auto-compact or /compact).")
 
     def test_hook_runs_handover_once_per_band(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -106,7 +108,7 @@ class PlannerContext(unittest.TestCase):
                 self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
             self.popen.assert_not_called()
             self.assertEqual(planner_context.hook_message(cfg, config_dir, root, transcript=transcript,
-                                                          session_id="other"), self._started(180000))
+                                                          session_id="other"), self._started(180000, "other"))
             data = json.loads(state.read_text())
             self.assertEqual(data, {"snapshot_hash": "h", "auto_handover_bands": {"S": 0, "other": 0}})
 
@@ -197,7 +199,7 @@ class PlannerContext(unittest.TestCase):
             self.assertEqual(message, self._started(2000))
             self.assertEqual(len(message.splitlines()), 1)
             self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
-            self.assertEqual(self._started(2000), planner_context.hook_message(
+            self.assertEqual(self._started(2000, "other"), planner_context.hook_message(
                 cfg, config_dir, root, transcript=transcript, session_id="other"))
 
     def test_default_threshold_when_key_absent(self):
