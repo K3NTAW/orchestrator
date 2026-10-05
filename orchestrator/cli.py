@@ -195,6 +195,7 @@ def main():
     rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
     rm.add_argument("--stdout", action="store_true")
     ins = sub.add_parser("install"); ins.add_argument("target")
+    new = sub.add_parser("new"); new.add_argument("path")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard")
     sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role", "packet_version", "reviewed_executor"])
@@ -656,6 +657,18 @@ def main():
         for line in install(a.target):
             print(line)
         print(f'Next: orchestrator goal start {a.target} "<goal>"')
+    elif a.cmd == "new":
+        from .new_project import NewProjectError, create
+        try:
+            lines = create(a.path)
+        except NewProjectError as e:
+            print(f"new: {e}", file=sys.stderr)
+            raise SystemExit(2)
+        for line in lines:
+            print(line)
+        target = lines[0].split(" ", 1)[1].removeprefix("existing ")
+        print(f"Next: ORCH_ROOT={target} uv run orchestrator daemon")
+        print(f'  or: orchestrator goal start {target} "<goal>"')
     elif a.cmd == "goal":
         from . import goals
         if a.goal_cmd == "start":
