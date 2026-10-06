@@ -5,16 +5,18 @@
 #   scripts/with-tokens.sh ENV_NAME=token-id [ENV_NAME=token-id ...] -- command [args...]
 #   scripts/with-tokens.sh --list    # prints the allowlisted token ids, one per line
 #
-# Allowlist: the only token ids allowed are the non-blank, non-# lines of
-# ${WITH_TOKENS_ALLOWLIST:-<repo root>/.orchestrator/token-allowlist.txt}. The human owns that file; this script
-# never writes it. A missing or empty allowlist refuses every request (exit 3); an id not on it exits 3.
+# Allowlist: the only token ids allowed are the non-blank, non-# lines of <repo root>/.orchestrator/token-allowlist.txt,
+# where repo root is the parent of this script's directory. The location is fixed and protected by
+# .orchestrator/protected-paths.txt; there is no override, and WITH_TOKENS_ALLOWLIST in the environment is refused
+# (exit 3). The human owns that file; this script never writes it. A missing or empty allowlist refuses every
+# request (exit 3); an id not on it exits 3.
 #
 # ENV_NAME must match ^[A-Z][A-Z0-9_]*$ and may not be a shell or loader variable (PATH, HOME, LD_PRELOAD, ...);
 # token-id must match ^[A-Za-z0-9._-]+$. Bad usage exits 2; a missing or empty token exits 1 naming only the id.
 #
 # Values are read with `f tok get <id> --reveal` into variables and exported just before exec; the script never
 # prints them. The command's own output is the caller's responsibility: never run echo, printenv or env through it.
-# WITH_TOKENS_F_SH overrides the f helper path for tests only.
+# WITH_TOKENS_F_SH overrides the f helper path and exists for tests only: a fake f.sh yields only fake values.
 set -euo pipefail
 
 usage() {
@@ -22,8 +24,13 @@ usage() {
   echo "       scripts/with-tokens.sh --list"
 }
 
+if [[ -n "${WITH_TOKENS_ALLOWLIST+set}" ]]; then
+  echo "with-tokens: WITH_TOKENS_ALLOWLIST is not supported" >&2
+  exit 3
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-allowlist_file="${WITH_TOKENS_ALLOWLIST:-${repo_root}/.orchestrator/token-allowlist.txt}"
+allowlist_file="${repo_root}/.orchestrator/token-allowlist.txt"
 
 allowed=()
 if [[ -f "${allowlist_file}" ]]; then
