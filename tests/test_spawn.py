@@ -1332,6 +1332,99 @@ class SpawnBase(unittest.TestCase):
         self.assertNotIn("+A = 1", diff)                              # predecessor's hunk, already in goal/G
 
 
+class LineageReviewPacket(unittest.TestCase):
+    """A review of a fix round covers base..head of the whole lineage, path-filtered by the union of chain
+    scopes, with the fix-only diff as a labelled extra section (T-1691)."""
+    CFG = {"context_router": {"mode": "off"}, "review": {"security_paths": []}, "limits": {}}
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="orch-lineage-"))
+        self.addCleanup(__import__("shutil").rmtree, self.repo, True)
+        scratch_repo(self.repo)
+        self.base = self.git("rev-parse", "HEAD")
+
+    def git(self, *a):
+        return subprocess.run(["git", *a], cwd=self.repo, capture_output=True, text=True).stdout.strip()
+
+    def commit(self, relpath, content):
+        path = self.repo / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        self.git("add", "-A", "-f"); self.git("commit", "-qm", f"add {relpath}")
+
+    def chain(self, root_content="ROOT = 1\n", fix_for=None):
+        self.commit("lineage_root.py", root_content)
+        self.commit("unrelated.py", "OTHER = 1\n")
+        root = bus.create_task("root", "s", ["a"], ["lineage_root.py"], role="execute")
+        bus.update(root["id"], worktree=str(self.repo))
+        self.git("branch", f"task/{root['id']}")              # the fix round's cut point
+        self.commit("tests/test_lineage_root.py", "def test_root():\n    assert True\n")
+        fix = bus.create_task("fix", "s", ["a"], ["tests/test_lineage_root.py"], role="execute",
+                              constraints={"fix_round_for": fix_for or root["id"]})
+        fix = bus.update(fix["id"], worktree=str(self.repo))
+        return root, fix
+
+    def review(self, fix, **extra):
+        return {"id": "T-R", "role": "review", "complexity": 3, "spec": "s", "acceptance": ["a"],
+                "scope": fix["scope"], "inputs": [fix["id"]], "lineage": True, "review_base": self.base,
+                "reviewed_sha": self.git("rev-parse", "HEAD"), **extra}
+
+    def test_fix_round_review_packet_covers_lineage(self):
+        _, fix = self.chain()
+        head = self.git("rev-parse", "HEAD")
+        text = spawn.review_packet(self.review(fix), fix, cfg=self.CFG)
+        diff, _, round_section = text.partition("## this round's change")
+        self.assertIn(f"range: {self.base}..{head}", diff)
+        self.assertIn("+ROOT = 1", diff)                       # the root's code, not only the fix's test
+        self.assertIn("+def test_root():", diff)
+        self.assertIn("+def test_root():", round_section)
+        self.assertNotIn("+ROOT = 1", round_section)
+
+    def test_lineage_filter_is_union_of_chain_scopes(self):
+        root, fix = self.chain()
+        self.assertEqual(spawn.lineage_paths(spawn.fix_chain(fix)),
+                         ["tests/test_lineage_root.py", "lineage_root.py"])
+        self.assertIsNone(spawn.lineage_paths([fix, {**root, "scope": ["**"]}]))
+        self.assertIsNone(spawn.lineage_paths([fix, {**root, "scope": []}]))
+        text = spawn.review_packet(self.review(fix), fix, cfg=self.CFG)
+        self.assertIn("lineage_root.py +1 -0", text)
+        self.assertNotIn("unrelated.py", text)
+
+    def test_lineage_diff_over_budget_lists_files_and_range(self):
+        big = "".join(f"LINE_{i} = {i}\n" for i in range(2000))
+        _, fix = self.chain(root_content=big)
+        head = self.git("rev-parse", "HEAD")
+        text = spawn.review_packet(self.review(fix), fix, cfg=self.CFG)
+        self.assertIn("lineage_root.py +2000 -0", text)
+        self.assertIn(f"git diff {self.base}..{head} -- lineage_root.py", text)
+        self.assertNotIn("LINE_1999", text)
+        self.assertIn("+def test_root():", text)               # the small file still fits in full
+
+    def test_lineage_packet_numstat_always_present(self):
+        _, fix = self.chain()
+        head = self.git("rev-parse", "HEAD")
+        cfg = {**self.CFG, "limits": {"review_diff_chars": 1}}
+        text = spawn.review_packet(self.review(fix), fix, cfg=cfg)
+        for path in ("lineage_root.py", "tests/test_lineage_root.py"):
+            self.assertIn(f"{path} +", text)
+            self.assertIn(f"git diff {self.base}..{head} -- {path}", text)
+        self.assertNotIn("+ROOT = 1", text)
+
+    def test_plain_task_review_unchanged(self):
+        self.commit("plain.py", "PLAIN = 1\n")
+        plain = bus.create_task("plain", "s", ["a"], ["plain.py"], role="execute")
+        plain = bus.update(plain["id"], worktree=str(self.repo))
+        review = {"id": "T-R", "role": "review", "complexity": 3}
+        with mock.patch.object(spawn, "scoped_diff", return_value="diff --git a/plain.py b/plain.py\n+PLAIN = 1\n"):
+            text = spawn.review_packet(review, plain, cfg=self.CFG)
+            expected = spawn.bounded_diff(spawn.scoped_diff(plain), 12000, "x").splitlines()[0]
+        self.assertIn(expected, text)
+        self.assertIn("+PLAIN = 1", text)
+        self.assertNotIn("## this round's change", text)
+        self.assertNotIn("range:", text)
+        self.assertNotIn("lineage", text)
+
+
 class SecretsForRole(unittest.TestCase):
     """env-form secrets (headless hosts, T-0079): ENV_NAME = "env:OTHER_NAME" reads OTHER_NAME from os.environ;
     a missing var is skipped, not raised; the command form (today's laptop config) is untouched."""

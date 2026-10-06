@@ -1252,8 +1252,34 @@ def _dirty_scope_paths(worktree, scope):
     return sorted(dirty)
 
 
-def _open_reviews(t, n_reviews, review_reason, cfg=None):
-    """Create exactly the missing review children and issue their workers."""
+def _lineage_base(t, head):
+    """(base sha, unresolved) for a fix-round lineage review: merge-base(goal/<parent> if it exists else
+    origin/main, head). A broken chain (missing ancestor, cycle, root without worktree) or a failed merge-base
+    falls back to the whole branch against origin/main, never to the fix-only diff."""
+    wt = t["worktree"]
+    try:
+        chain = spawn.fix_chain(t)
+        if not chain[-1].get("worktree"):
+            raise LookupError(f"lineage root {chain[-1]['id']} has no worktree")
+        parent = t.get("parent")
+        ref = (f"goal/{parent}" if parent and _git_in(wt, "rev-parse", "--verify", f"goal/{parent}").returncode == 0
+               else "origin/main")
+        r = _git_in(wt, "merge-base", ref, head)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip(), False
+    except LookupError:
+        pass
+    for ref in ("origin/main", "main"):
+        r = _git_in(wt, "merge-base", ref, head)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip(), True
+    r = _git_in(wt, "rev-list", "--max-parents=0", head)
+    return ((r.stdout.split() or [None])[0] if r.returncode == 0 else None), True
+
+
+def _open_reviews(t, n_reviews, review_reason, cfg=None, lineage=None):
+    """Create exactly the missing review children and issue their workers. A fix-round task (or lineage=True)
+    gets lineage reviews: stamped with the base..head range of everything that will land."""
     lookup_error = None
     if cfg is None:
         try:
@@ -1276,6 +1302,19 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
         pipeline["reviewed_sha"] = reviewed_sha
         bus.update(t["id"], pipeline=pipeline)
         existing = [x for x in existing if x.get("reviewed_sha") == reviewed_sha]
+    if lineage is None:
+        lineage = bool((t.get("constraints") or {}).get("fix_round_for"))
+    stamps = {}
+    if reviewed_sha:
+        stamps["reviewed_sha"] = reviewed_sha
+    if lineage:
+        existing = [x for x in existing if x.get("lineage")]
+        stamps["lineage"] = True
+        review_base, unresolved = _lineage_base(t, reviewed_sha) if reviewed_sha else (None, True)
+        if review_base:
+            stamps.update(review_base=review_base, pipeline={"review_range": f"{review_base}..{reviewed_sha}"})
+        if unresolved:
+            stamps["lineage_unresolved"] = True
     while len(existing) < n_reviews:
         number = len(existing)
         spec = t["spec"]
@@ -1300,8 +1339,8 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
         r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                             inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier,
                             constraints=constraints)
-        if reviewed_sha:
-            bus.update(r["id"], reviewed_sha=reviewed_sha)
+        if stamps:
+            r = bus.update(r["id"], **stamps)
         spawn_async(spawn.run_worker, r["id"])
         existing.append(r)
     return existing
@@ -1594,6 +1633,19 @@ def _merge_reviewed_one(t):
     reviews = [r for r in all_reviews if not reviewed_sha or r.get("reviewed_sha") == reviewed_sha]
     if not reviews:
         return  # gate() creates them; nothing to act on yet
+    if (t.get("constraints") or {}).get("fix_round_for"):
+        # A fix round's approval counts only from a review whose packet covered the whole lineage; a fix-only
+        # approval is ignored, but its request_changes still holds.
+        lineage_reviews = [r for r in reviews if r.get("lineage")]
+        fix_only_rejections = [r for r in reviews if not r.get("lineage") and r["status"] == "done"
+                               and _review_verdict(r, t, False) not in (None, "approve")]
+        if not lineage_reviews and not fix_only_rejections:
+            pipeline.update(reviews_expected=1)
+            bus.update(t["id"], pipeline=pipeline)
+            opened = _open_reviews(bus.get(t["id"]), 1, pipeline.get("review_reason", "lineage"), lineage=True)
+            notify(f"{t['id']}: fix-only approval ignored; lineage review {opened[0]['id']} opened")
+            return
+        reviews = lineage_reviews + fix_only_rejections
     single = len(reviews) == 1
     approved, rejected, pending, stuck, unknown = [], [], [], [], []
     for r in reviews:
