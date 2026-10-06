@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
 from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
-               planner_runs, spawn, strategy, worker_control)
+               planner_runs, ship, spawn, strategy, worker_control)
 from . import capacity, concurrency, decision_log, duration, jev_sched, machine, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier, executor_identity, config as pool_config
@@ -1984,6 +1984,12 @@ def tick(pool=None, stop_event=None):
             planner_runs.tick(pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
+    if not (stop_event and stop_event.is_set()):
+        try:
+            # --once (no stop_event) ships inline; the loop runs it in a non-daemon thread it joins on shutdown.
+            ship.tick(pool, stop_event=stop_event, inline=stop_event is None)
+        except Exception as e:
+            print(f"[daemon] ship failed: {e}", file=sys.stderr)
     m = pool.both_cooling_minutes()
     cooling = m > 30
     if pool.notification_transition("cooling", cooling) and cooling:
@@ -2040,6 +2046,7 @@ def _loop(interval, stop_event):
         except Exception as e:
             print(f"[daemon] tick failed: {e}", file=sys.stderr)
         if stop_event.wait(interval):
+            ship.join_threads()
             return
 
 

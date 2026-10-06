@@ -194,6 +194,10 @@ def main():
     pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true"); pc.add_argument("--brief", action="store_true")
     pc.add_argument("--transcript"); pc.add_argument("--session-id")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
+    shp = sub.add_parser("ship", help="advance one closed goal to the target branch; --retry clears a hold")
+    shp.add_argument("--retry", metavar="GOAL")
+    rb = sub.add_parser("rollback", help="revert a merge commit on the ship target through a gated PR")
+    rb.add_argument("sha"); rb.add_argument("--force", action="store_true", help="skip the gate (emergency)")
     rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
     rm.add_argument("--stdout", action="store_true")
     ins = sub.add_parser("install"); ins.add_argument("target")
@@ -649,6 +653,17 @@ def main():
                 print(tokens)
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
+    elif a.cmd == "ship":
+        from . import ship
+        from .pool import Pool
+        result = ship.retry(a.retry) if a.retry else ship.tick(Pool(), inline=True)
+        print(json.dumps(result, indent=1, default=str))
+    elif a.cmd == "rollback":
+        from . import ship
+        result = ship.rollback(a.sha, force=a.force)
+        print(json.dumps(result, indent=1))
+        if result["status"] != "rolled_back":
+            raise SystemExit(1)
     elif a.cmd == "repomap":
         from .repomap import build
         # Leave a little room for command wrappers while keeping the requested value an upper bound.
