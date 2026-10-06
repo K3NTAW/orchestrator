@@ -27,7 +27,7 @@ from pathlib import Path
 from . import ROOT, STATE, bus, goals, handover, jev, spawn, decision, failures, gitutil, notify
 from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner
 from . import planner_packet, scout_evidence
-from .pool import Pool
+from .pool import Pool, planner_setting, config as pool_config
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 _STALE_CLAIM_S = 120
@@ -165,6 +165,127 @@ def _held_key(t):
     return f"{t['id']}:{held_at!r}"
 
 
+# Roadmap checklist lines in .orchestrator/roadmap.md: "- [ ] <goal text>" (not filed yet) and
+# "- [x] <goal text> (T-xxxx)". Every other line is context.
+_ROADMAP_LINE = re.compile(r"^\s*[-*]\s+\[( |x|X)\]\s+(.+?)\s*$")
+_ROADMAP_ID = re.compile(r"\s*\(T-\d+\)\s*$")
+_NEXT_GOAL_ROADMAP_CHARS = 3000
+_NEXT_GOAL_RETRO_CHARS = 2000
+
+
+def roadmap_key(text):
+    """Stable key of a roadmap item: first 12 hex of sha1 of the stripped goal text, checkbox and a trailing
+    "(T-xxxx)" removed, so the key survives ticking the line."""
+    m = _ROADMAP_LINE.match(text)
+    text = m.group(2) if m else text
+    text = _ROADMAP_ID.sub("", text).strip()
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def _roadmap_items():
+    """(unchecked, checked) checklist lines of .orchestrator/roadmap.md, or None without a roadmap file."""
+    path = STATE / "roadmap.md"
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    unchecked, checked = [], []
+    for line in text.splitlines():
+        m = _ROADMAP_LINE.match(line)
+        if m:
+            (unchecked if m.group(1) == " " else checked).append(line.strip())
+    return unchecked, checked
+
+
+def _roadmap_packet_text():
+    """All unchecked lines first, each with its roadmap key, then up to 20 checked lines for context."""
+    items = _roadmap_items()
+    if items is None:
+        return ""
+    unchecked, checked = items
+    lines = [f"{line}  [roadmap_key:{roadmap_key(line)}]" for line in unchecked] + checked[:20]
+    return "\n".join(lines)[:_NEXT_GOAL_ROADMAP_CHARS]
+
+
+def _next_goal_retrospective(goal_id):
+    """Memory entries naming the closed goal, plus plan.md's "no learnings" marker, as raw text (data)."""
+    pattern = re.compile(rf"\bgoal:\s*{re.escape(goal_id)}\b")
+    blocks = []
+    for path in sorted((STATE / "memory").glob("*.md")):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        blocks += [b.strip() for b in re.split(r"\n\s*\n", text) if pattern.search(b)]
+    plan = STATE / "plan.md"
+    if plan.exists():
+        blocks += [line.strip() for line in plan.read_text().splitlines() if f"no learnings — goal: {goal_id}" in line]
+    return "\n\n".join(blocks)[:_NEXT_GOAL_RETRO_CHARS]
+
+
+def _is_goal(t):
+    return (t.get("role") == "triage" or bool((t.get("constraints") or {}).get("goal"))) and not t.get("parent")
+
+
+def _open_goals(all_tasks, exclude=None):
+    return [t["id"] for t in all_tasks if _is_goal(t) and t["id"] != exclude
+            and not (t.get("result") or {}).get("goal_closed") and t.get("status") not in ("done", "failed")]
+
+
+def _next_goal_enabled_at():
+    """First sighting of [planner].next_goal enabled writes enabled_at; only goals closed later produce a point."""
+    path = STATE / "next_goal_state.json"
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and isinstance(data.get("enabled_at"), (int, float)):
+            return data["enabled_at"]
+    except (OSError, json.JSONDecodeError):
+        pass
+    enabled_at = time.time()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"enabled_at": enabled_at}))
+    return enabled_at
+
+
+def _next_goal_closed(goal, ship_enabled):
+    if not (goal.get("result") or {}).get("goal_closed"):
+        return False
+    if ship_enabled:
+        return ((goal.get("pipeline") or {}).get("ship") or {}).get("state") == "shipped"
+    return True
+
+
+def _next_goal_points(all_tasks, records):
+    """At most one next_goal point: the earliest goal closed after enabled_at that has no blocking record, only
+    while no other goal is open, no next_goal decision is in flight, the roadmap has an unchecked item and the
+    rolling 24h launch count is under [planner].next_goal_max_per_day."""
+    try:
+        cfg = pool_config()
+    except (OSError, tomllib.TOMLDecodeError):
+        cfg = {}
+    if not planner_setting("next_goal", cfg):
+        return
+    enabled_at = _next_goal_enabled_at()
+    items = _roadmap_items()
+    if not items or not items[0]:
+        return
+    if _open_goals(all_tasks):
+        return
+    mine = [r for r in records if r.get("kind") == "next_goal"]
+    if any(r.get("status") in ("claimed", "running") for r in mine):
+        return
+    day_ago = time.time() - 86400
+    launched = sum(1 for r in mine if r.get("status") != "skipped" and (r.get("started_at") or 0) >= day_ago)
+    if launched >= int(planner_setting("next_goal_max_per_day", cfg)):
+        return
+    ship_enabled = bool((cfg.get("ship") or {}).get("enabled"))
+    closed = [g for g in all_tasks if _is_goal(g) and _next_goal_closed(g, ship_enabled)
+              and ((g.get("pipeline") or {}).get("closed_at") or 0) > enabled_at
+              and not _blocked(g["id"], "next_goal", g["id"], records)]
+    for goal in sorted(closed, key=lambda g: (g["pipeline"]["closed_at"], g["id"]))[:1]:
+        yield goal["id"], "next_goal", goal["id"]
+
+
 def decision_points():
     """Yield (goal_id, kind, payload_key) for every currently-unblocked decision: scouts_done (a goal has scout
     children, all done or failed, and no execute child yet -- the specs haven't been split off), held (each held
@@ -208,6 +329,8 @@ def decision_points():
                 not any(ch["status"] in ("queued", "running") for ch in children):
             if not _blocked(goal_id, "closable", goal_id, records):
                 yield goal_id, "closable", goal_id
+
+    yield from _next_goal_points(all_tasks, records)
 
 
 def _session_attached():
@@ -257,7 +380,8 @@ def _claim(goal_id, kind, payload_key, attempts, route=None):
              evidence=list(route.evidence) if route is not None else [goal_id, payload_key],
              cheaper_steps=list(route.cheaper_steps) if route is not None else [],
              decision_requested={"held": "write or approve a fix round", "scouts_done": "write specs",
-                                 "closable": "close the goal"}.get(kind, "make the requested decision"))
+                                 "closable": "close the goal",
+                                 "next_goal": "file the next roadmap goal"}.get(kind, "make the requested decision"))
     for field in ("usage_logged", "tokens", "usd", "session_id", "telemetry_before",
                   "materiality_logged", "materiality", "shadow_logged", "shadow_log",
                   "shadow_pid", "shadow_pid_start", "shadow_agreement"):
@@ -613,6 +737,19 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
         # needed -- any bus event it posted on the held task or its goal after launch (a result, a status
         # change) counts as that conclusion, so reconcile() scores exited_ok rather than exited_early/gave_up.
         return _bus_event_after(started_at, task_id, goal_id)
+    if kind == "next_goal":
+        # Filed (a goal carrying a roadmap_key created after launch) or a recorded reason on the closed goal.
+        started_at = r.get("started_at", 0)
+        for t in tasks_by_id.values():
+            if (t.get("constraints") or {}).get("roadmap_key"):
+                fts = _first_event_ts(t["id"])
+                if fts is not None and fts > started_at:
+                    return True
+        plan = STATE / "plan.md"
+        try:
+            return f"next_goal {goal_id}: no ready item" in plan.read_text() and plan.stat().st_mtime > started_at
+        except OSError:
+            return False
     return True
 
 
@@ -1063,6 +1200,10 @@ def build_ctx(point, pool=None):
                                         for glob in review.get("security_paths", [])),
                    semantic_trigger=semantic or any(fnmatch.fnmatch(path, glob) for path in [*scope, str(goal.get("spec") or "")]
                                                     for glob in review.get("semantic_paths", [])))
+    elif point["kind"] == "next_goal":
+        items = _roadmap_items()
+        ctx.update(roadmap_unchecked=len(items[0]) if items else 0,
+                   open_goals=_open_goals(bus.read(), exclude=goal["id"]))
     elif point["kind"] == "closable":
         executes = [t for t in children if t["role"] == "execute"]
         ctx.update(all_children_merged=bool(executes) and all(t["status"] == "done" and t.get("merged_into") for t in executes),
@@ -1087,9 +1228,15 @@ def _packet_sections(sections):
                 except KeyError:
                     status = "missing"
                 dependencies.append({"id": dep, "status": status})
-        result.append({"point": point, "ctx": ctx, "route": route, "classification": classification,
-                       "task": task, "reviews": comments, "failures": failure_text,
-                       "depends_on_statuses": dependencies})
+        section = {"point": point, "ctx": ctx, "route": route, "classification": classification,
+                   "task": task, "reviews": comments, "failures": failure_text,
+                   "depends_on_statuses": dependencies}
+        if point["kind"] == "next_goal":
+            section["next_goal"] = {
+                "closed_title": (task or {}).get("title"), "closed_result": (task or {}).get("result"),
+                "retrospective": _next_goal_retrospective(point["goal_id"]),
+                "roadmap": _roadmap_packet_text(), "open_goals": _open_goals(bus.read(), exclude=point["goal_id"])}
+        result.append(section)
     return result
 
 

@@ -91,6 +91,17 @@ def route(point: dict, ctx: dict) -> Route:
     if "infra_failure_kind" not in ctx or ctx["infra_failure_kind"] is not None:
         return result("escalate", "unknown:infra_failure_kind")
 
+    # next_goal dedups on its own record per closed goal; the closed goal's child state never changes again.
+    if point.get("kind") == "next_goal":
+        missing = unknown({"roadmap_unchecked": (int,), "open_goals": (list,)})
+        if missing:
+            return result("escalate", f"unknown:{missing}")
+        if not ctx["roadmap_unchecked"]:
+            return result("none", "roadmap_empty")
+        if ctx["open_goals"]:
+            return result("none", "goal_open")
+        return result("escalate", "next_goal_roadmap")
+
     if ctx.get("state_unchanged") is True:
         return result("none", "unchanged_state")
 

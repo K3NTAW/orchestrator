@@ -120,6 +120,9 @@ def classify(
             decision_type = "held_task"
     elif kind == "closable":
         decision_type = "closable_goal"
+    elif kind == "next_goal":
+        # Filing the next roadmap goal and its first atomic tasks is an initial goal plan.
+        decision_type = "initial_goal_plan"
     else:
         decision_type = "other"
 
@@ -130,7 +133,7 @@ def classify(
         ambiguity.append("ambiguous:true")
     if ambiguous:
         signals.extend(ambiguity)
-        if decision_type in ("initial_goal_plan", "scout_results"):
+        if decision_type in ("initial_goal_plan", "scout_results") and kind != "next_goal":
             decision_type = "ambiguous_requirement"
 
     entity = task_map if kind == "held" and task_map else goal_map
