@@ -13,16 +13,23 @@ The gate may take up to 2x [gate].timeout_s (run_gate retries once); the lock st
 Writes: only pipeline.ship, always through _ship_update(). The target branch only moves through `gh pr merge`;
 nothing here force-pushes or pushes to the target directly.
 
+Target sha: origin/<target> is read once, right after the fetch, and that exact sha is merged and stored as
+gated_target_sha. The daemon fetches the same repo from another thread, so re-reading the ref later could name a
+tree that was never gated.
+
 Residual window: origin/<target> can move between the final fetch and gh pr merge. After the merge the merge
 commit's first parent is compared with gated_target_sha; on a mismatch the full gate re-runs on the merge commit,
 and a red result rolls the merge back at once and holds the goal. Between that merge and the rollback, the target
-holds an ungated tree."""
+holds an ungated tree. A red post-merge gate never ships: the rollback state is kept in pipeline.ship and a resume
+runs it if it never finished; an unresolved first parent holds instead of skipping the check."""
 import fcntl, json, os, re, subprocess, sys, threading, time
 from pathlib import Path
 
 from . import ROOT, bus, gate, merge, notify
 
 ACTIVE = ("pending", "gating", "merging")
+MAX_ERRORS = 3
+SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 _THREADS = []
 
 
@@ -128,13 +135,27 @@ def _pr_number(url):
     return int(m.group(1)) if m else None
 
 
+def _goal_head(root, goal_id):
+    """The newer of goal/<id> and origin/goal/<id>; the remote wins unless the local branch is ahead of it."""
+    local, remote = _sha(root, f"goal/{goal_id}"), _sha(root, f"origin/goal/{goal_id}")
+    if remote and (not local or _git(root, "merge-base", "--is-ancestor", local, remote).returncode == 0):
+        return remote
+    return local
+
+
+def _covers(root, goal_id, pr):
+    """A merged PR ships the goal only if its head contains the current goal head."""
+    head, goal_head = (pr or {}).get("headRefOid"), _goal_head(root, goal_id)
+    return bool(head and goal_head) and _git(root, "merge-base", "--is-ancestor", goal_head, head).returncode == 0
+
+
 def _find_pr(root, goal_id, target):
     r = _gh(root, "pr", "list", "--head", f"goal/{goal_id}", "--base", target, "--state", "all",
-            "--json", "number,state,url,mergeCommit")
+            "--json", "number,state,url,mergeCommit,headRefOid")
     if r.returncode:
         raise _Hold("gh pr list failed", r.stderr[-2000:])
     prs = [p for p in json.loads(r.stdout or "[]") if p.get("state") != "CLOSED"]
-    merged = [p for p in prs if p.get("state") == "MERGED"]
+    merged = [p for p in prs if p.get("state") == "MERGED" and _covers(root, goal_id, p)]
     return (merged or [p for p in prs if p.get("state") == "OPEN"] or [None])[0]
 
 
@@ -167,25 +188,25 @@ def _stopped(stop_event):
 def _gating(goal_id, root, cfg, target):
     st = _ship_update(goal_id, state="gating")
     _git(root, "fetch", "origin", check=True)
-    local, remote = f"goal/{goal_id}", f"origin/goal/{goal_id}"
-    has_local, has_remote = _sha(root, local), _sha(root, remote)
-    base = remote if has_remote and (not has_local or
-                                     _git(root, "merge-base", "--is-ancestor", local, remote).returncode == 0) else local
-    if not (has_local or has_remote):
+    target_sha = _sha(root, f"origin/{target}")
+    if not target_sha:
+        raise _Hold("ship target missing")
+    has_remote = _sha(root, f"origin/goal/{goal_id}")
+    base = _goal_head(root, goal_id)
+    if not base:
         raise _Hold("ship goal branch missing")
     wt = _worktree(root, f"ship-{goal_id}", base)
     try:
-        r = _git(wt, "merge", "--no-edit", f"origin/{target}")
+        r = _git(wt, "merge", "--no-edit", "-m", f"Merge {target} {target_sha[:12]} into goal/{goal_id}", target_sha)
         if r.returncode:
             _git(wt, "merge", "--abort")
             raise _Hold("ship conflict", (r.stdout + r.stderr)[-2000:])
         head = _sha(wt, "HEAD")
-        if has_remote and _git(wt, "merge-base", "--is-ancestor", remote, "HEAD").returncode:
+        if has_remote and _git(wt, "merge-base", "--is-ancestor", has_remote, "HEAD").returncode:
             raise _Hold("ship push not fast-forward")
         push = _git(wt, "push", "origin", f"HEAD:refs/heads/goal/{goal_id}")
         if push.returncode:
             raise _Hold("ship push failed", push.stderr[-2000:])
-        target_sha = _sha(wt, f"origin/{target}")
         if not st.get("pr_number"):
             pr = _find_pr(root, goal_id, target) or _create_pr(root, bus.get(goal_id), target)
             _ship_update(goal_id, pr_number=pr["number"], pr_url=pr["url"])
@@ -195,7 +216,7 @@ def _gating(goal_id, root, cfg, target):
             raise _Hold(reason, tail)
     finally:
         _drop_worktree(root, wt)
-    _ship_update(goal_id, state="merging")
+    _ship_update(goal_id, state="merging", errors=0)
 
 
 def _merging(goal_id, root, cfg, target):
@@ -208,20 +229,41 @@ def _merging(goal_id, root, cfg, target):
             raise _Hold("ship target kept moving")
         _ship_update(goal_id, state="gating", attempts=attempts)
         return
+    if not (st.get("gated_head_sha") and st.get("gated_target_sha")) or _git(root, "merge-base", "--is-ancestor", st["gated_target_sha"],
+                                            st["gated_head_sha"]).returncode:
+        raise _Hold("ship gated head does not contain gated target")
     title = bus.get(goal_id).get("title", "")[:150]
     n = st["pr_number"]
     r = _gh(root, "pr", "merge", str(n), "--merge", "--match-head-commit", st["gated_head_sha"],
             "--subject", f"Merge PR {n}: {title} (goal/{goal_id}, auto-merged after green full gate)")
-    if r.returncode and (_pr_truth(root, n) or {}).get("state") != "MERGED":
-        raise _Hold("ship merge failed", r.stderr[-2000:])
+    if (_pr_truth(root, n) or {}).get("state") != "MERGED":
+        if r.returncode:
+            raise _Hold("ship merge failed", r.stderr[-2000:])
+        # Exit 0 without a merge: a merge queue or auto-merge took the PR. Nothing here can wait on it.
+        raise _Hold("merge pending", r.stdout[-2000:])
+
+
+def _roll_back_red(goal_id, root, cfg, merge_sha, tail=""):
+    """post_merge_gate is red: run the rollback unless one already finished, then hold. Never ships."""
+    rb = _ship(bus.get(goal_id)).get("rollback") or {}
+    if rb.get("status") in (None, "running"):
+        _ship_update(goal_id, rollback={"status": "running", "merge_sha": merge_sha})
+        rb = rollback(merge_sha, root=root, cfg=cfg)
+        _ship_update(goal_id, rollback=rb)
+    if rb.get("status") == "rolled_back":
+        return _hold(goal_id, "post-merge gate red", tail)
+    return _hold(goal_id, "post-merge gate red, rollback failed", tail or rb.get("tail", ""))
 
 
 def _on_merged(goal_id, root, cfg, target, merge_sha, stop_event=None):
     st = _ship_update(goal_id, merge_sha=merge_sha)
-    _git(root, "fetch", "origin")
+    if st.get("post_merge_gate") == "red":
+        return _roll_back_red(goal_id, root, cfg, merge_sha)
+    fetched = _git(root, "fetch", "origin")
     first_parent = _sha(root, f"{merge_sha}^1")
-    if st.get("gated_target_sha") and first_parent and first_parent != st["gated_target_sha"] \
-            and not st.get("post_merge_gate"):
+    if st.get("gated_target_sha") and not first_parent:
+        raise _Hold("ship merge parent unresolved", (fetched.stdout + fetched.stderr)[-2000:])
+    if st.get("gated_target_sha") and first_parent != st["gated_target_sha"] and not st.get("post_merge_gate"):
         wt = _worktree(root, f"ship-post-{goal_id}", merge_sha)
         try:
             ok, _reason, tail = _gate(root, wt, goal_id, cfg)
@@ -229,10 +271,8 @@ def _on_merged(goal_id, root, cfg, target, merge_sha, stop_event=None):
             _drop_worktree(root, wt)
         _ship_update(goal_id, post_merge_gate="green" if ok else "red")
         if not ok:
-            rb = rollback(merge_sha, root=root, cfg=cfg)
-            _ship_update(goal_id, rollback=rb)
-            return _hold(goal_id, "post-merge gate red", tail)
-    _ship_update(goal_id, state="shipped", last_error=None)
+            return _roll_back_red(goal_id, root, cfg, merge_sha, tail)
+    _ship_update(goal_id, state="shipped", last_error=None, errors=0)
     _record_decision(f"{goal_id} shipped to {target} as {merge_sha[:12]}",
                      f"revert path: orchestrator rollback {merge_sha}", goal_id)
     _notify_once(goal_id, "shipped",
@@ -251,6 +291,7 @@ def advance(goal_id, pool, root=ROOT, stop_event=None):
         if not st.get("state"):
             st = _ship_update(goal_id, state="pending", attempts=0)
         if not st.get("pr_number"):
+            _git(root, "fetch", "origin")
             pr = _find_pr(root, goal_id, target)
             if pr:
                 st = _ship_update(goal_id, pr_number=pr["number"], pr_url=pr["url"])
@@ -258,10 +299,16 @@ def advance(goal_id, pool, root=ROOT, stop_event=None):
                     return _on_merged(goal_id, root, cfg, target, _merge_oid(pr), stop_event)
         while not _stopped(stop_event):
             st = _ship(bus.get(goal_id))
+            if st.get("post_merge_gate") == "red" and st.get("merge_sha"):
+                return _on_merged(goal_id, root, cfg, target, st["merge_sha"], stop_event)
             if st.get("pr_number"):
                 truth = _pr_truth(root, st["pr_number"])
                 if truth and truth.get("state") == "MERGED" and _merge_oid(truth):
-                    return _on_merged(goal_id, root, cfg, target, _merge_oid(truth), stop_event)
+                    if _covers(root, goal_id, truth):
+                        return _on_merged(goal_id, root, cfg, target, _merge_oid(truth), stop_event)
+                    # The goal moved on after this PR merged: ship the rest through a new PR.
+                    _ship_update(goal_id, state="gating", pr_number=None, pr_url=None)
+                    continue
                 if truth and truth.get("state") == "CLOSED":
                     raise _Hold("ship PR closed")
             if st.get("state") in ("pending", "gating"):
@@ -274,8 +321,11 @@ def advance(goal_id, pool, root=ROOT, stop_event=None):
     except _Hold as h:
         return _hold(goal_id, h.reason, h.tail)
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
-        _ship_update(goal_id, last_error=str(e)[:500])
+        errors = _ship(bus.get(goal_id)).get("errors", 0) + 1
+        _ship_update(goal_id, last_error=str(e)[:500], errors=errors)
         print(f"[ship] {goal_id}: {e}", file=sys.stderr)
+        if errors >= MAX_ERRORS:
+            return _hold(goal_id, f"ship failed {MAX_ERRORS} times in a row", str(e))
         return {"status": "error", "error": str(e)[:500]}
 
 
@@ -343,13 +393,19 @@ def retry(goal_id):
     st = _ship(bus.get(goal_id))
     if st.get("state") != "held":
         return {"status": "not_held", "state": st.get("state")}
-    _ship_update(goal_id, state="pending", attempts=0, last_error=None, failure_tail="",
+    if st.get("merge_sha") and st.get("post_merge_gate") == "red":
+        return {"status": "refused", "reason": "PR merged with a red post-merge gate; roll back by hand"}
+    _ship_update(goal_id, state="pending", attempts=0, errors=0, last_error=None, failure_tail="",
                  retries=st.get("retries", 0) + 1)
     return {"status": "released", "goal": goal_id}
 
 
 def rollback(merge_sha, root=ROOT, cfg=None, force=False):
-    """Revert a merge commit on the target through a gated PR. --force skips the gate for emergencies."""
+    """Revert a merge commit on the target through a gated PR. --force skips the gate for emergencies.
+    The gate runs on the revert merged with the target as fetched; if the target moved by merge time, the revert
+    branch takes the new target and is gated once more; still moving leaves the PR open."""
+    if not isinstance(merge_sha, str) or not SHA_RE.fullmatch(merge_sha):
+        return {"status": "refused", "reason": f"{merge_sha!r} is not a commit sha"}
     if cfg is None:
         from .pool import config
         cfg = config()
@@ -365,7 +421,8 @@ def rollback(merge_sha, root=ROOT, cfg=None, force=False):
     short = sha[:12]
     subject = _git(root, "log", "-1", "--format=%s", sha).stdout.strip()
     branch = f"rollback/{short}"
-    wt = _worktree(root, f"rollback-{short}", f"origin/{target}")
+    base = _sha(root, f"origin/{target}")
+    wt = _worktree(root, f"rollback-{short}", base)
     try:
         r = _git(wt, "revert", "-m", "1", "--no-edit", sha)
         if r.returncode:
@@ -387,11 +444,31 @@ def rollback(merge_sha, root=ROOT, cfg=None, force=False):
             return {"status": "failed", "reason": "gh pr create failed", "tail": created.stderr[-2000:]}
         url = created.stdout.strip().splitlines()[-1]
         number = _pr_number(url)
-        if not force:
+        for regate in range(0 if force else 2):
             ok, reason, tail = _gate(root, wt, f"rollback-{short}", cfg)
             if not ok:
                 notify.notify(f"rollback {short}: {reason}; revert PR {url} left open, not merged")
                 return {"status": "gate_red", "pr_url": url, "tail": tail}
+            fetched = _git(root, "fetch", "origin")
+            now = _sha(root, f"origin/{target}")
+            if fetched.returncode or not now:
+                notify.notify(f"rollback {short}: fetch failed; revert PR {url} left open, not merged")
+                return {"status": "failed", "reason": "fetch failed", "pr_url": url, "tail": fetched.stderr[-2000:]}
+            if now == base:
+                break
+            if regate:
+                notify.notify(f"rollback {short}: {target} kept moving; revert PR {url} left open, not merged")
+                return {"status": "target_moved", "pr_url": url}
+            r = _git(wt, "merge", "--no-edit", "-m", f"Merge {target} {now[:12]} into {branch}", now)
+            if r.returncode:
+                _git(wt, "merge", "--abort")
+                notify.notify(f"rollback {short}: {target} moved and conflicts; revert PR {url} left open")
+                return {"status": "conflict", "pr_url": url, "tail": (r.stdout + r.stderr)[-2000:]}
+            head, base = _sha(wt, "HEAD"), now
+            push = _git(wt, "push", "origin", f"HEAD:refs/heads/{branch}")
+            if push.returncode:
+                notify.notify(f"rollback {short}: push failed; revert PR {url} left open")
+                return {"status": "failed", "reason": "push failed", "pr_url": url, "tail": push.stderr[-2000:]}
     finally:
         _drop_worktree(root, wt)
     merged = _gh(root, "pr", "merge", str(number), "--merge", "--match-head-commit", head,

@@ -8,7 +8,7 @@ from _harness import g, scratch_repo
 from orchestrator import bus, daemon, merge, notify, planner_runs, ship
 
 FAKE_GH = r'''#!/usr/bin/env python3
-import json, os, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile
 st_path, origin = os.environ["FAKE_GH_STATE"], os.environ["FAKE_GH_ORIGIN"]
 st = json.load(open(st_path)) if os.path.exists(st_path) else {"prs": [], "calls": []}
 argv = sys.argv[1:]
@@ -21,9 +21,12 @@ def head_sha(branch):
     return git("rev-parse", "refs/heads/" + branch, cwd=origin).stdout.strip() or None
 def mc(p):
     return {"oid": p["merge"]} if p.get("merge") else None
+def head_oid(p):
+    return p.get("head_oid") or head_sha(p["head"])
 out, code = "", 0
 if argv[:2] == ["pr", "list"]:
-    out = json.dumps([{"number": p["number"], "state": p["state"], "url": p["url"], "mergeCommit": mc(p)}
+    out = json.dumps([{"number": p["number"], "state": p["state"], "url": p["url"], "mergeCommit": mc(p),
+                       "headRefOid": head_oid(p)}
                       for p in st["prs"] if p["head"] == opt("--head") and p["base"] == opt("--base")])
 elif argv[:2] == ["pr", "create"]:
     n = len(st["prs"]) + 1
@@ -33,13 +36,15 @@ elif argv[:2] == ["pr", "create"]:
     out = p["url"]
 elif argv[:2] == ["pr", "view"]:
     p = st["prs"][int(argv[2]) - 1]
-    out = json.dumps({"state": p["state"], "mergeCommit": mc(p), "headRefOid": head_sha(p["head"])})
+    out = json.dumps({"state": p["state"], "mergeCommit": mc(p), "headRefOid": head_oid(p)})
 elif argv[:2] == ["pr", "merge"]:
     p = st["prs"][int(argv[2]) - 1]
     if opt("--match-head-commit") != head_sha(p["head"]):
         code = 1; sys.stderr.write("head moved")
+    elif st.get("pending"):
+        out = "queued"
     else:
-        d = tempfile.mkdtemp()
+        d = tempfile.mkdtemp(dir=os.environ["SHIP_TEST_TMP"])
         git("clone", "-q", origin, d)
         ident = ["-c", "user.email=t@t", "-c", "user.name=t"]
         if st.get("race"):
@@ -52,6 +57,8 @@ elif argv[:2] == ["pr", "merge"]:
         else:
             git("push", "-q", "origin", "HEAD:" + p["base"], cwd=d)
             p["state"], p["merge"] = "MERGED", git("rev-parse", "HEAD", cwd=d).stdout.strip()
+            p["head_oid"] = head_sha(p["head"])
+        shutil.rmtree(d, True)
 json.dump(st, open(st_path, "w"))
 print(out)
 sys.exit(code)
@@ -62,8 +69,9 @@ wt="$1"; cd "$wt" || exit 2
 [ -n "$GATE_LOG" ] && echo "full=${LUNA_GATE_FULL:-}" >> "$GATE_LOG"
 if [ -n "$MOVE_TARGET" ] && { [ -z "$MOVE_ONCE" ] || [ ! -f "$MOVE_ONCE" ]; }; then
   [ -n "$MOVE_ONCE" ] && touch "$MOVE_ONCE"
-  t=$(mktemp -d)
+  t=$(mktemp -d "$SHIP_TEST_TMP/move.XXXXXX")
   git clone -q "$MOVE_TARGET" "$t" && (cd "$t" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m move && git push -q origin HEAD:main)
+  python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1], True)' "$t"
 fi
 [ -f RED ] && { echo "RED failure tail" >&2; exit 1; }
 [ -f BREAK ] && [ -f goal.txt ] && { echo "post-merge red" >&2; exit 1; }
@@ -85,7 +93,8 @@ class Ship(unittest.TestCase):
         gate_script = self.dir / "gate.sh"; gate_script.write_text(GATE); gate_script.chmod(0o755)
         self.gh_state = self.dir / "gh.json"
         self.gate_log = self.dir / "gate.log"
-        env = mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}",
+        self.tmp = self.dir / "tmp"; self.tmp.mkdir()
+        env = mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}", "SHIP_TEST_TMP": str(self.tmp),
                                            "FAKE_GH_STATE": str(self.gh_state), "FAKE_GH_ORIGIN": str(self.origin)})
         env.start(); self.addCleanup(env.stop)
         for p in (mock.patch.object(merge, "TESTS_GREEN", gate_script),
@@ -438,6 +447,156 @@ class Ship(unittest.TestCase):
         self.assertEqual(result["status"], "gate_red")
         self.assertEqual(len(self.calls("pr", "merge")), 1)
         self.assertTrue(any("not merged" in n for n in self.notes))
+
+    # review fix round (T-1683)
+    def test_h1_gates_and_merges_the_target_sha_read_once(self):
+        gid = self.goal()
+        before = self.origin_sha("main")
+        real, moved = ship._git, []
+
+        def racing_git(root, *args, check=False):
+            if args[:1] == ("push",) and "refs/heads/goal/" in args[-1] and not moved:
+                # The daemon thread fetches the same repo between the merge and the push.
+                moved.append(self.push_main("race.txt", "r\n"))
+                real(self.root, "fetch", "origin")
+            return real(root, *args, check=check)
+
+        seen = []
+        real_merging = ship._merging
+        with mock.patch.object(ship, "_git", side_effect=racing_git), \
+                mock.patch.object(ship, "_merging", side_effect=lambda *a: seen.append(dict(self.state(a[0])))
+                                  or real_merging(*a)):
+            self.assertEqual(self.advance(gid)["status"], "shipped")
+        self.assertEqual(seen[0]["gated_target_sha"], before)
+        st = self.state(gid)
+        self.assertEqual((st["attempts"], st["gated_target_sha"]), (1, moved[0]))
+        self.assertEqual(g("merge-base", "--is-ancestor", st["gated_target_sha"], st["gated_head_sha"],
+                           cwd=self.origin).returncode, 0)
+        # _merging refuses a gated head that does not contain the gated target.
+        gid2 = self.goal(files=(("g2.txt", "a\n"),))
+        head = g("rev-parse", f"goal/{gid2}", cwd=self.root).stdout.strip()
+        ship._ship_update(gid2, state="merging", pr_number=9, gated_head_sha=head,
+                          gated_target_sha=self.origin_sha("main"))
+        with self.assertRaises(ship._Hold) as h:
+            ship._merging(gid2, self.root, self.cfg, "main")
+        self.assertEqual(h.exception.reason, "ship gated head does not contain gated target")
+
+    def test_h2_red_post_merge_gate_never_ships(self):
+        gid = self.goal()
+        self.gh_state.write_text(json.dumps({"calls": [], "prs": [], "race": True}))
+        with mock.patch.object(ship, "rollback", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.advance(gid)
+        st = self.state(gid)
+        self.assertEqual((st["post_merge_gate"], st["rollback"]["status"], st["state"]), ("red", "running", "merging"))
+        result = self.advance(gid)
+        self.assertEqual(result, {"status": "held", "reason": "post-merge gate red"})
+        st = self.state(gid)
+        self.assertEqual(st["rollback"]["status"], "rolled_back")
+        self.assertNotEqual(g("cat-file", "-e", "main:goal.txt", cwd=self.origin).returncode, 0)
+        self.assertEqual(ship.retry(gid)["status"], "refused")
+        self.assertFalse([n for n in self.notes if "shipped to main" in n])
+        # A rollback that failed holds and is not run again on resume.
+        gid2 = self.goal(files=(("g2.txt", "a\n"),))
+        ship._ship_update(gid2, state="merging", pr_number=1, merge_sha=st["merge_sha"], post_merge_gate="red",
+                          rollback={"status": "failed", "reason": "push failed"})
+        with mock.patch.object(ship, "rollback") as rb:
+            result = self.advance(gid2)
+        rb.assert_not_called()
+        self.assertEqual(result, {"status": "held", "reason": "post-merge gate red, rollback failed"})
+        self.assertEqual(self.state(gid2)["state"], "held")
+
+    def test_m3_unresolved_first_parent_holds(self):
+        gid = self.goal()
+        self._crash_after_merge(gid)
+        real = ship._git
+
+        def offline(root, *args, check=False):
+            if args[:1] == ("fetch",):
+                return subprocess.CompletedProcess(args, 1, "", "offline")
+            return real(root, *args, check=check)
+
+        with mock.patch.object(ship, "_git", side_effect=offline):
+            result = self.advance(gid)
+        self.assertEqual(result, {"status": "held", "reason": "ship merge parent unresolved"})
+        self.assertIn("offline", self.state(gid)["failure_tail"])
+        self.assertFalse([n for n in self.notes if "shipped to main" in n])
+
+    def test_m4_revert_regated_when_target_moves(self):
+        gid, sha = self.shipped()
+        self.cfg["ship"]["gate_env"].update(MOVE_TARGET=str(self.origin), MOVE_ONCE=str(self.dir / "moved"))
+        result = ship.rollback(sha, root=self.root, cfg=self.cfg)
+        self.assertEqual(result["status"], "rolled_back")
+        self.assertEqual(len(self.gate_runs()), 3)
+        call = self.calls("pr", "merge")[-1]
+        self.assertEqual(call[call.index("--match-head-commit") + 1], self.gh()["prs"][-1]["head_oid"])
+        self.assertNotEqual(g("cat-file", "-e", "main:goal.txt", cwd=self.origin).returncode, 0)
+        # Still moving after the re-gate: the PR stays open.
+        gid2 = self.goal(files=(("g2.txt", "a\n"),))
+        self.cfg["ship"]["gate_env"] = {"GATE_LOG": str(self.gate_log)}
+        self.assertEqual(self.advance(gid2)["status"], "shipped")
+        self.cfg["ship"]["gate_env"]["MOVE_TARGET"] = str(self.origin)
+        result = ship.rollback(self.state(gid2)["merge_sha"], root=self.root, cfg=self.cfg)
+        self.assertEqual(result["status"], "target_moved")
+        self.assertEqual(self.gh()["prs"][-1]["state"], "OPEN")
+        self.assertTrue(any("kept moving" in n for n in self.notes))
+
+    def test_m5_merge_pending_holds(self):
+        gid = self.goal()
+        self.gh_state.write_text(json.dumps({"calls": [], "prs": [], "pending": True}))
+        result = self.advance(gid)
+        self.assertEqual(result, {"status": "held", "reason": "merge pending"})
+        self.assertEqual(len(self.calls("pr", "merge")), 1)
+        self.assertEqual(self.state(gid)["state"], "held")
+
+    def test_l6_consecutive_errors_hold(self):
+        gid = self.goal()
+        with mock.patch.object(ship, "_gating", side_effect=OSError("boom")):
+            self.assertEqual(self.advance(gid)["status"], "error")
+            self.assertEqual(self.advance(gid)["status"], "error")
+            self.assertEqual(self.advance(gid), {"status": "held", "reason": "ship failed 3 times in a row"})
+        self.assertEqual(self.state(gid)["errors"], 3)
+        self.assertTrue(any("ship failed 3 times in a row" in n for n in self.notes))
+        ship.retry(gid)
+        self.assertEqual(self.advance(gid)["status"], "shipped")
+        self.assertEqual(self.state(gid)["errors"], 0)
+
+    def test_l7_stale_merged_pr_opens_new_pr(self):
+        gid = self.goal()
+        old_head = g("rev-parse", f"goal/{gid}", cwd=self.root).stdout.strip()
+        self.gh_state.write_text(json.dumps({"calls": [], "prs": [
+            {"number": 1, "state": "MERGED", "url": "https://example.test/pull/1", "head": f"goal/{gid}",
+             "base": "main", "merge": self.origin_sha("main"), "head_oid": old_head}]}))
+        g("checkout", "-q", f"goal/{gid}", cwd=self.root)
+        self.commit(self.root, "more.txt", "more\n")
+        g("push", "-q", "origin", f"goal/{gid}", cwd=self.root)
+        g("checkout", "-q", "main", cwd=self.root)
+        self.assertEqual(self.advance(gid)["status"], "shipped")
+        self.assertEqual(self.state(gid)["pr_number"], 2)
+        self.assertEqual(g("cat-file", "-e", "main:more.txt", cwd=self.origin).returncode, 0)
+        self.assertEqual(len(self.calls("pr", "create")), 1)
+
+    def test_l8_rollback_rejects_non_sha(self):
+        with mock.patch.object(ship, "_git") as git:
+            for bad in ("main", "HEAD~1", "--all", "abc", "deadbeef;x", "A" * 40, None):
+                self.assertEqual(ship.rollback(bad, root=self.root, cfg=self.cfg)["status"], "refused")
+        git.assert_not_called()
+
+    def test_l9_gitignore_covers_ship_state(self):
+        lines = (_harness.REPO / ".gitignore").read_text().splitlines()
+        self.assertIn(".orchestrator/ship-wt/", lines)
+        self.assertIn(".orchestrator/ship.lock", lines)
+
+    def test_l10_harness_disables_ship_and_temp_dirs_stay_local(self):
+        from orchestrator.pool import config
+        self.assertFalse(ship.settings(config())["enabled"])
+        self.assertIn('mkdtemp(dir=os.environ["SHIP_TEST_TMP"])', FAKE_GH)
+        self.assertIn('mktemp -d "$SHIP_TEST_TMP/', GATE)
+        gid = self.goal()
+        self.cfg["ship"]["gate_env"].update(MOVE_TARGET=str(self.origin), MOVE_ONCE=str(self.dir / "moved"))
+        self.assertEqual(self.advance(gid)["status"], "shipped")
+        self.assertTrue((self.dir / "moved").exists())
+        self.assertEqual(list(self.tmp.iterdir()), [])
 
 
 if __name__ == "__main__":
