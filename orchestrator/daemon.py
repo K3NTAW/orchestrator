@@ -1946,10 +1946,10 @@ def tick(pool=None, stop_event=None):
     maybe_handover("daemon tick")
 
 
-def acquire_lock():
+def acquire_lock(kind="cli"):
     """Non-blocking single-instance lock on STATE/daemon.lock. Returns the open file handle (keep it referenced
     for the daemon's lifetime; closing it or letting it get garbage-collected releases the flock), or None when
-    another daemon already holds it."""
+    another daemon already holds it. kind: "cli" (`orchestrator daemon`) or "mcp" (the autostart thread)."""
     STATE.mkdir(parents=True, exist_ok=True)
     # "a+", not "w": a contender that loses the flock must not truncate the holder's pid line.
     fh = open(LOCK_PATH, "a+")
@@ -1958,8 +1958,11 @@ def acquire_lock():
     except OSError:
         fh.close()
         return None
-    # The watchdog reads this pid to tell a live daemon from a dead one without probing the flock.
-    fh.seek(0); fh.truncate(); fh.write(f"{os.getpid()}\n"); fh.flush()
+    # The watchdog reads "<pid> <kind> <start time>" to tell a live daemon from a dead one or a reused pid
+    # without probing the flock.
+    start = machine.process_start(os.getpid())
+    marker = f"{os.getpid()} {kind}" + (f" {start}" if start else "")
+    fh.seek(0); fh.truncate(); fh.write(marker + "\n"); fh.flush()
     try:
         machine.register_repo(STATE.parent)
     except OSError as e:
@@ -1996,7 +1999,7 @@ def start_background(cfg, env=os.environ):
         return None
     if env.get("ORCH_DAEMON") == "0":
         return None
-    lock = acquire_lock()
+    lock = acquire_lock("mcp")
     if lock is None:
         return None
     interval = (cfg.get("daemon") or {}).get("interval_s", 30)

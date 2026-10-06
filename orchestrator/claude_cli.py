@@ -12,7 +12,7 @@ HOMEBREW_BIN = "/opt/homebrew/bin"
 
 def _first(name, candidates):
     found = shutil.which(name)
-    if found:
+    if found and os.path.isabs(found):  # a relative PATH entry resolves against whatever cwd spawns it
         return found
     for candidate in candidates:
         path = os.path.expanduser(candidate)
