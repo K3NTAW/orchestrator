@@ -15,6 +15,7 @@ MACHINE_DIR = Path(os.environ.get("ORCH_MACHINE_DIR", "~/.orchestrator-machine")
 LEASES = MACHINE_DIR / "leases.json"
 ACCOUNTS = MACHINE_DIR / "accounts.json"
 LOCK = MACHINE_DIR / "machine.lock"
+REPOS = MACHINE_DIR / "repos.json"
 WINDOW_S = 5 * 3600
 
 
@@ -170,3 +171,32 @@ def usage(account_id: str, now: float | None = None) -> dict:
             "planner_window_tokens": account["planner_window_tokens"],
             "planner_day_tokens": account["planner_day_tokens"],
         }
+
+
+def register_repo(path) -> None:
+    """Record a repo whose daemon took its lock, so the watchdog watches it without configuration."""
+    path = str(Path(path).resolve())
+    with _machine_state():
+        known = _read(REPOS, [])
+        if not isinstance(known, list):
+            known = []
+        if path not in known:
+            known.append(path)
+            _write(REPOS, known)
+
+
+def repos() -> list:
+    with _machine_state():
+        known = _read(REPOS, [])
+    return [p for p in known if isinstance(p, str)] if isinstance(known, list) else []
+
+
+def prune_repos(paths) -> None:
+    """Drop the given paths (repos whose directory is gone) from the registry."""
+    drop = {str(p) for p in paths}
+    if not drop:
+        return
+    with _machine_state():
+        known = _read(REPOS, [])
+        if isinstance(known, list):
+            _write(REPOS, [p for p in known if p not in drop])

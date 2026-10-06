@@ -1,4 +1,4 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | watchdog [--once] [--install-launchd] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
 import argparse, json, os, random, re, sys, time
 from collections import defaultdict
 from datetime import datetime
@@ -188,6 +188,8 @@ def main():
     pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
     pk.add_argument("--model", action="store_true")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
+    wd = sub.add_parser("watchdog"); wd.add_argument("--once", action="store_true", help="run one watchdog pass and exit")
+    wd.add_argument("--install-launchd", action="store_true", help="print a LaunchAgent plist and load commands; writes nothing")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual"); ho.add_argument("--session-id")
     pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true"); pc.add_argument("--brief", action="store_true")
     pc.add_argument("--transcript"); pc.add_argument("--session-id")
@@ -615,6 +617,12 @@ def main():
             print(f"model\t{model}\t{reason}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
+    elif a.cmd == "watchdog":
+        from . import watchdog
+        if a.install_launchd:
+            print(watchdog.install_launchd_text())
+        else:
+            sys.exit(watchdog.run(once=a.once))
     elif a.cmd == "handover":
         from . import handover
         from pathlib import Path

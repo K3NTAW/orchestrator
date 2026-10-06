@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 
-from . import ROOT, STATE, bus, goals, jev, spawn, env_policy
+from . import ROOT, STATE, bus, claude_cli, goals, jev, spawn, env_policy
 
 _ACTIONS = frozenset(("fix_round", "respec", "escalate", "noop", "synthesize_now",
                       "wait_for_more", "drop_low_confidence", "write_specs", "close", "other"))
@@ -30,12 +30,12 @@ def eligible(router_decision, cfg, *, sample=None):
 
 
 def argv(prompt, *, model, budget_usd, system_prompt_path):
-    return ["claude", "-p", prompt, "--model", model, "--output-format", "json",
+    return claude_cli.argv("-p", prompt, "--model", model, "--output-format", "json",
             "--max-budget-usd", str(budget_usd), "--mcp-config", ".mcp.planner-shadow.json",
             "--strict-mcp-config", "--disallowedTools",
             "Edit,Write,MultiEdit,NotebookEdit,Bash,Task,WebFetch,WebSearch",
             "--append-system-prompt", Path(system_prompt_path).read_text(encoding="utf-8"),
-            "--dangerously-skip-permissions"]
+            "--dangerously-skip-permissions")
 
 
 def launch(prompt, *, model, account, budget_usd, log, root=ROOT, popen=None, task_id=None):
@@ -56,7 +56,7 @@ def launch(prompt, *, model, account, budget_usd, log, root=ROOT, popen=None, ta
         stderr_log = str(log) + ".stderr"
         with log.open("w", encoding="utf-8") as stdout, open(stderr_log, "w", encoding="utf-8") as stderr:
             proc = (popen if popen is not None else goals.Popen)(
-                command, cwd=root, env=env, stdout=stdout, stderr=stderr,
+                command, executable=claude_cli.resolve(), cwd=root, env=env, stdout=stdout, stderr=stderr,
                 start_new_session=True)
         return {"pid": proc.pid, "log": str(log), "stderr_log": stderr_log, "argv": command}
     except Exception as exc:

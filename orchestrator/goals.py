@@ -11,7 +11,7 @@ from pathlib import Path
 from subprocess import Popen  # distinct from subprocess.run: tests fake this call without disturbing
                                # subprocess.run itself, which internally resolves Popen dynamically too
 
-from . import env_policy
+from . import claude_cli, env_policy
 from .install import install
 from .spawn import trust_workspace, resolve_secrets
 
@@ -347,15 +347,15 @@ def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extr
                                    task_id=task_id or "planner-" + uuid.uuid4().hex, root=repo_path)
 
     system_prompt = (repo_path / ".orchestrator" / "prompts" / "planner.md").read_text()
-    argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"] if model is None else model, "--output-format", "json",
+    argv = claude_cli.argv("-p", prompt, "--model", cfg["models"]["planner"] if model is None else model, "--output-format", "json",
             "--max-budget-usd", str(max_budget_usd), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
-            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]
+            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions")
 
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path = log_path.with_suffix(log_path.suffix + ".stderr")
     with open(log_path, "w") as log_fh, open(stderr_path, "w") as stderr_fh:
-        proc = Popen(argv, cwd=str(repo_path), env=env, stdout=log_fh, stderr=stderr_fh, start_new_session=True)
+        proc = Popen(argv, executable=claude_cli.resolve(), cwd=str(repo_path), env=env, stdout=log_fh, stderr=stderr_fh, start_new_session=True)
     return {"pid": proc.pid, "pid_start": _proc_start(proc.pid), "log": str(log_path),
             "stderr_log": str(stderr_path)}
 

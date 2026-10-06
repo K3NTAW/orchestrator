@@ -9,7 +9,7 @@ from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
 from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
                planner_runs, spawn, strategy, worker_control)
-from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
+from . import capacity, concurrency, decision_log, duration, jev_sched, machine, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier, executor_identity, config as pool_config
 from . import failures, gate as gate_runner, gitutil, interference, schedlog, notify as notifications
@@ -1951,12 +1951,19 @@ def acquire_lock():
     for the daemon's lifetime; closing it or letting it get garbage-collected releases the flock), or None when
     another daemon already holds it."""
     STATE.mkdir(parents=True, exist_ok=True)
-    fh = open(LOCK_PATH, "w")
+    # "a+", not "w": a contender that loses the flock must not truncate the holder's pid line.
+    fh = open(LOCK_PATH, "a+")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         fh.close()
         return None
+    # The watchdog reads this pid to tell a live daemon from a dead one without probing the flock.
+    fh.seek(0); fh.truncate(); fh.write(f"{os.getpid()}\n"); fh.flush()
+    try:
+        machine.register_repo(STATE.parent)
+    except OSError as e:
+        print(f"[daemon] machine registry update failed: {e}", file=sys.stderr)
     return fh
 
 

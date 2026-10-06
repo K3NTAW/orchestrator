@@ -4,7 +4,7 @@ import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import contracts, worker_registry, env_policy, worker_control
+from . import claude_cli, contracts, worker_registry, env_policy, worker_control
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -1314,9 +1314,9 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
     # claude 2.1.273 has no turn-cap flag; --max-budget-usd + subprocess timeout are the hard stops (§6.5)
     # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
     # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.
-    cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
+    cmd = claude_cli.argv("-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
            "--dangerously-skip-permissions", "--allowedTools", tools,
-           "--strict-mcp-config", "--mcp-config", str(mcp_config)]
+           "--strict-mcp-config", "--mcp-config", str(mcp_config))
     if resume_session:
         cmd += ["--resume", resume_session, "--tools", ""]
         cmd[cmd.index("--mcp-config") + 1] = '{"mcpServers": {}}'
@@ -1333,10 +1333,11 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
         log["packet_meta"] = task["packet_meta"]
     t0 = time.time()
 
-    if shutil.which("claude") is None:
+    cli = claude_cli.resolve()
+    if cli is None:
         worker_registry.finish(task["id"], "held", "no_cli", epoch=epoch)
         log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
-        return {"status": "held", "reason": "claude CLI not found on PATH"}
+        return {"status": "held", "reason": claude_cli.missing_reason()}
     try:
         with bus.locked():
             if not worker_control.is_current(task["id"], epoch):
@@ -1345,7 +1346,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
                                    model=model, account=acct.id, worktree=str(wt),
                                    branch=task.get("branch") or f"task/{task['id']}",
                                    parent=task.get("parent"), started_at=t0, epoch=epoch, tools=tools.split(",") if tools else [])
-            p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            p = subprocess.Popen(cmd, executable=cli, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             worker_registry.event(task["id"], "spawned", pid=p.pid, account=acct.id,
                                   model=model, worktree=str(wt), branch=task.get("branch") or f"task/{task['id']}")
             if task.get("_steering"):
@@ -1362,7 +1363,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
         # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never
         # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.
         log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
-        return {"status": "held", "reason": "claude CLI not found on PATH"}
+        return {"status": "held", "reason": claude_cli.missing_reason()}
     except OSError:
         worker_registry.finish(task["id"], "failed", "launch_error", epoch=epoch)
         raise
