@@ -390,9 +390,11 @@ class RunClaudeHoldsWhenCliMissing(unittest.TestCase):
         """Gotcha 2026-09-19: a missing `claude` binary must hold the task visibly (run logged with outcome
         "no_cli"), not crash the worker thread with FileNotFoundError and leave the task stuck "running" until
         something else requeues it as "process died" forever."""
-        orig_which = spawn.shutil.which
-        spawn.shutil.which = lambda name: None if name == "claude" else orig_which(name)
-        self.addCleanup(lambda: setattr(spawn.shutil, "which", orig_which))
+        # The resolver falls back to fixed install paths (/opt/homebrew/bin/claude, ...), so patching shutil.which
+        # no longer means "missing": patch the resolver itself.
+        resolver = mock.patch.object(spawn.claude_cli, "resolve", return_value=None)
+        resolver.start()
+        self.addCleanup(resolver.stop)
 
         popen_called = []
         def fail_if_called(*a, **k):
@@ -413,7 +415,8 @@ class RunClaudeHoldsWhenCliMissing(unittest.TestCase):
 
         self.assertEqual(popen_called, [])
         self.assertEqual(r["status"], "held")
-        self.assertIn("claude CLI not found", r["reason"])
+        self.assertEqual(r["reason"], spawn.claude_cli.missing_reason())
+        self.assertTrue(r["reason"].startswith("claude CLI not found; looked in: PATH, /opt/homebrew/bin/claude"))
 
         run_files = sorted(runs_dir.glob("*.jsonl"))
         self.assertGreaterEqual(len(run_files), max(before, 1))
