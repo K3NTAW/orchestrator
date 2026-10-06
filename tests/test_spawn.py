@@ -1,4 +1,6 @@
 import _harness
+import _fake_claude
+from _fake_claude import setUpModule, tearDownModule  # every spawn here fakes the claude CLI at an absolute path
 """spawn.run_worker's review-verdict propagation, prompt template rendering / result fitting, base-branch
 selection for stacked/challenge/review tasks (review T-0026, T-0030), and headless-host secret/token wiring
 (env-form secrets, CLAUDE_CODE_OAUTH_TOKEN injection)."""
@@ -35,7 +37,7 @@ class ReviewVerdict(unittest.TestCase):
                 mock.patch.object(spawn, "worker_registry"), \
                 mock.patch.object(spawn, "trust_workspace"), \
                 mock.patch.object(spawn, "secrets_for_role", return_value={"SERVICE_TOKEN": "orange"}), \
-                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                _fake_claude.patch(), \
                 mock.patch.dict(os.environ, {"SYNTHETIC_SOURCE": "green"}):
             with self.assertRaisesRegex(RuntimeError, "stop"):
                 spawn.run_claude(pl, acct, task, "p", "m", "Read", 1, 10)
@@ -60,7 +62,7 @@ class ReviewVerdict(unittest.TestCase):
         with mock.patch.object(spawn.subprocess, "Popen", return_value=process), \
                 mock.patch.object(spawn, "trust_workspace"), \
                 mock.patch.object(spawn, "secrets_for_role", return_value={}), \
-                mock.patch.object(spawn.shutil, "which", return_value="claude"):
+                _fake_claude.patch():
             result = spawn.run_claude(pl, pl.get("A"), task, "private prompt", "model", "Read", 1, 30)
         self.assertEqual(result["status"], "done")
         self.assertEqual([e["kind"] for e in registry.events(task["id"])], ["spawned", "usage", "exit"])
@@ -2268,7 +2270,7 @@ class OutputContracts(unittest.TestCase):
                 mock.patch.object(spawn, "run_claude", side_effect=run), \
                 mock.patch.object(spawn, "trust_workspace"), \
                 mock.patch.object(spawn, "secrets_for_role", return_value={}), \
-                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                _fake_claude.patch(), \
                 mock.patch.object(spawn.subprocess, "Popen", return_value=process) as popen:
             spawn.run_worker(task_id)
         return bus.get(task_id), calls, popen
@@ -2393,7 +2395,7 @@ class SteeringResume(unittest.TestCase):
         with mock.patch.object(spawn.subprocess, "Popen", return_value=process), \
                 mock.patch.object(spawn, "trust_workspace"), \
                 mock.patch.object(spawn, "secrets_for_role", return_value={}), \
-                mock.patch.object(spawn.shutil, "which", return_value="claude"), \
+                _fake_claude.patch(), \
                 mock.patch.object(P.Pool, "release") as release, \
                 mock.patch.object(bus, "post_result") as post:
             result = spawn.resume_worker(task, "steering", "session-example")
