@@ -92,11 +92,15 @@ class WatchdogTests(unittest.TestCase):
         for module in (goals, planner_shadow, daemon.spawn):
             src = inspect.getsource(module)
             self.assertIn("claude_cli.argv(", src, module.__name__)
-            self.assertRegex(src, r"executable=(claude_cli\.resolve\(\)|cli)", module.__name__)
-        self.assertIn("cli = claude_cli.resolve()", inspect.getsource(daemon.spawn))
+        for module in (goals, planner_shadow):
+            self.assertIn("executable=claude_cli.resolve()", inspect.getsource(module), module.__name__)
+        spawn_src = inspect.getsource(daemon.spawn)
+        self.assertIn("cli = claude_cli.resolve()", spawn_src)
+        self.assertIn("Popen([cli, *cmd[1:]]", spawn_src)
 
     def test_no_literal_claude_argv_outside_resolver(self):
-        pattern = re.compile(r"""[\[(]\s*["']claude["']\s*,""")
+        # A list or tuple literal (not a call like normalize("claude", ...)) whose first item is "claude".
+        pattern = re.compile(r"""(?<![\w.])[\[(]\s*["']claude["']\s*,""")
         offenders = [f.name for f in PKG.glob("*.py")
                      if f.name != "claude_cli.py" and pattern.search(f.read_text())]
         self.assertEqual(offenders, [])
