@@ -655,7 +655,6 @@ def main():
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
     elif a.cmd == "ship":
         from . import ship
-        from .pool import Pool
         result = ship.retry(a.retry) if a.retry else ship.tick(Pool(), inline=True)
         print(json.dumps(result, indent=1, default=str))
     elif a.cmd == "rollback":
