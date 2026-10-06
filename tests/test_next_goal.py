@@ -158,7 +158,7 @@ class NextGoalTests(NextGoalBase):
         self.enable()
         gid = self.closed_goal()
         point = PR._point((gid, "next_goal", gid))
-        ctx = PR.build_ctx(point, P.Pool({"accounts": [], "planner": {"routes": {"enabled": True}}}))
+        ctx = PR.build_ctx(point, P.Pool({"claude_accounts": [], "planner": {"routes": {"enabled": True}}}))
         self.assertEqual(ctx["roadmap_unchecked"], 2)
         self.assertEqual(ctx["open_goals"], [])
         route = decision.route(point, {**ctx, "state_unchanged": True})
