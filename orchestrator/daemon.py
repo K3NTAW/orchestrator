@@ -764,8 +764,48 @@ def _dispatch_deferrals(result, capacity_reason):
             for item in result["deferred"]}
 
 
+ORPHAN_MARGIN_S = 300
+
+
+def _worker_alive(t):
+    """True when any pid recorded for this task (on the task itself or in the worker registry) is still running."""
+    try:
+        registered = (worker_registry.get(t["id"]) or {}).get("pid")
+    except Exception:
+        registered = None
+    return any(pid and alive(pid) for pid in (t.get("pid"), registered))
+
+
+def reap_orphaned_reviews(now=None):
+    """A review or spec_review left running with no live worker past constraints.timeout_s + ORPHAN_MARGIN_S is
+    marked failed so the retry paths respawn it (2026-10-07: spec reviews T-0302/T-0303 sat running with no
+    claim and no run row for 8 h because their spawn_async worker never started). respawn_max still caps
+    retries; a task whose worker is alive is never touched. Returns the reaped ids."""
+    now = now or time.time()
+    reaped = []
+    for t in bus.read(status="running"):
+        if t.get("role") not in ("review", "spec_review"):
+            continue
+        started = t.get("claimed_at") or t.get("created_at") or 0
+        timeout = (t.get("constraints") or {}).get("timeout_s") or 900
+        if not started or now - started <= timeout + ORPHAN_MARGIN_S or _worker_alive(t):
+            continue
+        with bus.locked():
+            current = bus.get(t["id"])
+            if current.get("status") != "running" or _worker_alive(current):
+                continue
+            bus.update(t["id"], status="failed", hold_reason="orphaned: no worker", pid=None)
+        reaped.append(t["id"])
+        notify(f"{t['id']}: {t['role']} orphaned: no worker after {int(now - started)}s; marked failed")
+    return reaped
+
+
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
+    try:
+        reap_orphaned_reviews()
+    except Exception as e:
+        print(f"[daemon] reap_orphaned_reviews failed: {e}", file=sys.stderr)
     depth_tick = harness_depth.begin_tick(pool, notify, root=bus.STATE)
     scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)

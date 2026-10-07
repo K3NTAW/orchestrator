@@ -934,6 +934,62 @@ class Daemon(unittest.TestCase):
         entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
         self.assertEqual((entry["action"], entry["reason"]), ("spec_review", "spec_review_retry"))
 
+    def orphan(self, tid, **fields):
+        bus.update(tid, status="running", claimed_by=None, pipeline={},
+                   created_at=time.time() - 900 - daemon.ORPHAN_MARGIN_S - 60, **fields)
+
+    def test_orphaned_spec_review_marked_failed_and_respawned(self):
+        pool = self.dispatch_telemetry()
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        task = self.task("orphaned review", complexity=daemon.SPEC_REVIEW_MIN)
+        daemon.dispatch(pool)
+        first, = bus.read(role="spec_review")
+        self.orphan(first["id"])
+
+        daemon.dispatch(pool)
+
+        reaped = bus.get(first["id"])
+        self.assertEqual((reaped["status"], reaped["hold_reason"]), ("failed", "orphaned: no worker"))
+        reviews = bus.read(role="spec_review")
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual([review["inputs"] for review in reviews], [[task], [task]])
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual((entry["action"], entry["reason"]), ("spec_review", "spec_review_retry"))
+        daemon.dispatch(pool)
+        self.assertEqual(len([m for m in messages if "orphaned" in m]), 1)
+
+    def test_live_spec_review_not_reaped(self):
+        pool = self.dispatch_telemetry()
+        task = self.task("live review", complexity=daemon.SPEC_REVIEW_MIN)
+        daemon.dispatch(pool)
+        first, = bus.read(role="spec_review")
+        self.orphan(first["id"], pid=os.getpid())
+
+        daemon.dispatch(pool)
+
+        self.assertEqual(bus.get(first["id"])["status"], "running")
+        self.assertEqual(len(bus.read(role="spec_review")), 1)
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual((entry["task"], entry["reason"]), (task, "spec_review_pending"))
+
+    def test_orphaned_review_marked_failed(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        execute = self.task("reviewed work")
+        review = self.task("review: reviewed work", role="review", inputs=[execute])
+        young = self.task("review: young", role="review", inputs=[execute])
+        self.orphan(review)
+        bus.update(young, status="running")
+
+        self.assertEqual(daemon.reap_orphaned_reviews(), [review])
+
+        reaped = bus.get(review)
+        self.assertEqual((reaped["status"], reaped["hold_reason"]), ("failed", "orphaned: no worker"))
+        self.assertEqual(bus.get(young)["status"], "running")
+        self.assertEqual(bus.get(execute)["status"], "queued")
+        self.assertEqual(len(messages), 1)
+
     def test_spec_review_failures_hold_after_respawn_max(self):
         pool = self.dispatch_telemetry()
         pool.cfg["daemon"]["respawn_max"] = 2
