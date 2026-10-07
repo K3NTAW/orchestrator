@@ -3279,16 +3279,17 @@ class Daemon(unittest.TestCase):
             threads.append(thread)
             thread.start()
         self.swap(daemon, "spawn_async", async_for_test)
-        self.addCleanup(lambda: [thread.join() for thread in threads])
-        self.swap(executor, "start", lambda tid, prompt, executor_id=None: (time.sleep(2), self.started.append(tid)))
-        t0 = time.time()
+        release = threading.Event()
+        self.addCleanup(lambda: (release.set(), [thread.join() for thread in threads]))
+        self.swap(executor, "start", lambda tid, prompt, executor_id=None: (release.wait(30), self.started.append(tid)))
         daemon.tick()
-        self.assertLess(time.time() - t0, 0.5)                     # tick() returned before the sleep(2) finished
+        self.assertEqual(self.started, [])                         # tick() returned while the executor was still blocked
         stamp1 = bus.get(a)["pipeline"]["dispatched_at"]
         daemon.tick()
-        self.assertLess(time.time() - t0, 1.0)
+        self.assertEqual(self.started, [])
         stamp2 = bus.get(a)["pipeline"]["dispatched_at"]
         self.assertEqual(stamp1, stamp2)                           # not dispatched a second time
+        release.set()
         self.assertEqual(self.settle_started(1), [a])
 
     def test_gate_side_effect_failure_holds(self):
