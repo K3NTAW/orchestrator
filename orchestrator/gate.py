@@ -35,12 +35,12 @@ def settings(cfg=None):
             "cleanup_timeout_s": cleanup_timeout_s}
 
 
-def _run(argv, *, cwd, timeout_s, input, kill_grace_s):
+def _run(argv, *, cwd, timeout_s, input, kill_grace_s, env=None):
     started = time.monotonic()
     deadline = time.time() + timeout_s
     proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE if input is not None else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            start_new_session=True)
+                            start_new_session=True, env=env)
     on_start = _ON_START.get()
     if on_start is not None:
         on_start(proc.pid)
@@ -87,9 +87,9 @@ def _run(argv, *, cwd, timeout_s, input, kill_grace_s):
             "timed_out": True, "duration_s": time.monotonic() - started}
 
 
-def run_bounded(argv, *, cwd, timeout_s, input=None, kill_grace_s=KILL_GRACE_S):
-    """Run an argv in its own process group, killing the whole group on timeout."""
-    return _run(argv, cwd=cwd, timeout_s=timeout_s, input=input, kill_grace_s=kill_grace_s)
+def run_bounded(argv, *, cwd, timeout_s, input=None, kill_grace_s=KILL_GRACE_S, env=None):
+    """Run an argv in its own process group, killing the whole group on timeout. env None inherits."""
+    return _run(argv, cwd=cwd, timeout_s=timeout_s, input=input, kill_grace_s=kill_grace_s, env=env)
 
 
 def _gate_key(worktree, task_id):
@@ -97,7 +97,7 @@ def _gate_key(worktree, task_id):
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(raw)).strip("-.") or "gate"
 
 
-def run_gate(worktree, *, script, task_id=None, cfg=None):
+def run_gate(worktree, *, script, task_id=None, cfg=None, env=None):
     """Run a repository gate, cleaning up and retrying once after a timeout."""
     opts = settings(cfg)
     gates_dir = STATE / "gates"
@@ -113,7 +113,7 @@ def run_gate(worktree, *, script, task_id=None, cfg=None):
         token = _ON_START.set(register)
         try:
             result = run_bounded([str(script), str(worktree)], cwd=worktree,
-                                 timeout_s=opts["timeout_s"], input="{}")
+                                 timeout_s=opts["timeout_s"], input="{}", env=env)
         finally:
             _ON_START.reset(token)
             try:
