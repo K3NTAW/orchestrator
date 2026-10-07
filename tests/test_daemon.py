@@ -2146,6 +2146,52 @@ class Daemon(unittest.TestCase):
             self.assertEqual(task["merged_via"], f"fix round {second} abc12345")
             self.assertIsNone(task["hold_reason"])
 
+    def hand_filed_fix_chain(self):
+        """luna T-0597 <- T-0607 (hand-filed, no fix_round_for constraint) <- T-0608 (fix_round_for T-0607)."""
+        root_id = self.held_for_fix()
+        middle = self.task(f"fix round 1 (section-order test) for held {root_id} staging runbook")
+        bus.update(middle, status="held", hold_reason="gate_red")
+        last = self.task("fix 2", constraints={"fix_round_for": middle})
+        return root_id, middle, last
+
+    def test_two_level_fix_chain_marks_root_merged(self):
+        self.swap(daemon, "notify", lambda message: None)
+        root_id, middle, last = self.hand_filed_fix_chain()
+        daemon.report_merge(last, {"status": "merged", "target": "goal/G", "sha": "19ccbf2c"})
+        for tid in (root_id, middle, last):
+            task = bus.get(tid)
+            self.assertEqual(task["status"], "done")
+            self.assertEqual(task["merged_into"], "goal/G")
+            self.assertEqual(task["merged_via"], f"fix round {last} 19ccbf2c")
+            self.assertIsNone(task["hold_reason"])
+        self.assertIn("accepted_at", bus.get(root_id)["pipeline"])
+        other = bus.create_task("original elsewhere", "spec", ["works"], ["x.py"], role="execute", complexity=2,
+                                parent="T-9999")["id"]
+        bus.update(other, status="held", hold_reason="gate_red")
+        stray = self.task(f"fix round 1 for held {other}")
+        daemon.report_merge(stray, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
+        self.assertEqual(bus.get(other)["status"], "held")
+
+    def test_late_gate_result_does_not_reheld_merged_root(self):
+        self.swap(daemon, "notify", lambda message: None)
+        root_id, middle, last = self.hand_filed_fix_chain()
+        bus.update(root_id, status="done", worktree=str(self.sandbox), hold_reason=None)
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+
+        def late_red(*args, **kwargs):
+            if kwargs.get("task_id") == root_id:
+                daemon.report_merge(last, {"status": "merged", "target": "goal/G", "sha": "19ccbf2c"})
+            return {"returncode": 1, "timed_out": False, "timeouts": 0, "stdout": "", "stderr": "FAILED late"}
+        self.swap(daemon.gate, "run_gate", late_red)
+        daemon.gate(P.Pool())
+        task = bus.get(root_id)
+        self.assertEqual(task["status"], "done")
+        self.assertEqual(task["merged_into"], "goal/G")
+        self.assertIsNone(task["hold_reason"])
+        self.assertFalse(daemon.stamp(root_id, "review_held_at", status="held", hold_reason="late review"))
+        self.assertEqual(bus.get(root_id)["status"], "done")
+
     def settle_started(self, want, seconds=5):
         """dispatch() now runs executor.start on a background thread too; wait for it the same way."""
         deadline = time.time() + seconds

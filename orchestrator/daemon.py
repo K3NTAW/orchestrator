@@ -81,6 +81,29 @@ def is_goal(t):
     return bool((t.get("constraints") or {}).get("goal"))
 
 
+_HAND_FIX_ROUND = re.compile(r"^fix round\b.*?\bfor held (T-\d+)\b", re.I)
+
+
+def _fix_parent(task):
+    """The task a fix round repairs: constraints.fix_round_for, else the held task a hand-filed round names in its
+    title ("fix round 1 (...) for held T-0597 ..."), when that task is an unmerged execute task in the same goal.
+    The Planner files such rounds through bus_create_task without the constraint, and the merge walk must still
+    reach the root they repair."""
+    target = (task.get("constraints") or {}).get("fix_round_for")
+    if target:
+        return target
+    match = _HAND_FIX_ROUND.match(task.get("title") or "")
+    if not match or match.group(1) == task.get("id"):
+        return None
+    try:
+        named = bus.get(match.group(1))
+    except KeyError:
+        return None
+    if named.get("role") == "execute" and named.get("parent") == task.get("parent") and not named.get("merged_into"):
+        return named["id"]
+    return None
+
+
 
 
 
@@ -303,6 +326,8 @@ def stamp(tid, stage, pipeline_fields=None, **fields):
         pipeline = dict(t.get("pipeline") or {})
         if pipeline.get(stage):
             return False
+        if t.get("merged_into") and fields.get("status") == "held":
+            return False  # a late gate or review result never re-holds a task its fix-round chain already merged
         now = time.time()
         pipeline[stage] = now
         if stage in LEASED_STAGES and fields.get("status") != "held":
@@ -1468,7 +1493,8 @@ def _hold_stale_high(task):
     if not _stale_high_flag(task, evidence, active=False, now=time.time()):
         return False
     stamp(task["id"], "gated_at", status="held", hold_reason="stale_high")
-    bus.update(task["id"], status="held", hold_reason="stale_high")
+    if not bus.get(task["id"]).get("merged_into"):
+        bus.update(task["id"], status="held", hold_reason="stale_high")
     return True
 
 
@@ -1529,6 +1555,8 @@ def gate(pool):
                     print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
                 continue
         result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t["id"], cfg=pool.cfg)
+        if bus.get(t["id"]).get("merged_into"):
+            continue  # a fix round in its chain merged while this gate ran; its late result is moot
         if _hold_stale_high(t):
             continue
         if result["timed_out"]:
@@ -1602,19 +1630,24 @@ def report_merge(task_id, r):
             task_pipeline = dict(current.get("pipeline") or {})
             task_pipeline.setdefault("accepted_at", merged_at)
             bus.update(task_id, pipeline=task_pipeline)
-            if (current.get("constraints") or {}).get("fix_round_for"):
+            chain, seen = [], {task_id}
+            while (parent_id := _fix_parent(current)) and parent_id not in seen:
+                try:
+                    current = bus.get(parent_id)
+                except KeyError:
+                    break
+                seen.add(parent_id)
+                chain.append(current)
+            if chain:
                 fix_id = task_id
-                lineage_root = root(current)
-                root_pipeline = dict(lineage_root.get("pipeline") or {})
+                root_pipeline = dict(chain[-1].get("pipeline") or {})
                 root_pipeline.setdefault("accepted_at", merged_at)
-                while (current.get("constraints") or {}).get("fix_round_for"):
-                    ancestor = bus.get(current["constraints"]["fix_round_for"])
+                for ancestor in chain:
                     fields = {"status": "done", "merged_into": r["target"],
                               "merged_via": f"fix round {fix_id} {r['sha']}", "hold_reason": None}
-                    if ancestor["id"] == lineage_root["id"]:
+                    if ancestor is chain[-1]:
                         fields["pipeline"] = root_pipeline
                     bus.update(ancestor["id"], **fields)
-                    current = ancestor
                 bus.update(task_id, status="done", merged_into=r["target"],
                            merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
         notify(f"{task_id} merged into {r['target']} ({r['sha'][:8]})")
