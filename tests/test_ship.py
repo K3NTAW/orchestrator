@@ -794,18 +794,14 @@ class Ship(unittest.TestCase):
         self.assertEqual([c for c in self.gh()["calls"] if c[:2] in (["pr", "create"], ["pr", "merge"])], [])
         self.assertEqual(len([n for n in self.notes if "no automatic rollback" in n]), 1)
         # Already in the target with no PR: shipped as external, no gate, no rollback.
+        g("fetch", "-q", "origin", cwd=self.root)
+        g("merge", "-q", "--ff-only", "origin/main", cwd=self.root)
         gid2 = self.goal(files=(("g2.txt", "a\n"),))
         g("push", "-q", "origin", f"goal/{gid2}:main", cwd=self.root)
         with mock.patch.object(ship, "rollback") as rb:
             self.assertEqual(self.advance(gid2)["reason"], "already in target")
         rb.assert_not_called()
         self.assertEqual(self.state(gid2)["merged_by"], "external")
-        # A merge ship made itself is recorded as such.
-        g("fetch", "-q", "origin", cwd=self.root)
-        g("merge", "-q", "--ff-only", "origin/main", cwd=self.root)
-        gid3 = self.goal(files=(("g3.txt", "b\n"),))
-        self.assertEqual(self.advance(gid3)["status"], "shipped")
-        self.assertEqual(self.state(gid3)["merged_by"], "ship")
 
     def test_ship_worktree_under_wt(self):
         gid = self.goal()
@@ -816,6 +812,7 @@ class Ship(unittest.TestCase):
         self.assertEqual(len(seen[0].relative_to(self.root).parts), 2)
         self.assertFalse(seen[0].exists())
         self.assertFalse((self.root / ".orchestrator" / "ship-wt").exists())
+        self.assertEqual(self.state(gid)["merged_by"], "ship")
         # Post-merge and rollback gates use the same place.
         st = self.state(gid)
         seen.clear()
