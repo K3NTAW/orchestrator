@@ -88,6 +88,9 @@ class Ship(unittest.TestCase):
         self.root = scratch_repo(self.dir / "root")
         g("remote", "add", "origin", str(self.origin), cwd=self.root)
         g("push", "-q", "origin", "main", cwd=self.root)
+        # Ship was enabled before any goal here closed; the window tests remove this file.
+        (self.root / ".orchestrator").mkdir(exist_ok=True)
+        ship._state_path(self.root).write_text(json.dumps({"enabled_at": 0}))
         bindir = self.dir / "bin"; bindir.mkdir()
         (bindir / "gh").write_text(FAKE_GH); (bindir / "gh").chmod(0o755)
         gate_script = self.dir / "gate.sh"; gate_script.write_text(GATE); gate_script.chmod(0o755)
@@ -149,7 +152,7 @@ class Ship(unittest.TestCase):
 
     def mine(self):
         real = ship.candidates
-        return mock.patch.object(ship, "candidates", lambda: [t for t in real() if t["id"] in self.goals])
+        return mock.patch.object(ship, "candidates", lambda **kw: [t for t in real(**kw) if t["id"] in self.goals])
 
     def gate_runs(self):
         return self.gate_log.read_text().splitlines() if self.gate_log.exists() else []
@@ -165,14 +168,14 @@ class Ship(unittest.TestCase):
 
     def test_ship_runs_after_routine_close_only(self):
         gid = self.goal(closed=False)
-        self.assertNotIn(gid, [t["id"] for t in ship.candidates()])
+        self.assertNotIn(gid, [t["id"] for t in ship.candidates(root=self.root)])
         with self.mine():
             self.assertIsNone(ship.tick(self.pool, root=self.root))
         self.assertEqual(self.gh()["calls"], [])
         ctx = {"gate_state": "green", "all_children_merged": True, "routes": {}}
         planner_runs.routine_close({"goal_id": gid}, ctx, SimpleNamespace(cfg={"daemon": {}}))
         self.assertTrue(bus.get(gid)["result"]["goal_closed"])
-        self.assertIn(gid, [t["id"] for t in ship.candidates()])
+        self.assertIn(gid, [t["id"] for t in ship.candidates(root=self.root)])
         with self.mine():
             result = ship.tick(self.pool, root=self.root)
         self.assertEqual(result["status"], "shipped")
@@ -261,7 +264,7 @@ class Ship(unittest.TestCase):
         self.assertIn("RED failure tail", st["failure_tail"])
         self.advance(gid)
         self.assertEqual(len([n for n in self.notes if "ship held: gate red" in n]), 1)
-        self.assertNotIn(gid, [t["id"] for t in ship.candidates()])
+        self.assertNotIn(gid, [t["id"] for t in ship.candidates(root=self.root)])
         self.assertEqual(self.calls("pr", "merge"), [])
 
     def test_ship_retry_releases_hold(self):
@@ -270,7 +273,7 @@ class Ship(unittest.TestCase):
         self.assertEqual(ship.retry(gid)["status"], "released")
         st = self.state(gid)
         self.assertEqual((st["state"], st["retries"], st["last_error"]), ("pending", 1, None))
-        self.assertIn(gid, [t["id"] for t in ship.candidates()])
+        self.assertIn(gid, [t["id"] for t in ship.candidates(root=self.root)])
         self.assertEqual(ship.retry(gid)["status"], "not_held")
 
     def test_hold_after_retry_notifies_again(self):
@@ -304,7 +307,7 @@ class Ship(unittest.TestCase):
         head = self.state(gid)["gated_head_sha"]
         self.assertEqual(g("merge-base", "--is-ancestor", local, head, cwd=self.origin).returncode, 0)
         self.assertEqual(len(g("worktree", "list", cwd=self.root).stdout.splitlines()), 1)
-        self.assertEqual(list((self.root / ".orchestrator" / "ship-wt").iterdir()), [])
+        self.assertEqual(list((self.root / "wt").glob("ship-*")), [])
         # A diverged remote goal branch is never force-pushed over.
         gid2 = self.goal(files=(("g2.txt", "a\n"),))
         clone = self.dir / "diverge"
@@ -407,12 +410,16 @@ class Ship(unittest.TestCase):
         self.gh_state.write_text(json.dumps({"calls": [], "prs": [
             {"number": 1, "state": "MERGED", "url": "https://example.test/pull/1", "head": f"goal/{gid}",
              "base": "main", "merge": merge_sha}]}))
-        result = self.advance(gid)
-        self.assertEqual(result, {"status": "held", "reason": "post-merge gate red"})
+        # Ship did not make that merge: a red post-merge gate notifies and never rolls it back.
+        with mock.patch.object(ship, "rollback") as rb:
+            result = self.advance(gid)
+        rb.assert_not_called()
+        self.assertEqual((result["merged_by"], result["post_merge_gate"]), ("external", "red"))
         st = self.state(gid)
-        self.assertEqual((st["state"], st["post_merge_gate"]), ("held", "red"))
+        self.assertEqual((st["state"], st["post_merge_gate"], st["merged_by"]), ("shipped", "red", "external"))
         self.assertFalse([n for n in self.notes if "shipped to main" in n])
-        self.assertEqual(ship.retry(gid)["status"], "refused")
+        self.assertTrue(any("no automatic rollback" in n for n in self.notes))
+        self.assertEqual(ship.retry(gid)["status"], "not_held")
 
     def test_fetch_failure_counts_as_error(self):
         gid = self.goal()
@@ -442,7 +449,7 @@ class Ship(unittest.TestCase):
         self.assertEqual([c for c in self.gh()["calls"] if c[:2] != ["pr", "list"]], [])
         self.assertEqual(self.gate_runs(), [])
         self.assertEqual(self.origin_sha(f"goal/{gid}"), before)
-        self.assertNotIn(gid, [t["id"] for t in ship.candidates()])
+        self.assertNotIn(gid, [t["id"] for t in ship.candidates(root=self.root)])
         # The same check runs in gating, for a goal that reached the target after its PR was recorded.
         g("fetch", "-q", "origin", cwd=self.root)
         g("merge", "-q", "--ff-only", "origin/main", cwd=self.root)
@@ -561,7 +568,7 @@ class Ship(unittest.TestCase):
         self.assertEqual(result["status"], "conflict")
         self.assertEqual(len(self.calls("pr", "create")), 1)
         self.assertTrue(any("revert conflict" in n for n in self.notes))
-        self.assertEqual(list((self.root / ".orchestrator" / "ship-wt").iterdir()), [])
+        self.assertEqual(list((self.root / "wt").glob("ship-*")), [])
 
     def test_rollback_gate_red_no_merge(self):
         gid, sha = self.shipped()
@@ -622,7 +629,7 @@ class Ship(unittest.TestCase):
         # A rollback that failed holds and is not run again on resume.
         gid2 = self.goal(files=(("g2.txt", "a\n"),))
         ship._ship_update(gid2, state="merging", pr_number=1, merge_sha=st["merge_sha"], post_merge_gate="red",
-                          rollback={"status": "failed", "reason": "push failed"})
+                          merged_by="ship", rollback={"status": "failed", "reason": "push failed"})
         with mock.patch.object(ship, "rollback") as rb:
             result = self.advance(gid2)
         rb.assert_not_called()
@@ -725,6 +732,120 @@ class Ship(unittest.TestCase):
             for bad in ("main", "HEAD~1", "--all", "abc", "deadbeef;x", "A" * 40, None):
                 self.assertEqual(ship.rollback(bad, root=self.root, cfg=self.cfg)["status"], "refused")
         git.assert_not_called()
+
+    # T-1706: enable window, merge ownership, worktree depth, reset to gating
+    def test_goals_closed_before_enable_are_ignored(self):
+        ship._state_path(self.root).unlink()
+        old = self.goal()
+        stamped = self.goal(files=(("g2.txt", "a\n"),))
+        bus.update(stamped, pipeline={"closed_at": 1.0})
+        with self.mine():
+            self.assertIsNone(ship.tick(self.pool, root=self.root))
+        since = ship.enabled_at(self.root)
+        self.assertGreaterEqual(since, ship.closed_time(bus.get(old)))
+        self.assertEqual(ship.candidates(root=self.root), [])
+        for gid in (old, stamped):
+            self.assertNotIn("ship", bus.get(gid).get("pipeline") or {})
+        self.assertEqual(self.gh()["calls"], [])
+        new = self.goal(files=(("g3.txt", "b\n"),))
+        self.assertEqual([t["id"] for t in ship.candidates(root=self.root) if t["id"] in self.goals], [new])
+        with self.mine():
+            self.assertEqual(ship.tick(self.pool, root=self.root)["status"], "shipped")
+        self.assertEqual(self.state(new)["state"], "shipped")
+        self.assertEqual(self.state(old), {})
+        self.assertEqual(ship.enabled_at(self.root), since)
+
+    def test_disable_resets_enabled_at(self):
+        ship._state_path(self.root).unlink()
+        with self.mine():
+            ship.tick(self.pool, root=self.root)
+            first = ship.enabled_at(self.root)
+            self.assertIsNotNone(first)
+            self.assertIsNone(ship.tick(SimpleNamespace(cfg={"ship": {"enabled": False}}), root=self.root))
+            self.assertFalse(ship._state_path(self.root).exists())
+            self.assertIsNone(ship.enabled_at(self.root))
+            gid = self.goal()  # closed while ship was off
+            self.assertIsNone(ship.tick(self.pool, root=self.root))
+        self.assertGreater(ship.enabled_at(self.root), first)
+        self.assertGreaterEqual(ship.enabled_at(self.root), ship.closed_time(bus.get(gid)))
+        self.assertEqual(self.state(gid), {})
+        self.assertEqual(self.gh()["calls"], [])
+
+    def test_externally_merged_goal_never_rolled_back(self):
+        gid = self.goal(files=(("goal.txt", "g\n"), ("RED", "x\n")))
+        clone = self.dir / "human"
+        g("clone", "-q", str(self.origin), str(clone), cwd=self.dir)
+        g("config", "user.email", "t@t", cwd=clone); g("config", "user.name", "t", cwd=clone)
+        g("merge", "--no-ff", "-m", "human merge", f"origin/goal/{gid}", cwd=clone)
+        g("push", "-q", "origin", "HEAD:main", cwd=clone)
+        merge_sha = self.origin_sha("main")
+        self.gh_state.write_text(json.dumps({"calls": [], "prs": [
+            {"number": 1, "state": "MERGED", "url": "https://example.test/pull/1", "head": f"goal/{gid}",
+             "base": "main", "merge": merge_sha}]}))
+        with mock.patch.object(ship, "rollback") as rb:
+            result = self.advance(gid)
+            self.advance(gid)
+        rb.assert_not_called()
+        self.assertEqual(result["status"], "shipped")
+        st = self.state(gid)
+        self.assertEqual((st["state"], st["merged_by"], st["post_merge_gate"]), ("shipped", "external", "red"))
+        self.assertNotIn("rollback", st)
+        self.assertEqual(self.origin_sha("main"), merge_sha)
+        self.assertEqual([c for c in self.gh()["calls"] if c[:2] in (["pr", "create"], ["pr", "merge"])], [])
+        self.assertEqual(len([n for n in self.notes if "no automatic rollback" in n]), 1)
+        # Already in the target with no PR: shipped as external, no gate, no rollback.
+        gid2 = self.goal(files=(("g2.txt", "a\n"),))
+        g("push", "-q", "origin", f"goal/{gid2}:main", cwd=self.root)
+        with mock.patch.object(ship, "rollback") as rb:
+            self.assertEqual(self.advance(gid2)["reason"], "already in target")
+        rb.assert_not_called()
+        self.assertEqual(self.state(gid2)["merged_by"], "external")
+        # A merge ship made itself is recorded as such.
+        g("fetch", "-q", "origin", cwd=self.root)
+        g("merge", "-q", "--ff-only", "origin/main", cwd=self.root)
+        gid3 = self.goal(files=(("g3.txt", "b\n"),))
+        self.assertEqual(self.advance(gid3)["status"], "shipped")
+        self.assertEqual(self.state(gid3)["merged_by"], "ship")
+
+    def test_ship_worktree_under_wt(self):
+        gid = self.goal()
+        seen, real = [], ship._gate
+        with mock.patch.object(ship, "_gate", side_effect=lambda root, wt, *a: seen.append(Path(wt)) or real(root, wt, *a)):
+            self.assertEqual(self.advance(gid)["status"], "shipped")
+        self.assertEqual(seen[0], self.root / "wt" / f"ship-{gid}")
+        self.assertEqual(len(seen[0].relative_to(self.root).parts), 2)
+        self.assertFalse(seen[0].exists())
+        self.assertFalse((self.root / ".orchestrator" / "ship-wt").exists())
+        # Post-merge and rollback gates use the same place.
+        st = self.state(gid)
+        seen.clear()
+        with mock.patch.object(ship, "_gate", side_effect=lambda root, wt, *a: seen.append(Path(wt)) or real(root, wt, *a)):
+            self.assertEqual(ship.rollback(st["merge_sha"], root=self.root, cfg=self.cfg)["status"], "rolled_back")
+        self.assertEqual(seen[0], self.root / "wt" / f"ship-rollback-{st['merge_sha'][:12]}")
+
+    def test_reset_to_gating_clears_post_merge_state(self):
+        gid = self.goal()
+        old_head = g("rev-parse", f"goal/{gid}", cwd=self.root).stdout.strip()
+        self.gh_state.write_text(json.dumps({"calls": [], "prs": [
+            {"number": 1, "state": "MERGED", "url": "https://example.test/pull/1", "head": f"goal/{gid}",
+             "base": "main", "merge": self.origin_sha("main"), "head_oid": old_head}]}))
+        ship._ship_update(gid, state="merging", pr_number=1, merge_sha="a" * 40, post_merge_gate="green",
+                          merged_by="ship")
+        g("checkout", "-q", f"goal/{gid}", cwd=self.root)
+        self.commit(self.root, "more.txt", "more\n")
+        g("push", "-q", "origin", f"goal/{gid}", cwd=self.root)
+        g("checkout", "-q", "main", cwd=self.root)
+        seen = []
+
+        def stop(goal_id, *a):
+            seen.append(dict(self.state(goal_id)))
+            raise ship._Hold("stop here")
+
+        with mock.patch.object(ship, "_gating", side_effect=stop):
+            self.assertEqual(self.advance(gid)["reason"], "stop here")
+        self.assertEqual(seen[0]["state"], "gating")
+        self.assertEqual((seen[0]["pr_number"], seen[0]["merge_sha"], seen[0]["post_merge_gate"], seen[0]["merged_by"]),
+                         (None, None, None, None))
 
     def test_l9_gitignore_covers_ship_state(self):
         lines = (_harness.REPO / ".gitignore").read_text().splitlines()

@@ -1,6 +1,6 @@
 """Orchestration overhead measurements."""
 import _harness
-import json, tempfile, unittest
+import json, subprocess, tempfile, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -40,8 +40,15 @@ class Overhead(unittest.TestCase):
             self.assertIsNone(overhead.for_goal("T-1", root)["amplification"])
 
     def test_report_over_real_run_rows(self):
-        repository = Path(__file__).resolve().parents[3]
-        real = repository / ".orchestrator"
+        # The main checkout, from any worktree depth: the parent of the common .git directory.
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                cwd=Path(__file__).resolve().parent, capture_output=True, text=True)
+        if common.returncode:
+            self.skipTest("not inside a git repository")
+        real = Path(common.stdout.strip()).parent / ".orchestrator"
+        runs = real / "runs"
+        if not runs.is_dir() or not any(path.stat().st_size for path in runs.glob("*.jsonl")):
+            self.skipTest(f"no run rows under {runs}")
         rows = overhead.report(real)
         self.assertTrue(any(row["goal_id"].startswith("T-") and row["goal_id"] not in ("total", "median")
                             for row in rows))
