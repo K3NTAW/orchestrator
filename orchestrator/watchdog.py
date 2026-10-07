@@ -84,6 +84,13 @@ def read_lock(repo):
     return pid, kind, start
 
 
+def _lock_empty(path):
+    try:
+        return not path.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def daemon_pid(repo):
     lock = read_lock(repo)
     return lock[0] if lock else None
@@ -278,9 +285,14 @@ def evaluate(repo, now, *, registered):
     """Conditions that hold for repo right now: {condition: message}."""
     tasks = load_tasks(repo)
     alive = daemon_alive(repo)
-    lock_exists = (Path(repo) / ".orchestrator" / "daemon.lock").exists()
+    lock_path = Path(repo) / ".orchestrator" / "daemon.lock"
+    lock_exists = lock_path.exists()
     found = {}
-    if not alive and has_work(repo, tasks) and (lock_exists or registered):
+    if not alive and lock_exists and _lock_empty(lock_path):
+        # A daemon from before the pid marker holds the lock with an empty file: unknown, never dead.
+        found["daemon_unknown"] = f"{repo}: daemon.lock is empty: daemon on old code, restart it"
+        alive = True
+    elif not alive and has_work(repo, tasks) and (lock_exists or registered):
         found["daemon_dead"] = f"{repo}: daemon not running with work queued"
     stuck = running_too_long(tasks, now, alive)
     if stuck:
@@ -371,14 +383,14 @@ def launchd_plist(repo_root=None):
     path = os.pathsep.join([claude_cli.HOMEBREW_BIN, os.path.dirname(uv), "/usr/local/bin", "/usr/bin", "/bin",
                             "/usr/sbin", "/sbin"])
     logs = root / ".orchestrator" / "runs"
-    uv, path, root, logs = (escape(str(v)) for v in (uv, path, root, logs))
+    uv, path, root, logs, project = (escape(str(v)) for v in (uv, path, root, logs, PACKAGE_REPO))
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{uv}</string><string>run</string><string>orchestrator</string><string>watchdog</string><string>--once</string></array>
+  <array><string>{uv}</string><string>run</string><string>--project</string><string>{project}</string><string>orchestrator</string><string>watchdog</string><string>--once</string></array>
   <key>WorkingDirectory</key><string>{root}</string>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>{path}</string></dict>

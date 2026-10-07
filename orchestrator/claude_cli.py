@@ -31,8 +31,18 @@ def resolve_uv() -> str | None:
 
 
 def argv(*args) -> list:
-    """The argv every claude spawn uses; run it with Popen(..., executable=resolve())."""
+    """The argv every claude spawn builds; argv[0] is the bare name. Callers swap in the resolved absolute path
+    before Popen (command() below, or spawn.run_claude's [cli, *cmd[1:]])."""
     return [NAME, *args]
+
+
+def command(*args) -> list:
+    """argv(*args) with the resolved absolute path in argv[0]; FileNotFoundError naming the searched locations
+    when the CLI is missing."""
+    cli = resolve()
+    if cli is None:
+        raise FileNotFoundError(2, missing_reason(), NAME)
+    return [cli, *argv(*args)[1:]]
 
 
 def missing_reason() -> str:

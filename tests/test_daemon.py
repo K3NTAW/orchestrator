@@ -2724,6 +2724,18 @@ class Daemon(unittest.TestCase):
         self.assertIn(lineage[0]["id"], held["hold_reason"])
         self.assertEqual(self.merged, [])
 
+    def test_legacy_fix_round_keeps_expected_reviews(self):
+        fix, _, head = self.lineage_fix()
+        pipeline = dict(bus.get(fix)["pipeline"], reviews_expected=2)
+        bus.update(fix, pipeline=pipeline)
+        self.swap(daemon, "notify", lambda *a, **k: None)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        lineage = [r for r in bus.read(role="review") if r.get("lineage") and r["inputs"][:1] == [fix]]
+        self.assertEqual(len(lineage), 2)
+        self.assertEqual(bus.get(fix)["pipeline"]["reviews_expected"], 2)
+        self.assertEqual(self.merged, [])
+
     def test_lineage_review_approval_merges(self):
         fix, _, head = self.lineage_fix()
         self.swap(daemon, "notify", lambda *a, **k: None)

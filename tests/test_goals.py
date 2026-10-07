@@ -6,7 +6,8 @@ import contextlib, io, json, os, re, subprocess, sys, tempfile, threading, tomll
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_goals.py` doesn't add this dir itself
 from _harness import REPO, TMP, scratch_repo
-from orchestrator import bus, cli, goals
+from unittest import mock
+from orchestrator import bus, claude_cli, cli, goals, planner_shadow
 from orchestrator import planner_runs as PR
 from orchestrator.pool import Pool
 
@@ -51,6 +52,8 @@ class GoalsTestCase(unittest.TestCase):
         goals.Popen = FakePopen
         goals.trust_workspace = lambda config_dir, wt: None
         self.addCleanup(self._restore)
+        resolver = mock.patch.object(claude_cli, "resolve", return_value="/opt/fake/claude")
+        resolver.start(); self.addCleanup(resolver.stop)
 
     def _restore(self):
         goals.subprocess.run = self._orig_run
@@ -235,6 +238,30 @@ class InvalidTargetToml(GoalsTestCase):
 
 
 class ClaudeCliMissing(GoalsTestCase):
+    def test_goals_and_shadow_use_absolute_argv0(self):
+        repo = self.repo("absolute-argv0")
+        self.unignore(repo)
+        self.fake_run("T-9301")
+        r = goals.start(str(repo), "goal text", account_id="A")
+        self.assertTrue(r["launched"], r)
+        self.assertEqual(FakePopen.last_args[0], "/opt/fake/claude")
+        self.assertNotIn("executable", FakePopen.last_kwargs)
+        cmd = planner_shadow.argv("p", model="m", budget_usd=1, system_prompt_path=__file__)
+        self.assertEqual(cmd[0], "/opt/fake/claude")
+        self.assertEqual(cmd[1:3], ["-p", "p"])
+        with mock.patch.object(claude_cli, "resolve", return_value=None):
+            with self.assertRaises(FileNotFoundError) as e:
+                planner_shadow.argv("p", model="m", budget_usd=1, system_prompt_path=__file__)
+            self.assertIn("claude CLI not found", str(e.exception))
+            missing = self.repo("absolute-argv0-missing")
+            self.unignore(missing)
+            self.fake_run("T-9302")
+            calls = FakePopen.calls
+            r = goals.start(str(missing), "goal text", account_id="A")
+        self.assertFalse(r["launched"])
+        self.assertEqual(r["reason"], "claude CLI not found")
+        self.assertEqual(FakePopen.calls, calls)
+
     def test_start_records_missing_claude_cli(self):
         repo = self.repo("claude-missing")
         self.unignore(repo)

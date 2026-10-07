@@ -30,7 +30,8 @@ def eligible(router_decision, cfg, *, sample=None):
 
 
 def argv(prompt, *, model, budget_usd, system_prompt_path):
-    return claude_cli.argv("-p", prompt, "--model", model, "--output-format", "json",
+    """Absolute claude path in argv[0]; FileNotFoundError when the CLI is missing (launch() reports it)."""
+    return claude_cli.command("-p", prompt, "--model", model, "--output-format", "json",
             "--max-budget-usd", str(budget_usd), "--mcp-config", ".mcp.planner-shadow.json",
             "--strict-mcp-config", "--disallowedTools",
             "Edit,Write,MultiEdit,NotebookEdit,Bash,Task,WebFetch,WebSearch",
@@ -56,7 +57,7 @@ def launch(prompt, *, model, account, budget_usd, log, root=ROOT, popen=None, ta
         stderr_log = str(log) + ".stderr"
         with log.open("w", encoding="utf-8") as stdout, open(stderr_log, "w", encoding="utf-8") as stderr:
             proc = (popen if popen is not None else goals.Popen)(
-                command, executable=claude_cli.resolve(), cwd=root, env=env, stdout=stdout, stderr=stderr,
+                command, cwd=root, env=env, stdout=stdout, stderr=stderr,
                 start_new_session=True)
         return {"pid": proc.pid, "log": str(log), "stderr_log": stderr_log, "argv": command}
     except Exception as exc:

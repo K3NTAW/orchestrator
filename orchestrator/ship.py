@@ -39,6 +39,10 @@ class _Hold(Exception):
         self.reason, self.tail = reason, tail
 
 
+class _FetchError(OSError):
+    """A failed git fetch is usually transient: it counts toward MAX_ERRORS instead of holding at once."""
+
+
 def settings(cfg):
     ship = cfg.get("ship") or {}
     env = ship.get("gate_env") or {}
@@ -51,6 +55,13 @@ def _git(root, *args, check=False):
     r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
     if check and r.returncode:
         raise _Hold(f"git {args[0]} failed", (r.stdout + r.stderr)[-2000:])
+    return r
+
+
+def _fetch(root):
+    r = _git(root, "fetch", "origin")
+    if r.returncode:
+        raise _FetchError(f"git fetch failed: {(r.stdout + r.stderr)[-400:].strip()}")
     return r
 
 
@@ -149,14 +160,28 @@ def _covers(root, goal_id, pr):
     return bool(head and goal_head) and _git(root, "merge-base", "--is-ancestor", goal_head, head).returncode == 0
 
 
+def _in_target(root, goal_id, target):
+    """The goal head is already an ancestor of origin/<target>: nothing left to ship."""
+    head, target_sha = _goal_head(root, goal_id), _sha(root, f"origin/{target}")
+    return bool(head and target_sha) and _git(root, "merge-base", "--is-ancestor", head, target_sha).returncode == 0
+
+
+def _already_in_target(goal_id, target):
+    _ship_update(goal_id, state="shipped", shipped_reason="already in target", last_error=None, errors=0)
+    _notify_once(goal_id, "shipped", f"{goal_id}: already in {target}; marked shipped without a push or PR")
+    return {"status": "shipped", "reason": "already in target"}
+
+
 def _find_pr(root, goal_id, target):
+    """A covering MERGED PR, else an OPEN one, else a CLOSED one (callers hold on it), else None."""
     r = _gh(root, "pr", "list", "--head", f"goal/{goal_id}", "--base", target, "--state", "all",
             "--json", "number,state,url,mergeCommit,headRefOid")
     if r.returncode:
         raise _Hold("gh pr list failed", r.stderr[-2000:])
-    prs = [p for p in json.loads(r.stdout or "[]") if p.get("state") != "CLOSED"]
+    prs = json.loads(r.stdout or "[]")
     merged = [p for p in prs if p.get("state") == "MERGED" and _covers(root, goal_id, p)]
-    return (merged or [p for p in prs if p.get("state") == "OPEN"] or [None])[0]
+    return (merged or [p for p in prs if p.get("state") == "OPEN"]
+            or [p for p in prs if p.get("state") == "CLOSED"] or [None])[0]
 
 
 def _create_pr(root, goal, target):
@@ -186,11 +211,14 @@ def _stopped(stop_event):
 
 
 def _gating(goal_id, root, cfg, target):
-    st = _ship_update(goal_id, state="gating")
-    _git(root, "fetch", "origin", check=True)
+    """Gate the merged tree in a local worktree; push it and open the PR only after the gate is green."""
+    st = _ship_update(goal_id, state="gating", gate_ok=False)
+    _fetch(root)
     target_sha = _sha(root, f"origin/{target}")
     if not target_sha:
         raise _Hold("ship target missing")
+    if _in_target(root, goal_id, target):
+        return _already_in_target(goal_id, target)
     has_remote = _sha(root, f"origin/goal/{goal_id}")
     base = _goal_head(root, goal_id)
     if not base:
@@ -204,24 +232,28 @@ def _gating(goal_id, root, cfg, target):
         head = _sha(wt, "HEAD")
         if has_remote and _git(wt, "merge-base", "--is-ancestor", has_remote, "HEAD").returncode:
             raise _Hold("ship push not fast-forward")
+        ok, reason, tail = _gate(root, wt, goal_id, cfg)
+        if not ok:
+            raise _Hold(reason, tail)
         push = _git(wt, "push", "origin", f"HEAD:refs/heads/goal/{goal_id}")
         if push.returncode:
             raise _Hold("ship push failed", push.stderr[-2000:])
         if not st.get("pr_number"):
-            pr = _find_pr(root, goal_id, target) or _create_pr(root, bus.get(goal_id), target)
+            pr = _find_pr(root, goal_id, target)
+            if pr and pr.get("state") == "CLOSED":
+                raise _Hold("ship PR closed")
+            pr = pr or _create_pr(root, bus.get(goal_id), target)
             _ship_update(goal_id, pr_number=pr["number"], pr_url=pr["url"])
-        _ship_update(goal_id, gated_head_sha=head, gated_target_sha=target_sha)
-        ok, reason, tail = _gate(root, wt, goal_id, cfg)
-        if not ok:
-            raise _Hold(reason, tail)
+        _ship_update(goal_id, gated_head_sha=head, gated_target_sha=target_sha, gate_ok=True)
     finally:
         _drop_worktree(root, wt)
     _ship_update(goal_id, state="merging", errors=0)
+    return None
 
 
 def _merging(goal_id, root, cfg, target):
     st = _ship(bus.get(goal_id))
-    _git(root, "fetch", "origin", check=True)
+    _fetch(root)
     if _sha(root, f"origin/{target}") != st.get("gated_target_sha"):
         attempts = st.get("attempts", 0) + 1
         if attempts > settings(cfg)["max_regates"]:
@@ -229,7 +261,7 @@ def _merging(goal_id, root, cfg, target):
             raise _Hold("ship target kept moving")
         _ship_update(goal_id, state="gating", attempts=attempts)
         return
-    if not (st.get("gated_head_sha") and st.get("gated_target_sha")) or _git(root, "merge-base", "--is-ancestor", st["gated_target_sha"],
+    if not (st.get("gate_ok") and st.get("gated_head_sha") and st.get("gated_target_sha")) or _git(root, "merge-base", "--is-ancestor", st["gated_target_sha"],
                                             st["gated_head_sha"]).returncode:
         raise _Hold("ship gated head does not contain gated target")
     title = bus.get(goal_id).get("title", "")[:150]
@@ -243,9 +275,25 @@ def _merging(goal_id, root, cfg, target):
         raise _Hold("merge pending", r.stdout[-2000:])
 
 
+def _merged_rollback(root, merge_sha, target):
+    """The rollback/<short> PR a previous, interrupted rollback already got merged, or None."""
+    r = _gh(root, "pr", "list", "--head", f"rollback/{merge_sha[:12]}", "--base", target, "--state", "all",
+            "--json", "number,state,url,mergeCommit")
+    if r.returncode:
+        return None
+    merged = [p for p in json.loads(r.stdout or "[]") if p.get("state") == "MERGED"]
+    return merged[0] if merged else None
+
+
 def _roll_back_red(goal_id, root, cfg, merge_sha, tail=""):
     """post_merge_gate is red: run the rollback unless one already finished, then hold. Never ships."""
     rb = _ship(bus.get(goal_id)).get("rollback") or {}
+    if rb.get("status") == "running":
+        done = _merged_rollback(root, merge_sha, settings(cfg)["target"])
+        if done:
+            rb = {"status": "rolled_back", "merge_sha": merge_sha, "pr_url": done.get("url"),
+                  "revert_sha": _merge_oid(done), "resumed": True}
+            _ship_update(goal_id, rollback=rb)
     if rb.get("status") in (None, "running"):
         _ship_update(goal_id, rollback={"status": "running", "merge_sha": merge_sha})
         rb = rollback(merge_sha, root=root, cfg=cfg)
@@ -255,7 +303,8 @@ def _roll_back_red(goal_id, root, cfg, merge_sha, tail=""):
     return _hold(goal_id, "post-merge gate red, rollback failed", tail or rb.get("tail", ""))
 
 
-def _on_merged(goal_id, root, cfg, target, merge_sha, stop_event=None):
+def _on_merged(goal_id, root, cfg, target, merge_sha, stop_event=None, head_oid=None):
+    """A post-merge gate runs unless the PR merged exactly the green gated head onto the gated target."""
     st = _ship_update(goal_id, merge_sha=merge_sha)
     if st.get("post_merge_gate") == "red":
         return _roll_back_red(goal_id, root, cfg, merge_sha)
@@ -263,7 +312,9 @@ def _on_merged(goal_id, root, cfg, target, merge_sha, stop_event=None):
     first_parent = _sha(root, f"{merge_sha}^1")
     if st.get("gated_target_sha") and not first_parent:
         raise _Hold("ship merge parent unresolved", (fetched.stdout + fetched.stderr)[-2000:])
-    if st.get("gated_target_sha") and first_parent != st["gated_target_sha"] and not st.get("post_merge_gate"):
+    gated = bool(st.get("gate_ok") and st.get("gated_head_sha") and head_oid == st["gated_head_sha"]
+                 and first_parent == st.get("gated_target_sha"))
+    if not gated and not st.get("post_merge_gate"):
         wt = _worktree(root, f"ship-post-{goal_id}", merge_sha)
         try:
             ok, _reason, tail = _gate(root, wt, goal_id, cfg)
@@ -293,10 +344,16 @@ def advance(goal_id, pool, root=ROOT, stop_event=None):
         if not st.get("pr_number"):
             _git(root, "fetch", "origin")
             pr = _find_pr(root, goal_id, target)
+            if pr and pr.get("state") == "MERGED" and _merge_oid(pr):
+                _ship_update(goal_id, pr_number=pr["number"], pr_url=pr["url"])
+                return _on_merged(goal_id, root, cfg, target, _merge_oid(pr), stop_event, pr.get("headRefOid"))
+            if _in_target(root, goal_id, target):
+                return _already_in_target(goal_id, target)
+            if pr and pr.get("state") == "CLOSED":
+                # A human closed it: never replace it with a new PR that would merge unattended.
+                raise _Hold("ship PR closed")
             if pr:
                 st = _ship_update(goal_id, pr_number=pr["number"], pr_url=pr["url"])
-                if pr.get("state") == "MERGED" and _merge_oid(pr):
-                    return _on_merged(goal_id, root, cfg, target, _merge_oid(pr), stop_event)
         while not _stopped(stop_event):
             st = _ship(bus.get(goal_id))
             if st.get("post_merge_gate") == "red" and st.get("merge_sha"):
@@ -305,14 +362,17 @@ def advance(goal_id, pool, root=ROOT, stop_event=None):
                 truth = _pr_truth(root, st["pr_number"])
                 if truth and truth.get("state") == "MERGED" and _merge_oid(truth):
                     if _covers(root, goal_id, truth):
-                        return _on_merged(goal_id, root, cfg, target, _merge_oid(truth), stop_event)
+                        return _on_merged(goal_id, root, cfg, target, _merge_oid(truth), stop_event,
+                                          truth.get("headRefOid"))
                     # The goal moved on after this PR merged: ship the rest through a new PR.
                     _ship_update(goal_id, state="gating", pr_number=None, pr_url=None)
                     continue
                 if truth and truth.get("state") == "CLOSED":
                     raise _Hold("ship PR closed")
             if st.get("state") in ("pending", "gating"):
-                _gating(goal_id, root, cfg, target)
+                done = _gating(goal_id, root, cfg, target)
+                if done:
+                    return done
             elif st.get("state") == "merging":
                 _merging(goal_id, root, cfg, target)
             else:
@@ -362,6 +422,8 @@ def tick(pool, stop_event=None, root=ROOT, inline=True):
         return None
     if any(t.is_alive() for t in _THREADS):
         return None
+    if not inline and not threading.main_thread().is_alive():
+        return None  # interpreter shutdown: a new non-daemon thread would keep the process alive for hours
     rows = candidates()
     if not rows:
         return None

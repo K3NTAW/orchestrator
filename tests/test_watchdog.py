@@ -91,13 +91,14 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(env["ORCH_ROOT"], str(self.root))
 
     def test_resolver_used_by_goals_and_shadow(self):
-        cmd = planner_shadow.argv("p", model="m", budget_usd=1, system_prompt_path=__file__)
-        self.assertEqual(cmd[0], claude_cli.NAME)
-        for module in (goals, planner_shadow, daemon.spawn):
-            src = inspect.getsource(module)
-            self.assertIn("claude_cli.argv(", src, module.__name__)
+        with mock.patch.object(claude_cli, "resolve", return_value="/opt/fake/claude"):
+            cmd = planner_shadow.argv("p", model="m", budget_usd=1, system_prompt_path=__file__)
+        self.assertEqual(cmd[0], "/opt/fake/claude")
         for module in (goals, planner_shadow):
-            self.assertIn("executable=claude_cli.resolve()", inspect.getsource(module), module.__name__)
+            src = inspect.getsource(module)
+            self.assertIn("claude_cli.command(", src, module.__name__)
+            self.assertNotIn("executable=", src, module.__name__)
+        self.assertIn("claude_cli.argv(", inspect.getsource(daemon.spawn))
         spawn_src = inspect.getsource(daemon.spawn)
         self.assertIn("cli = claude_cli.resolve()", spawn_src)
         self.assertIn("Popen([cli, *cmd[1:]]", spawn_src)
@@ -312,6 +313,29 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(popen.call_args.kwargs["cwd"], str(repo))
         self.assertEqual(popen.call_args.kwargs["env"]["ORCH_ROOT"], str(repo))
         self.assertTrue(log.startswith(str(repo / ".orchestrator" / "runs")))
+
+    def test_plist_uses_project(self):
+        text = watchdog.launchd_plist(self.root)
+        args = re.search(r"<key>ProgramArguments</key>\s*<array>(.*?)</array>", text, re.S).group(1)
+        strings = re.findall(r"<string>([^<]*)</string>", args)
+        self.assertEqual(strings[1:], ["run", "--project", str(watchdog.PACKAGE_REPO), "orchestrator", "watchdog",
+                                       "--once"])
+
+    def test_empty_lock_is_unknown_not_dead(self):
+        repo = self.repo()
+        machine.register_repo(repo)
+        self.task(repo, "T-1")
+        lock = repo / ".orchestrator" / "daemon.lock"
+        lock.write_text("")
+        self.run_once()
+        self.run_once()
+        self.assertEqual(self.started, [])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("daemon on old code, restart it", self.sent[0])
+        self.assertNotIn("not running", self.sent[0])
+        lock.write_text("not a pid\n")  # malformed but not empty: still treated as dead
+        self.run_once()
+        self.assertEqual(self.started, [str(repo.resolve())])
 
     def test_h2_harness_isolates_machine_dir(self):
         home = Path("~/.orchestrator-machine").expanduser().resolve()

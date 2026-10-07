@@ -1640,9 +1640,10 @@ def _merge_reviewed_one(t):
         fix_only_rejections = [r for r in reviews if not r.get("lineage") and r["status"] == "done"
                                and _review_verdict(r, t, False) not in (None, "approve")]
         if not lineage_reviews and not fix_only_rejections:
-            pipeline.update(reviews_expected=1)
+            expected = max(int(pipeline.get("reviews_expected") or 0), 1)
+            pipeline.update(reviews_expected=expected)
             bus.update(t["id"], pipeline=pipeline)
-            opened = _open_reviews(bus.get(t["id"]), 1, pipeline.get("review_reason", "lineage"), lineage=True)
+            opened = _open_reviews(bus.get(t["id"]), expected, pipeline.get("review_reason", "lineage"), lineage=True)
             notify(f"{t['id']}: fix-only approval ignored; lineage review {opened[0]['id']} opened")
             return
         reviews = lineage_reviews + fix_only_rejections
@@ -1984,12 +1985,7 @@ def tick(pool=None, stop_event=None):
             planner_runs.tick(pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
-    if not (stop_event and stop_event.is_set()):
-        try:
-            # --once (no stop_event) ships inline; the loop runs it in a non-daemon thread it joins on shutdown.
-            ship.tick(pool, stop_event=stop_event, inline=stop_event is None)
-        except Exception as e:
-            print(f"[daemon] ship failed: {e}", file=sys.stderr)
+    ship_tick(pool, stop_event)
     m = pool.both_cooling_minutes()
     cooling = m > 30
     if pool.notification_transition("cooling", cooling) and cooling:
@@ -2026,6 +2022,18 @@ def acquire_lock(kind="cli"):
     except OSError as e:
         print(f"[daemon] machine registry update failed: {e}", file=sys.stderr)
     return fh
+
+
+def ship_tick(pool, stop_event):
+    """--once (no stop_event) never ships: a full gate can block for hours. The loop runs ship in a non-daemon
+    thread it joins on shutdown."""
+    if stop_event is None or stop_event.is_set():
+        return None
+    try:
+        return ship.tick(pool, stop_event=stop_event, inline=False)
+    except Exception as e:
+        print(f"[daemon] ship failed: {e}", file=sys.stderr)
+        return None
 
 
 def _loop(interval, stop_event):
