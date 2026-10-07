@@ -4,7 +4,7 @@ import logging
 import ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, time
 from collections import OrderedDict
 from pathlib import Path
-from . import contracts, worker_registry, env_policy, worker_control
+from . import claude_cli, contracts, worker_registry, env_policy, worker_control
 from . import harness_depth, memory_hot, memory_store
 from . import ROOT, STATE, attribution, bus, decision_log, evidence, instructions, notify, promotion, skill_router, specialist, skill_scorecard, tool_catalog, skills_registry
 from .pool import Pool, is_rate_limited, parse_reset_hint
@@ -1085,8 +1085,24 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     cfg = cache_config if cache_config is not None else _packet_cache_config(task, cfg, skills, pool)
     src = reviewed or task
     wt = Path(src.get("worktree") or ROOT)
-    raw_diff = scoped_diff(src)
-    hint = f"git -C {wt} diff -- {' '.join(src.get('scope', []))}"
+    lineage_range = None
+    if task.get("lineage"):
+        # Stamped by daemon._open_reviews; never recomputed here.
+        base, head = task.get("review_base"), task.get("reviewed_sha") or "HEAD"
+        label = "lineage unresolved; reviewing the whole branch" if task.get("lineage_unresolved") or not base else None
+        paths = None
+        if not label:
+            try:
+                paths = lineage_paths(fix_chain(src))
+            except LookupError:
+                label = "lineage unresolved; reviewing the whole branch"
+        lineage_range = f"{base}..{head}" if base else f"origin/main...{head}"
+        raw_diff = git("diff", "-U3", "--no-renames", lineage_range, "--", *(paths or []),
+                       cwd=wt, check=False).stdout or "(empty diff)"
+        hint = f"git -C {wt} diff {lineage_range}"
+    else:
+        raw_diff = scoped_diff(src)
+        hint = f"git -C {wt} diff -- {' '.join(src.get('scope', []))}"
     changed = sorted(set(re.findall(r"^[+\-]{3} [ab]/(tests/\S+)", raw_diff, re.M)))
     tests = [f"{path}: present" for path in changed]
     for test_id in _acceptance_test_ids(src.get("acceptance", [])):
@@ -1163,7 +1179,18 @@ def review_packet(task, reviewed, *, cfg=None, skills=None, provider="claude", p
     diff_heading_chars = len("## diff\n")
     configured_cap = cfg.get("limits", {}).get("review_diff_chars", 12000)
     diff_budget = max(1, min(configured_cap, 8000 - other_chars - diff_heading_chars))
-    sections[sections.index(None)] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
+    if lineage_range:
+        lineage_text = lineage_diff_text(wt, lineage_range, paths, diff_budget)
+        if label:
+            lineage_text = label + "\n" + lineage_text
+        sections[sections.index(None)] = _section("diff", "lineage (everything that will land): " + lineage_text)
+        round_diff = fix_round_diff(src, head)
+        round_hint = f"git -C {wt} diff {_fix_round_base(src)}...{head} -- {' '.join(src.get('scope', []))}"
+        room = diff_budget - len(lineage_text)
+        sections.append(_section("this round's change", round_diff if len(round_diff) <= room else
+                                 f"(omitted, {len(round_diff)} chars over the packet budget; expand with: {round_hint})"))
+    else:
+        sections[sections.index(None)] = _section("diff", bounded_diff(raw_diff, diff_budget, hint))
     body = "\n".join(sections)
     role_source = f" reviewer-role@{reviewer_role}" if reviewer_role in role_focus else ""
     candidates = []
@@ -1314,9 +1341,9 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
     # claude 2.1.273 has no turn-cap flag; --max-budget-usd + subprocess timeout are the hard stops (§6.5)
     # Full access by user decision (2026-09-16): permissions bypassed; guardrails.sh + scope-guard.sh hooks are the floor.
     # Read-only roles still cannot edit: --disallowedTools is enforced even in bypass mode.
-    cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
+    cmd = claude_cli.argv("-p", prompt, "--model", model, "--output-format", "json", "--max-budget-usd", str(max_budget_usd),
            "--dangerously-skip-permissions", "--allowedTools", tools,
-           "--strict-mcp-config", "--mcp-config", str(mcp_config)]
+           "--strict-mcp-config", "--mcp-config", str(mcp_config))
     if resume_session:
         cmd += ["--resume", resume_session, "--tools", ""]
         cmd[cmd.index("--mcp-config") + 1] = '{"mcpServers": {}}'
@@ -1333,10 +1360,11 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
         log["packet_meta"] = task["packet_meta"]
     t0 = time.time()
 
-    if shutil.which("claude") is None:
+    cli = claude_cli.resolve()
+    if cli is None:
         worker_registry.finish(task["id"], "held", "no_cli", epoch=epoch)
         log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
-        return {"status": "held", "reason": "claude CLI not found on PATH"}
+        return {"status": "held", "reason": claude_cli.missing_reason()}
     try:
         with bus.locked():
             if not worker_control.is_current(task["id"], epoch):
@@ -1345,7 +1373,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
                                    model=model, account=acct.id, worktree=str(wt),
                                    branch=task.get("branch") or f"task/{task['id']}",
                                    parent=task.get("parent"), started_at=t0, epoch=epoch, tools=tools.split(",") if tools else [])
-            p = subprocess.Popen(cmd, cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            p = subprocess.Popen([cli, *cmd[1:]], cwd=wt, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             worker_registry.event(task["id"], "spawned", pid=p.pid, account=acct.id,
                                   model=model, worktree=str(wt), branch=task.get("branch") or f"task/{task['id']}")
             if task.get("_steering"):
@@ -1362,7 +1390,7 @@ def run_claude(pool, acct, task, prompt, model, tools, max_budget_usd, timeout, 
         # shutil.which above should already catch this (gotcha 2026-09-19: a dead worker thread never
         # requeues cleanly), but a TOCTOU race (claude removed from PATH between the check and Popen) lands here.
         log_run(task=task["id"], role=task["role"], tier=task["tier"], account=acct.id, outcome="no_cli", **log)
-        return {"status": "held", "reason": "claude CLI not found on PATH"}
+        return {"status": "held", "reason": claude_cli.missing_reason()}
     except OSError:
         worker_registry.finish(task["id"], "failed", "launch_error", epoch=epoch)
         raise
@@ -1750,6 +1778,68 @@ def scoped_diff(src):
     base = f"goal/{parent}" if parent and branch_exists(f"goal/{parent}") else "origin/main"
     r = git("diff", "-U3", f"{base}...HEAD", "--", *src["scope"], cwd=wt, check=False)
     return r.stdout[:40000] or "(empty diff)"
+
+
+def fix_chain(src):
+    """The fix-round chain from src back to its root execute task. Raises LookupError (KeyError included) on a
+    missing ancestor or a fix_round_for cycle."""
+    chain, seen, current = [src], {src.get("id")}, src
+    while (fix_for := (current.get("constraints") or {}).get("fix_round_for")):
+        if fix_for in seen:
+            raise LookupError(f"fix_round_for cycle at {fix_for}")
+        current = bus.get(fix_for)
+        seen.add(fix_for)
+        chain.append(current)
+    return chain
+
+
+def lineage_paths(chain):
+    """Union of every chain task's scope; None (no path filter) when any scope is empty or the whole repo."""
+    paths = []
+    for t in chain:
+        scope = t.get("scope") or []
+        if not scope or any(path in ("**", ".", "./") for path in scope):
+            return None
+        paths.extend(path for path in scope if path not in paths)
+    return paths
+
+
+def lineage_diff_text(wt, diff_range, paths, budget):
+    """Numstat for the whole range always goes in; then hunks file by file within budget. Every file not shown
+    in full is listed with the exact command to read it. No silent cut."""
+    numstat = git("diff", "--numstat", "--no-renames", diff_range, "--", *(paths or []), cwd=wt, check=False).stdout
+    rows = [line.split("\t", 2) for line in numstat.splitlines() if line.count("\t") >= 2]
+    head_lines = [f"range: {diff_range}", f"files ({len(rows)}):"] + [f"  {path} +{a} -{d}" for a, d, path in rows]
+    if not rows:
+        head_lines.append("  (empty diff)")
+    used = len("\n".join(head_lines))
+    shown, omitted = [], []
+    for _, _, path in rows:
+        hunk = git("diff", "-U3", "--no-renames", diff_range, "--", path, cwd=wt, check=False).stdout.rstrip()
+        if hunk and used + len(hunk) + 1 <= budget:
+            shown.append(hunk)
+            used += len(hunk) + 1
+        else:
+            omitted.append(path)
+    tail = ([f"not shown in full; read with: git diff {diff_range} -- {path}" for path in omitted])
+    return "\n".join(head_lines + shown + tail)
+
+
+def _fix_round_base(src):
+    wt = src.get("worktree") or ROOT
+    exists = lambda ref: git("rev-parse", "--verify", ref, cwd=wt, check=False).returncode == 0
+    fix_for = (src.get("constraints") or {}).get("fix_round_for")
+    if fix_for and exists(f"task/{fix_for}"):
+        return f"task/{fix_for}"
+    parent = src.get("parent")
+    return f"goal/{parent}" if parent and exists(f"goal/{parent}") else "origin/main"
+
+
+def fix_round_diff(src, head="HEAD"):
+    """Only this fix round's commits: the fixed task's branch (the fix worktree's cut point) to the fix head."""
+    wt = src.get("worktree") or ROOT
+    r = git("diff", "-U3", f"{_fix_round_base(src)}...{head}", "--", *src.get("scope", []), cwd=wt, check=False)
+    return r.stdout or "(empty diff)"
 
 
 def resume_worker(task, prompt, session_id):

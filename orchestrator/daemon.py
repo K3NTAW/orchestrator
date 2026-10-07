@@ -8,8 +8,8 @@ import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
 from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
-               planner_runs, spawn, strategy, worker_control)
-from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
+               planner_runs, ship, spawn, strategy, worker_control)
+from . import capacity, concurrency, decision_log, duration, jev_sched, machine, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier, executor_identity, config as pool_config
 from . import failures, gate as gate_runner, gitutil, interference, schedlog, notify as notifications
@@ -1252,8 +1252,34 @@ def _dirty_scope_paths(worktree, scope):
     return sorted(dirty)
 
 
-def _open_reviews(t, n_reviews, review_reason, cfg=None):
-    """Create exactly the missing review children and issue their workers."""
+def _lineage_base(t, head):
+    """(base sha, unresolved) for a fix-round lineage review: merge-base(goal/<parent> if it exists else
+    origin/main, head). A broken chain (missing ancestor, cycle, root without worktree) or a failed merge-base
+    falls back to the whole branch against origin/main, never to the fix-only diff."""
+    wt = t["worktree"]
+    try:
+        chain = spawn.fix_chain(t)
+        if not chain[-1].get("worktree"):
+            raise LookupError(f"lineage root {chain[-1]['id']} has no worktree")
+        parent = t.get("parent")
+        ref = (f"goal/{parent}" if parent and _git_in(wt, "rev-parse", "--verify", f"goal/{parent}").returncode == 0
+               else "origin/main")
+        r = _git_in(wt, "merge-base", ref, head)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip(), False
+    except LookupError:
+        pass
+    for ref in ("origin/main", "main"):
+        r = _git_in(wt, "merge-base", ref, head)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip(), True
+    r = _git_in(wt, "rev-list", "--max-parents=0", head)
+    return ((r.stdout.split() or [None])[0] if r.returncode == 0 else None), True
+
+
+def _open_reviews(t, n_reviews, review_reason, cfg=None, lineage=None):
+    """Create exactly the missing review children and issue their workers. A fix-round task (or lineage=True)
+    gets lineage reviews: stamped with the base..head range of everything that will land."""
     lookup_error = None
     if cfg is None:
         try:
@@ -1276,6 +1302,19 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
         pipeline["reviewed_sha"] = reviewed_sha
         bus.update(t["id"], pipeline=pipeline)
         existing = [x for x in existing if x.get("reviewed_sha") == reviewed_sha]
+    if lineage is None:
+        lineage = bool((t.get("constraints") or {}).get("fix_round_for"))
+    stamps = {}
+    if reviewed_sha:
+        stamps["reviewed_sha"] = reviewed_sha
+    if lineage:
+        existing = [x for x in existing if x.get("lineage")]
+        stamps["lineage"] = True
+        review_base, unresolved = _lineage_base(t, reviewed_sha) if reviewed_sha else (None, True)
+        if review_base:
+            stamps.update(review_base=review_base, pipeline={"review_range": f"{review_base}..{reviewed_sha}"})
+        if unresolved:
+            stamps["lineage_unresolved"] = True
     while len(existing) < n_reviews:
         number = len(existing)
         spec = t["spec"]
@@ -1300,8 +1339,8 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
         r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], t["scope"], role="review",
                             inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier,
                             constraints=constraints)
-        if reviewed_sha:
-            bus.update(r["id"], reviewed_sha=reviewed_sha)
+        if stamps:
+            r = bus.update(r["id"], **stamps)
         spawn_async(spawn.run_worker, r["id"])
         existing.append(r)
     return existing
@@ -1594,6 +1633,20 @@ def _merge_reviewed_one(t):
     reviews = [r for r in all_reviews if not reviewed_sha or r.get("reviewed_sha") == reviewed_sha]
     if not reviews:
         return  # gate() creates them; nothing to act on yet
+    if (t.get("constraints") or {}).get("fix_round_for"):
+        # A fix round's approval counts only from a review whose packet covered the whole lineage; a fix-only
+        # approval is ignored, but its request_changes still holds.
+        lineage_reviews = [r for r in reviews if r.get("lineage")]
+        fix_only_rejections = [r for r in reviews if not r.get("lineage") and r["status"] == "done"
+                               and _review_verdict(r, t, False) not in (None, "approve")]
+        if not lineage_reviews and not fix_only_rejections:
+            expected = max(int(pipeline.get("reviews_expected") or 0), 1)
+            pipeline.update(reviews_expected=expected)
+            bus.update(t["id"], pipeline=pipeline)
+            opened = _open_reviews(bus.get(t["id"]), expected, pipeline.get("review_reason", "lineage"), lineage=True)
+            notify(f"{t['id']}: fix-only approval ignored; lineage review {opened[0]['id']} opened")
+            return
+        reviews = lineage_reviews + fix_only_rejections
     single = len(reviews) == 1
     approved, rejected, pending, stuck, unknown = [], [], [], [], []
     for r in reviews:
@@ -1932,6 +1985,7 @@ def tick(pool=None, stop_event=None):
             planner_runs.tick(pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
+    ship_tick(pool, stop_event)
     m = pool.both_cooling_minutes()
     cooling = m > 30
     if pool.notification_transition("cooling", cooling) and cooling:
@@ -1946,18 +2000,40 @@ def tick(pool=None, stop_event=None):
     maybe_handover("daemon tick")
 
 
-def acquire_lock():
+def acquire_lock(kind="cli"):
     """Non-blocking single-instance lock on STATE/daemon.lock. Returns the open file handle (keep it referenced
     for the daemon's lifetime; closing it or letting it get garbage-collected releases the flock), or None when
-    another daemon already holds it."""
+    another daemon already holds it. kind: "cli" (`orchestrator daemon`) or "mcp" (the autostart thread)."""
     STATE.mkdir(parents=True, exist_ok=True)
-    fh = open(LOCK_PATH, "w")
+    # "a+", not "w": a contender that loses the flock must not truncate the holder's pid line.
+    fh = open(LOCK_PATH, "a+")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         fh.close()
         return None
+    # The watchdog reads "<pid> <kind> <start time>" to tell a live daemon from a dead one or a reused pid
+    # without probing the flock.
+    start = machine.process_start(os.getpid())
+    marker = f"{os.getpid()} {kind}" + (f" {start}" if start else "")
+    fh.seek(0); fh.truncate(); fh.write(marker + "\n"); fh.flush()
+    try:
+        machine.register_repo(STATE.parent)
+    except OSError as e:
+        print(f"[daemon] machine registry update failed: {e}", file=sys.stderr)
     return fh
+
+
+def ship_tick(pool, stop_event):
+    """--once (no stop_event) never ships: a full gate can block for hours. The loop runs ship in a non-daemon
+    thread it joins on shutdown."""
+    if stop_event is None or stop_event.is_set():
+        return None
+    try:
+        return ship.tick(pool, stop_event=stop_event, inline=False)
+    except Exception as e:
+        print(f"[daemon] ship failed: {e}", file=sys.stderr)
+        return None
 
 
 def _loop(interval, stop_event):
@@ -1978,6 +2054,7 @@ def _loop(interval, stop_event):
         except Exception as e:
             print(f"[daemon] tick failed: {e}", file=sys.stderr)
         if stop_event.wait(interval):
+            ship.join_threads()
             return
 
 
@@ -1989,7 +2066,7 @@ def start_background(cfg, env=os.environ):
         return None
     if env.get("ORCH_DAEMON") == "0":
         return None
-    lock = acquire_lock()
+    lock = acquire_lock("mcp")
     if lock is None:
         return None
     interval = (cfg.get("daemon") or {}).get("interval_s", 30)

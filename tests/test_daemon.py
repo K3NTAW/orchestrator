@@ -2677,6 +2677,107 @@ class Daemon(unittest.TestCase):
         self.assertEqual(bus.read(role="review"), [])
         self.assertEqual(messages, [])
 
+    def lineage_fix(self, fix_round_for=None):
+        """Root execute task on task/root plus a fix round on top; returns (fix id, repo, head sha)."""
+        repo = self.real_repo()
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True).stdout.strip()
+        run("branch", "goal/T-0043")
+        self.commit_in(repo, "task/root", "x.py", "ROOT = 1\n")
+        self.commit_in(repo, "task/fix", "tests/test_x.py", "def test_x():\n    assert True\n")
+        head = run("rev-parse", "HEAD")
+        root = self.task("root")
+        bus.update(root, status="done", worktree=str(repo))
+        fix = self.task("fix", constraints={"fix_round_for": fix_round_for or root})
+        bus.update(fix, status="done", worktree=str(repo),
+                   pipeline={"gated_at": time.time(), "reviewed_sha": head, "reviews_expected": 1})
+        return fix, repo, head
+
+    def fix_only_approval(self, fix, head):
+        r = self.task("review fix only", role="review", inputs=[fix])
+        bus.update(r, status="done", review_verdict="approve", reviewed_sha=head)
+        return r
+
+    def test_merge_ignores_fix_only_approval(self):
+        fix, _, head = self.lineage_fix()
+        self.swap(daemon, "notify", lambda *a, **k: None)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        self.assertEqual(self.merged, [])
+        self.assertNotEqual(bus.get(fix)["status"], "held")
+
+    def test_ignored_fix_only_approval_opens_lineage_review(self):
+        fix, _, head = self.lineage_fix()
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        daemon.merge_reviewed(P.Pool())                       # waits; does not open a second one
+        lineage = [r for r in bus.read(role="review") if r.get("lineage")]
+        self.assertEqual(len(lineage), 1)
+        self.assertEqual(lineage[0]["reviewed_sha"], head)
+        self.assertEqual(self.merged, [])
+        self.assertEqual(len([m for m in messages if "fix-only approval ignored" in m]), 1)
+        bus.update(lineage[0]["id"], status="failed")
+        daemon.merge_reviewed(P.Pool())
+        held = bus.get(fix)
+        self.assertEqual(held["status"], "held")
+        self.assertIn(lineage[0]["id"], held["hold_reason"])
+        self.assertEqual(self.merged, [])
+
+    def test_legacy_fix_round_keeps_expected_reviews(self):
+        fix, _, head = self.lineage_fix()
+        pipeline = dict(bus.get(fix)["pipeline"], reviews_expected=2)
+        bus.update(fix, pipeline=pipeline)
+        self.swap(daemon, "notify", lambda *a, **k: None)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        lineage = [r for r in bus.read(role="review") if r.get("lineage") and r["inputs"][:1] == [fix]]
+        self.assertEqual(len(lineage), 2)
+        self.assertEqual(bus.get(fix)["pipeline"]["reviews_expected"], 2)
+        self.assertEqual(self.merged, [])
+
+    def test_lineage_review_approval_merges(self):
+        fix, _, head = self.lineage_fix()
+        self.swap(daemon, "notify", lambda *a, **k: None)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        lineage = [r for r in bus.read(role="review") if r.get("lineage")]
+        bus.update(lineage[0]["id"], status="done", review_verdict="approve")
+        daemon.merge_reviewed(P.Pool())
+        self.assertEqual(self.merged, [fix])
+
+    def test_stamp_at_open_reviews(self):
+        fix, repo, head = self.lineage_fix()
+        base = subprocess.run(["git", "merge-base", "goal/T-0043", head], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
+        reviews = daemon._open_reviews(bus.get(fix), 1, "semantic_path:changed")
+        review = bus.get(reviews[0]["id"])
+        self.assertTrue(review["lineage"])
+        self.assertEqual(review["review_base"], base)
+        self.assertEqual(review["reviewed_sha"], head)
+        self.assertEqual(review["pipeline"]["review_range"], f"{base}..{head}")
+        self.assertNotIn("lineage_unresolved", review)
+        plain = self.task("plain")
+        bus.update(plain, status="done", worktree=str(repo))
+        plain_review = bus.get(daemon._open_reviews(bus.get(plain), 1, "semantic_path:changed")[0]["id"])
+        self.assertNotIn("lineage", plain_review)
+        self.assertEqual(plain_review["reviewed_sha"], head)
+
+    def test_chain_failure_reviews_whole_branch(self):
+        fix, repo, head = self.lineage_fix(fix_round_for="T-9999")
+        base = subprocess.run(["git", "merge-base", "main", head], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
+        review = bus.get(daemon._open_reviews(bus.get(fix), 1, "semantic_path:changed")[0]["id"])
+        self.assertTrue(review["lineage"])
+        self.assertTrue(review["lineage_unresolved"])
+        self.assertEqual(review["review_base"], base)
+        cfg = {"context_router": {"mode": "off"}, "review": {"security_paths": []}, "limits": {}}
+        text = spawn.review_packet(review, bus.get(fix), cfg=cfg)
+        self.assertIn("lineage unresolved; reviewing the whole branch", text)
+        self.assertIn(f"range: {base}..{head}", text)
+        self.assertIn("+ROOT = 1", text)
+        self.assertIn("tests/test_x.py +2 -0", text)            # outside the fix scope: no path filter
+
     def test_changed_paths_real_repo_source_no_match(self):
         """A change to a plain source file outside every security glob does not match."""
         repo = self.real_repo()
