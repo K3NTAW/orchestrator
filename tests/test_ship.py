@@ -428,7 +428,7 @@ class Ship(unittest.TestCase):
             self.assertEqual(self.state(gid)["state"], "gating")
             self.assertEqual(self.advance(gid)["status"], "error")
             self.assertEqual(self.advance(gid), {"status": "held", "reason": "ship failed 3 times in a row"})
-        self.assertIn("network down", self.state(gid)["last_error"])
+        self.assertIn("network down", self.state(gid)["failure_tail"])
         ship.retry(gid)
         self.assertEqual(self.advance(gid)["status"], "shipped")
 

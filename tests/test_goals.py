@@ -387,7 +387,7 @@ class StartLaunch(GoalsTestCase):
         self.assertTrue(r["launched"], r)
 
         args, kwargs = FakePopen.last_args, FakePopen.last_kwargs
-        self.assertEqual(args[0], "claude")
+        self.assertEqual(args[0], "/opt/fake/claude")
         self.assertEqual(args[1], "-p")
         self.assertIn(goal_text, args[2])
         self.assertIn("T-9003", args[2])
