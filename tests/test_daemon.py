@@ -4079,10 +4079,10 @@ class Daemon(unittest.TestCase):
             self.assertIn(key, pipeline)
         self.assertNotIn("gated_at", pipeline)
         self.assertNotIn("gated_at_lease", pipeline)
-        self.assertTrue(daemon.inflight_claude_dispatches is not None)
         self.drain_gates(release, pool)
         pipeline = bus.get(tid)["pipeline"]
-        self.assertGreaterEqual(pipeline["gated_at"], pipeline["gate_attempts"])
+        self.assertGreaterEqual(pipeline["gated_at"], pipeline_started := pipeline.get("first_green_at", 0))
+        self.assertGreater(pipeline_started, 0)
         self.assertNotIn("gate_started_at", pipeline)
 
 class BusLock(unittest.TestCase):

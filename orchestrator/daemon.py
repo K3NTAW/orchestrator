@@ -1590,7 +1590,7 @@ def _start_gate(t, worktree, pool):
     None, with nothing stamped, when [gate].max_parallel is full or another gate already runs in this worktree."""
     tid = t["id"]
     key = str(Path(worktree).resolve())
-    cap = gate.settings(pool.cfg)["max_parallel"]
+    cap = gate_runner.settings(pool.cfg)["max_parallel"]
     run = {"task_id": tid, "worktree": key, "run_id": uuid.uuid4().hex, "started_at": time.time(), "thread": None}
     with _LIVE_GATES_LOCK:
         if (tid in _LIVE_GATES or len(_LIVE_GATES) >= cap
