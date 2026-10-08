@@ -10,6 +10,9 @@ MAX_RESULT_CHARS = 6000  # ~1,500 tokens
 ARCHIVE_DIR = "archive"
 ARCHIVE_AFTER_S = 7 * 86400
 CLOSED_STATUSES = {"done", "merged", "superseded", "failed"}
+# Bound at import: bus renames are bus-internal plumbing, so a caller that patches os.replace to count its own
+# writes (handover's unchanged-state check) does not also count every bus._save.
+_replace = os.replace
 ROLES = {"scout", "triage", "execute", "review", "challenge", "spec_review"}
 STATUSES = {"queued", "held", "running", "done", "failed"}
 
@@ -84,7 +87,7 @@ def _save(t):
         path = TASKS / f"{t['id']}.json"
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(text)
-        os.replace(tmp, path)
+        _replace(tmp, path)
         db().execute("insert or replace into tasks values(?,?,?,?,?,?)",
                      (t["id"], t["status"], t["role"], t["tier"], t.get("assigned_to"), time.time()))
         snap = _snapshot
@@ -397,7 +400,7 @@ def archive(tasks=None, now=None, max_age_s=ARCHIVE_AFTER_S):
             src = TASKS / f"{tid}.json"
             if not src.exists():
                 continue
-            os.replace(src, dest / src.name)
+            _replace(src, dest / src.name)
             moved.append(tid)
         c = db()
         c.execute("begin")   # one transaction, not one commit per row

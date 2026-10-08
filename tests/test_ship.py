@@ -488,7 +488,21 @@ class Ship(unittest.TestCase):
             stop.set()
             daemon.ship_tick(self.pool, stop)
             self.assertEqual(tick.call_count, 1)
-        self.assertIn("ship_tick(pool, stop_event)", inspect.getsource(daemon.tick))
+        # Through the real daemon.tick: --once (stop_event None) never ships, the loop (an Event) does.
+        pool = mock.Mock(cfg={"memory": {"mode": "off"}}, accounts=[])
+        pool.both_cooling_minutes.return_value = 0
+        pool.notification_transition.return_value = False
+        stages = ("_load_review_cfg", "sweep_leases", "_reconcile_running", "dispatch", "steering_tick", "gate",
+                  "merge_reviewed", "auto_fix_round", "maybe_handover", "notify")
+        with mock.patch.multiple(daemon, **{n: mock.DEFAULT for n in stages}), \
+                mock.patch.object(daemon.worker_registry, "reconcile"), \
+                mock.patch.object(daemon.bus, "archive", return_value=[]), \
+                mock.patch.object(daemon.ship, "tick") as tick:
+            daemon.tick(pool, None)
+            tick.assert_not_called()
+            stop = threading.Event()
+            daemon.tick(pool, stop)
+            tick.assert_called_once_with(pool, stop_event=stop, inline=False)
 
     def test_no_ship_thread_after_main_exit(self):
         self.goal()
