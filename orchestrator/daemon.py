@@ -2208,6 +2208,9 @@ def stop_background(thread, timeout=5):
     executor.join_fallback_threads(timeout)
 
 
+SHIP_JOIN_TIMEOUT_S = 60
+
+
 def main(interval=30, once=False):
     if once:
         tick(Pool())
@@ -2216,9 +2219,15 @@ def main(interval=30, once=False):
     if lock is None:
         print("[daemon] another instance already holds the lock; exiting", file=sys.stderr)
         sys.exit(1)
+    stop_event = threading.Event()
     try:
-        _loop(interval, threading.Event())
+        _loop(interval, stop_event)
     finally:
+        # Ctrl-C skips _loop's join: stop the non-daemon ship thread before another daemon can take the lock.
+        stop_event.set()
+        ship.join_threads(SHIP_JOIN_TIMEOUT_S)
+        if any(t.is_alive() for t in ship._THREADS):
+            print(f"[daemon] ship thread still running after {SHIP_JOIN_TIMEOUT_S}s; releasing lock", file=sys.stderr)
         executor.join_fallback_threads()
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()

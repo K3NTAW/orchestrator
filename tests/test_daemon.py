@@ -3928,6 +3928,35 @@ class Background(unittest.TestCase):
         self.addCleanup(daemon.stop_background, t3)
         self.assertIsNotNone(t3)                                   # lock released, a fresh start_background works
 
+    def test_cli_shutdown_stops_ship_thread_before_lock_release(self):
+        """Ctrl-C in the CLI daemon sets the stop Event and joins the non-daemon ship thread before the lock goes."""
+        from orchestrator import ship
+        seen = {}
+
+        def fake_loop(interval, stop_event):
+            thread = threading.Thread(target=stop_event.wait)
+            thread.start()
+            ship._THREADS.append(thread)
+            seen["thread"] = thread
+            raise KeyboardInterrupt
+
+        def fake_flock(fh, op):
+            if op == daemon.fcntl.LOCK_UN:
+                seen["alive_at_unlock"] = seen["thread"].is_alive()
+
+        lock = tempfile.TemporaryFile("a+")
+        with mock.patch.object(daemon, "acquire_lock", return_value=lock), \
+                mock.patch.object(daemon, "_loop", fake_loop), \
+                mock.patch.object(daemon.fcntl, "flock", fake_flock), \
+                mock.patch.object(daemon.executor, "join_fallback_threads"):
+            with self.assertRaises(KeyboardInterrupt):
+                daemon.main(interval=60)
+        if seen["thread"] in ship._THREADS:
+            ship._THREADS.remove(seen["thread"])
+        self.assertIs(seen["alive_at_unlock"], False)
+        self.assertFalse(seen["thread"].is_alive())
+        self.assertTrue(lock.closed)
+
 
 class WorkerRegistryReconciliation(unittest.TestCase):
     def test_tick_reconciles_registry_once_per_tick(self):

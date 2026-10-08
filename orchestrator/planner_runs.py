@@ -261,6 +261,31 @@ def _next_goal_closed(goal, ship_enabled):
     return True
 
 
+def _goal_closed_time(goal):
+    """pipeline.closed_at, else the time of the event that posted result.goal_closed (a model close), else 0."""
+    closed = (goal.get("pipeline") or {}).get("closed_at")
+    if closed:
+        return closed
+    for e in goal.get("events") or []:
+        if isinstance(e, dict) and isinstance(e.get("result"), dict) and e["result"].get("goal_closed"):
+            return e.get("ts") or 0
+    return 0
+
+
+def _stamp_closed_at(all_tasks):
+    """Stamp pipeline.closed_at on every closed goal that lacks it: only routine_close stamps it, so a goal the
+    Planner model closed through bus_post_result would otherwise never carry one. Uses the goal_closed event time.
+    Call under bus.locked()."""
+    for goal in all_tasks:
+        if not _is_goal(goal) or not (goal.get("result") or {}).get("goal_closed"):
+            continue
+        pipeline = dict(goal.get("pipeline") or {})
+        if pipeline.get("closed_at"):
+            continue
+        pipeline["closed_at"] = _goal_closed_time(goal) or time.time()
+        bus.update(goal["id"], pipeline=pipeline)
+
+
 def _next_goal_points(all_tasks, records):
     """At most one next_goal point: the earliest goal closed after enabled_at that has no blocking record, only
     while no other goal is open, no next_goal decision is in flight, the roadmap has an unchecked item and the
@@ -270,6 +295,8 @@ def _next_goal_points(all_tasks, records):
     except (OSError, tomllib.TOMLDecodeError):
         cfg = {}
     if not planner_setting("next_goal", cfg):
+        # Off resets enabled_at, so goals closed while off never become eligible after re-enabling.
+        (STATE / "next_goal_state.json").unlink(missing_ok=True)
         return
     enabled_at = _next_goal_enabled_at()
     items = _roadmap_items()
@@ -286,9 +313,9 @@ def _next_goal_points(all_tasks, records):
         return
     ship_enabled = bool((cfg.get("ship") or {}).get("enabled"))
     closed = [g for g in all_tasks if _is_goal(g) and _next_goal_closed(g, ship_enabled)
-              and ((g.get("pipeline") or {}).get("closed_at") or 0) > enabled_at
+              and _goal_closed_time(g) > enabled_at
               and not _blocked(g["id"], "next_goal", g["id"], records)]
-    for goal in sorted(closed, key=lambda g: (g["pipeline"]["closed_at"], g["id"]))[:1]:
+    for goal in sorted(closed, key=lambda g: (_goal_closed_time(g), g["id"]))[:1]:
         yield goal["id"], "next_goal", goal["id"]
 
 
@@ -838,6 +865,7 @@ def reconcile():
     gave_up = []
     now = time.time()
     with bus.locked():
+        _stamp_closed_at(all_tasks)
         records = _load_records()
         changed = False
         for r in records:
