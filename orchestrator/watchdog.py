@@ -279,6 +279,55 @@ def confirm_alive(repo, *, timeout=CONFIRM_S, sleep=time.sleep, clock=time.monot
         sleep(1)
 
 
+# idle simulators ----------------------------------------------------------------------------------------------
+
+SIM_BUSY_MARKERS = ("xcodebuild test", "xcodebuild build-for-testing", "simctl launch")
+
+
+def tests_running():
+    """Any process on the machine running an xcodebuild test/build-for-testing or a simctl launch."""
+    return any(m in line for line in _run(["ps", "-axo", "command="]).splitlines() for m in SIM_BUSY_MARKERS)
+
+
+def booted_simulators():
+    """UDIDs of booted simulators; simctl lists simulators only, never physical devices."""
+    try:
+        data = json.loads(_run(["xcrun", "simctl", "list", "devices", "booted", "-j"]) or "{}")
+    except ValueError:
+        return []
+    devices = data.get("devices") if isinstance(data, dict) else None
+    return [d.get("udid") for group in (devices.values() if isinstance(devices, dict) else [])
+            if isinstance(group, list) for d in group
+            if isinstance(d, dict) and d.get("state") == "Booted"]
+
+
+def gate_live(repos):
+    """A gate registry entry (.orchestrator/gates/*.json) in any repo whose pid is still alive."""
+    for repo in repos:
+        for path in (Path(repo) / ".orchestrator" / "gates").glob("*.json"):
+            entry = _json(path, None)
+            pid = entry.get("pid") if isinstance(entry, dict) else None
+            if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < MAX_PID and machine._pid_alive(pid):
+                return True
+    return False
+
+
+def sweep_simulators(repos):
+    """Shut down booted simulators when no test or gate needs them; returns how many were shut down."""
+    if gate_live(repos) or tests_running():
+        return 0
+    booted = booted_simulators()
+    if not booted:
+        return 0
+    try:
+        subprocess.run(["xcrun", "simctl", "shutdown", "all"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        print(f"[watchdog] simulator shutdown failed: {e!r}", file=sys.stderr)
+        return 0
+    print(f"[watchdog] shut down {len(booted)} idle simulators")
+    return len(booted)
+
+
 # one pass -----------------------------------------------------------------------------------------------------
 
 def evaluate(repo, now, *, registered):
@@ -331,6 +380,10 @@ def run_once(*, now=None, config=None, start=None, confirm=None, send=None):
                 current[key] += f"; restart failed: {e!r}"[:200]
                 continue
             current[key] += f"; restarted, log {log}" if ok else f"; restart did not take the lock within {CONFIRM_S}s, log {log}"
+    try:
+        sweep_simulators(list(dict.fromkeys([str(STATE.parent)] + [str(r) for r in registered + extras])))
+    except Exception as e:
+        print(f"[watchdog] simulator sweep failed: {e!r}", file=sys.stderr)
     path = _state_path()
     state = _json(path, {})
     state = state if isinstance(state, dict) else {}
