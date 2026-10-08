@@ -404,7 +404,6 @@ class ConcurrentGoals(GoalsTestCase):
         self.assertTrue(own.exists())
         self.assertEqual(r["plan_file"], ".orchestrator/plan-T-9300.md")
         self.assertIn(".orchestrator/plan-T-9300.md", FakePopen.last_args[2])
-        self.assertEqual(FakePopen.last_kwargs["env"]["ORCH_PLAN_FILE"], ".orchestrator/plan-T-9300.md")
         shared = (repo / ".orchestrator" / "plan.md").read_text()
         self.assertIn("T-9100: .orchestrator/plan-T-9100.md", shared)
         self.assertIn("T-9300: .orchestrator/plan-T-9300.md", shared)

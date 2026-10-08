@@ -498,8 +498,7 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
     runs_dir = repo_path / ".orchestrator" / "runs"
     log_path = runs_dir / f"planner-{goal_id}.log"
     try:
-        launched = launch_planner(repo_path, prompt, account_id, max_budget, log_path,
-                                  extra_env={"ORCH_GOAL_ID": goal_id, "ORCH_PLAN_FILE": own_plan})
+        launched = launch_planner(repo_path, prompt, account_id, max_budget, log_path)
     except FileNotFoundError:
         _finalize_running_slot(repo_path, reservation_id, {
             "goal_id": goal_id, "text": goal_text, "pid": None, "pid_start": None, "account": account_id,
