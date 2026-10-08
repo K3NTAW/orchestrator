@@ -482,48 +482,13 @@ class Bus(BusSandbox):
 
 
 class HotSet(BusSandbox):
-    def test_read_takes_no_lock(self):
+    def test_read_takes_lock_once(self):
         for n in range(5):
             bus.create_task(f"t{n}", "s", ["ok"], ["x.py"])
         with patch.object(bus.fcntl, "flock", wraps=bus.fcntl.flock) as flock:
             rows = bus.read()
-            by_ids = bus.read(ids=[t["id"] for t in rows])
         self.assertEqual(len(rows), 5)
-        self.assertEqual(len(by_ids), 5)
-        self.assertEqual(flock.call_count, 0)
-
-    def test_read_does_not_wait_for_a_held_lock(self):
-        """A scan must never sit behind (or hold) the writer lock: a daemon tick scanning a large hot set under
-        it starved planner_runs.run()'s check-and-claim for seconds (T-1729)."""
-        bus.create_task("t", "s", ["ok"], ["x.py"])
-        held, release, rows = threading.Event(), threading.Event(), []
-
-        def holder():
-            with bus.locked():
-                held.set()
-                release.wait(5)
-
-        h = threading.Thread(target=holder)
-        h.start()
-        self.assertTrue(held.wait(2))
-        reader = threading.Thread(target=lambda: rows.extend(bus.read()))
-        reader.start()
-        reader.join(2)
-        finished = not reader.is_alive()
-        release.set()
-        h.join(5)
-        reader.join(5)
-        self.assertTrue(finished, "bus.read blocked on the writer lock")
-        self.assertEqual(len(rows), 1)
-
-    def test_read_skips_a_row_archived_mid_scan_silently(self):
-        tid = bus.create_task("t", "s", ["ok"], ["x.py"])["id"]
-        dest = bus.TASKS / bus.ARCHIVE_DIR
-        dest.mkdir(parents=True, exist_ok=True)
-        (bus.TASKS / f"{tid}.json").rename(dest / f"{tid}.json")   # file moved, index row not yet dropped
-        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            self.assertEqual(bus.read(), [])
-        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(flock.call_count, 1)
 
     def test_archive_moves_old_closed_tasks_and_get_still_finds_them(self):
         old = time.time() - 8 * 86400

@@ -102,17 +102,12 @@ def _event(tid, kind, data=None):
 def get(tid):
     """One task from disk; an archived id falls back to tasks/archive/."""
     with locked():
-        return _load_any(tid)
-
-
-def _load_any(tid):
-    """get() without the lock, for scans: hot file, else tasks/archive/, else KeyError."""
-    p = TASKS / f"{tid}.json"
-    if not p.exists():
-        p = TASKS / ARCHIVE_DIR / f"{tid}.json"
+        p = TASKS / f"{tid}.json"
         if not p.exists():
-            raise KeyError(tid)
-    return json.loads(p.read_text())
+            p = TASKS / ARCHIVE_DIR / f"{tid}.json"
+            if not p.exists():
+                raise KeyError(tid)
+        return json.loads(p.read_text())
 
 
 def next_id():
@@ -219,7 +214,7 @@ def _compact_row(t):
 
 def read(tid=None, status=None, status_not=None, role=None, compact=False, *, parent=None, ids=None):
     """Hot tasks (archived ones are skipped). Inside snapshot() on the owning thread this filters the in-memory
-    snapshot; otherwise it scans the files without taking the bus lock (see _scan)."""
+    snapshot; otherwise it scans the files under one bus lock instead of one flock per task."""
     if tid:
         return get(tid)
     snap = _active_snapshot()
@@ -233,28 +228,23 @@ def read(tid=None, status=None, status_not=None, role=None, compact=False, *, pa
 
 
 def _scan(ids=None):
-    """Lock-free: every writer replaces task files by rename (_save, archive), so a reader only ever sees a whole
-    old or whole new file. Holding the bus lock across a scan of the hot set (seconds on a large one) starved
-    every writer behind it, including planner_runs.run()'s check-and-claim. A row archived mid-scan is skipped."""
     rows = [(task_id,) for task_id in sorted(set(ids))] if ids is not None else db().execute("select id from tasks order by id").fetchall()
     out = []
     skipped = 0
-    for row in rows:
-        task_id = row[0]
-        if not isinstance(task_id, str) or not re.fullmatch(r"T-[0-9]+", task_id):
-            skipped += 1
-            continue
-        try:
-            task = _load_hot(task_id) if ids is None else _load_any(task_id)
-            if not isinstance(task, dict) or not {"id", "status", "role"} <= task.keys():
+    with locked():
+        for row in rows:
+            task_id = row[0]
+            if not isinstance(task_id, str) or not re.fullmatch(r"T-[0-9]+", task_id):
                 skipped += 1
                 continue
-            out.append(task)
-        except FileNotFoundError:
-            if ids is not None or not (TASKS / ARCHIVE_DIR / f"{task_id}.json").exists():
+            try:
+                task = _load_hot(task_id) if ids is None else get(task_id)
+                if not isinstance(task, dict) or not {"id", "status", "role"} <= task.keys():
+                    skipped += 1
+                    continue
+                out.append(task)
+            except (KeyError, OSError, ValueError, TypeError):
                 skipped += 1
-        except (KeyError, OSError, ValueError, TypeError):
-            skipped += 1
     if skipped:
         print(f"bus.read: skipped {skipped} unreadable rows", file=sys.stderr)
     return out
