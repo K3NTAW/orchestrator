@@ -1150,7 +1150,7 @@ def build_ctx(point, pool=None):
     cfg = pool.cfg
     goal = bus.get(point["goal_id"])
     task = _decision_task(point["goal_id"], point["kind"], point["payload_key"]) or goal
-    children = [t for t in bus.read() if t.get("parent") == goal["id"]]
+    children = bus.read(parent=goal["id"])
     scouts = [t for t in children if t.get("role") == "scout"]
     blocked = [t["id"] for t in scouts if t.get("status") in ("held", "failed")
                or (t.get("result") or {}).get("blocked")]
@@ -1701,10 +1701,13 @@ def tick(pool=None):
         return
     groups = {}
     enabled = decision.routes_enabled(config)
+    fix_rounds_for = None
     for raw in list(decision_points()):
         point = _point(raw)
-        if point["kind"] == "held" and any(t.get("status") != "failed" and
-                (t.get("constraints") or {}).get("fix_round_for") == point["task_id"] for t in bus.read()):
+        if point["kind"] == "held" and fix_rounds_for is None:
+            fix_rounds_for = {(t.get("constraints") or {}).get("fix_round_for")
+                              for t in bus.read() if t.get("status") != "failed"}
+        if point["kind"] == "held" and point["task_id"] in fix_rounds_for:
             _telemetry_skip(point, "tick", "fix_round_in_flight")
             continue
         ctx = build_ctx(point, pool)

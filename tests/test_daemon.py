@@ -3710,6 +3710,49 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.settle_started(1), [other])   # dispatch() still ran despite the reconcile blow-up
         self.assertEqual(bus.get(dead)["status"], "running")   # left alone, not requeued or crashed on
 
+    def test_tick_uses_one_snapshot(self):
+        """tick() reads the bus from disk once; every later bus.read in the tick filters that snapshot, and a stage's
+        own writes are visible to the stages after it."""
+        first, second = self.task("first", complexity=2), self.task("second", complexity=2)
+        review = self.task("review", role="review", inputs=[first])
+        real_read = bus.read
+        calls = []
+        def counted(*args, **kwargs):
+            calls.append(bus._active_snapshot() is None)
+            return real_read(*args, **kwargs)
+        self.swap(bus, "read", counted)
+
+        daemon.tick()
+
+        self.assertEqual(calls.count(True), 1)        # one disk read: the snapshot
+        self.assertGreater(calls.count(False), 1)     # the rest were served from it
+        self.assertEqual(sorted(self.settle_started(2)), sorted([first, second]))
+        self.assertEqual(bus.children(first, role="review")[0]["id"], review)
+        with bus.snapshot():
+            bus.update(first, hold_reason="seen")
+            self.assertEqual(bus.read(ids=[first])[0]["hold_reason"], "seen")
+
+    def test_slow_stage_is_logged(self):
+        clock = [1000.0]
+        def dispatch(pool):
+            clock[0] += 6
+        def gate(pool):
+            clock[0] += 31
+        def merge_reviewed(pool):
+            clock[0] += 1
+        self.swap(daemon, "dispatch", dispatch)
+        self.swap(daemon, "gate", gate)
+        self.swap(daemon, "merge_reviewed", merge_reviewed)
+        err = io.StringIO()
+        with mock.patch.object(daemon.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(daemon.sys, "stderr", err):
+            daemon.tick()
+        log = err.getvalue()
+        self.assertIn("[daemon] slow stage dispatch 6.0s", log)
+        self.assertIn("[daemon] slow stage gate 31.0s", log)
+        self.assertNotIn("slow stage merge_reviewed", log)
+        self.assertIn("[daemon] slow tick 38.0s", log)
+
     def test_tick_skips_execute_task_of_closed_goal(self):
         closed_goal = bus.create_task("goal closed", "s", ["ok"], ["x.py"], role="scout")["id"]
         bus.update(closed_goal, status="done")

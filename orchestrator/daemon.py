@@ -1048,7 +1048,7 @@ def dispatch(pool):
                 entry["reason"] = "spec_review_changes"
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
         else:
-            children = [r for r in bus.read(role="spec_review") if r["inputs"][:1] == [t["id"]]]
+            children = bus.children(t["id"], role="spec_review")
             live = [r for r in children if r.get("status") not in ("failed", "superseded")]
             failed = [r for r in children if r.get("status") in ("failed", "superseded")]
             retry = bool(children and not live)
@@ -1354,7 +1354,7 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None, lineage=None):
     # Carry a failed read into tier selection without retrying configuration I/O.
     review_cfg = lookup_error if lookup_error is not None else cfg
     t = bus.get(t["id"])
-    existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
+    existing = bus.children(t["id"], role="review")
     security = (review_reason in ("diff_unavailable", "security_paths_empty") or
                 review_reason.startswith("security_paths:") or review_reason.startswith("semantic_"))
     reviewed_sha = None
@@ -1691,7 +1691,7 @@ def _merge_reviewed_one(t):
         return
     if already_merged(t):
         return
-    all_reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
+    all_reviews = bus.children(t["id"], role="review")
     pipeline = dict(t.get("pipeline") or {})
     reviewed_sha = pipeline.get("reviewed_sha")
     if reviewed_sha and t.get("worktree"):
@@ -1792,7 +1792,7 @@ def sweep_leases(pool):
                     if status == "queued":
                         clear_stage(tid, stage)
                 elif stage == "spec_review_at":
-                    children = [r for r in bus.read(role="spec_review") if r["inputs"][:1] == [tid]]
+                    children = bus.children(tid, role="spec_review")
                     if children and children[0]["status"] == "queued" and not children[0].get("claimed_at"):
                         spawn_async(spawn.run_worker, children[0]["id"])
                         complete(tid, stage)
@@ -1809,7 +1809,7 @@ def sweep_leases(pool):
                         report_merge(tid, merge.merge(tid))
                         complete(tid, stage)
                         continue
-                    children = [r for r in bus.read(role="review") if r["inputs"][:1] == [tid]]
+                    children = bus.children(tid, role="review")
                     if len(children) >= expected:
                         for child in children:
                             if child["status"] == "queued" and not child.get("claimed_at"):
@@ -2012,30 +2012,54 @@ def steering_tick(pool, *, depth_tick=None):
     _steering_decisions(pool, running, tasks, ranked, time.time(), recent_by_task, critical_ids)
 
 
+SLOW_STAGE_S = 5.0
+SLOW_TICK_S = 30.0
+
+
+def _timed(name, fn, *args, **kwargs):
+    """Run one tick stage; log `[daemon] slow stage <name> <s>s` when it takes over SLOW_STAGE_S."""
+    started = time.monotonic()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed > SLOW_STAGE_S:
+            print(f"[daemon] slow stage {name} {elapsed:.1f}s", file=sys.stderr)
+
+
 def tick(pool=None, stop_event=None):
+    """One pass. The bus is read once into a snapshot (bus.snapshot) that every bus.read inside the tick filters;
+    writes go through bus.update and land in the snapshot too. Old closed tasks are archived from that snapshot."""
+    started = time.monotonic()
+    try:
+        with bus.snapshot() as snap:
+            try:
+                _timed("archive", bus.archive, list(snap.by_id.values()))
+            except Exception as e:
+                print(f"[daemon] archive failed: {e}", file=sys.stderr)
+            _tick(pool, stop_event)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed > SLOW_TICK_S:
+            print(f"[daemon] slow tick {elapsed:.1f}s", file=sys.stderr)
+
+
+def _tick(pool=None, stop_event=None):
     pool = pool or Pool()
     try:
-        pool.tally_planner()
+        _timed("tally_planner", pool.tally_planner)
     except Exception as e:
         print(f"[daemon] tally_planner failed: {e}", file=sys.stderr)
     _load_review_cfg(pool)
     try:
-        sweep_leases(pool)
+        _timed("sweep_leases", sweep_leases, pool)
     except Exception as e:
         print(f"[daemon] sweep_leases failed: {e}", file=sys.stderr)
-    for t in bus.read(status="running"):
-        if stop_event and stop_event.is_set():
-            break
-        if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
-            try:
-                reconcile_dead(t, pool)
-            except Exception as e:
-                print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
-                continue
-    worker_registry.reconcile(alive)
+    _timed("reconcile", _reconcile_running, pool, stop_event)
+    _timed("worker_registry", worker_registry.reconcile, alive)
     try:
         if pool.cfg.get("memory", {}).get("mode", "shadow") != "off" and not memory_hot.fresh(STATE.parent):
-            memory_hot.build(STATE.parent)
+            _timed("memory_hot", memory_hot.build, STATE.parent)
     except Exception:
         print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
     for stage in (dispatch, steering_tick, gate, merge_reviewed):
@@ -2043,22 +2067,22 @@ def tick(pool=None, stop_event=None):
             return
         try:
             if stage is steering_tick:
-                stage(pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
+                _timed(stage.__name__, stage, pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
             else:
-                stage(pool)
+                _timed(stage.__name__, stage, pool)
         except Exception as e:
             print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
     try:
-        auto_fix_round(pool)
+        _timed("auto_fix_round", auto_fix_round, pool)
     except Exception as e:
         print(f"[daemon] auto_fix_round failed: {e}", file=sys.stderr)
     if pool.cfg.get("planner", {}).get("autonomous", False):
         try:
-            planner_runs.reconcile()
-            planner_runs.tick(pool)
+            _timed("planner_runs.reconcile", planner_runs.reconcile)
+            _timed("planner_runs.tick", planner_runs.tick, pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
-    ship_tick(pool, stop_event)
+    _timed("ship_tick", ship_tick, pool, stop_event)
     m = pool.both_cooling_minutes()
     cooling = m > 30
     if pool.notification_transition("cooling", cooling) and cooling:
@@ -2071,6 +2095,18 @@ def tick(pool=None, stop_event=None):
     if pool.notification_transition("codex_cooling", codex_cooling) and codex_cooling:
         notify("Executor (Codex) cooling; execute tasks held, refill the pipeline")
     maybe_handover("daemon tick")
+
+
+def _reconcile_running(pool, stop_event=None):
+    for t in bus.read(status="running"):
+        if stop_event and stop_event.is_set():
+            break
+        if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
+            try:
+                reconcile_dead(t, pool)
+            except Exception as e:
+                print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
+                continue
 
 
 def acquire_lock(kind="cli"):
