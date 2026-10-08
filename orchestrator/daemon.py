@@ -2065,13 +2065,14 @@ def _tick(pool=None, stop_event=None):
     for stage in (dispatch, steering_tick, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return
+        name = getattr(stage, "__name__", repr(stage))
         try:
             if stage is steering_tick:
-                _timed(stage.__name__, stage, pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
+                _timed(name, stage, pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
             else:
-                _timed(stage.__name__, stage, pool)
+                _timed(name, stage, pool)
         except Exception as e:
-            print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
+            print(f"[daemon] {name} failed: {e}", file=sys.stderr)
     try:
         _timed("auto_fix_round", auto_fix_round, pool)
     except Exception as e:
