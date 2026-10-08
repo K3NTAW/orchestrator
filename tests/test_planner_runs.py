@@ -201,7 +201,7 @@ class DecisionPoints(PlannerRunsBase):
         self.assertEqual(PR._point((goal, "held", key))["task_id"], tid)
         self.assertEqual(PR._decision_task(goal, "held", key)["id"], tid)
         # Re-queued by the decision Planner: the point resolves and stops firing.
-        r = {"kind": "held", "goal_id": goal, "payload_key": key, "started_at": 0}
+        r = {"kind": "held", "goal_id": goal, "payload_key": key, "started_at": time.time()}
         self.assertFalse(PR._condition_resolved(r, {t["id"]: t for t in bus.read()}, {}))
         bus.update(tid, status="queued")
         self.assertTrue(PR._condition_resolved(r, {t["id"]: t for t in bus.read()}, {}))
