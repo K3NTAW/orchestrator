@@ -322,8 +322,8 @@ def _next_goal_points(all_tasks, records):
 def decision_points():
     """Yield (goal_id, kind, payload_key) for every currently-unblocked decision: scouts_done (a goal has scout
     children, all done or failed, and no execute child yet -- the specs haven't been split off), held (each held
-    execute child of a goal), closable (a goal's execute children are all merged and nothing is left queued or
-    running)."""
+    execute child of a goal), closable (a goal's non-superseded execute children are all merged, there is at least
+    one, and nothing is left queued or running)."""
     all_tasks = bus.read()
     children_by_parent = {}
     for t in all_tasks:
@@ -358,7 +358,10 @@ def decision_points():
             if not _blocked(goal_id, "held", key, records):
                 yield goal_id, "held", key
 
-        if executes and all(c.get("merged_into") for c in executes) and \
+        # A superseded execute child (e.g. a re-gate round whose target merged another way) never merges; it must
+        # not hold the goal open. failed still blocks so a real failure reaches the Planner.
+        live = [c for c in executes if c["status"] != "superseded"]
+        if live and all(c.get("merged_into") for c in live) and \
                 not any(ch["status"] in ("queued", "running") for ch in children):
             if not _blocked(goal_id, "closable", goal_id, records):
                 yield goal_id, "closable", goal_id

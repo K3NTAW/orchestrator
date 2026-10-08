@@ -103,6 +103,20 @@ class DecisionPoints(PlannerRunsBase):
         bus.update(unmerged, merged_into=f"goal/{goal}")
         self.assertIn((goal, "closable", goal), list(PR.decision_points()))
 
+    def test_superseded_child_does_not_block_closable(self):
+        goal = self.goal("superseded child")
+        superseded = self.execute_child(goal, status="superseded")
+        self.assertNotIn((goal, "closable", goal), list(PR.decision_points()))
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        self.assertIn((goal, "closable", goal), list(PR.decision_points()))
+        self.assertIsNone(bus.get(superseded).get("merged_into"))
+
+    def test_failed_child_still_blocks_closable(self):
+        goal = self.goal("failed child")
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        self.execute_child(goal, status="failed")
+        self.assertNotIn((goal, "closable", goal), list(PR.decision_points()))
+
     def test_held_decision_skipped_when_fix_round_exists(self):
         goal = self.goal()
         tid = self.execute_child(goal, status="held", hold_reason="gate_red")
