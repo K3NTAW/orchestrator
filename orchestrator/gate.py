@@ -4,6 +4,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from contextvars import ContextVar
 from pathlib import Path
@@ -31,8 +32,11 @@ def settings(cfg=None):
     cleanup_cmd = gate_cfg.get("cleanup_cmd")
     if not isinstance(cleanup_cmd, str) or not cleanup_cmd:
         cleanup_cmd = None
+    post_cmd = gate_cfg.get("post_cmd")
+    if not isinstance(post_cmd, str) or not post_cmd:
+        post_cmd = None
     return {"timeout_s": timeout_s, "cleanup_cmd": cleanup_cmd,
-            "cleanup_timeout_s": cleanup_timeout_s}
+            "cleanup_timeout_s": cleanup_timeout_s, "post_cmd": post_cmd}
 
 
 def _run(argv, *, cwd, timeout_s, input, kill_grace_s, env=None):
@@ -97,6 +101,21 @@ def _gate_key(worktree, task_id):
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(raw)).strip("-.") or "gate"
 
 
+def _post(opts, worktree, task_id):
+    """Run [gate].post_cmd after an attempt; failures are logged and never change the gate result."""
+    if not opts["post_cmd"]:
+        return
+    try:
+        result = run_bounded(["bash", "-c", opts["post_cmd"]], cwd=worktree,
+                             timeout_s=opts["cleanup_timeout_s"])
+    except Exception as e:
+        print(f"[gate] post_cmd failed: task_id={task_id}: {e!r}", file=sys.stderr)
+        return
+    if result["timed_out"] or result["returncode"] != 0:
+        print(f"[gate] post_cmd failed: task_id={task_id} returncode={result['returncode']} "
+              f"timed_out={result['timed_out']}", file=sys.stderr)
+
+
 def run_gate(worktree, *, script, task_id=None, cfg=None, env=None):
     """Run a repository gate, cleaning up and retrying once after a timeout."""
     opts = settings(cfg)
@@ -121,12 +140,14 @@ def run_gate(worktree, *, script, task_id=None, cfg=None, env=None):
             except FileNotFoundError:
                 pass
         if not result["timed_out"]:
+            _post(opts, worktree, task_id)
             return {**{k: result[k] for k in ("returncode", "stdout", "stderr", "timed_out")},
                     "attempts": attempt, "timeouts": timeouts}
         timeouts += 1
         if opts["cleanup_cmd"]:
             run_bounded(["bash", "-c", opts["cleanup_cmd"]], cwd=worktree,
                         timeout_s=opts["cleanup_timeout_s"])
+        _post(opts, worktree, task_id)
         notify.notify(f"gate timeout: task_id={task_id} attempt={attempt} timeout_s={opts['timeout_s']}")
     return {"returncode": None, "stdout": result["stdout"], "stderr": result["stderr"],
             "timed_out": True, "attempts": 2, "timeouts": timeouts}

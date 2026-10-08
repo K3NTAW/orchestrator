@@ -38,6 +38,9 @@ class WatchdogTests(unittest.TestCase):
         # Fixture repos live under the temp dir, which is_install rejects; tests of that rule restore it.
         self.real_temp_roots = machine._temp_roots
         p = mock.patch.object(machine, "_temp_roots", return_value=()); p.start(); self.addCleanup(p.stop)
+        # run_once sweeps idle simulators; keep every pass off the real machine's simctl.
+        self.real_sweep = watchdog.sweep_simulators
+        p = mock.patch.object(watchdog, "sweep_simulators", return_value=0); self.sweep = p.start(); self.addCleanup(p.stop)
         self.root = root
         self.sent = []
         self.started = []
@@ -505,6 +508,44 @@ class WatchdogTests(unittest.TestCase):
             self.assertIsNone(claude_cli.resolve())
         with mock.patch.object(claude_cli.shutil, "which", return_value=fake):
             self.assertEqual(claude_cli.resolve(), fake)
+
+    # idle simulators ----------------------------------------------------------------------------------------
+    def stub_machine(self, ps):
+        booted = json.dumps({"devices": {"iOS-26": [{"udid": "A", "state": "Booted"},
+                                                    {"udid": "B", "state": "Shutdown"}],
+                                         "watchOS": [{"udid": "C", "state": "Booted"}]}})
+        outputs = {"ps": ps, "xcrun": booted}
+        run = mock.patch.object(watchdog, "_run", side_effect=lambda argv: outputs[argv[0]])
+        shutdown = mock.patch.object(watchdog.subprocess, "run")
+        return run, shutdown
+
+    def test_watchdog_shuts_idle_simulators(self):
+        repo = self.repo()
+        run, shutdown = self.stub_machine("/usr/bin/python3 x\nlaunchd\n")
+        out = io.StringIO()
+        with run, shutdown as sub, redirect_stdout(out):
+            self.assertEqual(self.real_sweep([str(repo)]), 2)
+        sub.assert_called_once()
+        self.assertEqual(sub.call_args.args[0], ["xcrun", "simctl", "shutdown", "all"])
+        self.assertIn("[watchdog] shut down 2 idle simulators", out.getvalue())
+        self.run_once()
+        self.sweep.assert_called_once()
+
+    def test_watchdog_skips_when_tests_running(self):
+        repo = self.repo()
+        for ps in ("/usr/bin/xcodebuild test -scheme App\n", "xcodebuild build-for-testing -scheme App\n",
+                   "xcrun simctl launch booted com.x\n"):
+            run, shutdown = self.stub_machine(ps)
+            with run, shutdown as sub:
+                self.assertEqual(self.real_sweep([str(repo)]), 0)
+            sub.assert_not_called()
+        gates = repo / ".orchestrator" / "gates"
+        gates.mkdir()
+        (gates / "T-1.json").write_text(json.dumps({"pid": os.getpid()}))
+        run, shutdown = self.stub_machine("")
+        with run, shutdown as sub:
+            self.assertEqual(self.real_sweep([str(repo)]), 0)
+        sub.assert_not_called()
 
     def test_l8_plist_paths_escaped(self):
         root = self.root / "a&b<c>"
