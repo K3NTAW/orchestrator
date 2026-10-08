@@ -33,6 +33,12 @@ _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 _STALE_CLAIM_S = 120
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 _JEV_TIMEOUT_S = 3.0
+# Declared so jev_triage never takes ask()'s undeclared-site path, whose synchronous notify (osascript on darwin)
+# sat between run()'s claim and its launch.
+jev.declare_boundary("triage", fields=("kind", "task_title", "spec", "hold_reason", "review_comments",
+                                       "depends_on", "attempts"),
+                     max_chars=jev.DEFAULT_MAX_STATE_CHARS, raw_source_allowed=False,
+                     notes="Shadow triage in run(); spec 1500 chars, up to 10 review comments.")
 
 
 def _fenced(label, value, limit=None):
@@ -530,7 +536,7 @@ def jev_triage(kind, task, attempts=0):
     started = time.monotonic()
     result = jev.ask(state, {"next_action": {"type": "choice",
                      "instructions": "Given this decision-point state, what should the Planner do next?",
-                     "criteria": options}}, timeout_s=_JEV_TIMEOUT_S)
+                     "criteria": options}}, site="triage", timeout_s=_JEV_TIMEOUT_S)
     latency_ms = (time.monotonic() - started) * 1000
     if result is None:
         return None
@@ -1150,7 +1156,7 @@ def build_ctx(point, pool=None):
     cfg = pool.cfg
     goal = bus.get(point["goal_id"])
     task = _decision_task(point["goal_id"], point["kind"], point["payload_key"]) or goal
-    children = [t for t in bus.read() if t.get("parent") == goal["id"]]
+    children = bus.read(parent=goal["id"])
     scouts = [t for t in children if t.get("role") == "scout"]
     blocked = [t["id"] for t in scouts if t.get("status") in ("held", "failed")
                or (t.get("result") or {}).get("blocked")]
@@ -1701,10 +1707,13 @@ def tick(pool=None):
         return
     groups = {}
     enabled = decision.routes_enabled(config)
+    fix_rounds_for = None
     for raw in list(decision_points()):
         point = _point(raw)
-        if point["kind"] == "held" and any(t.get("status") != "failed" and
-                (t.get("constraints") or {}).get("fix_round_for") == point["task_id"] for t in bus.read()):
+        if point["kind"] == "held" and fix_rounds_for is None:
+            fix_rounds_for = {(t.get("constraints") or {}).get("fix_round_for")
+                              for t in bus.read() if t.get("status") != "failed"}
+        if point["kind"] == "held" and point["task_id"] in fix_rounds_for:
             _telemetry_skip(point, "tick", "fix_round_in_flight")
             continue
         ctx = build_ctx(point, pool)

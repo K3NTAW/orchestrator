@@ -744,6 +744,20 @@ class JevShadowTriage(PlannerRunsBase):
         rec = self.record(goal_id, "scouts_done", goal_id)
         self.assertIsNone(rec["jev"])
 
+    def test_triage_is_a_declared_jev_site(self):
+        """T-1729: an undeclared site makes jev.ask() fire a synchronous notify (osascript on darwin, ~1 s)
+        between run()'s claim and its launch, long enough for a concurrent caller test to time out."""
+        goal_id = self.goal()
+        self.scout_child(goal_id, "done")
+        self.patch_launch_planner(lambda *a, **k: {"pid": 1, "pid_start": None, "log": "x"})
+        warnings = []
+        self.swap(jev, "_boundary_warning", warnings.append)
+
+        r = PR.run(goal_id, "scouts_done", goal_id)
+        self.assertTrue(r["launched"], r)
+        self.assertEqual(warnings, [])
+        self.assertLessEqual(set(PR._jev_state("held", {"id": goal_id}, 0)), jev.BOUNDARIES["triage"]["fields"])
+
     def test_triage_not_called_when_guard_skips(self):
         """T-0232 review item 1: jev_triage runs only after every guard has passed, immediately before
         launch_planner -- a decision point that gets skipped (session attached, no headroom, unsafe key) must

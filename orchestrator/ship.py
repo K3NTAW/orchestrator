@@ -21,7 +21,13 @@ Residual window: origin/<target> can move between the final fetch and gh pr merg
 commit's first parent is compared with gated_target_sha; on a mismatch the full gate re-runs on the merge commit,
 and a red result rolls the merge back at once and holds the goal. Between that merge and the rollback, the target
 holds an ungated tree. A red post-merge gate never ships: the rollback state is kept in pipeline.ship and a resume
-runs it if it never finished; an unresolved first parent holds instead of skipping the check."""
+runs it if it never finished; an unresolved first parent holds instead of skipping the check.
+
+Window: tick() stores ship_enabled_at in .orchestrator/ship_state.json the first time it sees [ship].enabled true
+and deletes it when ship is seen disabled. Goals closed before that time are never touched.
+
+Ownership: automatic rollback only reverts a merge ship made itself (pipeline.ship.merged_by == "ship"). A goal
+merged by a human or another path is recorded merged_by="external"; a red post-merge gate on it only notifies."""
 import fcntl, json, os, re, subprocess, sys, threading, time
 from pathlib import Path
 
@@ -101,6 +107,46 @@ def _hold(goal_id, reason, tail=""):
     return {"status": "held", "reason": reason}
 
 
+def _state_path(root):
+    return Path(root) / ".orchestrator" / "ship_state.json"
+
+
+def enabled_at(root=ROOT):
+    """When ship was last seen switched on, or None if it is off or was never seen on."""
+    try:
+        return float(json.loads(_state_path(root).read_text())["enabled_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _track_enabled(root, enabled):
+    """Persist ship_enabled_at on the first enabled tick; forget it when disabled so off-then-on opens a new window."""
+    path = _state_path(root)
+    if not enabled:
+        path.unlink(missing_ok=True)
+        return None
+    at = enabled_at(root)
+    if at is None:
+        at = time.time()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"enabled_at": at}) + "\n")
+        os.replace(tmp, path)
+    return at
+
+
+def closed_time(task):
+    """pipeline.closed_at, else the time of the event that set goal_closed, else updated_at, else the last event."""
+    closed = (task.get("pipeline") or {}).get("closed_at")
+    if closed:
+        return closed
+    events = [e for e in task.get("events") or [] if isinstance(e, dict)]
+    for e in events:
+        if isinstance(e.get("result"), dict) and e["result"].get("goal_closed") and e.get("ts"):
+            return e["ts"]
+    return task.get("updated_at") or (events[-1].get("ts") if events else None) or 0
+
+
 def _record_decision(title, fact, goal_id):
     script = ROOT / ".claude" / "skills" / "memory" / "scripts" / "record.sh"
     if not script.exists():
@@ -121,9 +167,11 @@ def _gate(root, wt, task_id, cfg):
 
 
 def _worktree(root, name, ref):
-    base = Path(root) / ".orchestrator" / "ship-wt"
+    """<root>/wt/ship-<name>: the same depth as task worktrees, so tests that derive the repo root from __file__
+    resolve it the same way in both."""
+    base = Path(root) / "wt"
     base.mkdir(parents=True, exist_ok=True)
-    wt = base / name
+    wt = base / f"ship-{name}"
     if wt.exists():
         _git(root, "worktree", "remove", "--force", str(wt))
     _git(root, "worktree", "prune")
@@ -167,7 +215,8 @@ def _in_target(root, goal_id, target):
 
 
 def _already_in_target(goal_id, target):
-    _ship_update(goal_id, state="shipped", shipped_reason="already in target", last_error=None, errors=0)
+    _ship_update(goal_id, state="shipped", shipped_reason="already in target", merged_by="external",
+                 last_error=None, errors=0)
     _notify_once(goal_id, "shipped", f"{goal_id}: already in {target}; marked shipped without a push or PR")
     return {"status": "shipped", "reason": "already in target"}
 
@@ -223,7 +272,7 @@ def _gating(goal_id, root, cfg, target):
     base = _goal_head(root, goal_id)
     if not base:
         raise _Hold("ship goal branch missing")
-    wt = _worktree(root, f"ship-{goal_id}", base)
+    wt = _worktree(root, goal_id, base)
     try:
         r = _git(wt, "merge", "--no-edit", "-m", f"Merge {target} {target_sha[:12]} into goal/{goal_id}", target_sha)
         if r.returncode:
@@ -273,6 +322,8 @@ def _merging(goal_id, root, cfg, target):
             raise _Hold("ship merge failed", r.stderr[-2000:])
         # Exit 0 without a merge: a merge queue or auto-merge took the PR. Nothing here can wait on it.
         raise _Hold("merge pending", r.stdout[-2000:])
+    # A crash before this line leaves merged_by unset: the merge then counts as external and is never rolled back.
+    _ship_update(goal_id, merged_by="ship")
 
 
 def _merged_rollback(root, merge_sha, target):
@@ -304,9 +355,12 @@ def _roll_back_red(goal_id, root, cfg, merge_sha, tail=""):
 
 
 def _on_merged(goal_id, root, cfg, target, merge_sha, stop_event=None, head_oid=None):
-    """A post-merge gate runs unless the PR merged exactly the green gated head onto the gated target."""
-    st = _ship_update(goal_id, merge_sha=merge_sha)
-    if st.get("post_merge_gate") == "red":
+    """A post-merge gate runs unless the PR merged exactly the green gated head onto the gated target.
+    Only a merge ship made itself is rolled back on red; an external merge is recorded shipped and only notifies."""
+    st = _ship(bus.get(goal_id))
+    ours = st.get("merged_by") == "ship"
+    st = _ship_update(goal_id, merge_sha=merge_sha, merged_by="ship" if ours else "external")
+    if st.get("post_merge_gate") == "red" and ours:
         return _roll_back_red(goal_id, root, cfg, merge_sha)
     fetched = _git(root, "fetch", "origin")
     first_parent = _sha(root, f"{merge_sha}^1")
@@ -315,14 +369,20 @@ def _on_merged(goal_id, root, cfg, target, merge_sha, stop_event=None, head_oid=
     gated = bool(st.get("gate_ok") and st.get("gated_head_sha") and head_oid == st["gated_head_sha"]
                  and first_parent == st.get("gated_target_sha"))
     if not gated and not st.get("post_merge_gate"):
-        wt = _worktree(root, f"ship-post-{goal_id}", merge_sha)
+        wt = _worktree(root, f"post-{goal_id}", merge_sha)
         try:
             ok, _reason, tail = _gate(root, wt, goal_id, cfg)
         finally:
             _drop_worktree(root, wt)
-        _ship_update(goal_id, post_merge_gate="green" if ok else "red")
-        if not ok:
+        _ship_update(goal_id, post_merge_gate="green" if ok else "red", failure_tail="" if ok else tail)
+        if not ok and ours:
             return _roll_back_red(goal_id, root, cfg, merge_sha, tail)
+    if not ours and _ship(bus.get(goal_id)).get("post_merge_gate") == "red":
+        _ship_update(goal_id, state="shipped", last_error="post-merge gate red on an external merge")
+        _notify_once(goal_id, "external-red",
+                     f"{goal_id}: merged into {target} outside ship as {merge_sha}; post-merge gate red, "
+                     f"no automatic rollback. Revert by hand if needed: orchestrator rollback {merge_sha}")
+        return {"status": "shipped", "merge_sha": merge_sha, "merged_by": "external", "post_merge_gate": "red"}
     _ship_update(goal_id, state="shipped", last_error=None, errors=0)
     _record_decision(f"{goal_id} shipped to {target} as {merge_sha[:12]}",
                      f"revert path: orchestrator rollback {merge_sha}", goal_id)
@@ -356,7 +416,7 @@ def advance(goal_id, pool, root=ROOT, stop_event=None):
                 st = _ship_update(goal_id, pr_number=pr["number"], pr_url=pr["url"])
         while not _stopped(stop_event):
             st = _ship(bus.get(goal_id))
-            if st.get("post_merge_gate") == "red" and st.get("merge_sha"):
+            if st.get("post_merge_gate") == "red" and st.get("merge_sha") and st.get("merged_by") == "ship":
                 return _on_merged(goal_id, root, cfg, target, st["merge_sha"], stop_event)
             if st.get("pr_number"):
                 truth = _pr_truth(root, st["pr_number"])
@@ -365,7 +425,8 @@ def advance(goal_id, pool, root=ROOT, stop_event=None):
                         return _on_merged(goal_id, root, cfg, target, _merge_oid(truth), stop_event,
                                           truth.get("headRefOid"))
                     # The goal moved on after this PR merged: ship the rest through a new PR.
-                    _ship_update(goal_id, state="gating", pr_number=None, pr_url=None)
+                    _ship_update(goal_id, state="gating", pr_number=None, pr_url=None, post_merge_gate=None,
+                                 merge_sha=None, merged_by=None)
                     continue
                 if truth and truth.get("state") == "CLOSED":
                     raise _Hold("ship PR closed")
@@ -408,23 +469,30 @@ def _unlock(fh):
         fh.close()
 
 
-def candidates():
+def candidates(root=ROOT, since=None):
+    """Closed goals not yet shipped or held, closed at or after ship_enabled_at; nothing before ship was seen on."""
+    since = enabled_at(root) if since is None else since
+    if since is None:
+        return []
     rows = [t for t in bus.read() if (t.get("constraints") or {}).get("goal")
-            and (t.get("result") or {}).get("goal_closed") and _ship(t).get("state") not in ("shipped", "held")]
-    return sorted(rows, key=lambda t: ((t.get("pipeline") or {}).get("closed_at") or t.get("created_at") or 0, t["id"]))
+            and (t.get("result") or {}).get("goal_closed") and _ship(t).get("state") not in ("shipped", "held")
+            and closed_time(t) >= since]
+    return sorted(rows, key=lambda t: (closed_time(t), t["id"]))
 
 
 def tick(pool, stop_event=None, root=ROOT, inline=True):
     """Start at most one ship. Inline (daemon --once) blocks; otherwise a non-daemon thread runs it."""
     if not settings(pool.cfg)["enabled"]:
+        _track_enabled(root, False)
         return None
+    since = _track_enabled(root, True)
     if _git(root, "remote", "get-url", "origin").returncode:
         return None
     if any(t.is_alive() for t in _THREADS):
         return None
     if not inline and not threading.main_thread().is_alive():
         return None  # interpreter shutdown: a new non-daemon thread would keep the process alive for hours
-    rows = candidates()
+    rows = candidates(root=root, since=since)
     if not rows:
         return None
     fh = _lock(root)
