@@ -171,6 +171,47 @@ def _held_key(t):
     return f"{t['id']}:{held_at!r}"
 
 
+def _failed_key(t):
+    """task_id, a literal "failed" and the newest status=failed event time: a re-queued task that fails again is a
+    new decision. Same split(":", 1)[0] task-id convention as _held_key."""
+    failed_ts = [e["ts"] for e in t.get("events", []) if e.get("status") == "failed"]
+    if not failed_ts:
+        return None
+    return f"{t['id']}:failed:{max(failed_ts)!r}"
+
+
+def _is_failed_key(payload_key):
+    return payload_key.split(":", 2)[1:2] == ["failed"]
+
+
+def _superseded(t, all_tasks):
+    """A failed task some live task already handles (fix round, respec) or one marked superseded_by."""
+    if t.get("superseded_by"):
+        return True
+    return any(x.get("status") != "failed" and x["id"] != t["id"] and t["id"] in (
+        (x.get("constraints") or {}).get("fix_round_for"), (x.get("constraints") or {}).get("respec_for"))
+        for x in all_tasks)
+
+
+def _worktree_note(t):
+    """One line on a failed task's worktree: commits ahead of base and whether the tree is dirty. None without one."""
+    worktree = t.get("worktree")
+    if not worktree or not Path(worktree).is_dir():
+        return None
+    try:
+        base = gitutil._resolve_base(worktree, t.get("parent"))
+        if not base:
+            return None
+        ahead = gitutil._git_in(worktree, "rev-list", "--count", f"{base}..HEAD")
+        dirty = gitutil._git_in(worktree, "status", "--porcelain")
+    except OSError:
+        return None
+    if ahead.returncode != 0 or dirty.returncode != 0:
+        return None
+    tree = "dirty" if dirty.stdout.strip() else "clean"
+    return f"worktree: {ahead.stdout.strip()} commits ahead of base, {tree} tree"
+
+
 # Roadmap checklist lines in .orchestrator/roadmap.md: "- [ ] <goal text>" (not filed yet) and
 # "- [x] <goal text> (T-xxxx)". Every other line is context.
 _ROADMAP_LINE = re.compile(r"^\s*[-*]\s+\[( |x|X)\]\s+(.+?)\s*$")
@@ -356,6 +397,15 @@ def decision_points():
             if key is None:
                 continue
             if not _blocked(goal_id, "held", key, records):
+                yield goal_id, "held", key
+
+        # A failed execute child (e.g. executor timeout) never re-queues itself; its dependents would sit queued.
+        # Same "held" kind so the decision Planner can re-queue it, write a fix round or escalate.
+        for c in executes:
+            if c["status"] != "failed" or _superseded(c, all_tasks):
+                continue
+            key = _failed_key(c)
+            if key is not None and not _blocked(goal_id, "held", key, records):
                 yield goal_id, "held", key
 
         # A superseded execute child (e.g. a re-gate round whose target merged another way) never merges; it must
@@ -758,7 +808,7 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
         # A held task never leaves status "held" by itself (CLAUDE.md: the Planner clears a hold by writing a
         # new task, never by editing the held one) -- so "no longer held" only fires once the task is gone
         # (id reused/purged) or the daemon requeued it some other way; the real signal is the fix-round task.
-        if t is None or t["status"] != "held":
+        if t is None or t["status"] != ("failed" if _is_failed_key(payload_key) else "held"):
             return True
         started_at = r.get("started_at", 0)
         for other in tasks_by_id.values():
@@ -1259,6 +1309,10 @@ def _packet_sections(sections):
             failure_text = (task.get("resume_hint") or {}).get("failures")
             if failure_text is None:
                 failure_text = (task.get("result") or {}).get("failures")
+            if point["kind"] == "held" and _is_failed_key(point["payload_key"]):
+                note = _worktree_note(task)
+                if note:
+                    failure_text = f"{note}\n{failure_text}" if failure_text else note
             for dep in task.get("depends_on") or []:
                 try:
                     status = bus.get(dep)["status"]
