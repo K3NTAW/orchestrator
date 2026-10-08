@@ -68,10 +68,14 @@ def decision_packet(goal_id, kind, payload, repo_path=ROOT):
         goal, ctx = {"id": goal_id}, {}
     task = _decision_task(goal_id, kind, payload)
     classification = planner_taxonomy.classify(point, ctx, goal=goal, task=task)
-    return planner_packet.build(
+    text = planner_packet.build(
         _packet_sections([(point, ctx, None, classification)]), goal=goal,
         scout_findings=_scout_findings(goal_id), memory_hits=_memory_hits(goal),
         cap_chars=_packet_cap(repo_path))["text"]
+    own = Path(repo_path) / ".orchestrator" / f"plan-{goal_id}.md"
+    if own.exists():
+        text += f"\nPlan file: .orchestrator/plan-{goal_id}.md (read and write this goal's plan here, not plan.md)"
+    return text
 
 # next_action options offered to Jev for a decision-point shadow triage (D3, T-0217). scouts_done gets its own
 # set (there is no held task/review to react to yet); held and closable share the fix_round/respec/escalate/noop
@@ -254,6 +258,12 @@ def _roadmap_packet_text():
     return "\n".join(lines)[:_NEXT_GOAL_ROADMAP_CHARS]
 
 
+def _plan_file(goal_id):
+    """The goal's own plan file (goals.plan_file) when it exists, else the shared plan.md."""
+    own = STATE / f"plan-{goal_id}.md"
+    return own if own.exists() else STATE / "plan.md"
+
+
 def _next_goal_retrospective(goal_id):
     """Memory entries naming the closed goal, plus plan.md's "no learnings" marker, as raw text (data)."""
     pattern = re.compile(rf"\bgoal:\s*{re.escape(goal_id)}\b")
@@ -264,7 +274,7 @@ def _next_goal_retrospective(goal_id):
         except OSError:
             continue
         blocks += [b.strip() for b in re.split(r"\n\s*\n", text) if pattern.search(b)]
-    plan = STATE / "plan.md"
+    plan = _plan_file(goal_id)
     if plan.exists():
         blocks += [line.strip() for line in plan.read_text().splitlines() if f"no learnings — goal: {goal_id}" in line]
     return "\n\n".join(blocks)[:_NEXT_GOAL_RETRO_CHARS]
@@ -831,7 +841,7 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
                 fts = _first_event_ts(t["id"])
                 if fts is not None and fts > started_at:
                     return True
-        plan = STATE / "plan.md"
+        plan = _plan_file(goal_id)
         try:
             return f"next_goal {goal_id}: no ready item" in plan.read_text() and plan.stat().st_mtime > started_at
         except OSError:
@@ -1702,7 +1712,7 @@ def _retrospective(goal_id):
     for path in memory.glob("*.md"):
         if re.search(rf"\bgoal:\s*{re.escape(goal_id)}\b", path.read_text()):
             return
-    plan = STATE / "plan.md"
+    plan = _plan_file(goal_id)
     text = plan.read_text() if plan.exists() else ""
     marker = f"no learnings — goal: {goal_id}"
     if marker not in text:
