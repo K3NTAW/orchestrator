@@ -360,6 +360,67 @@ class PrecheckGitRefusals(GoalsTestCase):
         self._assert_refused_no_commit(repo, "merge")
 
 
+class ConcurrentGoals(GoalsTestCase):
+    def _repo_with_live_goal(self, name, live_id="T-9100"):
+        repo = self.repo(name)
+        self.unignore(repo)
+        tasks = repo / ".orchestrator" / "tasks"
+        tasks.mkdir(parents=True, exist_ok=True)
+        (tasks / f"{live_id}.json").write_text(json.dumps(
+            {"id": live_id, "title": "GOAL: first", "role": "triage", "status": "claimed", "parent": None}))
+        children = []
+        for n in range(1, 4):
+            tid = f"T-91{n:02d}"
+            (tasks / f"{tid}.json").write_text(json.dumps(
+                {"id": tid, "title": "child", "role": "execute", "status": "queued", "parent": live_id}))
+            children.append(tid)
+        subprocess.run(["git", "checkout", "-q", "-b", f"goal/{live_id}"], cwd=repo, check=True)
+        return repo, [live_id, *children]
+
+    def test_second_goal_start_keeps_checkout_and_bus(self):
+        repo, task_ids = self._repo_with_live_goal("second-goal")
+        self.fake_run("T-9200")
+        r = goals.start(str(repo), "second goal")
+        self.assertTrue(r["launched"], r)
+        head = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, "goal/T-9100")
+        self.assertEqual(r["branch"], "goal/T-9200")
+        self.assertEqual(subprocess.run(["git", "rev-parse", "--verify", "-q", "refs/heads/goal/T-9200"],
+                                        cwd=repo, capture_output=True).returncode, 0)
+        for tid in task_ids:
+            self.assertTrue((repo / ".orchestrator" / "tasks" / f"{tid}.json").exists(), tid)
+        prompt = FakePopen.last_args[2]
+        self.assertIn("never switch the repo root's branch", prompt)
+        self.assertIn("T-9100", prompt)
+
+    def test_each_goal_reads_its_own_plan_file(self):
+        repo, _ = self._repo_with_live_goal("own-plan")
+        (repo / ".orchestrator").mkdir(exist_ok=True)
+        self.fake_run("T-9300")
+        r = goals.start(str(repo), "third goal")
+        self.assertTrue(r["launched"], r)
+        own = repo / ".orchestrator" / "plan-T-9300.md"
+        self.assertTrue(own.exists())
+        self.assertEqual(r["plan_file"], ".orchestrator/plan-T-9300.md")
+        self.assertIn(".orchestrator/plan-T-9300.md", FakePopen.last_args[2])
+        shared = (repo / ".orchestrator" / "plan.md").read_text()
+        self.assertIn("T-9100: .orchestrator/plan-T-9100.md", shared)
+        self.assertIn("T-9300: .orchestrator/plan-T-9300.md", shared)
+
+        state = repo / ".orchestrator"
+        (state / "plan-T-9100.md").write_text("# first goal plan\n")
+        with mock.patch.object(PR, "STATE", state):
+            self.assertEqual(PR._plan_file("T-9300"), own)
+            self.assertEqual(PR._plan_file("T-9100"), state / "plan-T-9100.md")
+            PR._retrospective("T-9300")
+            PR._retrospective("T-9100")
+        self.assertIn("no learnings — goal: T-9300", own.read_text())
+        self.assertNotIn("T-9100", own.read_text())
+        self.assertIn("no learnings — goal: T-9100", (state / "plan-T-9100.md").read_text())
+        self.assertNotIn("no learnings", (state / "plan.md").read_text())
+
+
 class StartLaunch(GoalsTestCase):
     def test_start_creates_goal_task_via_stdin_script_with_env(self):
         repo = self.repo("stdin-script")

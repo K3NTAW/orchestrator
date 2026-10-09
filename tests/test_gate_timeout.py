@@ -295,10 +295,15 @@ class GateTimeoutTest(unittest.TestCase):
 
     def test_settings_defaults_and_override(self):
         self.assertEqual(gate.settings({}), {"timeout_s": 2700, "cleanup_cmd": None,
-                                             "cleanup_timeout_s": 300, "post_cmd": None})
-        cfg = {"gate": {"timeout_s": 9, "cleanup_cmd": "true", "cleanup_timeout_s": 4, "post_cmd": "true"}}
+                                             "cleanup_timeout_s": 300, "post_cmd": None,
+                                             "max_parallel": 1})
+        cfg = {"gate": {"timeout_s": 9, "cleanup_cmd": "true", "cleanup_timeout_s": 4, "post_cmd": "true",
+                        "max_parallel": 3}}
         self.assertEqual(gate.settings(cfg), {"timeout_s": 9, "cleanup_cmd": "true",
-                                              "cleanup_timeout_s": 4, "post_cmd": "true"})
+                                              "cleanup_timeout_s": 4, "post_cmd": "true",
+                                              "max_parallel": 3})
+        for invalid in (0, -1, 1.5, "2", True):
+            self.assertEqual(gate.settings({"gate": {"max_parallel": invalid}})["max_parallel"], 1)
         for invalid in (0, -1, 1.5, "1", True):
             self.assertEqual(gate.settings({"gate": {"timeout_s": invalid}})["timeout_s"], 2700)
 

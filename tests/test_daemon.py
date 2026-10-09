@@ -3882,6 +3882,209 @@ class Daemon(unittest.TestCase):
         self.assertEqual(received, [])
 
 
+    def bg_setup(self, results=None):
+        """Background-gate fixture: run_gate blocks until released, then returns results[task_id] (green by
+        default) or raises it when it is an exception. Cleanup releases and drains every live gate."""
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+        self.swap(daemon, "_review_plan", lambda task: (1, "always"))
+        self.swap(daemon, "_open_reviews", lambda *args, **kwargs: [])
+        release, calls = threading.Event(), []
+
+        def run_gate(worktree, *, script, task_id=None, cfg=None):
+            calls.append(task_id)
+            release.wait(30)
+            outcome = (results or {}).get(task_id)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome or {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False,
+                               "attempts": 1, "timeouts": 0}
+        self.swap(daemon.gate, "run_gate", run_gate)
+        self.addCleanup(self.drain_gates, release)
+        return release, calls
+
+    def drain_gates(self, release, pool=None):
+        release.set()
+        for run in list(daemon._LIVE_GATES.values()):
+            if run.get("thread"):
+                run["thread"].join(5)
+        if pool is not None:
+            daemon._reap_gates(pool)
+        daemon._LIVE_GATES.clear()
+        daemon._GATE_RESULTS.clear()
+
+    def bg_task(self, title, worktree):
+        tid = self.task(title)
+        path = self.sandbox / worktree
+        path.mkdir(exist_ok=True)
+        bus.update(tid, status="done", worktree=str(path))
+        return tid
+
+    def gate_in_tick(self, pool, wait=0.05):
+        token = daemon._GATE_WAIT_S.set(wait)
+        try:
+            daemon.gate(pool)
+        finally:
+            daemon._GATE_WAIT_S.reset(token)
+
+    def bg_pool(self, max_parallel=None):
+        pool = P.Pool()
+        if max_parallel is not None:
+            pool.cfg.setdefault("gate", {})["max_parallel"] = max_parallel
+        return pool
+
+    def test_gate_runs_in_background_and_tick_returns(self):
+        release, calls = self.bg_setup()
+        tid = self.bg_task("slow gate", "wt-slow")
+        started = time.monotonic()
+        daemon.tick()
+        self.assertLess(time.monotonic() - started, 5)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertIn("gate_started_at", pipeline)
+        self.assertNotIn("gated_at", pipeline)
+        daemon.tick()
+        self.assertEqual(calls, [tid])                              # in flight: not gated a second time
+        release.set()
+        for run in list(daemon._LIVE_GATES.values()):
+            run["thread"].join(5)
+        daemon.tick()
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertTrue(pipeline["gated_at"])
+        self.assertIn("gated_at_done", pipeline)
+        self.assertNotIn("gate_started_at", pipeline)
+        self.assertEqual(calls, [tid])
+
+    def test_gate_result_applied_by_reaper_green_red_timeout(self):
+        results = {}
+        release, calls = self.bg_setup(results)
+        pool = self.bg_pool(max_parallel=3)
+        green, red, slow = (self.bg_task(name, f"wt-{name}") for name in ("green", "red", "slow"))
+        results[red] = {"returncode": 1, "stdout": "", "stderr": "FAILED red", "timed_out": False,
+                        "attempts": 1, "timeouts": 0}
+        results[slow] = {"returncode": None, "stdout": "out", "stderr": "", "timed_out": True,
+                         "attempts": 2, "timeouts": 2}
+        self.gate_in_tick(pool)
+        self.assertEqual(sorted(calls), sorted([green, red, slow]))
+        for tid in (green, red, slow):
+            self.assertNotIn("gated_at", bus.get(tid)["pipeline"])
+            self.assertEqual(bus.get(tid)["status"], "done")
+        self.drain_gates(release, pool)
+        task = bus.get(green)
+        self.assertEqual(task["status"], "done")
+        self.assertTrue(task["pipeline"]["gated_at"])
+        self.assertIn("gated_at_done", task["pipeline"])
+        self.assertEqual(task["pipeline"]["reviews_expected"], 1)
+        task = bus.get(red)
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_red"))
+        self.assertEqual(task["pipeline"]["gate_reds"], 1)
+        self.assertIn("FAILED red", task["resume_hint"]["failures"])
+        task = bus.get(slow)
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_timeout"))
+        self.assertEqual(task["pipeline"]["infra_failure"], "gate_timeout")
+        self.assertEqual(task["pipeline"]["gate_timeouts"], 2)
+        for tid in (green, red, slow):
+            self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(bus.get(tid)["pipeline"]))
+
+    def test_gate_worker_exception_holds_gated_error(self):
+        tid = self.task("boom")
+        release, _ = self.bg_setup({tid: RuntimeError("runner blew up")})
+        path = self.sandbox / "wt-boom"
+        path.mkdir()
+        bus.update(tid, status="done", worktree=str(path))
+        release.set()
+        daemon.gate(self.bg_pool())                                 # direct call: waits and reaps
+        task = bus.get(tid)
+        self.assertEqual(task["status"], "held")
+        self.assertTrue(task["hold_reason"].startswith("gate failed"), task["hold_reason"])
+        self.assertIn("runner blew up", task["pipeline"]["gated_error"])
+        self.assertNotIn("gate_started_at", task["pipeline"])
+        self.assertEqual(daemon._LIVE_GATES, {})
+
+    def test_gate_max_parallel_and_same_worktree(self):
+        release, calls = self.bg_setup()
+        pool = self.bg_pool(max_parallel=2)
+        first, second = self.bg_task("shared one", "wt-shared"), self.bg_task("shared two", "wt-shared")
+        other = self.bg_task("other", "wt-other")
+        self.gate_in_tick(pool)
+        self.assertEqual(len(calls), 2)
+        self.assertIn(other, calls)
+        self.assertEqual(len({first, second} & set(calls)), 1)      # one gate per worktree at a time
+        extra = self.bg_task("extra", "wt-extra")
+        self.gate_in_tick(pool)
+        self.assertNotIn(extra, calls)                              # cap of two is full
+        self.assertEqual(len(daemon._LIVE_GATES), 2)
+        self.assertNotIn("gate_started_at", bus.get(extra).get("pipeline") or {})
+        self.assertEqual(daemon.gate_runner.settings({})["max_parallel"], 1)
+
+    def test_cap_skip_does_not_count_attempt(self):
+        release, calls = self.bg_setup()
+        pool = self.bg_pool()
+        a, b = self.bg_task("a", "wt-a"), self.bg_task("b", "wt-b")
+        self.gate_in_tick(pool)
+        self.gate_in_tick(pool)
+        self.assertEqual(len(calls), 1)
+        running, skipped = (a, b) if calls == [a] else (b, a)
+        self.assertEqual(bus.get(running)["pipeline"]["gate_attempts"], 1)
+        self.assertNotIn("gate_attempts", bus.get(skipped).get("pipeline") or {})
+        self.drain_gates(release, pool)
+        self.gate_in_tick(pool, wait=5)
+        self.assertEqual(calls, [running, skipped])
+        self.assertEqual(bus.get(skipped)["pipeline"]["gate_attempts"], 1)
+        self.assertTrue(bus.get(skipped)["pipeline"]["gated_at"])
+
+    def test_sweep_extends_live_gate_lease(self):
+        release, calls = self.bg_setup()
+        pool = self.bg_pool()
+        tid = self.bg_task("long gate", "wt-long")
+        self.gate_in_tick(pool)
+        pipeline = dict(bus.get(tid)["pipeline"])
+        run_id = pipeline["gate_run_id"]
+        pipeline["gate_started_at_lease"] = time.time() - 1
+        bus.update(tid, pipeline=pipeline)
+        daemon.sweep_leases(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertGreater(pipeline["gate_started_at_lease"], time.time() + daemon.STAGE_LEASE_S - 60)
+        self.assertEqual(pipeline["gate_run_id"], run_id)
+        self.drain_gates(release, pool)
+        self.assertTrue(bus.get(tid)["pipeline"]["gated_at"])
+        self.assertEqual(calls, [tid])
+
+    def test_restart_clears_orphaned_gate_marker_and_regates(self):
+        tid = self.task("orphaned gate")
+        bus.update(tid, status="done", worktree=str(self.sandbox),
+                   pipeline={"gate_started_at": time.time() - 2000, "gate_started_at_lease": time.time() - 1,
+                             "gate_run_id": "before-restart", "gate_attempts": 1})
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+        self.swap(daemon, "_review_plan", lambda task: (1, "always"))
+        self.swap(daemon, "_open_reviews", lambda *args, **kwargs: [])
+        pool = self.bg_pool()
+        daemon.gate(pool)
+        self.assertNotIn("gated_at", bus.get(tid)["pipeline"])     # marker still says in flight
+        daemon.sweep_leases(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(pipeline))
+        daemon.gate(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertTrue(pipeline["gated_at"])
+        self.assertEqual(pipeline["gate_attempts"], 2)
+
+    def test_gated_at_not_stamped_at_start(self):
+        release, _ = self.bg_setup()
+        pool = self.bg_pool()
+        tid = self.bg_task("in flight", "wt-flight")
+        self.gate_in_tick(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        for key in daemon.GATE_MARKER_KEYS:
+            self.assertIn(key, pipeline)
+        self.assertNotIn("gated_at", pipeline)
+        self.assertNotIn("gated_at_lease", pipeline)
+        self.drain_gates(release, pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertGreaterEqual(pipeline["gated_at"], pipeline_started := pipeline.get("first_green_at", 0))
+        self.assertGreater(pipeline_started, 0)
+        self.assertNotIn("gate_started_at", pipeline)
+
 class BusLock(unittest.TestCase):
     def test_writes_take_the_flock(self):
         taken = []
@@ -3927,6 +4130,35 @@ class Background(unittest.TestCase):
         t3 = daemon.start_background({"daemon": {"autostart": True, "interval_s": 60}})
         self.addCleanup(daemon.stop_background, t3)
         self.assertIsNotNone(t3)                                   # lock released, a fresh start_background works
+
+    def test_cli_shutdown_stops_ship_thread_before_lock_release(self):
+        """Ctrl-C in the CLI daemon sets the stop Event and joins the non-daemon ship thread before the lock goes."""
+        from orchestrator import ship
+        seen = {}
+
+        def fake_loop(interval, stop_event):
+            thread = threading.Thread(target=stop_event.wait)
+            thread.start()
+            ship._THREADS.append(thread)
+            seen["thread"] = thread
+            raise KeyboardInterrupt
+
+        def fake_flock(fh, op):
+            if op == daemon.fcntl.LOCK_UN:
+                seen["alive_at_unlock"] = seen["thread"].is_alive()
+
+        lock = tempfile.TemporaryFile("a+")
+        with mock.patch.object(daemon, "acquire_lock", return_value=lock), \
+                mock.patch.object(daemon, "_loop", fake_loop), \
+                mock.patch.object(daemon.fcntl, "flock", fake_flock), \
+                mock.patch.object(daemon.executor, "join_fallback_threads"):
+            with self.assertRaises(KeyboardInterrupt):
+                daemon.main(interval=60)
+        if seen["thread"] in ship._THREADS:
+            ship._THREADS.remove(seen["thread"])
+        self.assertIs(seen["alive_at_unlock"], False)
+        self.assertFalse(seen["thread"].is_alive())
+        self.assertTrue(lock.closed)
 
 
 class WorkerRegistryReconciliation(unittest.TestCase):
