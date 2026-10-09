@@ -367,3 +367,9 @@ type: decision · goal: T-1654 · tasks: T-1655,T-1656,T-1657 · provenance: rep
 - github PR 41 — goal/T-1654 merged to main by the human 2026-10-05T21:26Z; origin/goal/T-1654 is an ancestor of main, 0 commits ahead
 - .orchestrator/tasks/T-1654.json — result.pr_url was null after the daemon closed the goal, so the closable_goal packet replayed; backfilled pr_url=PR 41 via bus_post_result on 2026-10-09
 outcome: Goal done on the bus with PR 41 as result. Revert path: bus_post_result T-1654 with the prior result (pr_url null), or git revert the commit.
+
+## 2026-10-09 2026-10-09 closed goal T-1658 on the bus; no new PR (PR 43 on main since 2026-10-06)
+type: decision · goal: T-1658 · tasks: T-1658 · provenance: repo
+- goal/T-1658 shipped as PR 43 (6cbc778) but the goal task stayed queued with no result, so the daemon replayed a closable_goal decision; T-1660 (ship) was superseded into T-1667 / PR 44
+- Answer: bus_post_result status=done with goal_closed=true and pr_url=PR 43; same pattern as T-1334 (d2cd953)
+outcome: revert path: git revert the plan commit; reset the T-1658 result by hand if the close was wrong
