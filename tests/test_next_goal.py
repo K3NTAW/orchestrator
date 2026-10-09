@@ -243,5 +243,33 @@ class NextGoalTests(NextGoalBase):
         self.assertIn("no ready item", (REPO / ".orchestrator" / "prompts" / "planner-decision.md").read_text())
 
 
+class NextGoalCloseTests(NextGoalBase):
+    def test_next_goal_after_model_close(self):
+        self.roadmap()
+        self.enable()
+        gid = bus.create_task("GOAL: model closed", "model closed", ["Planner closes the goal"], ["**"],
+                              role="triage", complexity=5)["id"]
+        bus.post_result(gid, {"goal_closed": True, "summary": "Goal complete", "pr_url": None})
+        self.assertFalse((bus.get(gid).get("pipeline") or {}).get("closed_at"))
+        self.assertEqual(self.points(), [(gid, "next_goal", gid)])
+        PR.reconcile()
+        closed_at = bus.get(gid)["pipeline"]["closed_at"]
+        event_ts = next(e["ts"] for e in bus.get(gid)["events"] if (e.get("result") or {}).get("goal_closed"))
+        self.assertEqual(closed_at, event_ts)
+        self.assertEqual(self.points(), [(gid, "next_goal", gid)])
+
+    def test_reenable_resets_enabled_at(self):
+        self.roadmap()
+        self.enable()
+        self.config(False)
+        self.assertEqual(self.points(), [])
+        self.assertFalse((self.sandbox / "next_goal_state.json").exists())
+        closed_while_off = self.closed_goal("closed while off")
+        self.config(True)
+        self.assertEqual(self.points(), [])
+        state = json.loads((self.sandbox / "next_goal_state.json").read_text())
+        self.assertGreaterEqual(state["enabled_at"], bus.get(closed_while_off)["pipeline"]["closed_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

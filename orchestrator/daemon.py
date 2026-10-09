@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
+import contextvars, fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request, uuid
 import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
@@ -74,7 +74,15 @@ LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
 STAGE_LEASE_S = 900
-LEASED_STAGES = {"dispatched_at", "spec_review_at", "gated_at", "merged_at"}
+LEASED_STAGES = {"dispatched_at", "spec_review_at", "gated_at", "merged_at", "gate_started_at"}
+# Live gates: gate() starts gate.run_gate on a worker thread and _reap_gates() applies the result on a later
+# tick. pipeline.gate_started_at(+_lease, gate_run_id) marks a gate in flight; gated_at still means "finished".
+GATE_MARKER_KEYS = ("gate_started_at", "gate_started_at_lease", "gate_run_id")
+TICK_GATE_WAIT_S = 2.0   # how long one tick waits for the gates it just started before moving on
+_LIVE_GATES = {}         # task id -> {"task_id", "worktree", "run_id", "started_at", "thread"}
+_GATE_RESULTS = {}       # task id -> {"run_id", "result" | "error"}, finished and waiting for _reap_gates()
+_LIVE_GATES_LOCK = threading.Lock()
+_GATE_WAIT_S = contextvars.ContextVar("gate_wait_s", default=None)  # None: gate() blocks; tick() sets a bound
 
 
 def is_goal(t):
@@ -1514,93 +1522,201 @@ def gate(pool):
     The successful gate stamp also freezes
     pipeline.reviews_expected/review_reason so a later change to [review] can't change how many approvals
     merge_reviewed() waits for on a task already past this stage. Filters run cheap-first, already_merged()
-    (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call."""
+    (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call.
+    Only gate.run_gate leaves the calling thread (_start_gate/_gate_worker); its result is applied by
+    _reap_gates() on the tick. Called from tick() it waits at most TICK_GATE_WAIT_S for the gates it started;
+    called directly it waits for each gate, so results land before it returns."""
+    wait_s = _GATE_WAIT_S.get()
+    _reap_gates(pool)
+    started = []
     for t in bus.read(status="done", role="execute"):
-        if is_goal(t) or stale(t) or (t.get("pipeline") or {}).get("gated_at") or t.get("merged_into"):
+        pipeline = t.get("pipeline") or {}
+        if (is_goal(t) or stale(t) or pipeline.get("gated_at") or pipeline.get("gate_started_at")
+                or t.get("merged_into")):
             continue
-        with bus.locked():
-            t = bus.get(t["id"])
-            pipeline = dict(t.get("pipeline") or {})
-            pipeline["gate_attempts"] = pipeline.get("gate_attempts", 0) + 1
-            bus.update(t["id"], pipeline=pipeline)
+        with _LIVE_GATES_LOCK:
+            if t["id"] in _LIVE_GATES or t["id"] in _GATE_RESULTS:
+                continue
+        t = bus.get(t["id"])
+        pipeline = dict(t.get("pipeline") or {})
+        attempt = {"gate_attempts": pipeline.get("gate_attempts", 0) + 1}
         worktree = t.get("worktree")
         if worktree and not Path(worktree).exists():
-            if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
+            if stamp(t["id"], "gated_at", pipeline_fields=attempt, status="held", hold_reason="worktree missing"):
                 notify(f"{t['id']}: worktree missing; held")
             continue
         if not worktree or not Path(worktree).is_dir():
             continue
-        if worktree:
-            dirty = _dirty_scope_paths(worktree, t.get("scope") or [])
-            if dirty:
-                if stamp(t["id"], "gated_at", status="held", hold_reason="executor did not commit",
-                         resume_hint={"dirty": dirty}):
-                    notify(f"{t['id']}: worktree has uncommitted scope changes; held")
-                continue
-            if already_merged(t):
-                continue
-            missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
-            if missing:
-                if _hold_stale_high(t):
-                    continue
-                failures = [
-                    f"FAILED {path}::{name} (missing: "
-                    f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
-                    for entry in missing for path, name in [entry]
-                ]
-                gate_reds = pipeline.get("gate_reds", 0) + 1
-                if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
-                         status="held", hold_reason="gate_red",
-                         resume_hint={"failures": failures, "missing_tests": missing}):
-                    print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
-                continue
-        result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t["id"], cfg=pool.cfg)
-        if bus.get(t["id"]).get("merged_into"):
-            continue  # a fix round in its chain merged while this gate ran; its late result is moot
-        if _hold_stale_high(t):
+        dirty = _dirty_scope_paths(worktree, t.get("scope") or [])
+        if dirty:
+            if stamp(t["id"], "gated_at", pipeline_fields=attempt, status="held",
+                     hold_reason="executor did not commit", resume_hint={"dirty": dirty}):
+                notify(f"{t['id']}: worktree has uncommitted scope changes; held")
             continue
-        if result["timed_out"]:
-            if stamp(t["id"], "gated_at",
-                     pipeline_fields={"infra_failure": "gate_timeout",
-                                      "gate_timeouts": pipeline.get("gate_timeouts", 0) + result["timeouts"]},
-                     status="held", hold_reason="gate_timeout",
-                     resume_hint={"gate_timeout_s": gate.settings(pool.cfg)["timeout_s"],
-                                  "output_tail": (result["stdout"] + result["stderr"])[-4000:]}):
-                notify(f"{t['id']}: gate timed out twice; held as infra failure")
+        if already_merged(t):
             continue
-        if result["returncode"]:
+        missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
+        if missing:
+            if _hold_stale_high(t):
+                continue
+            failures = [
+                f"FAILED {path}::{name} (missing: "
+                f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
+                for entry in missing for path, name in [entry]
+            ]
             gate_reds = pipeline.get("gate_reds", 0) + 1
-            if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
+            if stamp(t["id"], "gated_at", pipeline_fields={**attempt, "gate_reds": gate_reds},
                      status="held", hold_reason="gate_red",
-                     resume_hint={"failures": result["stderr"][-4000:]}):
-                notify(f"{t['id']}: tests red at the gate; held")
+                     resume_hint={"failures": failures, "missing_tests": missing}):
+                print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
             continue
-        n_reviews, review_reason = _review_plan(t)
-        now = time.time()
-        green_fields = {"first_green_at": pipeline.get("first_green_at", now),
-                        "gate_reds": pipeline.get("gate_reds", 0),
-                        "reviews_expected": n_reviews, "review_reason": review_reason}
+        run = _start_gate(t, worktree, pool)
+        if run is None:
+            continue  # cap full or worktree busy: retried next tick, not counted as an attempt
+        if wait_s is None:
+            run["thread"].join()  # direct callers (CLI, tests) keep the synchronous gate
+            _reap_gates(pool)
+        else:
+            started.append(run)
+    if started:
+        deadline = time.monotonic() + wait_s
+        for run in started:
+            run["thread"].join(max(0.0, deadline - time.monotonic()))
+        _reap_gates(pool)
+
+
+def _start_gate(t, worktree, pool):
+    """Reserve a live-gate slot, stamp the in-flight marker and start gate.run_gate on a worker thread. Returns
+    None, with nothing stamped, when [gate].max_parallel is full or another gate already runs in this worktree."""
+    tid = t["id"]
+    key = str(Path(worktree).resolve())
+    cap = gate_runner.settings(pool.cfg)["max_parallel"]
+    run = {"task_id": tid, "worktree": key, "run_id": uuid.uuid4().hex, "started_at": time.time(), "thread": None}
+    with _LIVE_GATES_LOCK:
+        if (tid in _LIVE_GATES or len(_LIVE_GATES) >= cap
+                or any(entry["worktree"] == key for entry in _LIVE_GATES.values())):
+            return None
+        _LIVE_GATES[tid] = run
+    claimed = False
+    try:
         with bus.locked():
-            if not stamp(t["id"], "gated_at", pipeline_fields=green_fields):
-                continue
-            lineage_root = root(t)
-            if lineage_root["id"] != t["id"]:
-                root_pipeline = dict(lineage_root.get("pipeline") or {})
-                root_pipeline.setdefault("first_green_at", now)
-                root_pipeline["lineage_fix_rounds"] = root_pipeline.get("lineage_fix_rounds", 0) + 1
-                bus.update(lineage_root["id"], pipeline=root_pipeline)
+            current = bus.get(tid)
+            pipeline = dict(current.get("pipeline") or {})
+            if not (pipeline.get("gated_at") or pipeline.get("gate_started_at") or current.get("merged_into")
+                    or current.get("status") != "done"):
+                now = time.time()
+                pipeline.update(gate_started_at=now, gate_started_at_lease=now + STAGE_LEASE_S,
+                                gate_run_id=run["run_id"], gate_attempts=pipeline.get("gate_attempts", 0) + 1)
+                bus.update(tid, pipeline=pipeline)
+                claimed = True
+    finally:
+        if not claimed:
+            with _LIVE_GATES_LOCK:
+                _LIVE_GATES.pop(tid, None)
+    if not claimed:
+        return None
+    thread = threading.Thread(target=_gate_worker, name=f"gate-{tid}", daemon=True,
+                              args=(run, gate.run_gate, worktree, merge.TESTS_GREEN, pool.cfg))
+    run["thread"] = thread
+    try:
+        thread.start()
+    except Exception:
+        with _LIVE_GATES_LOCK:
+            _LIVE_GATES.pop(tid, None)
+        clear_stage(tid, "gate_started_at", clear_pipeline_keys=GATE_MARKER_KEYS)
+        raise
+    return run
+
+
+def _gate_worker(run, runner, worktree, script, cfg):
+    """Background half of a gate: only the test subprocess. Everything that touches the bus runs in _reap_gates."""
+    outcome = {"error": RuntimeError("gate worker exited without a result")}
+    try:
+        outcome = {"result": runner(worktree, script=script, task_id=run["task_id"], cfg=cfg)}
+    except Exception as e:
+        outcome = {"error": e}
+    finally:
+        with _LIVE_GATES_LOCK:
+            _GATE_RESULTS[run["task_id"]] = {"run_id": run["run_id"], **outcome}
+            if _LIVE_GATES.get(run["task_id"]) is run:
+                del _LIVE_GATES[run["task_id"]]
+
+
+def _reap_gates(pool):
+    """Apply every finished gate result on the tick thread."""
+    with _LIVE_GATES_LOCK:
+        finished = list(_GATE_RESULTS.items())
+        _GATE_RESULTS.clear()
+    for tid, done in finished:
         try:
-            evidence, _ = _record_stale_check(t)
-            if _load_scheduler_cfg(pool)["stale_rebase"] and evidence["risk"] == "high":
-                if _stale_rebase(t, evidence):
-                    continue
-            if n_reviews == 0:
-                report_merge(t["id"], merge.merge(t["id"]))
-            else:
-                _open_reviews(t, n_reviews, review_reason, cfg=pool.cfg)
-            complete(t["id"], "gated_at")
+            _apply_gate_result(pool, tid, done)
         except Exception as e:
-            hold_failed(t["id"], "gated_error", "gate", e)
+            print(f"[daemon] gate result for {tid} failed: {e}", file=sys.stderr)
+
+
+def _apply_gate_result(pool, tid, done):
+    with bus.locked():
+        try:
+            t = bus.get(tid)
+        except KeyError:
+            return
+        pipeline = dict(t.get("pipeline") or {})
+        if pipeline.get("gate_run_id") != done["run_id"]:
+            return  # a swept or superseded run: its result belongs to nobody
+        for key in GATE_MARKER_KEYS:
+            pipeline.pop(key, None)
+        bus.update(tid, pipeline=pipeline)
+        t = bus.get(tid)
+    if "error" in done:
+        hold_failed(tid, "gated_error", "gate", done["error"])
+        return
+    result = done["result"]
+    if t.get("merged_into"):
+        return  # a fix round in its chain merged while this gate ran; its late result is moot
+    if _hold_stale_high(t):
+        return
+    if result["timed_out"]:
+        if stamp(tid, "gated_at",
+                 pipeline_fields={"infra_failure": "gate_timeout",
+                                  "gate_timeouts": pipeline.get("gate_timeouts", 0) + result["timeouts"]},
+                 status="held", hold_reason="gate_timeout",
+                 resume_hint={"gate_timeout_s": gate.settings(pool.cfg)["timeout_s"],
+                              "output_tail": (result["stdout"] + result["stderr"])[-4000:]}):
+            notify(f"{tid}: gate timed out twice; held as infra failure")
+        return
+    if result["returncode"]:
+        gate_reds = pipeline.get("gate_reds", 0) + 1
+        if stamp(tid, "gated_at", pipeline_fields={"gate_reds": gate_reds},
+                 status="held", hold_reason="gate_red",
+                 resume_hint={"failures": result["stderr"][-4000:]}):
+            notify(f"{tid}: tests red at the gate; held")
+        return
+    n_reviews, review_reason = _review_plan(t)
+    now = time.time()
+    green_fields = {"first_green_at": pipeline.get("first_green_at", now),
+                    "gate_reds": pipeline.get("gate_reds", 0),
+                    "reviews_expected": n_reviews, "review_reason": review_reason}
+    with bus.locked():
+        if not stamp(tid, "gated_at", pipeline_fields=green_fields):
+            return
+        lineage_root = root(t)
+        if lineage_root["id"] != tid:
+            root_pipeline = dict(lineage_root.get("pipeline") or {})
+            root_pipeline.setdefault("first_green_at", now)
+            root_pipeline["lineage_fix_rounds"] = root_pipeline.get("lineage_fix_rounds", 0) + 1
+            bus.update(lineage_root["id"], pipeline=root_pipeline)
+    try:
+        evidence, _ = _record_stale_check(t)
+        if _load_scheduler_cfg(pool)["stale_rebase"] and evidence["risk"] == "high":
+            if _stale_rebase(t, evidence):
+                return
+        if n_reviews == 0:
+            report_merge(tid, merge.merge(tid))
+        else:
+            _open_reviews(t, n_reviews, review_reason, cfg=pool.cfg)
+        complete(tid, "gated_at")
+    except Exception as e:
+        hold_failed(tid, "gated_error", "gate", e)
 
 
 # Keep the long-standing daemon.gate(pool) entry point while exposing the bounded-runner
@@ -1800,11 +1916,25 @@ def sweep_leases(pool):
                         clear_stage(tid, stage)
                     else:
                         clear_stage(tid, stage)
+                elif stage == "gate_started_at":
+                    with _LIVE_GATES_LOCK:
+                        live = any((entries.get(tid) or {}).get("run_id") == pipeline.get("gate_run_id")
+                                   for entries in (_LIVE_GATES, _GATE_RESULTS))
+                    if live:  # gates outlive STAGE_LEASE_S; the worker still owns this run
+                        with bus.locked():
+                            current = dict(bus.get(tid).get("pipeline") or {})
+                            if current.get("gate_run_id") == pipeline.get("gate_run_id"):
+                                current["gate_started_at_lease"] = now + STAGE_LEASE_S
+                                bus.update(tid, pipeline=current)
+                    else:  # no worker owns it (daemon restarted): drop the marker so gate() re-gates
+                        clear_stage(tid, stage, clear_pipeline_keys=GATE_MARKER_KEYS)
                 elif stage == "gated_at":
                     if already_merged(t):
                         complete(tid, stage, merged_into=_merged_target(t))
                         continue
-                    expected = pipeline["reviews_expected"]
+                    expected = pipeline.get("reviews_expected")
+                    if expected is None:
+                        expected = reviews_expected(t)
                     if expected == 0:
                         report_merge(tid, merge.merge(tid))
                         complete(tid, stage)
@@ -1815,7 +1945,7 @@ def sweep_leases(pool):
                             if child["status"] == "queued" and not child.get("claimed_at"):
                                 spawn_async(spawn.run_worker, child["id"])
                     else:
-                        _open_reviews(t, expected, pipeline["review_reason"], cfg=pool.cfg)
+                        _open_reviews(t, expected, pipeline.get("review_reason", "always"), cfg=pool.cfg)
                     complete(tid, stage)
                 else:  # merged_at
                     if already_merged(t):
@@ -2037,7 +2167,11 @@ def tick(pool=None, stop_event=None):
                 _timed("archive", bus.archive, list(snap.by_id.values()))
             except Exception as e:
                 print(f"[daemon] archive failed: {e}", file=sys.stderr)
-            _tick(pool, stop_event)
+            token = _GATE_WAIT_S.set(TICK_GATE_WAIT_S)
+            try:
+                _tick(pool, stop_event)
+            finally:
+                _GATE_WAIT_S.reset(token)
     finally:
         elapsed = time.monotonic() - started
         if elapsed > SLOW_TICK_S:
@@ -2208,6 +2342,9 @@ def stop_background(thread, timeout=5):
     executor.join_fallback_threads(timeout)
 
 
+SHIP_JOIN_TIMEOUT_S = 60
+
+
 def main(interval=30, once=False):
     if once:
         tick(Pool())
@@ -2216,9 +2353,15 @@ def main(interval=30, once=False):
     if lock is None:
         print("[daemon] another instance already holds the lock; exiting", file=sys.stderr)
         sys.exit(1)
+    stop_event = threading.Event()
     try:
-        _loop(interval, threading.Event())
+        _loop(interval, stop_event)
     finally:
+        # Ctrl-C skips _loop's join: stop the non-daemon ship thread before another daemon can take the lock.
+        stop_event.set()
+        ship.join_threads(SHIP_JOIN_TIMEOUT_S)
+        if any(t.is_alive() for t in ship._THREADS):
+            print(f"[daemon] ship thread still running after {SHIP_JOIN_TIMEOUT_S}s; releasing lock", file=sys.stderr)
         executor.join_fallback_threads()
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()

@@ -35,8 +35,12 @@ def settings(cfg=None):
     post_cmd = gate_cfg.get("post_cmd")
     if not isinstance(post_cmd, str) or not post_cmd:
         post_cmd = None
+    max_parallel = gate_cfg.get("max_parallel", 1)
+    if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
+        max_parallel = 1
     return {"timeout_s": timeout_s, "cleanup_cmd": cleanup_cmd,
-            "cleanup_timeout_s": cleanup_timeout_s, "post_cmd": post_cmd}
+            "cleanup_timeout_s": cleanup_timeout_s, "post_cmd": post_cmd,
+            "max_parallel": max_parallel}
 
 
 def _run(argv, *, cwd, timeout_s, input, kill_grace_s, env=None):

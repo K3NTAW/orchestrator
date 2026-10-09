@@ -103,6 +103,20 @@ class DecisionPoints(PlannerRunsBase):
         bus.update(unmerged, merged_into=f"goal/{goal}")
         self.assertIn((goal, "closable", goal), list(PR.decision_points()))
 
+    def test_superseded_child_does_not_block_closable(self):
+        goal = self.goal("superseded child")
+        superseded = self.execute_child(goal, status="superseded")
+        self.assertNotIn((goal, "closable", goal), list(PR.decision_points()))
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        self.assertIn((goal, "closable", goal), list(PR.decision_points()))
+        self.assertIsNone(bus.get(superseded).get("merged_into"))
+
+    def test_failed_child_still_blocks_closable(self):
+        goal = self.goal("failed child")
+        self.execute_child(goal, status="done", merged_into=f"goal/{goal}")
+        self.execute_child(goal, status="failed")
+        self.assertNotIn((goal, "closable", goal), list(PR.decision_points()))
+
     def test_held_decision_skipped_when_fix_round_exists(self):
         goal = self.goal()
         tid = self.execute_child(goal, status="held", hold_reason="gate_red")
@@ -173,6 +187,36 @@ class DecisionPoints(PlannerRunsBase):
         key2 = PR._held_key(bus.get(tid))
         self.assertNotEqual(key1, key2)
         self.assertIn((goal_id, "held", key2), list(PR.decision_points()))
+
+    def test_failed_execute_with_dependents_yields_point(self):
+        goal = self.goal("timeout")
+        tid = self.execute_child(goal)
+        bus.update(tid, status="failed", result={"reason": "timeout after 2700 s"})
+        dep = bus.create_task("dependent", "spec", ["x"], ["y"], role="execute", parent=goal, complexity=3,
+                              depends_on=[tid])["id"]
+        self.assertEqual(bus.get(dep)["status"], "queued")
+        key = PR._failed_key(bus.get(tid))
+        self.assertTrue(key.startswith(f"{tid}:failed:"))
+        self.assertIn((goal, "held", key), list(PR.decision_points()))
+        self.assertEqual(PR._point((goal, "held", key))["task_id"], tid)
+        self.assertEqual(PR._decision_task(goal, "held", key)["id"], tid)
+        # Re-queued by the decision Planner: the point resolves and stops firing.
+        r = {"kind": "held", "goal_id": goal, "payload_key": key, "started_at": time.time()}
+        self.assertFalse(PR._condition_resolved(r, {t["id"]: t for t in bus.read()}, {}))
+        bus.update(tid, status="queued")
+        self.assertTrue(PR._condition_resolved(r, {t["id"]: t for t in bus.read()}, {}))
+        self.assertNotIn((goal, "held", key), list(PR.decision_points()))
+
+    def test_superseded_failed_task_yields_no_point(self):
+        goal = self.goal("superseded failure")
+        tid = self.execute_child(goal, status="failed")
+        key = PR._failed_key(bus.get(tid))
+        self.assertIn((goal, "held", key), list(PR.decision_points()))
+        fix = self.execute_child(goal, constraints={"fix_round_for": tid})
+        self.assertNotIn((goal, "held", key), list(PR.decision_points()))
+        bus.update(fix, status="failed")
+        other = self.execute_child(goal, status="failed", superseded_by=fix)
+        self.assertNotIn((goal, "held", PR._failed_key(bus.get(other))), list(PR.decision_points()))
 
     def test_held_at_uses_newest_held_event(self):
         """daemon.stamp's `if pipeline.get(stage): return False` guard means review_held_at/spec_review_held_at
