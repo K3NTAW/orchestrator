@@ -1,6 +1,6 @@
 """Machine-readable roadmap coverage and status derivation."""
 import _harness
-import tempfile, unittest
+import tempfile, tomllib, unittest
 from pathlib import Path
 
 from _harness import REPO
@@ -41,10 +41,16 @@ class Roadmap(unittest.TestCase):
     def test_experimental_features_report_their_configured_mode(self):
         report = roadmap.build(REPO)
         statuses = {item["id"]: item["status"] for item in report["requirements"]}
-        self.assertEqual(statuses["adaptive-parallelism-p17"], "implemented_off")
-        self.assertEqual(statuses["adaptive-parallelism-p16"], "implemented_shadow")
-        self.assertEqual(statuses["adaptive-parallelism-p18"], "implemented_shadow")
-        self.assertEqual(statuses["phase-i-p7"], "implemented_shadow")
+        # Modes are operator settings in pool.toml; the report must follow whatever is configured there.
+        cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+        configured = {
+            "adaptive-parallelism-p17": cfg["speculation"]["mode"],
+            "adaptive-parallelism-p16": cfg["allocation"]["mode"],
+            "adaptive-parallelism-p18": cfg["strategy"]["mode"],
+            "phase-i-p7": cfg["jev"]["points"]["scout_necessity"],
+        }
+        for requirement, mode in configured.items():
+            self.assertEqual(statuses[requirement], f"implemented_{mode}")
 
     def test_registered_feature_uses_its_default_for_missing_or_unknown_mode(self):
         with tempfile.TemporaryDirectory() as directory:

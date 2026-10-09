@@ -20,6 +20,9 @@ os.environ["ORCH_ROOT"] = str(TMP)
 # The machine registry, leases and watchdog state go to a temp dir, never the real ~/.orchestrator-machine.
 MACHINE = Path(tempfile.mkdtemp(prefix="orch-machine-"))
 os.environ["ORCH_MACHINE_DIR"] = str(MACHINE)
+# Notifications only print in tests: no desktop banner (a mocked Popen cannot run osascript) and no webhook.
+os.environ["ORCH_NOTIFY_DESKTOP"] = "0"
+os.environ.pop("ORCH_NOTIFY_URL", None)
 (TMP / ".orchestrator").mkdir()
 for f in ("pool.toml",):
     config = (REPO / ".orchestrator" / f).read_text()

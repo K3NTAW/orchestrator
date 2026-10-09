@@ -203,7 +203,9 @@ class ReviewVerdict(unittest.TestCase):
         self.assertEqual(updated["status"], "held")
         self.assertTrue(updated["hold_reason"].startswith("render_error"))
         self.assertIsNone(updated.get("assigned_to"))
-        notify.assert_called_once()
+        # Live active-mode refusals (skill routing, context_router) also notify; exactly one is the render error.
+        render_notices = [c for c in notify.call_args_list if "render_error" in c.args[0]]
+        self.assertEqual(len(render_notices), 1)
 
     def test_ensure_worktree_reuses_existing_task_branch(self):
         with tempfile.TemporaryDirectory(prefix="orch-worktree-") as directory:

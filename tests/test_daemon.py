@@ -1221,6 +1221,8 @@ class Daemon(unittest.TestCase):
         self.assertTrue(updated["hold_reason"].startswith("dispatch failed"))
         self.assertIn("unfilled_placeholder", updated["pipeline"]["dispatch_error"])
         self.assertNotIn("dispatched_at", updated["pipeline"])
+        # A live active context_router refusal also notifies; exactly one message is the dispatch failure.
+        messages = [m for m in messages if "dispatch failed" in m]
         self.assertEqual(messages, [mock.ANY])
         self.assertIn(broken, messages[0])
         self.assertIn(normal, self.started)
@@ -2423,6 +2425,12 @@ class Daemon(unittest.TestCase):
         self.assertIsNone(task["hold_reason"])
         self.assertFalse(daemon.stamp(root_id, "review_held_at", status="held", hold_reason="late review"))
         self.assertEqual(bus.get(root_id)["status"], "done")
+
+    def first_come_dispatch(self):
+        """Pin [scheduler].mode to shadow: the live active wave serializes tasks sharing a scope file, which these
+        tick tests (all on x.py) do not exercise."""
+        load = daemon._load_scheduler_cfg
+        self.swap(daemon, "_load_scheduler_cfg", lambda pool: {**load(pool), "mode": "shadow"})
 
     def settle_started(self, want, seconds=5):
         """dispatch() now runs executor.start on a background thread too; wait for it the same way."""
@@ -3972,6 +3980,7 @@ class Daemon(unittest.TestCase):
         dead = self.task("dead git", complexity=2)
         bus.update(dead, status="running", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
         self.swap(daemon, "_git_in", raiser(RuntimeError("git blew up")))
+        self.first_come_dispatch()
         other = self.task("other queued", complexity=3)
 
         daemon.tick()
@@ -3984,6 +3993,7 @@ class Daemon(unittest.TestCase):
         own writes are visible to the stages after it."""
         first, second = self.task("first", complexity=2), self.task("second", complexity=2)
         review = self.task("review", role="review", inputs=[first])
+        self.first_come_dispatch()
         real_read = bus.read
         calls = []
         def counted(*args, **kwargs):

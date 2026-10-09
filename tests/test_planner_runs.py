@@ -5,6 +5,7 @@ goals.identity_of are patched per test so nothing here spawns a real `claude` su
 state; every test gets its own sandbox for bus.STATE/TASKS/RUNS, handover.STATE/ROOT and planner_runs.STATE so
 plan.md, tasks and planner_runs.json never touch the shared TMP root other test files use."""
 import contextlib, io, json, os, sys, tempfile, time, unittest
+from unittest import mock
 from datetime import date
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_planner_runs.py` doesn't add this dir itself
@@ -283,7 +284,9 @@ class RunGuards(PlannerRunsBase):
         pool.cooldown(pool.get("A"), 600)
         pool.cooldown(pool.get("B"), 600)
 
-        r = PR.run(goal_id, "scouts_done", goal_id)
+        # The live [planner].account pin bypasses headroom by design; this guard is checked unpinned.
+        with mock.patch.object(P.Pool, "planner_pin", return_value=None):
+            r = PR.run(goal_id, "scouts_done", goal_id)
         self.assertFalse(r["launched"])
         self.assertEqual(r["reason"], "no account with headroom")
         self.assertEqual(calls, [])

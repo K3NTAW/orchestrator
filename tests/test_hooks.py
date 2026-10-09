@@ -1,6 +1,6 @@
 """The .claude/hooks/*.sh scripts: acceptance gating, scope guard, loop guard, retrospect/uncommitted checks,
 tests-green, guardrails (destructive/protected command blocking), and planner-mode (Planner may not edit source)."""
-import os, shutil, subprocess, sys, tempfile, time, unittest
+import os, shutil, subprocess, sys, tempfile, time, tomllib, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_hooks.py` doesn't add this dir itself
 from _harness import HOOKS, REPO, TMP, hook
@@ -220,11 +220,14 @@ class PlannerMode(unittest.TestCase):
             project.mkdir(parents=True)
             transcript = project / "session.jsonl"
             env = {**self.P, "ORCH_ROOT": str(REPO), "CLAUDE_CONFIG_DIR": directory}
-            for tokens in (149999, 150000):
+            # The hook reads the live threshold from ORCH_ROOT's pool.toml, an operator setting.
+            cfg = tomllib.loads((REPO / ".orchestrator" / "pool.toml").read_text())
+            threshold = cfg["planner"].get("handover_context_tokens", 150000)
+            for tokens in (threshold - 1, threshold):
                 transcript.write_text(json.dumps({"message": {"usage": {"input_tokens": tokens}}}) + "\n")
                 result = hook("planner-prompt.sh", {"prompt": "continue"}, cwd=TMP, env=env)
                 self.assertEqual(result.returncode, 0)
-                if tokens < 150000:
+                if tokens < threshold:
                     self.assertEqual(result.stdout, reminder)
                 else:
                     self.assertTrue(result.stdout.startswith(reminder))
