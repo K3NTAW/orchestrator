@@ -6,7 +6,7 @@ spawn.run_worker, merge.merge, subprocess.run) monkeypatched to record instead o
 Each test gets its own bus directory (bus.STATE/TASKS/RUNS swapped) because bus.read() is global: without the swap
 these ticks would pick up every execute task any other test file left queued in the shared TMP root."""
 import io
-import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
+import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, types, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python -m unittest tests/test_daemon.py` doesn't add this dir itself
@@ -4440,6 +4440,211 @@ class Daemon(unittest.TestCase):
         pipeline = bus.get(tid).get("pipeline") or {}
         self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(pipeline))
         self.assertEqual(daemon.adopt_orphaned_gates(), [])         # idempotent: nothing left to kill
+
+    # reap_worktrees: real worktrees under the TMP ROOT's wt/, task records written straight to the sandbox bus.
+    def reap_begin(self):
+        scratch_repo(TMP)
+        self.assertTrue(Path(daemon.ROOT).resolve().is_relative_to(TMP.resolve()))
+        self.live_worktrees = g("worktree", "list", cwd=REPO).stdout
+        self.reap_pool = types.SimpleNamespace(cfg={"daemon": {}})
+
+    def reap_end(self):
+        self.assertEqual(g("worktree", "list", cwd=REPO).stdout, self.live_worktrees)
+
+    def reap_clean(self, tid):
+        wt = TMP / "wt" / tid
+        g("worktree", "remove", "--force", str(wt))
+        shutil.rmtree(wt, True)
+        g("worktree", "prune")
+        g("branch", "-D", f"task/{tid}")
+
+    def reap_task(self, tid, status="done", role="execute", *, worktree=True, commit=False, fresh=False,
+                  **fields):
+        self.reap_clean(tid)
+        self.addCleanup(self.reap_clean, tid)
+        t = {"id": tid, "created_at": time.time() - (0 if fresh else 7200), "parent": None, "role": role,
+             "tier": "sonnet", "complexity": 2, "title": tid, "spec": "spec", "inputs": [], "acceptance": ["ok"],
+             "scope": ["x.py"], "depends_on": [], "constraints": {}, "status": status, "assigned_to": None,
+             "worktree": None, "codex_thread": None, "result": None, "events": [], **fields}
+        bus._save(t)
+        wt = TMP / "wt" / tid
+        if worktree:
+            (TMP / "wt").mkdir(exist_ok=True)
+            self.assertEqual(g("worktree", "add", "-q", str(wt), "-b", f"task/{tid}", "main").returncode, 0)
+            if commit:
+                (wt / f"{tid}.txt").write_text(tid)
+                g("add", "-A", cwd=wt)
+                self.assertEqual(g("commit", "-qm", tid, cwd=wt).returncode, 0)
+        else:
+            g("branch", f"task/{tid}", "main")
+        return wt
+
+    def reap_has_branch(self, tid):
+        return g("rev-parse", "--verify", f"task/{tid}").returncode == 0
+
+    def reap_events(self, tid):
+        rows = bus.db().execute("select count(*) from events where task_id=?", (tid,)).fetchone()[0]
+        return bus.get(tid)["events"], rows
+
+    def test_reap_worktrees_removes_landed_and_superseded_after_grace(self):
+        self.reap_begin()
+        merged = self.reap_task("T-9701", merged_into="main")
+        superseded = self.reap_task("T-9702", "superseded", commit=True)
+        review = self.reap_task("T-9703", role="review")
+        ancestry = self.reap_task("T-9704")
+        fresh = self.reap_task("T-9705", fresh=True, merged_into="main")
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            counts = daemon.reap_worktrees(self.reap_pool)
+        self.assertIn("[daemon] reap: removed 4 worktrees", err.getvalue())
+        self.assertEqual(counts["removed"], 4)
+        for wt in (merged, superseded, review, ancestry):
+            self.assertFalse(wt.exists(), wt)
+        self.assertTrue(fresh.exists())
+        p = bus.get("T-9701")["pipeline"]
+        self.assertTrue(p["reaped_at"] and p["reap_branch_deleted"])
+        self.assertFalse(self.reap_has_branch("T-9701"))
+        self.assertTrue(self.reap_has_branch("T-9702"))
+        self.assertEqual(bus.get("T-9702")["pipeline"]["reap_branch_kept_reason"], "unlanded_tip")
+        self.assertFalse(self.reap_has_branch("T-9704"))
+        self.assertIsNone(bus.get("T-9704").get("merged_into"))
+        self.assertTrue(bus.get("T-9704")["pipeline"]["reap_branch_deleted"])
+        daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(fresh.exists())
+        for tid in ("T-9701", "T-9702", "T-9703", "T-9704", "T-9705"):
+            self.assertEqual(self.reap_events(tid), ([], 0))
+        self.reap_end()
+
+    def test_reap_worktrees_keeps_branch_with_post_merge_commit_and_dirty_superseded(self):
+        self.reap_begin()
+        fixed = self.reap_task("T-9711", merged_into="main", commit=True)
+        dirty = self.reap_task("T-9712", "superseded", commit=True)
+        (dirty / ".gitignore").write_text("changed\n")
+        counts = daemon.reap_worktrees(self.reap_pool)
+        self.assertFalse(fixed.exists())
+        self.assertTrue(self.reap_has_branch("T-9711"))
+        p = bus.get("T-9711")["pipeline"]
+        self.assertEqual((p["reap_branch_deleted"], p["reap_branch_kept_reason"]), (False, "unlanded_tip"))
+        self.assertTrue(dirty.exists())
+        self.assertTrue(self.reap_has_branch("T-9712"))
+        self.assertEqual(counts["dirty"], 1)
+        self.assertNotIn("pipeline", bus.get("T-9712"))
+        self.reap_end()
+
+    def test_reap_worktrees_keeps_live_unlanded_failed_blocked_and_unknown(self):
+        self.reap_begin()
+        kept = [self.reap_task(f"T-972{i}", status, merged_into="main")
+                for i, status in enumerate(("running", "queued", "held", "blocked", "failed"))]
+        kept.append(self.reap_task("T-9725", commit=True))
+        unknown = TMP / "wt" / "T-9726"
+        self.reap_clean("T-9726")
+        self.addCleanup(self.reap_clean, "T-9726")
+        unknown.mkdir(parents=True)
+        archived = self.reap_task("T-9727", merged_into="main")
+        (bus.TASKS / bus.ARCHIVE_DIR).mkdir(parents=True, exist_ok=True)
+        (bus.TASKS / "T-9727.json").rename(bus.TASKS / bus.ARCHIVE_DIR / "T-9727.json")
+        flipped = self.reap_task("T-9728", merged_into="main")
+        real_get = bus.get
+        def flipping_get(tid):
+            t = real_get(tid)
+            if tid == "T-9728":
+                t["status"] = "running"
+            return t
+        with mock.patch.object(bus, "get", flipping_get):
+            counts = daemon.reap_worktrees(self.reap_pool)
+        for wt in (*kept, unknown, flipped):
+            self.assertTrue(wt.exists(), wt)
+        self.assertGreaterEqual(counts["unknown"], 1)
+        self.assertFalse(archived.exists())
+        self.assertTrue(bus.get("T-9727")["pipeline"]["reaped_at"])
+        self.assertNotIn("pipeline", bus.get("T-9728"))
+        self.reap_end()
+
+    def test_reap_worktrees_skips_live_gate_results_merges_and_workers_and_respects_cap(self):
+        self.reap_begin()
+        live = [self.reap_task(f"T-973{i}", merged_into="main") for i in range(4)]
+        (bus.STATE / "gates").mkdir(parents=True, exist_ok=True)
+        (bus.STATE / "gates" / "T-9730.json").write_text("{}")
+        daemon._GATE_RESULTS["T-9731"] = {"run_id": "r"}
+        self.addCleanup(daemon._GATE_RESULTS.pop, "T-9731", None)
+        daemon._LIVE_MERGES["T-9732"] = None
+        self.addCleanup(daemon._LIVE_MERGES.pop, "T-9732", None)
+        real_worker = daemon.worker_registry.get
+        workers = lambda tid: {"status": "running"} if tid == "T-9733" else real_worker(tid)
+        with mock.patch.object(daemon.worker_registry, "get", workers):
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+            for wt in live:
+                self.assertTrue(wt.exists(), wt)
+            a = self.reap_task("T-9734", merged_into="main")
+            b = self.reap_task("T-9735", merged_into="main")
+            self.reap_pool.cfg["daemon"]["reap_max_per_tick"] = 1
+            self.assertEqual(daemon.reap_worktrees(self.reap_pool)["removed"], 1)
+            self.assertEqual((a.exists(), b.exists()), (False, True))
+            self.assertEqual(daemon.reap_worktrees(self.reap_pool)["removed"], 1)
+            self.assertFalse(b.exists())
+            for wt in live:
+                self.assertTrue(wt.exists(), wt)
+        self.reap_end()
+
+    def test_reap_worktrees_rereaps_recreated_dir_and_handles_stray(self):
+        self.reap_begin()
+        wt = self.reap_task("T-9741", merged_into="main")
+        t0 = time.time()
+        with mock.patch.object(daemon.time, "time", return_value=t0):
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(wt.exists())
+        self.assertEqual(bus.get("T-9741")["pipeline"]["reaped_at"], t0)
+        self.assertEqual(g("worktree", "add", "-q", str(wt), "-b", "task/T-9741", "main").returncode, 0)
+        with mock.patch.object(daemon.time, "time", return_value=t0 + 5):
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(wt.exists())
+        self.assertEqual(bus.get("T-9741")["pipeline"]["reaped_at"], t0 + 5)
+        stray = self.reap_task("T-9742", merged_into="main", worktree=False)
+        stray.mkdir(parents=True)
+        (stray / "leftover.txt").write_text("x")
+        counts = daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertFalse(stray.exists())
+        self.assertEqual(counts["removed"], 1)
+        self.assertTrue(bus.get("T-9742")["pipeline"]["reaped_at"])
+        self.reap_end()
+
+    def test_reap_worktrees_disabled_dry_run_and_git_failure_backoff(self):
+        self.reap_begin()
+        wts = [self.reap_task(f"T-975{i}", merged_into="main") for i in range(3)]
+        self.reap_pool.cfg["daemon"]["reap_worktrees"] = False
+        self.assertIsNone(daemon.reap_worktrees(self.reap_pool, grace_s=0))
+        self.assertTrue(all(wt.exists() for wt in wts))
+        self.reap_pool.cfg["daemon"].update(reap_worktrees=True, reap_dry_run=True)
+        before = [(bus.TASKS / f"T-975{i}.json").read_bytes() for i in range(3)]
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            daemon.reap_worktrees(self.reap_pool, grace_s=0)
+        self.assertIn("[daemon] reap dry-run: would remove T-9750 (branch: delete)", err.getvalue())
+        self.assertTrue(all(wt.exists() for wt in wts))
+        self.assertEqual([(bus.TASKS / f"T-975{i}.json").read_bytes() for i in range(3)], before)
+        self.reap_pool.cfg["daemon"].update(reap_dry_run=False, reap_max_per_tick=2)
+        real_git = spawn.git
+        def failing_git(*a, **k):
+            if a[:2] == ("worktree", "remove") and a[-1] == str(wts[0]):
+                return subprocess.CompletedProcess(["git", *a], 1, "", "fatal: boom")
+            return real_git(*a, **k)
+        self.swap(spawn, "git", failing_git)
+        t0 = time.time()
+        with mock.patch.object(daemon.time, "time", return_value=t0):
+            counts = daemon.reap_worktrees(self.reap_pool, grace_s=100)
+        self.assertEqual((counts["failed"], counts["removed"]), (1, 1))
+        self.assertEqual([wt.exists() for wt in wts], [True, False, True])
+        p = bus.get("T-9750")["pipeline"]
+        self.assertEqual((p["reap_failed_at"], p["reap_error"]), (t0, "fatal: boom"))
+        self.assertEqual(self.reap_events("T-9750"), ([], 0))
+        with mock.patch.object(daemon.time, "time", return_value=t0 + 10):
+            counts = daemon.reap_worktrees(self.reap_pool, grace_s=100)
+        self.assertEqual((counts["failed"], counts["removed"]), (0, 1))
+        self.assertEqual([wt.exists() for wt in wts], [True, False, False])
+        with mock.patch.object(daemon.time, "time", return_value=t0 + 200):
+            counts = daemon.reap_worktrees(self.reap_pool, grace_s=100)
+        self.assertEqual(counts["failed"], 1)
+        self.assertEqual(bus.get("T-9750")["pipeline"]["reap_failed_at"], t0 + 200)
+        self.assertTrue(wts[0].exists())
+        self.reap_end()
 
 class BusLock(unittest.TestCase):
     def test_writes_take_the_flock(self):
