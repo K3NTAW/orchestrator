@@ -24,6 +24,14 @@ _PROCS = {}
 _ABORTED = set()
 _PROCS_LOCK = threading.Lock()
 _OWNER = {}
+# One [gate].max_parallel count per repo across every path that starts a gate (daemon background gate, the merge
+# gate, ship): slot key -> repo state dir, reserved by a thread of this process before its gate starts. Gates of
+# other processes count through their live registry entries. _HELD names the slot the calling context already
+# reserved, so run_gate does not wait on the slot its own caller holds.
+_SLOTS = {}
+_SLOTS_LOCK = threading.Lock()
+_HELD = ContextVar("gate_slot_held", default=None)
+SLOT_POLL_S = 5
 
 
 class Aborted(RuntimeError):
@@ -140,6 +148,59 @@ def _gate_key(worktree, task_id):
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(raw)).strip("-.") or "gate"
 
 
+def slot_key(worktree, task_id=None):
+    """The gate's slot and registry key: one gate per key at a time."""
+    return _gate_key(worktree, task_id)
+
+
+def _live_registry_keys():
+    """Registry keys whose gate process group still runs (a reused pid with another start time does not)."""
+    from . import machine
+    keys = set()
+    for path in (STATE / "gates").glob("*.json"):
+        try:
+            entry = json.loads(path.read_text())
+            pid = int(entry["pid"])
+            pgid = int(entry.get("pgid") or pid)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if not _group_alive(pgid):
+            continue
+        if entry.get("proc_start") and machine.process_start(pid) not in (None, entry["proc_start"]):
+            continue
+        keys.add(path.stem)
+    return keys
+
+
+def live_slots():
+    """Gates running or reserved in this repo: this process's reservations plus other live registry entries."""
+    repo = str(STATE)
+    with _SLOTS_LOCK:
+        mine = {key for key, owner in _SLOTS.items() if owner == repo}
+    return len(mine | _live_registry_keys())
+
+
+def try_acquire_slot(key, cfg=None):
+    """Reserve a gate slot for key when fewer than [gate].max_parallel gates run in this repo. False when the cap
+    is full or key already holds a slot; the caller retries later and never starts the gate."""
+    cap = settings(cfg)["max_parallel"]
+    repo = str(STATE)
+    with _SLOTS_LOCK:
+        if key in _SLOTS:
+            return False
+        mine = {k for k, owner in _SLOTS.items() if owner == repo}
+        live = _live_registry_keys()
+        if key in live or len(mine | live) >= cap:
+            return False
+        _SLOTS[key] = repo
+        return True
+
+
+def release_slot(key):
+    with _SLOTS_LOCK:
+        _SLOTS.pop(key, None)
+
+
 def _post(opts, worktree, task_id):
     """Run [gate].post_cmd after an attempt; failures are logged and never change the gate result."""
     if not opts["post_cmd"]:
@@ -156,10 +217,24 @@ def _post(opts, worktree, task_id):
 
 
 def run_gate(worktree, *, script, task_id=None, cfg=None, env=None):
-    """Run a repository gate, cleaning up and retrying once after a timeout."""
+    """Run a repository gate, cleaning up and retrying once after a timeout. Takes a [gate].max_parallel slot
+    first, waiting until one frees, unless the calling context already holds the slot for this gate."""
+    key = _gate_key(worktree, task_id)
+    held = _HELD.get() == key
+    if not held:
+        while not try_acquire_slot(key, cfg):
+            time.sleep(SLOT_POLL_S)
+    try:
+        return _run_gate(worktree, script=script, task_id=task_id, cfg=cfg, env=env, key=key)
+    finally:
+        if not held:
+            release_slot(key)
+
+
+def _run_gate(worktree, *, script, task_id, cfg, env, key):
     opts = settings(cfg)
     gates_dir = STATE / "gates"
-    registry = gates_dir / f"{_gate_key(worktree, task_id)}.json"
+    registry = gates_dir / f"{key}.json"
     timeouts = 0
     for attempt in (1, 2):
         def register(pid):
