@@ -199,10 +199,49 @@ def finish(task_id, status, reason=None, *, epoch=None):
         return event(task_id, "exit", status=status, status_reason=reason)
 
 
+LAST_RECONCILE = {}  # causes of the last reconcile() pass, for the daemon's slow-stage line
+
+
 def reconcile(alive_fn):
+    """Mark running workers whose pid is dead as failed. The scan and the liveness probes run without the bus
+    lock (active() would rescan every task file per worker under it); each dead worker is re-read and updated
+    under the lock. LAST_RECONCILE records where the time went."""
+    started = time.monotonic()
+    stats = {"workers": 0, "probed": 0, "dead": 0, "scan_s": 0.0, "probe_s": 0.0, "lock_wait_s": 0.0}
     changed = []
-    with bus.locked():
-        for doc in active():
-            if doc["status"] in ("running", "starting") and doc.get("pid") and not alive_fn(doc["pid"]):
-                changed.append(event(doc["task"], "reconciled", status="failed", status_reason="process_dead"))
-    return changed
+    try:
+        docs = []
+        for path in sorted((STATE / "workers").glob("*.json")):
+            try:
+                doc = _read(path.stem)
+            except (OSError, ValueError):
+                continue
+            if doc and doc.get("status") not in TERMINAL:
+                docs.append(doc)
+        stats["workers"] = len(docs)
+        stats["scan_s"] = time.monotonic() - started
+        probe_started = time.monotonic()
+        candidates = [doc for doc in docs if doc["status"] in ("running", "starting") and doc.get("pid")]
+        dead = [doc for doc in candidates if not alive_fn(doc["pid"])]
+        stats["probed"] = len(candidates)
+        stats["probe_s"] = time.monotonic() - probe_started
+        for doc in dead:
+            waited = time.monotonic()
+            with bus.locked():
+                stats["lock_wait_s"] += time.monotonic() - waited
+                current = _read(doc["task"])
+                if current and current["status"] in ("running", "starting") and current.get("pid") == doc["pid"]:
+                    changed.append(event(doc["task"], "reconciled", status="failed", status_reason="process_dead"))
+        stats["dead"] = len(changed)
+        return changed
+    finally:
+        stats["total_s"] = time.monotonic() - started
+        LAST_RECONCILE.clear()
+        LAST_RECONCILE.update(stats)
+
+
+def reconcile_causes():
+    """One-line summary of LAST_RECONCILE: worker count, probes, deaths and where the seconds went."""
+    s = LAST_RECONCILE
+    return " ".join(f"{k}={s[k]:.1f}s" if k.endswith("_s") else f"{k}={s[k]}" for k in
+                    ("workers", "probed", "dead", "scan_s", "probe_s", "lock_wait_s") if k in s)
