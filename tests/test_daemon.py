@@ -1204,6 +1204,7 @@ class Daemon(unittest.TestCase):
                                  ["works"], ["x.py"], role="execute", complexity=2,
                                  parent="T-0043")["id"]
         normal = self.task("normal render")
+        self.first_come_dispatch()
         messages = []
         self.swap(daemon, "notify", messages.append)
         original = spawn.render
@@ -1225,7 +1226,7 @@ class Daemon(unittest.TestCase):
         messages = [m for m in messages if "dispatch failed" in m]
         self.assertEqual(messages, [mock.ANY])
         self.assertIn(broken, messages[0])
-        self.assertIn(normal, self.started)
+        self.assertIn(normal, self.settle_started(1))
 
     def test_fresh_fix_dispatch_holds_on_render_error(self):
         tid = self.task("fresh fix")

@@ -204,10 +204,12 @@ class PoolSel(unittest.TestCase):
         self.assertEqual(rows["claude:opus"]["complexity_max"], 10)
         self.assertLessEqual(rows["claude:opus"]["complexity_min"], 6)
 
-        # The live opus band is an operator setting (opened to 1..10); routing is checked on the documented split.
+        # The live opus band (opened to 1..10) and enabled flags (2026-10-03 Opus-only switch) are operator
+        # settings; routing is checked on the documented split with both Claude rows on.
         codex_disabled = {**cfg, "executors": [
             {**row, "enabled": False} if row["provider"] == "codex"
-            else {**row, "complexity_min": 6} if row["id"] == "claude:opus" else row
+            else {**row, "enabled": True, "complexity_min": 6} if row["id"] == "claude:opus"
+            else {**row, "enabled": True} if row["id"] == "claude:sonnet" else row
             for row in cfg["executors"]
         ]}
         pool = P.Pool(codex_disabled)
