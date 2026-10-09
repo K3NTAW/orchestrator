@@ -373,3 +373,9 @@ type: decision · goal: T-1658 · tasks: T-1658 · provenance: repo
 - goal/T-1658 shipped as PR 43 (6cbc778) but the goal task stayed queued with no result, so the daemon replayed a closable_goal decision; T-1660 (ship) was superseded into T-1667 / PR 44
 - Answer: bus_post_result status=done with goal_closed=true and pr_url=PR 43; same pattern as T-1334 (d2cd953)
 outcome: revert path: git revert the plan commit; reset the T-1658 result by hand if the close was wrong
+
+## 2026-10-09 closed goal T-1667 on the bus; no new PR (PR 44 on main since 2026-10-07)
+type: decision · goal: T-1667 · tasks: T-1667 · provenance: repo
+- goal/T-1667 shipped as PR 44 (1c72a58) but the goal task stayed queued with no result, so the daemon replayed a closable_goal decision; origin/goal/T-1667 has 0 commits not in main, all remaining children superseded
+- Answer: bus_post_result status=done with goal_closed=true and pr_url=PR 44; same pattern as T-1334 (d2cd953) and T-1658 (0262fbb). plan.md trimmed from 26k to 7k chars: old ## Now moved to plan-log.md, daemon auto-handover snapshot replaced by a stub (it is regenerated on the next handover)
+outcome: revert path: git revert the plan commit; reset the T-1667 result by hand if the close was wrong
