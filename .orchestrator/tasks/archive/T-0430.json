@@ -1,0 +1,199 @@
+{
+  "id": "T-0430",
+  "parent": "T-0353",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: H3b: wire decision routes into the daemon \u2014 routine holds and closable goals handled without a model launch, investigate on the configured smaller tier, escalate on the premium tier; one coalesced decision packet per goal per tick with a durable processed-event cursor and infra backoff",
+  "spec": "Build on goal/T-0353 after H3a (T-0357 decision.py), H2 (T-0361 launch attribution) and H7 (T-0364 failure kinds). Handover sections 3 and 4. Evidence (scout T-0354): daemon.py:1044-1049 launches one headless Planner per decision point whenever planner.autonomous is true; planner_runs.decision_points yields one point per held task; tick breaks after one launch per tick (rate throttle, no content coalescing); no processed-event cursor; _record_failed_launch treats auth, quota and unavailable failures like any failure (gave_up after 2).\n1. planner_runs.run (or its caller in daemon.tick): build ctx for decision.route from bus state (complexity, task_class via scorecard.task_class, hold_reason, failure_signature and repeat flag, auto rounds used, spec review rounds, scout counts and blocked flags, gate state, review triggers from daemon._review_plan's lists, infra kind from pool cooldowns); route each point; routine -> no launch, the daemon's existing machinery acts (auto_fix_round; for closable: deterministic close = retrospective entry via the memory record script with facts from bus state and a no-new-learning marker when nothing new, PR opened from a fixed template with task titles, merged shas, gate result and scorecard numbers, GOAL task result posted with the PR url); investigate -> launch on [planner.routes].investigate_tier with the same packet; escalate -> launch on the premium tier. Route, reason, evidence and cheaper_steps go into the claim record (H2 fields). [planner.routes].enabled = false restores the previous per-point escalation.\n2. Coalescing: all points of one goal in the same tick collapse into one decision packet (sections per point, ordered held first), one claim keyed goal id plus a state version = sha12 over the sorted (task id, status, hold_reason, merged_into, last event seq) of the goal's children; an identical version never launches again (the durable no-duplicate guarantee); the cursor (last processed bus event seq per goal) is persisted in planner_runs.json and the packet lists events since the cursor. Unrelated goals never share a packet; a blocked scout or a security hold is not delayed by coalescing (it launches in the same tick).\n3. Infra backoff: launch failures whose stderr or exit signature matches auth, quota or service-unavailable markers set a cooldown on the account (pool.cooldown with reason) and are not counted toward gave_up; the point is retried after the cooldown without a model call in between; notify once per transition (H4's map).\n4. Soft premium budget: when a goal's escalate launches exceed [planner.routes].premium_launches_soft_per_goal, the launch still happens and the claim record carries exception: true with the reason; never fake completion or skip a needed launch.\nTests in tests/test_planner_runs.py and tests/test_daemon.py: test_routine_hold_launches_no_model, test_closable_all_merged_closes_without_launch (PR template filled, GOAL result posted), test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_burst_of_holds_one_packet_per_goal, test_two_goals_two_packets, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0365"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py and tests/test_daemon.py: test_routine_hold_launches_no_model, test_closable_all_merged_closes_without_launch, test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_burst_of_holds_one_packet_per_goal, test_two_goals_two_packets, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch pass",
+    "many idle ticks with unchanged state produce zero launches (covered by test_same_state_version_never_relaunches plus the existing idle test)",
+    "every launch record carries route, reason, evidence, cheaper_steps, state version and cursor",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    "orchestrator/goals.py",
+    ".orchestrator/prompts/planner-decision.md",
+    ".orchestrator/pool.toml",
+    "tests/test_planner_runs.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0430",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "ctx-building instructions (item 1) never populate failing_ids, in_scope_review_comments, auto_fix_rounds (cap), touches_auth/migrations/interfaces/data_deletion, or scouts_done's security_trigger/semantic_trigger \u2014 all required by decision.route() (orchestrator/decision.py:88-118,120-137), whose unknown() helper fails closed to 'escalate' when any is missing. None of these fields exist anywhere in the codebase outside decision.py and its test. As specified, routine/investigate routes for held and scouts_done points are unreachable, so test_routine_hold_launches_no_model and test_investigate_uses_smaller_tier cannot pass.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "routine routes explicitly skip the goal_id+state_version claim mechanism (item 2 scopes that dedup to launches only), but the closable routine path performs external side effects (open a PR via gh, post the GOAL task result). No goal-closed stamp exists anywhere in goals.py, and daemon.py's own stage-stamp convention (module docstring: 'a stage runs at most once no matter how often tick() runs') is not invoked here. Without an equivalent guard, every tick while the goal stays closable re-opens a duplicate PR and re-posts the GOAL result.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "the new goal_id+state_version claim scheme isn't reconciled with the existing (goal_id, kind, payload_key) dedup keys and per-kind blocking rules documented at the top of the file and implemented in _find_record/_blocked. The spec doesn't say whether old per-point records and the new per-goal coalesced record coexist, share a kind, or replace the old scheme, risking two launches locking at different granularities on the same goal.",
+        "severity": "med",
+        "line": 6
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "no stated timing for when the per-goal event cursor advances relative to launch success. If it advances before a launch is confirmed, an infra-backoff retry (item 3, meant to replay 'without a model call in between') would rebuild its packet from 'events since cursor' with fewer events than the original attempt saw.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Enumerate, per point kind, the exact decision.route() ctx fields to populate and name their source (e.g. failing_ids from gate rerun ids, touches_auth/migrations/interfaces/data_deletion from a diff-path classifier, in_scope_review_comments and security_trigger/semantic_trigger from _review_plan or scout output) so every required field in orchestrator/decision.py is covered before route() is called.",
+      "Specify a stamp (e.g. pipeline.goal_closed_at set under the bus lock) that gates the closable deterministic-close side effects (PR creation, GOAL result post) so they execute at most once per goal, matching the existing pipeline.<stage>_at convention.",
+      "State explicitly whether the goal_id+state_version claim record is a new 'kind' alongside the existing per-(goal_id,kind,payload_key) records or replaces them, and how _find_record/_blocked are updated to check both during the transition.",
+      "State that the per-goal cursor only advances after a launch reaches exited_ok (or an equivalent confirmed terminal state), not at claim time, so an infra-backoff retry replays the same evidence window."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789914486.4260108,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0430",
+      "claimed_at": 1789914486.4256918
+    },
+    {
+      "ts": 1789914486.426912,
+      "account": "B"
+    },
+    {
+      "ts": 1789914486.4326432,
+      "pid": 78116,
+      "account": "B"
+    },
+    {
+      "ts": 1789914691.776671,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "ctx-building instructions (item 1) never populate failing_ids, in_scope_review_comments, auto_fix_rounds (cap), touches_auth/migrations/interfaces/data_deletion, or scouts_done's security_trigger/semantic_trigger \u2014 all required by decision.route() (orchestrator/decision.py:88-118,120-137), whose unknown() helper fails closed to 'escalate' when any is missing. None of these fields exist anywhere in the codebase outside decision.py and its test. As specified, routine/investigate routes for held and scouts_done points are unreachable, so test_routine_hold_launches_no_model and test_investigate_uses_smaller_tier cannot pass.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "routine routes explicitly skip the goal_id+state_version claim mechanism (item 2 scopes that dedup to launches only), but the closable routine path performs external side effects (open a PR via gh, post the GOAL task result). No goal-closed stamp exists anywhere in goals.py, and daemon.py's own stage-stamp convention (module docstring: 'a stage runs at most once no matter how often tick() runs') is not invoked here. Without an equivalent guard, every tick while the goal stays closable re-opens a duplicate PR and re-posts the GOAL result.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "the new goal_id+state_version claim scheme isn't reconciled with the existing (goal_id, kind, payload_key) dedup keys and per-kind blocking rules documented at the top of the file and implemented in _find_record/_blocked. The spec doesn't say whether old per-point records and the new per-goal coalesced record coexist, share a kind, or replace the old scheme, risking two launches locking at different granularities on the same goal.",
+            "severity": "med",
+            "line": 6
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "no stated timing for when the per-goal event cursor advances relative to launch success. If it advances before a launch is confirmed, an infra-backoff retry (item 3, meant to replay 'without a model call in between') would rebuild its packet from 'events since cursor' with fewer events than the original attempt saw.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Enumerate, per point kind, the exact decision.route() ctx fields to populate and name their source (e.g. failing_ids from gate rerun ids, touches_auth/migrations/interfaces/data_deletion from a diff-path classifier, in_scope_review_comments and security_trigger/semantic_trigger from _review_plan or scout output) so every required field in orchestrator/decision.py is covered before route() is called.",
+          "Specify a stamp (e.g. pipeline.goal_closed_at set under the bus lock) that gates the closable deterministic-close side effects (PR creation, GOAL result post) so they execute at most once per goal, matching the existing pipeline.<stage>_at convention.",
+          "State explicitly whether the goal_id+state_version claim record is a new 'kind' alongside the existing per-(goal_id,kind,payload_key) records or replaces them, and how _find_record/_blocked are updated to check both during the transition.",
+          "State that the per-goal cursor only advances after a launch reaches exited_ok (or an equivalent confirmed terminal state), not at claim time, so an infra-backoff retry replays the same evidence window."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789914691.777956,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "ctx-building instructions (item 1) never populate failing_ids, in_scope_review_comments, auto_fix_rounds (cap), touches_auth/migrations/interfaces/data_deletion, or scouts_done's security_trigger/semantic_trigger \u2014 all required by decision.route() (orchestrator/decision.py:88-118,120-137), whose unknown() helper fails closed to 'escalate' when any is missing. None of these fields exist anywhere in the codebase outside decision.py and its test. As specified, routine/investigate routes for held and scouts_done points are unreachable, so test_routine_hold_launches_no_model and test_investigate_uses_smaller_tier cannot pass.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "routine routes explicitly skip the goal_id+state_version claim mechanism (item 2 scopes that dedup to launches only), but the closable routine path performs external side effects (open a PR via gh, post the GOAL task result). No goal-closed stamp exists anywhere in goals.py, and daemon.py's own stage-stamp convention (module docstring: 'a stage runs at most once no matter how often tick() runs') is not invoked here. Without an equivalent guard, every tick while the goal stays closable re-opens a duplicate PR and re-posts the GOAL result.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "the new goal_id+state_version claim scheme isn't reconciled with the existing (goal_id, kind, payload_key) dedup keys and per-kind blocking rules documented at the top of the file and implemented in _find_record/_blocked. The spec doesn't say whether old per-point records and the new per-goal coalesced record coexist, share a kind, or replace the old scheme, risking two launches locking at different granularities on the same goal.",
+          "severity": "med",
+          "line": 6
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "no stated timing for when the per-goal event cursor advances relative to launch success. If it advances before a launch is confirmed, an infra-backoff retry (item 3, meant to replay 'without a model call in between') would rebuild its packet from 'events since cursor' with fewer events than the original attempt saw.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789914486.4256918,
+  "account": "B",
+  "pid": 78116,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "ctx-building instructions (item 1) never populate failing_ids, in_scope_review_comments, auto_fix_rounds (cap), touches_auth/migrations/interfaces/data_deletion, or scouts_done's security_trigger/semantic_trigger \u2014 all required by decision.route() (orchestrator/decision.py:88-118,120-137), whose unknown() helper fails closed to 'escalate' when any is missing. None of these fields exist anywhere in the codebase outside decision.py and its test. As specified, routine/investigate routes for held and scouts_done points are unreachable, so test_routine_hold_launches_no_model and test_investigate_uses_smaller_tier cannot pass.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "routine routes explicitly skip the goal_id+state_version claim mechanism (item 2 scopes that dedup to launches only), but the closable routine path performs external side effects (open a PR via gh, post the GOAL task result). No goal-closed stamp exists anywhere in goals.py, and daemon.py's own stage-stamp convention (module docstring: 'a stage runs at most once no matter how often tick() runs') is not invoked here. Without an equivalent guard, every tick while the goal stays closable re-opens a duplicate PR and re-posts the GOAL result.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "the new goal_id+state_version claim scheme isn't reconciled with the existing (goal_id, kind, payload_key) dedup keys and per-kind blocking rules documented at the top of the file and implemented in _find_record/_blocked. The spec doesn't say whether old per-point records and the new per-goal coalesced record coexist, share a kind, or replace the old scheme, risking two launches locking at different granularities on the same goal.",
+      "severity": "med",
+      "line": 6
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "no stated timing for when the per-goal event cursor advances relative to launch success. If it advances before a launch is confirmed, an infra-backoff retry (item 3, meant to replay 'without a model call in between') would rebuild its packet from 'events since cursor' with fewer events than the original attempt saw.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,349 @@
+{
+  "id": "T-0447",
+  "parent": "T-0445",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Scout I-S2 (context construction and fix-round paths at Phase H code, READ wt/goal-T-0353): what each role's prompt and packet contains today, where unrelated state leaks in, how fix rounds resume, and measured packet sizes from recent runs",
+  "spec": "Read-only. Work in /Users/k3ntaw/code/orchestrator/wt/goal-T-0353 (Phase H head 0d7bf09). Program: .orchestrator/phase-i-program.md sections P1 and P2. Deliver, each item with path:line:\n1. Per role (execute via Codex, execute via Claude fallback, fix round, spec_review, review, challenge, scout, headless Planner decision packet): the exact inputs assembled into the prompt: spawn.packet fields (G2), spawn.render template and its {{keys}}, .orchestrator/prompts/<role>.md contents summary, what daemon or executor adds (review inputs, diff, gate result, resume_hint, failure text, memory, scout findings, bus events), and the H8 packet header (version hash, base sha, provenance, truncation markers).\n2. Leaks: where a packet includes information the P1 brief says not to inject (unrelated completed tasks, full goal history, unrelated memory, all scout output, verbose bus history) or omits something P1 requires (relevant memory, relevant scout findings, dependencies, gate result for reviewers, security context).\n3. Fix rounds: executor.reply / codex exec resume mechanics (thread id, what delta is sent, MAX_ROUNDS), daemon.auto_fix_round spec content and when it reconstructs instead of resuming, H7 worktree compatibility check, Claude-fallback fix path; where unchanged state is re-sent.\n4. Sizes: from .orchestrator/runs/*.jsonl and runs/jev rows on this machine, the median and max input tokens (and cache_read) per role over the last three days, and if prompt or packet lengths are logged anywhere, their sizes; else say what would need logging to measure packet size per role.\n5. Existing tests that pin packet contents (tests/test_spawn.py etc.).\nOutput under 1,500 tokens, confidence per section, provenance repo.",
+  "inputs": [],
+  "acceptance": [
+    "per-role input inventory with path:line for eight roles",
+    "leak and omission list against the P1 brief",
+    "fix-round resume mechanics and reconstruction points with path:line",
+    "measured input-token medians per role from runs or an explicit statement of what logging is missing",
+    "pinning tests listed"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/goals.py",
+    "orchestrator/planner_runs.py",
+    ".orchestrator/prompts/",
+    "tests/test_spawn.py",
+    "tests/test_executor.py",
+    "tests/test_daemon.py",
+    ".orchestrator/runs/"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 30,
+    "timeout_s": 1200,
+    "cwd": "wt/goal-T-0353"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0447",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Codex's primary execute dispatch never fills {{packet}}: daemon.dispatch() calls spawn.render(\"execute\", spec=,acceptance=,scope=) with no packet= kwarg, so render() (which only substitutes keys it's given) leaves the literal string {{packet}} in the Codex prompt; the compact deterministic packet (memory, gotchas, tests, symbols, dependencies) is built but never reaches Codex on this path.",
+        "evidence": [
+          "orchestrator/daemon.py:536",
+          "orchestrator/spawn.py:86-93",
+          "orchestrator/spawn.py:161-345"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "spawn.packet() is only ever called from the Claude-fallback execute path, the headless Planner held-decision packet, and executor.reply()'s incompatible-resume repair; daemon's own codex-dispatch path never imports/calls it, matching the {{packet}} gap above.",
+        "evidence": [
+          "orchestrator/spawn.py:531-538",
+          "orchestrator/planner_runs.py:90",
+          "orchestrator/executor.py:328-334",
+          "orchestrator/daemon.py:1-9 (spawn imported, spawn.packet never called)"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "This gap plausibly explains measured codex execute input sizes: raw input_tokens median ~315k (max ~3.9M) over the last 3 days, vs Claude roles' tiny new-input medians (review 22, scout 26, spec_review 20) riding on large cached system-prompt reads (median cache_read ~580k-990k); Codex must rediscover scope/tests/symbols itself.",
+        "evidence": [
+          ".orchestrator/runs/2026-09-18.jsonl",
+          "runs/2026-09-19.jsonl",
+          "runs/2026-09-20.jsonl (fields input_tokens, cached_input_tokens, provider absent on Claude rows)"
+        ],
+        "confidence": 0.55,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Executor packet omits P1's required 'dependencies': _packet_body reads task['inputs'] into an 'evidence' section but never task['depends_on'], though bus.create_task/bus.ready track depends_on separately.",
+        "evidence": [
+          "orchestrator/spawn.py:258-267",
+          "orchestrator/bus.py:102-155"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Review prompt/template omits P1's required spec and gate result: review.md has no {{spec}} or {{gate}} placeholder and run_worker's review render() call passes only complexity/diff/acceptance/security.",
+        "evidence": [
+          ".orchestrator/prompts/review.md:1-7",
+          "orchestrator/spawn.py:514-520"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "bus.normalize_usage's provider-independent fields (input_uncached_tokens, cache_read_tokens, total_tokens) are wired into executor.py's _tokens() and spawn.py's run_claude log_run call, but zero occurrences of input_uncached_tokens exist in any of the last 3 days of runs/*.jsonl -- either dead code or not reaching the log write.",
+        "evidence": [
+          "orchestrator/bus.py:221-244",
+          "orchestrator/executor.py:88-94,139-140",
+          "orchestrator/spawn.py:435-440",
+          ".orchestrator/runs/2026-09-20.jsonl (grep: 0 matches)"
+        ],
+        "confidence": 0.6,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "H8 packet header (hash, base sha, pool.toml/gotchas provenance, over-cap truncation marker) exists but is only visible on the Claude-fallback/reply-reconstruction/decision-packet paths that actually call packet(), not on Codex's primary run.",
+        "evidence": [
+          "orchestrator/spawn.py:329-344"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Fix rounds: executor.reply() resumes the same codex thread with only a short delta when _resume_compatible() (worktree clean + expected head an ancestor of HEAD), capped at MAX_ROUNDS=5; incompatible resume falls back to full packet()+delta as a fresh 'exec' call instead of 'resume'.",
+        "evidence": [
+          "orchestrator/executor.py:17,309-339",
+          "orchestrator/executor.py:155-170"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "daemon.auto_fix_round instead creates a brand-new bus task (fresh id, fresh worktree via ensure_worktree, fresh codex thread through the normal dispatch path) rather than calling executor.reply on the held task, so its 'resume' is a re-dispatch of a fix-round.md-rendered spec, not a thread resume.",
+        "evidence": [
+          "orchestrator/daemon.py:139-201",
+          "orchestrator/daemon.py:104-136 (_fix_round_spec)"
+        ],
+        "confidence": 0.6,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Pinning tests for the packet exist: test_packet_sections_in_order, test_packet_over_cap_keeps_every_acceptance_criterion, test_packet_header_has_hash_base_and_sources, test_packet_hash_changes_when_body_changes, test_packet_never_trims_base_or_verify, test_execute_prompt_contains_packet, test_packet_gotcha_match_by_path.",
+        "evidence": [
+          "tests/test_spawn.py:431,440,450,457,463,503,521"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Fix-round/resume tests exist: test_codex_reply_fresh_thread_when_worktree_moved, test_codex_reply_resumes_when_compatible, test_resume_argv_has_no_C_flag_and_uses_cwd, test_reply_requires_thread_and_caps_rounds.",
+        "evidence": [
+          "tests/test_executor.py:44,57,166"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Is the missing packet= kwarg at daemon.py:536 a known/intended gap already tracked, or unnoticed regression from G2?",
+      "Why do runs/*.jsonl never show input_uncached_tokens despite the normalize_usage wiring -- log_run signature drop, or a stale deployed daemon process?"
+    ],
+    "suggested_next": [
+      "Confirm daemon.py:536 vs a possibly-updated production daemon process (running code may lag this worktree's HEAD) before treating the packet gap as current-prod behavior.",
+      "Add a regression test asserting spawn.render('execute', packet=...) is always called with packet= from daemon.dispatch."
+    ],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789918563.957324,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0447",
+      "claimed_at": 1789918563.956992
+    },
+    {
+      "ts": 1789918563.9587,
+      "account": "B"
+    },
+    {
+      "ts": 1789918563.9899468,
+      "pid": 58940,
+      "account": "B"
+    },
+    {
+      "ts": 1789918793.235866,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Codex's primary execute dispatch never fills {{packet}}: daemon.dispatch() calls spawn.render(\"execute\", spec=,acceptance=,scope=) with no packet= kwarg, so render() (which only substitutes keys it's given) leaves the literal string {{packet}} in the Codex prompt; the compact deterministic packet (memory, gotchas, tests, symbols, dependencies) is built but never reaches Codex on this path.",
+            "evidence": [
+              "orchestrator/daemon.py:536",
+              "orchestrator/spawn.py:86-93",
+              "orchestrator/spawn.py:161-345"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "spawn.packet() is only ever called from the Claude-fallback execute path, the headless Planner held-decision packet, and executor.reply()'s incompatible-resume repair; daemon's own codex-dispatch path never imports/calls it, matching the {{packet}} gap above.",
+            "evidence": [
+              "orchestrator/spawn.py:531-538",
+              "orchestrator/planner_runs.py:90",
+              "orchestrator/executor.py:328-334",
+              "orchestrator/daemon.py:1-9 (spawn imported, spawn.packet never called)"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "This gap plausibly explains measured codex execute input sizes: raw input_tokens median ~315k (max ~3.9M) over the last 3 days, vs Claude roles' tiny new-input medians (review 22, scout 26, spec_review 20) riding on large cached system-prompt reads (median cache_read ~580k-990k); Codex must rediscover scope/tests/symbols itself.",
+            "evidence": [
+              ".orchestrator/runs/2026-09-18.jsonl",
+              "runs/2026-09-19.jsonl",
+              "runs/2026-09-20.jsonl (fields input_tokens, cached_input_tokens, provider absent on Claude rows)"
+            ],
+            "confidence": 0.55,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Executor packet omits P1's required 'dependencies': _packet_body reads task['inputs'] into an 'evidence' section but never task['depends_on'], though bus.create_task/bus.ready track depends_on separately.",
+            "evidence": [
+              "orchestrator/spawn.py:258-267",
+              "orchestrator/bus.py:102-155"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Review prompt/template omits P1's required spec and gate result: review.md has no {{spec}} or {{gate}} placeholder and run_worker's review render() call passes only complexity/diff/acceptance/security.",
+            "evidence": [
+              ".orchestrator/prompts/review.md:1-7",
+              "orchestrator/spawn.py:514-520"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "bus.normalize_usage's provider-independent fields (input_uncached_tokens, cache_read_tokens, total_tokens) are wired into executor.py's _tokens() and spawn.py's run_claude log_run call, but zero occurrences of input_uncached_tokens exist in any of the last 3 days of runs/*.jsonl -- either dead code or not reaching the log write.",
+            "evidence": [
+              "orchestrator/bus.py:221-244",
+              "orchestrator/executor.py:88-94,139-140",
+              "orchestrator/spawn.py:435-440",
+              ".orchestrator/runs/2026-09-20.jsonl (grep: 0 matches)"
+            ],
+            "confidence": 0.6,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "H8 packet header (hash, base sha, pool.toml/gotchas provenance, over-cap truncation marker) exists but is only visible on the Claude-fallback/reply-reconstruction/decision-packet paths that actually call packet(), not on Codex's primary run.",
+            "evidence": [
+              "orchestrator/spawn.py:329-344"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Fix rounds: executor.reply() resumes the same codex thread with only a short delta when _resume_compatible() (worktree clean + expected head an ancestor of HEAD), capped at MAX_ROUNDS=5; incompatible resume falls back to full packet()+delta as a fresh 'exec' call instead of 'resume'.",
+            "evidence": [
+              "orchestrator/executor.py:17,309-339",
+              "orchestrator/executor.py:155-170"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "daemon.auto_fix_round instead creates a brand-new bus task (fresh id, fresh worktree via ensure_worktree, fresh codex thread through the normal dispatch path) rather than calling executor.reply on the held task, so its 'resume' is a re-dispatch of a fix-round.md-rendered spec, not a thread resume.",
+            "evidence": [
+              "orchestrator/daemon.py:139-201",
+              "orchestrator/daemon.py:104-136 (_fix_round_spec)"
+            ],
+            "confidence": 0.6,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Pinning tests for the packet exist: test_packet_sections_in_order, test_packet_over_cap_keeps_every_acceptance_criterion, test_packet_header_has_hash_base_and_sources, test_packet_hash_changes_when_body_changes, test_packet_never_trims_base_or_verify, test_execute_prompt_contains_packet, test_packet_gotcha_match_by_path.",
+            "evidence": [
+              "tests/test_spawn.py:431,440,450,457,463,503,521"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Fix-round/resume tests exist: test_codex_reply_fresh_thread_when_worktree_moved, test_codex_reply_resumes_when_compatible, test_resume_argv_has_no_C_flag_and_uses_cwd, test_reply_requires_thread_and_caps_rounds.",
+            "evidence": [
+              "tests/test_executor.py:44,57,166"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Is the missing packet= kwarg at daemon.py:536 a known/intended gap already tracked, or unnoticed regression from G2?",
+          "Why do runs/*.jsonl never show input_uncached_tokens despite the normalize_usage wiring -- log_run signature drop, or a stale deployed daemon process?"
+        ],
+        "suggested_next": [
+          "Confirm daemon.py:536 vs a possibly-updated production daemon process (running code may lag this worktree's HEAD) before treating the packet gap as current-prod behavior.",
+          "Add a regression test asserting spawn.render('execute', packet=...) is always called with packet= from daemon.dispatch."
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789918563.956992,
+  "account": "B",
+  "pid": 58940
+}

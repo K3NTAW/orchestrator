@@ -1,0 +1,2704 @@
+{
+  "id": "T-1688",
+  "created_at": 1791322013.2869928,
+  "parent": "T-1667",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "fix round: auto-merge review findings (gate the exact target sha, never ship after a red post-merge gate, merge-pending, revert gating)",
+  "spec": "Fix round for auto-merge (T-1678/T-1681/T-1683) after an independent full-diff security review (Planner-run,\n2026-10-06, REQUEST_CHANGES; no push to main, no shell, no clobbering found; tests 109 OK). Work in\n/Users/k3ntaw/code/orchestrator/wt/T-1683 on branch task/T-1683; add commits on top. Fix all of these:\n\nH1 ship.py:178,188 gated_target_sha is read again after the push, but spawn.py:320 fetches origin in the same repo from\n   the daemon thread, so main can move in between and an ungated tree gets merged while the post-merge check sees\n   nothing. Read the target sha once (rev-parse origin/<target> right after the fetch), merge exactly that sha, store it\n   as gated_target_sha; in _merging also require `git merge-base --is-ancestor <gated_target_sha> <gated_head_sha>`.\nH2 ship.py:223-235, 342-347 once post_merge_gate == \"red\", _on_merged sets shipped (after a crash before or during the\n   rollback, or after `ship --retry`). Never set shipped when post_merge_gate is red: run the rollback if none completed\n   (record rollback state in pipeline.ship), otherwise hold \"post-merge gate red, rollback failed\". `ship --retry` refuses a\n   goal whose PR is merged and red.\nM3 ship.py:221-224 fetch failure -> first_parent None -> post-merge gate skipped -> shipped unverified. With\n   gated_target_sha set and first_parent unresolved: error and hold, never ship.\nM4 ship.py:368-397 the revert PR is gated on a stale origin/main and merged with only --match-head-commit. Fetch before\n   merging, compare with the base sha the revert was gated on; moved -> re-gate once, still moving -> leave the PR open,\n   notify.\nM5 ship.py:213-216, 259-270 `gh pr merge` exit 0 but PR not MERGED (merge queue / auto-merge) loops forever (no stop\n   event in --once). After exit 0 read the PR state; not MERGED -> hold \"merge pending\" and return.\nL6 ship.py:276-279 errors only set last_error and re-run gating every tick. Count consecutive errors; hold with a notice\n   after 3.\nL7 ship.py:131-138, 253-258 a MERGED PR counts as shipped even if goal/<id> has commits after it. Shipped only if the\n   merged PR's head contains the current goal head; otherwise open a new PR.\nL8 ship.py:358-360 validate the rollback sha with ^[0-9a-f]{7,40}$ before any git call.\nL9 .gitignore: add .orchestrator/ship-wt/ and .orchestrator/ship.lock.\nL10 tests/_harness.py copies the live pool.toml with [ship].enabled = true: force enabled = false there (as for\n   autonomous); fake gh and gate scripts create temp dirs under the test's own directory and clean them up.\nOne named test per item in tests/test_ship.py. Run in the foreground: PYTHONPATH=tests uv run python -m unittest\ntests.test_ship tests.test_cli tests.test_goals tests.test_daemon (pytest may be missing). Commit on task/T-1683.\n",
+  "inputs": [],
+  "acceptance": [
+    "each of H1-H2, M3-M5, L6-L10 is fixed and has a named test in tests/test_ship.py",
+    "tests/_harness.py forces [ship].enabled = false",
+    "tests.test_ship, tests.test_cli, tests.test_goals and tests.test_daemon pass"
+  ],
+  "scope": [
+    "orchestrator/ship.py",
+    "tests/test_ship.py",
+    "tests/_harness.py",
+    ".gitignore"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 50,
+    "timeout_s": 3600,
+    "task_class": "debugging",
+    "route": "straightforward",
+    "fix_round_for": "T-1683",
+    "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1683",
+    "branch": "task/T-1683"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1688",
+  "codex_thread": null,
+  "result": {
+    "summary": "I fixed all ten review items (H1-H2, M3-M5, L6-L10) and committed the work as `T-1688 ship: review fix round...` on `task/T-1688`. The acceptance run is not fully green: 3 of 366 tests fail, all in `tests.test_daemon`. The same 3 fail on the base commit with the same set run, and they pass when run alone, so they come from test ordering, not this change. The 36 ship tests (all new ones included) and the cli and goals tests pass.\n\nThe packet said to work in `wt/T-1683` on `task/T-1683`, but this session started in `wt/T-1688` on `task/T-1688`, which already holds the T-1683 commits. I committed there, as the run instructions say to use the current branch.\n\n**What changed in ship.py**\n- **H1:** `origin/<target>` is read once, right after the fetch. That sha is what gets merged into the goal branch and stored as `gated_target_sha`. `_merging` now also holds unless `gated_target_sha` is an ancestor of `gated_head_sha`.\n- **H2:** a red post-merge gate never leads to shipped. The rollback status is saved in `pipeline.ship` as `running` before it starts. On resume, a rollback still marked `running` is run again; one that finished and failed holds with \"post-merge gate red, rollback failed\". `ship --retry` refuses a goal whose PR is merged with a red post-merge gate.\n- **M3:** if `gated_target_sha` is set but the merge commit's first parent can't be resolved, the goal holds with \"ship merge parent unresolved\" instead of skipping the check.\n- **M4:** the revert worktree starts from a fixed base sha. After the gate passes it fetches again. If the target moved, it merges the new target into the rollback branch, pushes (a normal push, not forced) and gates once more. If the target is still moving, the PR is left open with a notice. With `--force` the gate is skipped, so this check is skipped too.\n- **M5:** if `gh pr merge` exits 0 but the PR isn't MERGED, the goal holds with \"merge pending\".\n- **L6:** consecutive errors are counted in `pipeline.ship.errors`. The third holds with a notice (\"ship failed 3 times in a row\"). The count resets on reaching merging or shipped, and on retry.\n- **L7:** a MERGED PR only counts as shipped if its head contains the current goal head. Otherwise the PR number is cleared and a new PR goes through gating.\n- **L8:** `rollback` refuses anything that doesn't match `^[0-9a-f]{7,40}$` before any git call.\n\n**Other files**\n- **L9:** `.gitignore` now covers `.orchestrator/ship-wt/` and `.orchestrator/ship.lock`.\n- **L10:** `tests/_harness.py` forces `[ship].enabled = false`.\n- In `tests/test_ship.py`, the fake gh and gate scripts now put their temp dirs under the test's own `tmp` dir and remove them. The fake gh also reports the PR head and can simulate a pending merge.\n\n**One decision for you:** for H2 I don't re-run a rollback that finished and failed. Running it again could open a second revert PR. Say if you want it retried on resume instead.\n\n**Files changed:** `orchestrator/ship.py`, `tests/test_ship.py`, `tests/_harness.py`, ",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791322271.950757,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573
+      }
+    },
+    {
+      "ts": 1791323093.943726,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676
+      }
+    },
+    {
+      "ts": 1791323093.9461918,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676
+      }
+    },
+    {
+      "ts": 1791323093.9476202,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        }
+      }
+    },
+    {
+      "ts": 1791323098.029474,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5758,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791323098.0313668,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311
+      }
+    },
+    {
+      "ts": 1791323330.08085,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        }
+      }
+    },
+    {
+      "ts": 1791323330.4298828,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1791323330.440983,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791323334.137132,
+      "executor": "claude:opus"
+    },
+    {
+      "ts": 1791323336.148642,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5758,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791323336.169301,
+      "packet_meta": {
+        "chars": 4879,
+        "est_tokens": 1219,
+        "presented_tokens": 1219,
+        "sections": {
+          "_preamble": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "21e655138556ee6bd4f1fcfb3e834eb01bdf00a23c2aa74a61d95c479ccd79b5"
+          },
+          "objective": {
+            "chars": 2942,
+            "est_tokens": 735,
+            "sha256": "03ecb56d539885add1c1aa5d9e40521c4761d4a363f42ab958d3cd242b223e8c"
+          },
+          "acceptance": {
+            "chars": 226,
+            "est_tokens": 56,
+            "sha256": "78092a99673828738a53fb0e0a83a35af80010855930e708d934bb7b1e8a95cc"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "c1ed643e027a15fc981ad7bddf84e0c9a98895e26258171918cb73511dff9abd"
+          },
+          "write_scope": {
+            "chars": 92,
+            "est_tokens": 23,
+            "sha256": "47992812595567196776ade791f199e1edecb1bf80b07de1fd31ba1ac0c4fd36"
+          },
+          "read_scope": {
+            "chars": 43,
+            "est_tokens": 10,
+            "sha256": "047c1971e0a4e0f1aa14dd2ad3eb2d0c0f7ff110ecfbd244b0ad9a5729440983"
+          },
+          "constraints": {
+            "chars": 230,
+            "est_tokens": 57,
+            "sha256": "cc13762bc2004ab6090e935848bdab04edbed66c0373e815d5af3d5a32206900"
+          },
+          "relevant_tests": {
+            "chars": 927,
+            "est_tokens": 231,
+            "sha256": "240ba8884e8c43fd28d202b2c0a0bb33f02960b7b5f306cfd659caf74a1a1fc0"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "02c9124a6060",
+        "version": "02c9124a6060",
+        "candidate_known": true,
+        "base": "6cbc7786e482",
+        "sources": "pool.toml@b9bca20e78ae gotchas@50adade6ea84 memory@notes over cap by 79 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "50adade6ea84",
+        "candidate_tokens": 2581,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 21128,
+        "routed_reduction_ratio": 0.26896147872800874,
+        "routed_hidden": 34,
+        "routed_ambiguous": 30,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "87f4e92f81e4",
+          "82ee5bc061b9",
+          "a3c5d5c77090",
+          "997cbc1341c0",
+          "71fe6c2a4235",
+          "ad28180c0a0c",
+          "6cfe8c026bbf",
+          "a1320707b652",
+          "ba351d0cce35",
+          "60fa38d41870",
+          "33c27d0794fb",
+          "8d25801367d1",
+          "b1708e9b3f5e",
+          "72f83754eb5b",
+          "f63b9f480f86",
+          "2a8cf04ec45a",
+          "f50301711d72",
+          "58bcfe125828",
+          "468b493a9dab",
+          "15d254eb0c4b",
+          "4a9c289ff2f0",
+          "7067c6cfc20c",
+          "64633696890d",
+          "e5bb232e7291",
+          "1123a1e2f83a",
+          "9b65f97f1fe2",
+          "c97639668e22",
+          "f0a1e4b4afdb",
+          "2eaddc39f80d",
+          "c64a79749bf1",
+          "42445d5c3a8c",
+          "46046b524c97",
+          "0f4737395d5d",
+          "67f8b589f1e2",
+          "70d0d9f869ca",
+          "f1f0c61311b9",
+          "83109cc9df12",
+          "3db1b12c3605",
+          "d7497476d217",
+          "8bef670768a3",
+          "19fe68459ff9",
+          "c506713faa4d",
+          "be020b2e8fa5",
+          "93c3132fde1f",
+          "4fe7858da833",
+          "514575a0cdff",
+          "9dfad850825f",
+          "d77704a7d878",
+          "60d0ecf1820d",
+          "01d7be514e82",
+          "b62bf6639378",
+          "2ce45a72cf01",
+          "00db509188f0",
+          "0148c8d2026d",
+          "021add6ffb89",
+          "0331f61415c0",
+          "03d9db5b76a4",
+          "041199286363",
+          "04de65c255cf",
+          "051786ba0165",
+          "05df0bc9ef62",
+          "06250f5b2bf9",
+          "0768ddd89e7e",
+          "0784c689df19",
+          "09585e885a2c",
+          "0a3ca7410102",
+          "0bbc287aecf4",
+          "0d238bb278d4",
+          "0d5efa94f9ca",
+          "0da74424ba2b",
+          "0f1d68687edd",
+          "0fb2f39963fc",
+          "0fcd075d9f57",
+          "1010a8c11bac",
+          "10357d124edf",
+          "1073188aac14",
+          "11f75475460f",
+          "12b4301edd3e",
+          "1336f8df6f94",
+          "13abf2cf46f6",
+          "15359a72a0a5",
+          "158dd9947c80",
+          "16285184ccd9",
+          "1807a69e7663",
+          "188950523280",
+          "18df6b59f1b8",
+          "18f9ce631e61",
+          "1a17ff32a904",
+          "1a7a7f5dc41a",
+          "1a80d55206ca",
+          "1ab87a10d407",
+          "1c510a428e02",
+          "1d0cc9ab8559",
+          "1dd317c8d9b9",
+          "1df251b67771",
+          "1e8bb14425a8",
+          "1f4f25fba597",
+          "1f7cd86722f6",
+          "2091ec7061d7",
+          "2380174927fc",
+          "23e771b7caa4",
+          "248975d5c496",
+          "25e6db5cf579",
+          "25ee5f8920dc",
+          "260f2103255f",
+          "26adf6a241ea",
+          "270a093d49c3",
+          "27e3d479e418",
+          "28a564cd538d",
+          "29862065763a",
+          "2a459fab6526",
+          "2a874b8ed171",
+          "2b71081a619f",
+          "2c3608269bcd",
+          "2ccea77faf96",
+          "2db2764f9bd8",
+          "2db518b45b7a",
+          "2eae3c2d74c4",
+          "2f544c8da367",
+          "2f87295b9e34",
+          "2fda1602f756",
+          "3037c6d26ebe",
+          "31f918ec7b61",
+          "325d85b6f071",
+          "32a73d2b77ef",
+          "32c8fc2ba755",
+          "347b2365cf0d",
+          "34b6b61ecc58",
+          "34c966b7b621",
+          "34f30d64c6aa",
+          "36dd90fbb604",
+          "36f0d96529d8",
+          "36fba3c5b5ac",
+          "3700e33e38dd",
+          "376d59216a0a",
+          "37c254b43610",
+          "386984bd9daf",
+          "3953665afea9",
+          "3a6ff3f4dab0",
+          "3a7ed61a955d",
+          "3bef63a0226d",
+          "3ca6fc77d0d0",
+          "3d576cc180d1",
+          "3d9de6ae8904",
+          "3db57e23f967",
+          "3e677b524cec",
+          "3e787c244ee0",
+          "3ec2adada116",
+          "3fc77651746c",
+          "4180c7586cb1",
+          "418f23dce663",
+          "42758e20cbaf",
+          "427a8e2bd836",
+          "42be67d41407",
+          "4394c9ea5626",
+          "43ed90a1ad4e",
+          "453b6e50c221",
+          "461132b06b06",
+          "4748dac32cb6",
+          "4840989d4fad",
+          "48de25429ecb",
+          "4a226dc6afc3",
+          "4b20ac430c64",
+          "4b4b12743a05",
+          "4ca2eec9fe74",
+          "4cf8b290c178",
+          "4e6a2070bda4",
+          "4e7c92225364",
+          "504365aa02ad",
+          "51355537f5ea",
+          "52a59c2d8b66",
+          "52f5acceef24",
+          "52f6f7dd5afb",
+          "55d0ebe04a88",
+          "55e8c42797cc",
+          "5650c5639689",
+          "5693a275ea2c",
+          "573b5b20bfad",
+          "575022ff3493",
+          "5777308171e4",
+          "5783dcfcf0b6",
+          "5893a1c64463",
+          "5b27613653f6",
+          "5b27f397c201",
+          "5b7245db391a",
+          "5b872ee10528",
+          "5b9bb25ec23c",
+          "5d279e520eff",
+          "5dfb7da66de0",
+          "5e22799f1c53",
+          "5e9bcae7ed92",
+          "60094942b7f7",
+          "61d4a8ade48d",
+          "6215f26cae57",
+          "622b3821c7d5",
+          "622de2bd3ec8",
+          "62bb42ad80d2",
+          "62c565ed60b9",
+          "62d782bc1c28",
+          "63407adb9b84"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5758,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 472,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791323337.6746721,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1688",
+      "claimed_at": 1791323337.6741939
+    },
+    {
+      "ts": 1791323337.676382,
+      "account": "B"
+    },
+    {
+      "ts": 1791323341.732683,
+      "pid": 70607,
+      "account": "B"
+    },
+    {
+      "ts": 1791324004.230947,
+      "packet_meta": {
+        "chars": 4879,
+        "est_tokens": 1219,
+        "presented_tokens": 1219,
+        "sections": {
+          "_preamble": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "21e655138556ee6bd4f1fcfb3e834eb01bdf00a23c2aa74a61d95c479ccd79b5"
+          },
+          "objective": {
+            "chars": 2942,
+            "est_tokens": 735,
+            "sha256": "03ecb56d539885add1c1aa5d9e40521c4761d4a363f42ab958d3cd242b223e8c"
+          },
+          "acceptance": {
+            "chars": 226,
+            "est_tokens": 56,
+            "sha256": "78092a99673828738a53fb0e0a83a35af80010855930e708d934bb7b1e8a95cc"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "c1ed643e027a15fc981ad7bddf84e0c9a98895e26258171918cb73511dff9abd"
+          },
+          "write_scope": {
+            "chars": 92,
+            "est_tokens": 23,
+            "sha256": "47992812595567196776ade791f199e1edecb1bf80b07de1fd31ba1ac0c4fd36"
+          },
+          "read_scope": {
+            "chars": 43,
+            "est_tokens": 10,
+            "sha256": "047c1971e0a4e0f1aa14dd2ad3eb2d0c0f7ff110ecfbd244b0ad9a5729440983"
+          },
+          "constraints": {
+            "chars": 230,
+            "est_tokens": 57,
+            "sha256": "cc13762bc2004ab6090e935848bdab04edbed66c0373e815d5af3d5a32206900"
+          },
+          "relevant_tests": {
+            "chars": 927,
+            "est_tokens": 231,
+            "sha256": "240ba8884e8c43fd28d202b2c0a0bb33f02960b7b5f306cfd659caf74a1a1fc0"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "02c9124a6060",
+        "version": "02c9124a6060",
+        "candidate_known": true,
+        "base": "6cbc7786e482",
+        "sources": "pool.toml@b9bca20e78ae gotchas@50adade6ea84 memory@notes over cap by 79 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "50adade6ea84",
+        "candidate_tokens": 2581,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 21128,
+        "routed_reduction_ratio": 0.26896147872800874,
+        "routed_hidden": 34,
+        "routed_ambiguous": 30,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "87f4e92f81e4",
+          "82ee5bc061b9",
+          "a3c5d5c77090",
+          "997cbc1341c0",
+          "71fe6c2a4235",
+          "ad28180c0a0c",
+          "6cfe8c026bbf",
+          "a1320707b652",
+          "ba351d0cce35",
+          "60fa38d41870",
+          "33c27d0794fb",
+          "8d25801367d1",
+          "b1708e9b3f5e",
+          "72f83754eb5b",
+          "f63b9f480f86",
+          "2a8cf04ec45a",
+          "f50301711d72",
+          "58bcfe125828",
+          "468b493a9dab",
+          "15d254eb0c4b",
+          "4a9c289ff2f0",
+          "7067c6cfc20c",
+          "64633696890d",
+          "e5bb232e7291",
+          "1123a1e2f83a",
+          "9b65f97f1fe2",
+          "c97639668e22",
+          "f0a1e4b4afdb",
+          "2eaddc39f80d",
+          "c64a79749bf1",
+          "42445d5c3a8c",
+          "46046b524c97",
+          "0f4737395d5d",
+          "67f8b589f1e2",
+          "70d0d9f869ca",
+          "f1f0c61311b9",
+          "83109cc9df12",
+          "3db1b12c3605",
+          "d7497476d217",
+          "8bef670768a3",
+          "19fe68459ff9",
+          "c506713faa4d",
+          "be020b2e8fa5",
+          "93c3132fde1f",
+          "4fe7858da833",
+          "514575a0cdff",
+          "9dfad850825f",
+          "d77704a7d878",
+          "60d0ecf1820d",
+          "01d7be514e82",
+          "b62bf6639378",
+          "2ce45a72cf01",
+          "00db509188f0",
+          "0148c8d2026d",
+          "021add6ffb89",
+          "0331f61415c0",
+          "03d9db5b76a4",
+          "041199286363",
+          "04de65c255cf",
+          "051786ba0165",
+          "05df0bc9ef62",
+          "06250f5b2bf9",
+          "0768ddd89e7e",
+          "0784c689df19",
+          "09585e885a2c",
+          "0a3ca7410102",
+          "0bbc287aecf4",
+          "0d238bb278d4",
+          "0d5efa94f9ca",
+          "0da74424ba2b",
+          "0f1d68687edd",
+          "0fb2f39963fc",
+          "0fcd075d9f57",
+          "1010a8c11bac",
+          "10357d124edf",
+          "1073188aac14",
+          "11f75475460f",
+          "12b4301edd3e",
+          "1336f8df6f94",
+          "13abf2cf46f6",
+          "15359a72a0a5",
+          "158dd9947c80",
+          "16285184ccd9",
+          "1807a69e7663",
+          "188950523280",
+          "18df6b59f1b8",
+          "18f9ce631e61",
+          "1a17ff32a904",
+          "1a7a7f5dc41a",
+          "1a80d55206ca",
+          "1ab87a10d407",
+          "1c510a428e02",
+          "1d0cc9ab8559",
+          "1dd317c8d9b9",
+          "1df251b67771",
+          "1e8bb14425a8",
+          "1f4f25fba597",
+          "1f7cd86722f6",
+          "2091ec7061d7",
+          "2380174927fc",
+          "23e771b7caa4",
+          "248975d5c496",
+          "25e6db5cf579",
+          "25ee5f8920dc",
+          "260f2103255f",
+          "26adf6a241ea",
+          "270a093d49c3",
+          "27e3d479e418",
+          "28a564cd538d",
+          "29862065763a",
+          "2a459fab6526",
+          "2a874b8ed171",
+          "2b71081a619f",
+          "2c3608269bcd",
+          "2ccea77faf96",
+          "2db2764f9bd8",
+          "2db518b45b7a",
+          "2eae3c2d74c4",
+          "2f544c8da367",
+          "2f87295b9e34",
+          "2fda1602f756",
+          "3037c6d26ebe",
+          "31f918ec7b61",
+          "325d85b6f071",
+          "32a73d2b77ef",
+          "32c8fc2ba755",
+          "347b2365cf0d",
+          "34b6b61ecc58",
+          "34c966b7b621",
+          "34f30d64c6aa",
+          "36dd90fbb604",
+          "36f0d96529d8",
+          "36fba3c5b5ac",
+          "3700e33e38dd",
+          "376d59216a0a",
+          "37c254b43610",
+          "386984bd9daf",
+          "3953665afea9",
+          "3a6ff3f4dab0",
+          "3a7ed61a955d",
+          "3bef63a0226d",
+          "3ca6fc77d0d0",
+          "3d576cc180d1",
+          "3d9de6ae8904",
+          "3db57e23f967",
+          "3e677b524cec",
+          "3e787c244ee0",
+          "3ec2adada116",
+          "3fc77651746c",
+          "4180c7586cb1",
+          "418f23dce663",
+          "42758e20cbaf",
+          "427a8e2bd836",
+          "42be67d41407",
+          "4394c9ea5626",
+          "43ed90a1ad4e",
+          "453b6e50c221",
+          "461132b06b06",
+          "4748dac32cb6",
+          "4840989d4fad",
+          "48de25429ecb",
+          "4a226dc6afc3",
+          "4b20ac430c64",
+          "4b4b12743a05",
+          "4ca2eec9fe74",
+          "4cf8b290c178",
+          "4e6a2070bda4",
+          "4e7c92225364",
+          "504365aa02ad",
+          "51355537f5ea",
+          "52a59c2d8b66",
+          "52f5acceef24",
+          "52f6f7dd5afb",
+          "55d0ebe04a88",
+          "55e8c42797cc",
+          "5650c5639689",
+          "5693a275ea2c",
+          "573b5b20bfad",
+          "575022ff3493",
+          "5777308171e4",
+          "5783dcfcf0b6",
+          "5893a1c64463",
+          "5b27613653f6",
+          "5b27f397c201",
+          "5b7245db391a",
+          "5b872ee10528",
+          "5b9bb25ec23c",
+          "5d279e520eff",
+          "5dfb7da66de0",
+          "5e22799f1c53",
+          "5e9bcae7ed92",
+          "60094942b7f7",
+          "61d4a8ade48d",
+          "6215f26cae57",
+          "622b3821c7d5",
+          "622de2bd3ec8",
+          "62bb42ad80d2",
+          "62c565ed60b9",
+          "62d782bc1c28",
+          "63407adb9b84"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5758,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 472,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "a87e13e6-044f-43f1-b05d-c627835c053e"
+      }
+    },
+    {
+      "ts": 1791324004.268204,
+      "packet_meta": {
+        "chars": 4879,
+        "est_tokens": 1219,
+        "presented_tokens": 1219,
+        "sections": {
+          "_preamble": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "21e655138556ee6bd4f1fcfb3e834eb01bdf00a23c2aa74a61d95c479ccd79b5"
+          },
+          "objective": {
+            "chars": 2942,
+            "est_tokens": 735,
+            "sha256": "03ecb56d539885add1c1aa5d9e40521c4761d4a363f42ab958d3cd242b223e8c"
+          },
+          "acceptance": {
+            "chars": 226,
+            "est_tokens": 56,
+            "sha256": "78092a99673828738a53fb0e0a83a35af80010855930e708d934bb7b1e8a95cc"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "c1ed643e027a15fc981ad7bddf84e0c9a98895e26258171918cb73511dff9abd"
+          },
+          "write_scope": {
+            "chars": 92,
+            "est_tokens": 23,
+            "sha256": "47992812595567196776ade791f199e1edecb1bf80b07de1fd31ba1ac0c4fd36"
+          },
+          "read_scope": {
+            "chars": 43,
+            "est_tokens": 10,
+            "sha256": "047c1971e0a4e0f1aa14dd2ad3eb2d0c0f7ff110ecfbd244b0ad9a5729440983"
+          },
+          "constraints": {
+            "chars": 230,
+            "est_tokens": 57,
+            "sha256": "cc13762bc2004ab6090e935848bdab04edbed66c0373e815d5af3d5a32206900"
+          },
+          "relevant_tests": {
+            "chars": 927,
+            "est_tokens": 231,
+            "sha256": "240ba8884e8c43fd28d202b2c0a0bb33f02960b7b5f306cfd659caf74a1a1fc0"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "02c9124a6060",
+        "version": "02c9124a6060",
+        "candidate_known": true,
+        "base": "6cbc7786e482",
+        "sources": "pool.toml@b9bca20e78ae gotchas@50adade6ea84 memory@notes over cap by 79 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "50adade6ea84",
+        "candidate_tokens": 2581,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 21128,
+        "routed_reduction_ratio": 0.26896147872800874,
+        "routed_hidden": 34,
+        "routed_ambiguous": 30,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "87f4e92f81e4",
+          "82ee5bc061b9",
+          "a3c5d5c77090",
+          "997cbc1341c0",
+          "71fe6c2a4235",
+          "ad28180c0a0c",
+          "6cfe8c026bbf",
+          "a1320707b652",
+          "ba351d0cce35",
+          "60fa38d41870",
+          "33c27d0794fb",
+          "8d25801367d1",
+          "b1708e9b3f5e",
+          "72f83754eb5b",
+          "f63b9f480f86",
+          "2a8cf04ec45a",
+          "f50301711d72",
+          "58bcfe125828",
+          "468b493a9dab",
+          "15d254eb0c4b",
+          "4a9c289ff2f0",
+          "7067c6cfc20c",
+          "64633696890d",
+          "e5bb232e7291",
+          "1123a1e2f83a",
+          "9b65f97f1fe2",
+          "c97639668e22",
+          "f0a1e4b4afdb",
+          "2eaddc39f80d",
+          "c64a79749bf1",
+          "42445d5c3a8c",
+          "46046b524c97",
+          "0f4737395d5d",
+          "67f8b589f1e2",
+          "70d0d9f869ca",
+          "f1f0c61311b9",
+          "83109cc9df12",
+          "3db1b12c3605",
+          "d7497476d217",
+          "8bef670768a3",
+          "19fe68459ff9",
+          "c506713faa4d",
+          "be020b2e8fa5",
+          "93c3132fde1f",
+          "4fe7858da833",
+          "514575a0cdff",
+          "9dfad850825f",
+          "d77704a7d878",
+          "60d0ecf1820d",
+          "01d7be514e82",
+          "b62bf6639378",
+          "2ce45a72cf01",
+          "00db509188f0",
+          "0148c8d2026d",
+          "021add6ffb89",
+          "0331f61415c0",
+          "03d9db5b76a4",
+          "041199286363",
+          "04de65c255cf",
+          "051786ba0165",
+          "05df0bc9ef62",
+          "06250f5b2bf9",
+          "0768ddd89e7e",
+          "0784c689df19",
+          "09585e885a2c",
+          "0a3ca7410102",
+          "0bbc287aecf4",
+          "0d238bb278d4",
+          "0d5efa94f9ca",
+          "0da74424ba2b",
+          "0f1d68687edd",
+          "0fb2f39963fc",
+          "0fcd075d9f57",
+          "1010a8c11bac",
+          "10357d124edf",
+          "1073188aac14",
+          "11f75475460f",
+          "12b4301edd3e",
+          "1336f8df6f94",
+          "13abf2cf46f6",
+          "15359a72a0a5",
+          "158dd9947c80",
+          "16285184ccd9",
+          "1807a69e7663",
+          "188950523280",
+          "18df6b59f1b8",
+          "18f9ce631e61",
+          "1a17ff32a904",
+          "1a7a7f5dc41a",
+          "1a80d55206ca",
+          "1ab87a10d407",
+          "1c510a428e02",
+          "1d0cc9ab8559",
+          "1dd317c8d9b9",
+          "1df251b67771",
+          "1e8bb14425a8",
+          "1f4f25fba597",
+          "1f7cd86722f6",
+          "2091ec7061d7",
+          "2380174927fc",
+          "23e771b7caa4",
+          "248975d5c496",
+          "25e6db5cf579",
+          "25ee5f8920dc",
+          "260f2103255f",
+          "26adf6a241ea",
+          "270a093d49c3",
+          "27e3d479e418",
+          "28a564cd538d",
+          "29862065763a",
+          "2a459fab6526",
+          "2a874b8ed171",
+          "2b71081a619f",
+          "2c3608269bcd",
+          "2ccea77faf96",
+          "2db2764f9bd8",
+          "2db518b45b7a",
+          "2eae3c2d74c4",
+          "2f544c8da367",
+          "2f87295b9e34",
+          "2fda1602f756",
+          "3037c6d26ebe",
+          "31f918ec7b61",
+          "325d85b6f071",
+          "32a73d2b77ef",
+          "32c8fc2ba755",
+          "347b2365cf0d",
+          "34b6b61ecc58",
+          "34c966b7b621",
+          "34f30d64c6aa",
+          "36dd90fbb604",
+          "36f0d96529d8",
+          "36fba3c5b5ac",
+          "3700e33e38dd",
+          "376d59216a0a",
+          "37c254b43610",
+          "386984bd9daf",
+          "3953665afea9",
+          "3a6ff3f4dab0",
+          "3a7ed61a955d",
+          "3bef63a0226d",
+          "3ca6fc77d0d0",
+          "3d576cc180d1",
+          "3d9de6ae8904",
+          "3db57e23f967",
+          "3e677b524cec",
+          "3e787c244ee0",
+          "3ec2adada116",
+          "3fc77651746c",
+          "4180c7586cb1",
+          "418f23dce663",
+          "42758e20cbaf",
+          "427a8e2bd836",
+          "42be67d41407",
+          "4394c9ea5626",
+          "43ed90a1ad4e",
+          "453b6e50c221",
+          "461132b06b06",
+          "4748dac32cb6",
+          "4840989d4fad",
+          "48de25429ecb",
+          "4a226dc6afc3",
+          "4b20ac430c64",
+          "4b4b12743a05",
+          "4ca2eec9fe74",
+          "4cf8b290c178",
+          "4e6a2070bda4",
+          "4e7c92225364",
+          "504365aa02ad",
+          "51355537f5ea",
+          "52a59c2d8b66",
+          "52f5acceef24",
+          "52f6f7dd5afb",
+          "55d0ebe04a88",
+          "55e8c42797cc",
+          "5650c5639689",
+          "5693a275ea2c",
+          "573b5b20bfad",
+          "575022ff3493",
+          "5777308171e4",
+          "5783dcfcf0b6",
+          "5893a1c64463",
+          "5b27613653f6",
+          "5b27f397c201",
+          "5b7245db391a",
+          "5b872ee10528",
+          "5b9bb25ec23c",
+          "5d279e520eff",
+          "5dfb7da66de0",
+          "5e22799f1c53",
+          "5e9bcae7ed92",
+          "60094942b7f7",
+          "61d4a8ade48d",
+          "6215f26cae57",
+          "622b3821c7d5",
+          "622de2bd3ec8",
+          "62bb42ad80d2",
+          "62c565ed60b9",
+          "62d782bc1c28",
+          "63407adb9b84"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5758,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 472,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "a87e13e6-044f-43f1-b05d-c627835c053e",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791324005.684275,
+      "status": "done",
+      "result": {
+        "summary": "I fixed all ten review items (H1-H2, M3-M5, L6-L10) and committed the work as `T-1688 ship: review fix round...` on `task/T-1688`. The acceptance run is not fully green: 3 of 366 tests fail, all in `tests.test_daemon`. The same 3 fail on the base commit with the same set run, and they pass when run alone, so they come from test ordering, not this change. The 36 ship tests (all new ones included) and the cli and goals tests pass.\n\nThe packet said to work in `wt/T-1683` on `task/T-1683`, but this session started in `wt/T-1688` on `task/T-1688`, which already holds the T-1683 commits. I committed there, as the run instructions say to use the current branch.\n\n**What changed in ship.py**\n- **H1:** `origin/<target>` is read once, right after the fetch. That sha is what gets merged into the goal branch and stored as `gated_target_sha`. `_merging` now also holds unless `gated_target_sha` is an ancestor of `gated_head_sha`.\n- **H2:** a red post-merge gate never leads to shipped. The rollback status is saved in `pipeline.ship` as `running` before it starts. On resume, a rollback still marked `running` is run again; one that finished and failed holds with \"post-merge gate red, rollback failed\". `ship --retry` refuses a goal whose PR is merged with a red post-merge gate.\n- **M3:** if `gated_target_sha` is set but the merge commit's first parent can't be resolved, the goal holds with \"ship merge parent unresolved\" instead of skipping the check.\n- **M4:** the revert worktree starts from a fixed base sha. After the gate passes it fetches again. If the target moved, it merges the new target into the rollback branch, pushes (a normal push, not forced) and gates once more. If the target is still moving, the PR is left open with a notice. With `--force` the gate is skipped, so this check is skipped too.\n- **M5:** if `gh pr merge` exits 0 but the PR isn't MERGED, the goal holds with \"merge pending\".\n- **L6:** consecutive errors are counted in `pipeline.ship.errors`. The third holds with a notice (\"ship failed 3 times in a row\"). The count resets on reaching merging or shipped, and on retry.\n- **L7:** a MERGED PR only counts as shipped if its head contains the current goal head. Otherwise the PR number is cleared and a new PR goes through gating.\n- **L8:** `rollback` refuses anything that doesn't match `^[0-9a-f]{7,40}$` before any git call.\n\n**Other files**\n- **L9:** `.gitignore` now covers `.orchestrator/ship-wt/` and `.orchestrator/ship.lock`.\n- **L10:** `tests/_harness.py` forces `[ship].enabled = false`.\n- In `tests/test_ship.py`, the fake gh and gate scripts now put their temp dirs under the test's own `tmp` dir and remove them. The fake gh also reports the PR head and can simulate a pending merge.\n\n**One decision for you:** for H2 I don't re-run a rollback that finished and failed. Running it again could open a second revert PR. Say if you want it retried on resume instead.\n\n**Files changed:** `orchestrator/ship.py`, `tests/test_ship.py`, `tests/_harness.py`, ",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791324294.496862,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791324316.065515,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791324316.0643258,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": ""
+      }
+    },
+    {
+      "ts": 1791324325.090395,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791324316.0643258,
+        "gate_reds": 1,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1791324328.011088,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791324316.0643258,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        }
+      }
+    },
+    {
+      "ts": 1791324792.1412108,
+      "status": "done",
+      "hold_reason": null,
+      "resume_hint": null,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        }
+      }
+    },
+    {
+      "ts": 1791324801.762945,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        }
+      }
+    },
+    {
+      "ts": 1791325141.470436,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1791325143.879162,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1688",
+          "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+          "moved_count": 12,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "tests/_harness.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "tests/_harness.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687",
+              "T-1691"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791325143.8784351,
+          "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+        }
+      }
+    },
+    {
+      "ts": 1791325144.6273012,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1688",
+          "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+          "moved_count": 12,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "tests/_harness.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "tests/_harness.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687",
+              "T-1691"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791325143.8784351,
+          "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+        },
+        "reviewed_sha": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+      }
+    },
+    {
+      "ts": 1791325144.6421728,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1688",
+          "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+          "moved_count": 12,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "tests/_harness.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "tests/_harness.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687",
+              "T-1691"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791325143.8784351,
+          "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+        },
+        "reviewed_sha": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f",
+        "gated_at_done": 1791325144.640068
+      }
+    },
+    {
+      "ts": 1791325215.6892428,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1791325305.2706618,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1688",
+          "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+          "moved_count": 12,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "tests/_harness.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "tests/_harness.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687",
+              "T-1691"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791325143.8784351,
+          "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+        },
+        "reviewed_sha": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f",
+        "gated_at_done": 1791325144.640068,
+        "merged_at": 1791325305.27028,
+        "merged_at_lease": 1791326205.27028
+      }
+    },
+    {
+      "ts": 1791325305.562506,
+      "status": "failed",
+      "reason": "rebase_conflict",
+      "resume_hint": {
+        "conflicts": [
+          "orchestrator/daemon.py"
+        ],
+        "hunks": "diff --cc orchestrator/daemon.py\nindex c883c9a,bb43180..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -8,8 -8,8 +8,13 @@@ import tomlli\n  from pathlib import Path\n  from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion\n  from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,\n++<<<<<<< HEAD\n +               planner_runs, spawn, strategy, worker_control)\n +from . import capacity, concurrency, decision_log, duration, jev_sched, machine, merge_pressure\n++=======\n+                planner_runs, ship, spawn, strategy, worker_control)\n+ from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure\n++>>>>>>> 626802a (T-1678 ship: unattended merge of a closed goal to main after a full gate, resumable, with orchestrator rollback)\n  from . import stale as stale_evidence\n  from .pool import Pool, fallback_tier, executor_identity, config as pool_config\n  from . import failures, gate as gate_runner, gitutil, interference, schedlog, notify as notifications\n"
+      }
+    },
+    {
+      "ts": 1791325305.722921,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1688",
+          "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+          "moved_count": 12,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "tests/_harness.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "tests/_harness.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687",
+              "T-1691"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791325143.8784351,
+          "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+        },
+        "reviewed_sha": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f",
+        "gated_at_done": 1791325144.640068,
+        "merged_at": 1791325305.27028,
+        "merged_at_lease": 1791326205.27028,
+        "merged_at_done": 1791325305.722626
+      }
+    },
+    {
+      "ts": 1791325305.7247438,
+      "status": "held",
+      "hold_reason": "merge conflict"
+    },
+    {
+      "ts": 1791325310.671534,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1791324316.065515": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1688",
+          "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+          "moved_count": 12,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "tests/_harness.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "tests/_harness.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687",
+              "T-1691"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791325143.8784351,
+          "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+        },
+        "reviewed_sha": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f",
+        "gated_at_done": 1791325144.640068,
+        "merged_at": 1791325305.27028,
+        "merged_at_lease": 1791326205.27028,
+        "merged_at_done": 1791325305.722626
+      }
+    },
+    {
+      "ts": 1791325312.4064581,
+      "pipeline": {
+        "first_ready_at": 1791322271.935573,
+        "dispatched_at": 1791323093.943676,
+        "dispatched_at_lease": 1791323993.943676,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1791323098.031311,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791323330.080477
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "conflict",
+        "auto_fix_skipped": {
+          "1791324316.065515": true,
+          "1791325305.7247438": true
+        },
+        "gated_at": 1791325141.464027,
+        "gated_at_lease": 1791326041.464027,
+        "first_green_at": 1791325141.4544299,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1688",
+          "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+          "moved_count": 12,
+          "stale_paths": [
+            "orchestrator/claude_cli.py",
+            "orchestrator/cli.py",
+            "orchestrator/daemon.py",
+            "orchestrator/goals.py",
+            "orchestrator/machine.py",
+            "orchestrator/planner_shadow.py",
+            "orchestrator/spawn.py",
+            "orchestrator/watchdog.py",
+            "tests/_harness.py",
+            "tests/test_daemon.py",
+            "tests/test_spawn.py",
+            "tests/test_watchdog.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [
+              "tests/_harness.py"
+            ],
+            "changed_files_moved": [
+              "orchestrator/cli.py",
+              "orchestrator/daemon.py",
+              "tests/_harness.py"
+            ],
+            "tests_changed": [
+              "tests/test_daemon.py"
+            ],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": [
+              "T-1687",
+              "T-1691"
+            ]
+          },
+          "risk": "high",
+          "risk_reasons": [
+            "scoped_files_changed",
+            "changed_files_moved",
+            "tests_changed",
+            "overlapping_merge"
+          ],
+          "graph": "stale",
+          "severity": "high",
+          "severity_reasons": [
+            "write_scope"
+          ],
+          "checked_at": 1791325143.8784351,
+          "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+        },
+        "reviewed_sha": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f",
+        "gated_at_done": 1791325144.640068,
+        "merged_at": 1791325305.27028,
+        "merged_at_lease": 1791326205.27028,
+        "merged_at_done": 1791325305.722626
+      }
+    },
+    {
+      "ts": 1791330206.30201,
+      "status": "done",
+      "merged_into": "goal/T-1667",
+      "merged_via": "fix round T-1696 600c51727f037b86b737e3ebe0e129b8e028cab3",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791322271.935573,
+    "dispatched_at": 1791323093.943676,
+    "dispatched_at_lease": 1791323993.943676,
+    "resume": {
+      "mode": "fresh",
+      "reason": "no_thread"
+    },
+    "dispatched_at_done": 1791323098.031311,
+    "handoff": {
+      "baseline": "claude:opus",
+      "selected": "claude:opus",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791323330.080477
+    },
+    "jev_route": {
+      "baseline": "opus",
+      "hypothetical": "claude:opus",
+      "key": "dffeff060ecb9d91aee54c2bd0df4240d537532d",
+      "adjustment": {
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "skills_used": [],
+    "gate_attempts": 2,
+    "gate_reds": 1,
+    "failure_kind": "conflict",
+    "auto_fix_skipped": {
+      "1791324316.065515": true,
+      "1791325305.7247438": true
+    },
+    "gated_at": 1791325141.464027,
+    "gated_at_lease": 1791326041.464027,
+    "first_green_at": 1791325141.4544299,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1688",
+      "goal_head": "4849462c6b482d0ebf07ea58a69afa9ae44c4f5f",
+      "moved_count": 12,
+      "stale_paths": [
+        "orchestrator/claude_cli.py",
+        "orchestrator/cli.py",
+        "orchestrator/daemon.py",
+        "orchestrator/goals.py",
+        "orchestrator/machine.py",
+        "orchestrator/planner_shadow.py",
+        "orchestrator/spawn.py",
+        "orchestrator/watchdog.py",
+        "tests/_harness.py",
+        "tests/test_daemon.py",
+        "tests/test_spawn.py",
+        "tests/test_watchdog.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [
+          "tests/_harness.py"
+        ],
+        "changed_files_moved": [
+          "orchestrator/cli.py",
+          "orchestrator/daemon.py",
+          "tests/_harness.py"
+        ],
+        "tests_changed": [
+          "tests/test_daemon.py"
+        ],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": [
+          "T-1687",
+          "T-1691"
+        ]
+      },
+      "risk": "high",
+      "risk_reasons": [
+        "scoped_files_changed",
+        "changed_files_moved",
+        "tests_changed",
+        "overlapping_merge"
+      ],
+      "graph": "stale",
+      "severity": "high",
+      "severity_reasons": [
+        "write_scope"
+      ],
+      "checked_at": 1791325143.8784351,
+      "head": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f"
+    },
+    "reviewed_sha": "1c823e224f97dca7ea49acb4eaf602ca0e4da50f",
+    "gated_at_done": 1791325144.640068,
+    "merged_at": 1791325305.27028,
+    "merged_at_lease": 1791326205.27028,
+    "merged_at_done": 1791325305.722626
+  },
+  "packet_meta": {
+    "chars": 4879,
+    "est_tokens": 1219,
+    "presented_tokens": 1219,
+    "sections": {
+      "_preamble": {
+        "chars": 162,
+        "est_tokens": 40,
+        "sha256": "21e655138556ee6bd4f1fcfb3e834eb01bdf00a23c2aa74a61d95c479ccd79b5"
+      },
+      "objective": {
+        "chars": 2942,
+        "est_tokens": 735,
+        "sha256": "03ecb56d539885add1c1aa5d9e40521c4761d4a363f42ab958d3cd242b223e8c"
+      },
+      "acceptance": {
+        "chars": 226,
+        "est_tokens": 56,
+        "sha256": "78092a99673828738a53fb0e0a83a35af80010855930e708d934bb7b1e8a95cc"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "c1ed643e027a15fc981ad7bddf84e0c9a98895e26258171918cb73511dff9abd"
+      },
+      "write_scope": {
+        "chars": 92,
+        "est_tokens": 23,
+        "sha256": "47992812595567196776ade791f199e1edecb1bf80b07de1fd31ba1ac0c4fd36"
+      },
+      "read_scope": {
+        "chars": 43,
+        "est_tokens": 10,
+        "sha256": "047c1971e0a4e0f1aa14dd2ad3eb2d0c0f7ff110ecfbd244b0ad9a5729440983"
+      },
+      "constraints": {
+        "chars": 230,
+        "est_tokens": 57,
+        "sha256": "cc13762bc2004ab6090e935848bdab04edbed66c0373e815d5af3d5a32206900"
+      },
+      "relevant_tests": {
+        "chars": 927,
+        "est_tokens": 231,
+        "sha256": "240ba8884e8c43fd28d202b2c0a0bb33f02960b7b5f306cfd659caf74a1a1fc0"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "02c9124a6060",
+    "version": "02c9124a6060",
+    "candidate_known": true,
+    "base": "6cbc7786e482",
+    "sources": "pool.toml@b9bca20e78ae gotchas@50adade6ea84 memory@notes over cap by 79 chars: acceptance kept whole routed=shadow",
+    "policy_version": "b9bca20e78ae",
+    "gotchas": "50adade6ea84",
+    "candidate_tokens": 2581,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 21128,
+    "routed_reduction_ratio": 0.26896147872800874,
+    "routed_hidden": 34,
+    "routed_ambiguous": 30,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "87f4e92f81e4",
+      "82ee5bc061b9",
+      "a3c5d5c77090",
+      "997cbc1341c0",
+      "71fe6c2a4235",
+      "ad28180c0a0c",
+      "6cfe8c026bbf",
+      "a1320707b652",
+      "ba351d0cce35",
+      "60fa38d41870",
+      "33c27d0794fb",
+      "8d25801367d1",
+      "b1708e9b3f5e",
+      "72f83754eb5b",
+      "f63b9f480f86",
+      "2a8cf04ec45a",
+      "f50301711d72",
+      "58bcfe125828",
+      "468b493a9dab",
+      "15d254eb0c4b",
+      "4a9c289ff2f0",
+      "7067c6cfc20c",
+      "64633696890d",
+      "e5bb232e7291",
+      "1123a1e2f83a",
+      "9b65f97f1fe2",
+      "c97639668e22",
+      "f0a1e4b4afdb",
+      "2eaddc39f80d",
+      "c64a79749bf1",
+      "42445d5c3a8c",
+      "46046b524c97",
+      "0f4737395d5d",
+      "67f8b589f1e2",
+      "70d0d9f869ca",
+      "f1f0c61311b9",
+      "83109cc9df12",
+      "3db1b12c3605",
+      "d7497476d217",
+      "8bef670768a3",
+      "19fe68459ff9",
+      "c506713faa4d",
+      "be020b2e8fa5",
+      "93c3132fde1f",
+      "4fe7858da833",
+      "514575a0cdff",
+      "9dfad850825f",
+      "d77704a7d878",
+      "60d0ecf1820d",
+      "01d7be514e82",
+      "b62bf6639378",
+      "2ce45a72cf01",
+      "00db509188f0",
+      "0148c8d2026d",
+      "021add6ffb89",
+      "0331f61415c0",
+      "03d9db5b76a4",
+      "041199286363",
+      "04de65c255cf",
+      "051786ba0165",
+      "05df0bc9ef62",
+      "06250f5b2bf9",
+      "0768ddd89e7e",
+      "0784c689df19",
+      "09585e885a2c",
+      "0a3ca7410102",
+      "0bbc287aecf4",
+      "0d238bb278d4",
+      "0d5efa94f9ca",
+      "0da74424ba2b",
+      "0f1d68687edd",
+      "0fb2f39963fc",
+      "0fcd075d9f57",
+      "1010a8c11bac",
+      "10357d124edf",
+      "1073188aac14",
+      "11f75475460f",
+      "12b4301edd3e",
+      "1336f8df6f94",
+      "13abf2cf46f6",
+      "15359a72a0a5",
+      "158dd9947c80",
+      "16285184ccd9",
+      "1807a69e7663",
+      "188950523280",
+      "18df6b59f1b8",
+      "18f9ce631e61",
+      "1a17ff32a904",
+      "1a7a7f5dc41a",
+      "1a80d55206ca",
+      "1ab87a10d407",
+      "1c510a428e02",
+      "1d0cc9ab8559",
+      "1dd317c8d9b9",
+      "1df251b67771",
+      "1e8bb14425a8",
+      "1f4f25fba597",
+      "1f7cd86722f6",
+      "2091ec7061d7",
+      "2380174927fc",
+      "23e771b7caa4",
+      "248975d5c496",
+      "25e6db5cf579",
+      "25ee5f8920dc",
+      "260f2103255f",
+      "26adf6a241ea",
+      "270a093d49c3",
+      "27e3d479e418",
+      "28a564cd538d",
+      "29862065763a",
+      "2a459fab6526",
+      "2a874b8ed171",
+      "2b71081a619f",
+      "2c3608269bcd",
+      "2ccea77faf96",
+      "2db2764f9bd8",
+      "2db518b45b7a",
+      "2eae3c2d74c4",
+      "2f544c8da367",
+      "2f87295b9e34",
+      "2fda1602f756",
+      "3037c6d26ebe",
+      "31f918ec7b61",
+      "325d85b6f071",
+      "32a73d2b77ef",
+      "32c8fc2ba755",
+      "347b2365cf0d",
+      "34b6b61ecc58",
+      "34c966b7b621",
+      "34f30d64c6aa",
+      "36dd90fbb604",
+      "36f0d96529d8",
+      "36fba3c5b5ac",
+      "3700e33e38dd",
+      "376d59216a0a",
+      "37c254b43610",
+      "386984bd9daf",
+      "3953665afea9",
+      "3a6ff3f4dab0",
+      "3a7ed61a955d",
+      "3bef63a0226d",
+      "3ca6fc77d0d0",
+      "3d576cc180d1",
+      "3d9de6ae8904",
+      "3db57e23f967",
+      "3e677b524cec",
+      "3e787c244ee0",
+      "3ec2adada116",
+      "3fc77651746c",
+      "4180c7586cb1",
+      "418f23dce663",
+      "42758e20cbaf",
+      "427a8e2bd836",
+      "42be67d41407",
+      "4394c9ea5626",
+      "43ed90a1ad4e",
+      "453b6e50c221",
+      "461132b06b06",
+      "4748dac32cb6",
+      "4840989d4fad",
+      "48de25429ecb",
+      "4a226dc6afc3",
+      "4b20ac430c64",
+      "4b4b12743a05",
+      "4ca2eec9fe74",
+      "4cf8b290c178",
+      "4e6a2070bda4",
+      "4e7c92225364",
+      "504365aa02ad",
+      "51355537f5ea",
+      "52a59c2d8b66",
+      "52f5acceef24",
+      "52f6f7dd5afb",
+      "55d0ebe04a88",
+      "55e8c42797cc",
+      "5650c5639689",
+      "5693a275ea2c",
+      "573b5b20bfad",
+      "575022ff3493",
+      "5777308171e4",
+      "5783dcfcf0b6",
+      "5893a1c64463",
+      "5b27613653f6",
+      "5b27f397c201",
+      "5b7245db391a",
+      "5b872ee10528",
+      "5b9bb25ec23c",
+      "5d279e520eff",
+      "5dfb7da66de0",
+      "5e22799f1c53",
+      "5e9bcae7ed92",
+      "60094942b7f7",
+      "61d4a8ade48d",
+      "6215f26cae57",
+      "622b3821c7d5",
+      "622de2bd3ec8",
+      "62bb42ad80d2",
+      "62c565ed60b9",
+      "62d782bc1c28",
+      "63407adb9b84"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 5758,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 472,
+    "instruction_tokens_modular": 411,
+    "role": "execute",
+    "tool_tokens_disclosed": 5995,
+    "tool_tokens_minimal": 5995,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_selected_l0": 25,
+    "skill_tokens_selected_l2": 62,
+    "skill_routing_mode": "shadow",
+    "session_id": "a87e13e6-044f-43f1-b05d-c627835c053e",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:opus",
+  "claimed_at": 1791323337.6741939,
+  "account": "B",
+  "pid": 70607,
+  "hold_reason": null,
+  "resume_hint": {
+    "conflicts": [
+      "orchestrator/daemon.py"
+    ],
+    "hunks": "diff --cc orchestrator/daemon.py\nindex c883c9a,bb43180..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -8,8 -8,8 +8,13 @@@ import tomlli\n  from pathlib import Path\n  from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion\n  from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,\n++<<<<<<< HEAD\n +               planner_runs, spawn, strategy, worker_control)\n +from . import capacity, concurrency, decision_log, duration, jev_sched, machine, merge_pressure\n++=======\n+                planner_runs, ship, spawn, strategy, worker_control)\n+ from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure\n++>>>>>>> 626802a (T-1678 ship: unattended merge of a closed goal to main after a full gate, resumable, with orchestrator rollback)\n  from . import stale as stale_evidence\n  from .pool import Pool, fallback_tier, executor_identity, config as pool_config\n  from . import failures, gate as gate_runner, gitutil, interference, schedlog, notify as notifications\n"
+  },
+  "review_verdict": "approve",
+  "reason": "rebase_conflict",
+  "merged_into": "goal/T-1667",
+  "merged_via": "fix round T-1696 600c51727f037b86b737e3ebe0e129b8e028cab3"
+}

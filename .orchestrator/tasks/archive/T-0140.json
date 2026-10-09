@@ -1,0 +1,217 @@
+{
+  "id": "T-0140",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: C-O4: `orchestrator serve` \u2014 bearer-authed HTTP API over goals for the kgpt orchestrator module (starlette, already a dependency of mcp)",
+  "spec": "Why: the kgpt `modules/orchestrator` (Phase C, kgpt side) forwards start_goal/goal_status/list_goals/cancel_goal to a per-user endpoint; this is that endpoint, running in the executor container on the home network. Implement orchestrator/serve.py with starlette (import from the mcp dependency tree; if starlette is not importable, fail at startup with a one-line message and do not add a dependency): routes GET /healthz (no auth, {\"status\":\"ok\"}), POST /goals {repo, goal, requester} \u2192 goals.start on the repo resolved from .orchestrator/repos.toml (slug \u2192 {path, git_url}); when path is missing and git_url is set, `git clone` it under ORCH_WORK (env, default /work) first; 404 unknown slug, 400 empty goal, 409 when a goal is already running for that repo (planner pid alive) \u2192 {goal_id, repo, status}; GET /goals[?repo=] \u2192 goals.list per repo; GET /goals/{repo}/{goal_id} \u2192 goals.status; POST /goals/{repo}/{goal_id}/cancel \u2192 SIGTERM the planner pid if alive, mark cancelled in goals.json, 404 otherwise. Auth: every route but /healthz requires `Authorization: Bearer <ORCH_SERVICE_TOKEN>` (env; refuse to start when unset), compared with hmac.compare_digest; 401 otherwise. Requester is recorded on the goal record and returned; the service never stores or logs the bearer. cli.py: `serve [--host 127.0.0.1] [--port 8090]` using uvicorn from the same dependency tree. `.orchestrator/repos.toml.example` with one commented entry. Tests in tests/test_serve.py with starlette's TestClient and goals.* patched: 401 without token, 404 unknown repo, 201 start returns goal id, 409 when running, cancel path, healthz open.\n(Recreated from T-0105: depends_on re-pointed at C-O3 v4)",
+  "inputs": [
+    "T-0116"
+  ],
+  "acceptance": [
+    "tests/test_serve.py covers: healthz_no_auth, rejects_missing_or_wrong_bearer, unknown_repo_404, start_returns_goal_id, second_start_409_while_running, cancel_marks_cancelled; all green",
+    "`uv run orchestrator serve` without ORCH_SERVICE_TOKEN exits non-zero with one line",
+    "No route logs or persists the bearer token; requester is stored on the goal record",
+    "`uv run python -m unittest discover -q tests` green; no new dependency added to pyproject.toml"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "orchestrator/cli.py",
+    "tests/test_serve.py",
+    ".orchestrator/repos.toml.example",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0140",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "Spec requires the endpoint to record 'requester' on the goal record and return/persist it, but goals.py is outside the task's Scope list and its start() signature is start(repo_path, goal_text, account_id='A', reinstall=False) with no requester param; the record dict built in start() and the fields _status_entry() returns have no requester slot. Tests in scope mock goals.* so this gap won't be caught by test_serve.py, but real integration would need either a TypeError-raising call to a nonexistent kwarg, or serve.py reaching into goals.py's private _goals_path/_with_goals_lock/_append_goal_record internals (which goals.py's own docstring says is an import boundary nobody outside the module should cross) to bolt requester on after the fact.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "Spec's POST /goals 409 case ('goal already running for that repo, planner pid alive') is only detectable today by string-matching goals.start()'s free-text failure reason ('... is still running; stop it first'), since start() returns no structured error code. This is fragile coupling to wording in a file outside scope; a safer route is to call goals.list_goals(repo_path) first and check for a record with record_status=='running' and planner_alive==True (fields already exposed by the public status()/list_goals() API) before invoking start(), rather than parsing start()'s reason string.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "POST /goals's git-clone-if-missing step and goals.start()'s own subprocess.run (task creation) and git commands are synchronous/blocking. If the route handler is an async def, running these inline blocks the whole ASGI event loop for the clone/subprocess duration, stalling /healthz and every other concurrent request (status polls for other repos, cancel calls) on this single-service endpoint. Spec doesn't say whether handlers should be sync (starlette threadpools sync def automatically) or wrap blocking calls in run_in_threadpool.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "Spec enumerates status codes for 3 failure modes (404 unknown slug, 400 empty goal, 409 already running) but goals.start() has several other 'launched: False' reasons (git precheck failures, staged-changes conflict, missing pool.toml config, missing planner.md, install failure, scaffold-commit failure) that aren't assigned a status code or covered by any acceptance test, leaving the mapping for those to implementer discretion.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "POST /goals body per spec is {repo, goal, requester} with no account field, but goals.start() requires account_id (defaults to 'A'). Spec doesn't say whether the service should always use the default account or expose it as an optional body field; worth an explicit call-out so the executor doesn't guess.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add orchestrator/goals.py to Scope with a narrow change: accept an optional requester=None kwarg on start(), store it on the record dict, and include it in _status_entry()'s returned dict \u2014 or explicitly state that requester need only be echoed back in the POST /goals response body and not persisted/returned by GET status, if that's the intended (lesser) scope.",
+      "Specify that the 409-vs-other-failure distinction should be made via goals.list_goals()/status() planner_alive+record_status fields rather than parsing goals.start()'s free-text reason string.",
+      "State whether blocking calls (git clone, goals.start's internal subprocess.run) must be offloaded to a thread (e.g. starlette.concurrency.run_in_threadpool) so /healthz and concurrent requests stay responsive during a clone or task-creation call.",
+      "Clarify the status code (400 vs 500) for goals.start() failure reasons other than 'already running', and whether account_id is fixed to default 'A' or accepted as an optional request field."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789737952.2881122,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0140",
+      "claimed_at": 1789737952.287661
+    },
+    {
+      "ts": 1789737952.3001652,
+      "pid": 78391,
+      "account": "B"
+    },
+    {
+      "ts": 1789738074.184142,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "Spec requires the endpoint to record 'requester' on the goal record and return/persist it, but goals.py is outside the task's Scope list and its start() signature is start(repo_path, goal_text, account_id='A', reinstall=False) with no requester param; the record dict built in start() and the fields _status_entry() returns have no requester slot. Tests in scope mock goals.* so this gap won't be caught by test_serve.py, but real integration would need either a TypeError-raising call to a nonexistent kwarg, or serve.py reaching into goals.py's private _goals_path/_with_goals_lock/_append_goal_record internals (which goals.py's own docstring says is an import boundary nobody outside the module should cross) to bolt requester on after the fact.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "Spec's POST /goals 409 case ('goal already running for that repo, planner pid alive') is only detectable today by string-matching goals.start()'s free-text failure reason ('... is still running; stop it first'), since start() returns no structured error code. This is fragile coupling to wording in a file outside scope; a safer route is to call goals.list_goals(repo_path) first and check for a record with record_status=='running' and planner_alive==True (fields already exposed by the public status()/list_goals() API) before invoking start(), rather than parsing start()'s reason string.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "POST /goals's git-clone-if-missing step and goals.start()'s own subprocess.run (task creation) and git commands are synchronous/blocking. If the route handler is an async def, running these inline blocks the whole ASGI event loop for the clone/subprocess duration, stalling /healthz and every other concurrent request (status polls for other repos, cancel calls) on this single-service endpoint. Spec doesn't say whether handlers should be sync (starlette threadpools sync def automatically) or wrap blocking calls in run_in_threadpool.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "Spec enumerates status codes for 3 failure modes (404 unknown slug, 400 empty goal, 409 already running) but goals.start() has several other 'launched: False' reasons (git precheck failures, staged-changes conflict, missing pool.toml config, missing planner.md, install failure, scaffold-commit failure) that aren't assigned a status code or covered by any acceptance test, leaving the mapping for those to implementer discretion.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "POST /goals body per spec is {repo, goal, requester} with no account field, but goals.start() requires account_id (defaults to 'A'). Spec doesn't say whether the service should always use the default account or expose it as an optional body field; worth an explicit call-out so the executor doesn't guess.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add orchestrator/goals.py to Scope with a narrow change: accept an optional requester=None kwarg on start(), store it on the record dict, and include it in _status_entry()'s returned dict \u2014 or explicitly state that requester need only be echoed back in the POST /goals response body and not persisted/returned by GET status, if that's the intended (lesser) scope.",
+          "Specify that the 409-vs-other-failure distinction should be made via goals.list_goals()/status() planner_alive+record_status fields rather than parsing goals.start()'s free-text reason string.",
+          "State whether blocking calls (git clone, goals.start's internal subprocess.run) must be offloaded to a thread (e.g. starlette.concurrency.run_in_threadpool) so /healthz and concurrent requests stay responsive during a clone or task-creation call.",
+          "Clarify the status code (400 vs 500) for goals.start() failure reasons other than 'already running', and whether account_id is fixed to default 'A' or accepted as an optional request field."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789738074.186849,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Spec requires the endpoint to record 'requester' on the goal record and return/persist it, but goals.py is outside the task's Scope list and its start() signature is start(repo_path, goal_text, account_id='A', reinstall=False) with no requester param; the record dict built in start() and the fields _status_entry() returns have no requester slot. Tests in scope mock goals.* so this gap won't be caught by test_serve.py, but real integration would need either a TypeError-raising call to a nonexistent kwarg, or serve.py reaching into goals.py's private _goals_path/_with_goals_lock/_append_goal_record internals (which goals.py's own docstring says is an import boundary nobody outside the module should cross) to bolt requester on after the fact.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "Spec's POST /goals 409 case ('goal already running for that repo, planner pid alive') is only detectable today by string-matching goals.start()'s free-text failure reason ('... is still running; stop it first'), since start() returns no structured error code. This is fragile coupling to wording in a file outside scope; a safer route is to call goals.list_goals(repo_path) first and check for a record with record_status=='running' and planner_alive==True (fields already exposed by the public status()/list_goals() API) before invoking start(), rather than parsing start()'s reason string.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "POST /goals's git-clone-if-missing step and goals.start()'s own subprocess.run (task creation) and git commands are synchronous/blocking. If the route handler is an async def, running these inline blocks the whole ASGI event loop for the clone/subprocess duration, stalling /healthz and every other concurrent request (status polls for other repos, cancel calls) on this single-service endpoint. Spec doesn't say whether handlers should be sync (starlette threadpools sync def automatically) or wrap blocking calls in run_in_threadpool.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "Spec enumerates status codes for 3 failure modes (404 unknown slug, 400 empty goal, 409 already running) but goals.start() has several other 'launched: False' reasons (git precheck failures, staged-changes conflict, missing pool.toml config, missing planner.md, install failure, scaffold-commit failure) that aren't assigned a status code or covered by any acceptance test, leaving the mapping for those to implementer discretion.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "POST /goals body per spec is {repo, goal, requester} with no account field, but goals.start() requires account_id (defaults to 'A'). Spec doesn't say whether the service should always use the default account or expose it as an optional body field; worth an explicit call-out so the executor doesn't guess.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789737952.287661,
+  "pid": 78391,
+  "account": "B",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Spec requires the endpoint to record 'requester' on the goal record and return/persist it, but goals.py is outside the task's Scope list and its start() signature is start(repo_path, goal_text, account_id='A', reinstall=False) with no requester param; the record dict built in start() and the fields _status_entry() returns have no requester slot. Tests in scope mock goals.* so this gap won't be caught by test_serve.py, but real integration would need either a TypeError-raising call to a nonexistent kwarg, or serve.py reaching into goals.py's private _goals_path/_with_goals_lock/_append_goal_record internals (which goals.py's own docstring says is an import boundary nobody outside the module should cross) to bolt requester on after the fact.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "Spec's POST /goals 409 case ('goal already running for that repo, planner pid alive') is only detectable today by string-matching goals.start()'s free-text failure reason ('... is still running; stop it first'), since start() returns no structured error code. This is fragile coupling to wording in a file outside scope; a safer route is to call goals.list_goals(repo_path) first and check for a record with record_status=='running' and planner_alive==True (fields already exposed by the public status()/list_goals() API) before invoking start(), rather than parsing start()'s reason string.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "POST /goals's git-clone-if-missing step and goals.start()'s own subprocess.run (task creation) and git commands are synchronous/blocking. If the route handler is an async def, running these inline blocks the whole ASGI event loop for the clone/subprocess duration, stalling /healthz and every other concurrent request (status polls for other repos, cancel calls) on this single-service endpoint. Spec doesn't say whether handlers should be sync (starlette threadpools sync def automatically) or wrap blocking calls in run_in_threadpool.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "Spec enumerates status codes for 3 failure modes (404 unknown slug, 400 empty goal, 409 already running) but goals.start() has several other 'launched: False' reasons (git precheck failures, staged-changes conflict, missing pool.toml config, missing planner.md, install failure, scaffold-commit failure) that aren't assigned a status code or covered by any acceptance test, leaving the mapping for those to implementer discretion.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "POST /goals body per spec is {repo, goal, requester} with no account field, but goals.start() requires account_id (defaults to 'A'). Spec doesn't say whether the service should always use the default account or expose it as an optional body field; worth an explicit call-out so the executor doesn't guess.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

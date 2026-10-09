@@ -1,0 +1,127 @@
+{
+  "id": "T-0147",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "C-O4 v4: `orchestrator serve` \u2014 bearer-authed HTTP API over goals (final spec; folds in spec reviews T-0140, T-0143, T-0146; supersedes T-0144)",
+  "spec": "Why: the kgpt `modules/orchestrator` (Phase C, kgpt side) forwards start_goal/goal_status/list_goals/cancel_goal to a per-user endpoint; this is that endpoint, running in the executor container on the home network. Spec round 4 folds in spec reviews T-0140, T-0143 and T-0146; dispatched without a further spec review by Planner decision. Scope is 6 files by Planner decision: the requester field belongs in goals.py with its record, and README waits for the C-O5 runbook.\n\nCONTRACT WITH goals.py (read orchestrator/goals.py on goal/T-0073 first): goals.status(repo_path, goal_id=None) returns a LIST of entry dicts (one per record, filtered to goal_id when given; empty list when unknown); goals.list_goals(repo_path) returns the same list shape; goals.stop(repo_path, goal_id) returns {\"error\": \"unknown goal\"} for an unknown id, else a dict with the record's status; goals.start(...) returns {\"launched\": bool, ...} with \"reason\" when false. Entry dicts carry goal_id, record_status, planner_alive, requester and the fields _status_entry builds. If any of this differs from the code you read, follow the code and say so in the summary.\n\ngoals.py (small, additive): start(repo_path, goal_text, account_id=\"A\", reinstall=False, requester=None) stores `requester` (string or None) on the goals.json record; _status_entry()/status()/list_goals() return it. Nothing else in goals.py changes. tests/test_goals.py: one test that start() with requester=\"alice\" records it and status() returns it.\n\nserve.py with starlette (import from the mcp dependency tree; if starlette or uvicorn is not importable, exit at startup with one line; do not add a dependency). `from . import goals` and calls through the module attribute (goals.start etc.), never `from .goals import start`. All route handlers are plain `def` (not async). Every goal entry in a response carries \"repo\": <slug> added by serve.py. repos.toml: `.orchestrator/repos.toml` maps slug \u2192 {path, git_url?}; \"path missing\" below means THE DIRECTORY DOES NOT EXIST ON DISK (os.path.isdir(path) is false), never that the key is absent; an entry without a path key is a 500-free config error: 404 {\"reason\": \"repo not configured\"}.\nPer-slug lock: fcntl flock on <ORCH_WORK>/.locks/<slug>.lock (mkdir -p; ORCH_WORK env, default /work), mirroring goals.py's _with_goals_lock pattern; POST /goals holds it across the whole clone-check + running-check + goals.start sequence so two concurrent starts for one slug serialize (T-0146 risk 6).\nRoutes:\n- GET /healthz (no auth) \u2192 200 {\"status\": \"ok\"}.\n- POST /goals body {repo, goal, requester?, account?}: 400 {\"reason\": ...} when repo or goal is missing, goal is empty/whitespace, or requester/account present and not a string; 404 {\"reason\": \"unknown repo\"} for an unknown slug. Under the per-slug lock: if the directory is missing and git_url is set \u2192 `subprocess.run([\"git\", \"clone\", git_url, path], capture_output=True, text=True, timeout=CLONE_TIMEOUT_S)` with CLONE_TIMEOUT_S = int(env ORCH_CLONE_TIMEOUT_S or 300); TimeoutExpired \u2192 504 {\"reason\": \"clone timed out\"}; non-zero \u2192 502 {\"reason\": \"clone failed\"} and the stderr goes ONLY to the server log after redaction (regex replace `://[^/@\\s]+@` with `://***@`), never into the response body (T-0146 risk 3); directory missing and no git_url \u2192 404 {\"reason\": \"repo path missing and no git_url\"}. Then goals.list_goals(path): any entry with record_status == \"running\" and planner_alive True \u2192 409 {\"reason\": \"goal already running\", \"goal_id\": <id>}. Then goals.start(path, goal, account_id=body.get(\"account\", \"A\"), requester=body.get(\"requester\")); launched true \u2192 201 {goal_id, repo: slug, status: \"running\", requester}; launched false \u2192 422 {\"reason\": r[\"reason\"]}. Never a 500 for an expected refusal.\n- GET /goals[?repo=slug] \u2192 200 {\"goals\": [entries]} from goals.list_goals(path) per configured repo (all repos when no filter; 404 unknown slug), each entry with \"repo\": slug.\n- GET /goals/{repo}/{goal_id} \u2192 entries = goals.status(path, goal_id); empty \u2192 404 {\"reason\": \"unknown goal\"}; else 200 with the single entry dict plus \"repo\": slug (T-0146 risk 1).\n- POST /goals/{repo}/{goal_id}/cancel \u2192 goals.stop(path, goal_id); {\"error\": \"unknown goal\"} \u2192 404; else 200 {goal_id, repo: slug, status: \"stopped\"}.\nAuth: every route except /healthz requires `Authorization: Bearer <ORCH_SERVICE_TOKEN>` (env; the server refuses to start with one line and non-zero exit when unset), compared with hmac.compare_digest; 401 {\"reason\": \"unauthorized\"} otherwise. The token is never stored, logged or echoed; access log lines contain method, path, status only.\ncli.py: `serve [--host 127.0.0.1] [--port 8090]` runs uvicorn with the app. `.orchestrator/repos.toml.example` with one commented entry showing slug, path, git_url.\n\nTests tests/test_serve.py with starlette's TestClient and orchestrator.goals.start/list_goals/status/stop patched via unittest.mock.patch (no real git, no Popen; ORCH_WORK pointed at a temp dir): healthz_no_auth, rejects_missing_or_wrong_bearer, unknown_repo_404, empty_goal_400, bad_requester_type_400, start_returns_goal_id_and_requester (201; start called with requester and account kwargs; response repo == slug), start_refusal_422, second_start_409_while_running (start NOT called), list_entries_carry_slug, get_goal_returns_single_entry_200, get_goal_unknown_404 (status returns []), clone_runs_under_lock_once_with_timeout (directory missing + git_url set; subprocess.run patched: called once with an argv list starting [\"git\", \"clone\"] and a timeout kwarg; lock file exists under ORCH_WORK/.locks), clone_failure_502_does_not_echo_stderr (patched run returns rc 1 with stderr containing \"https://user:SECRET@host\"; body has no \"SECRET\"), clone_timeout_504, cancel_marks_stopped, cancel_unknown_404, handlers_are_sync, serve_imports_goals_as_module (serve.goals is orchestrator.goals). No new dependency; finish with summary, files changed, failures-only test output; commit on the task branch when green.",
+  "inputs": [
+    "T-0140",
+    "T-0143",
+    "T-0146"
+  ],
+  "acceptance": [
+    "tests/test_serve.py has the eighteen named tests, green; tests/test_goals.py gains the requester test, green",
+    "goals.start accepts requester and status()/list_goals() return it; no other goals.py change (diff)",
+    "serve.py calls goals.* through the module attribute; every handler is a plain def; single-goal GET returns one entry or 404 from an empty status() list; every start() refusal maps to 422; 409 comes from list_goals; every goal entry carries repo = slug; requester/account validated as strings or 400",
+    "First-use clone runs under a per-slug flock that also spans the running-check and start(), as an argv list with a timeout; clone stderr never reaches a response body and is redacted in the log; timeout \u2192 504",
+    "`uv run orchestrator serve` without ORCH_SERVICE_TOKEN exits non-zero with one line; no route logs, stores or echoes the bearer",
+    "`uv run python -m unittest discover -q tests` green; no new dependency; only the six scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "orchestrator/cli.py",
+    "orchestrator/goals.py",
+    "tests/test_serve.py",
+    "tests/test_goals.py",
+    ".orchestrator/repos.toml.example"
+  ],
+  "depends_on": [
+    "T-0115"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2700,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_serve.py",
+    "supersedes": "T-0144",
+    "spec_review": "waived by Planner after three rounds (T-0140, T-0143, T-0146), all folded in; code review still applies"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0147",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0147`.\n\n## Summary\n\nImplemented the per-user goal HTTP endpoint (`orchestrator/serve.py`) that kgpt's `modules/orchestrator` forwards to, plus the `requester` field threaded through `goals.py`.\n\n- **`orchestrator/goals.py`**: `start()` gained a `requester=None` kwarg, stored on the goal record; `_status_entry()` returns it. Nothing else changed (diff is 2 one-line additions).\n- **`orchestrator/serve.py`** (new): starlette app, all route handlers plain `def`. Bearer auth via `hmac.compare_digest` on every route but `/healthz`; per-slug `flock` under `<ORCH_WORK>/.locks/<slug>.lock` spans the clone-check, running-check, and `goals.start` call; clone stderr is regex-redacted and only ever logged, never returned in a response; every start refusal maps to 422, running-conflict to 409, unknown/misconfigured repo to 404 (never 500). `goals` is imported and called as a module (`from . import goals`), never via `from .goals import ...`, so `mock.patch(\"orchestrator.goals.x\")` reaches serve.py's calls. Repo config comes from `.orchestrator/repos.toml` (path overridable via `ORCH_REPOS_TOML` for tests).\n- **`orchestrator/cli.py`**: added `serve [--host] [--port]`, delegating to `serve.main()`, which exits non-zero with one line if `ORCH_SERVICE_TOKEN` is unset.\n- **`.orchestrator/repos.toml.example`**: one commented slug/path/git_url entry.\n- **Tests**: `tests/test_serve.py` has all 18 named tests, green. `tests/test_goals.py` gained `test_start_records_requester_and_status_returns_it`.\n\nOne implementation detail not pinned by the spec: reading the POST body in a sync handler needs `anyio.from_thread.run(request.body)` (anyio ships as a starlette/uvicorn transitive dependency already in the lockfile \u2014 no new dependency added).\n\nFull suite: `uv run python -m unittest discover -q tests` \u2192 175 tests, OK. `.claude/hooks/tests-green.sh` \u2192 exit 0. Only the six scoped files changed; committed on `task/T-0147` (be42500).",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789739904.1187289,
+      "pipeline": {
+        "spec_review_at": 1789739904.1186602
+      }
+    },
+    {
+      "ts": 1789739921.4940438,
+      "spec_review_verdict": "approve",
+      "spec_review_note": "waived by Planner after three rounds (T-0140, T-0143, T-0146), all folded into v4",
+      "pipeline": {
+        "spec_review_at": 1789739921.4938428
+      }
+    },
+    {
+      "ts": 1789739929.60222,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789739930.605888,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0147",
+      "claimed_at": 1789739930.605393
+    },
+    {
+      "ts": 1789739930.61345,
+      "pid": 29228,
+      "account": "B"
+    },
+    {
+      "ts": 1789740319.18592,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0147`.\n\n## Summary\n\nImplemented the per-user goal HTTP endpoint (`orchestrator/serve.py`) that kgpt's `modules/orchestrator` forwards to, plus the `requester` field threaded through `goals.py`.\n\n- **`orchestrator/goals.py`**: `start()` gained a `requester=None` kwarg, stored on the goal record; `_status_entry()` returns it. Nothing else changed (diff is 2 one-line additions).\n- **`orchestrator/serve.py`** (new): starlette app, all route handlers plain `def`. Bearer auth via `hmac.compare_digest` on every route but `/healthz`; per-slug `flock` under `<ORCH_WORK>/.locks/<slug>.lock` spans the clone-check, running-check, and `goals.start` call; clone stderr is regex-redacted and only ever logged, never returned in a response; every start refusal maps to 422, running-conflict to 409, unknown/misconfigured repo to 404 (never 500). `goals` is imported and called as a module (`from . import goals`), never via `from .goals import ...`, so `mock.patch(\"orchestrator.goals.x\")` reaches serve.py's calls. Repo config comes from `.orchestrator/repos.toml` (path overridable via `ORCH_REPOS_TOML` for tests).\n- **`orchestrator/cli.py`**: added `serve [--host] [--port]`, delegating to `serve.main()`, which exits non-zero with one line if `ORCH_SERVICE_TOKEN` is unset.\n- **`.orchestrator/repos.toml.example`**: one commented slug/path/git_url entry.\n- **Tests**: `tests/test_serve.py` has all 18 named tests, green. `tests/test_goals.py` gained `test_start_records_requester_and_status_returns_it`.\n\nOne implementation detail not pinned by the spec: reading the POST body in a sync handler needs `anyio.from_thread.run(request.body)` (anyio ships as a starlette/uvicorn transitive dependency already in the lockfile \u2014 no new dependency added).\n\nFull suite: `uv run python -m unittest discover -q tests` \u2192 175 tests, OK. `.claude/hooks/tests-green.sh` \u2192 exit 0. Only the six scoped files changed; committed on `task/T-0147` (be42500).",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789740351.201656,
+      "pipeline": {
+        "spec_review_at": 1789739921.4938428,
+        "gated_at": 1789740351.201443
+      }
+    },
+    {
+      "ts": 1789741913.168322,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "hold_reason": null,
+      "merged_via": "T-0158 (rebased fix rounds)"
+    }
+  ],
+  "pipeline": {
+    "spec_review_at": 1789739921.4938428,
+    "gated_at": 1789740351.201443
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_note": "waived by Planner after three rounds (T-0140, T-0143, T-0146), all folded into v4",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789739930.605393,
+  "pid": 29228,
+  "account": "B",
+  "merged_into": "goal/T-0073",
+  "hold_reason": null,
+  "merged_via": "T-0158 (rebased fix rounds)"
+}

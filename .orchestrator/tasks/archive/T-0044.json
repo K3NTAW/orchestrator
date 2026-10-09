@@ -1,0 +1,328 @@
+{
+  "id": "T-0044",
+  "parent": "T-0043",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout C1: map tests/test_orchestrator.py for a per-module split with a shared harness",
+  "spec": "HARD OUTPUT CAP: JSON under 4,500 chars; \u226412 findings; evidence path:line only. Read-only.\ntests/test_orchestrator.py (800 lines, 16 classes: Bus, PoolSel, FakeProc, Executor, Executors, Scorecard, Bench, ReviewVerdict, Render, Hooks, Guardrails, MergeQueue, SpawnBase, Cli, MemorySkill, PlannerMode). Answer: (1) the module-level setup (lines 1-22): what it creates (TMP, ORCH_ROOT env, copied pool.toml, symlinked prompts/.claude, sys.path) and why it must run before `from orchestrator import ...`; (2) which classes share helpers (hook(), FakeProc, scratch git repos) and which are independent; (3) a proposed layout: tests/_harness.py exposing TMP, REPO, HOOKS, hook(), FakeProc and any git helper, plus tests/test_<name>.py per module with the class list for each; (4) how `python -m unittest discover -q tests` and `uv run --project . python -m unittest discover -q tests` (tests-green.sh) import these (top-level module names; no tests/__init__.py today \u2014 is one needed for `from tests._harness import ...` vs `from _harness import ...`?); (5) order or state coupling between classes (e.g. tests that depend on task ids created by earlier tests, bus.next_id) that would break when files run separately; (6) the two hook-related classes (Hooks, PlannerMode, Guardrails) read REPO/.claude/hooks \u2014 any path assumption that changes with the split. suggested_next: the exact file list and the import line each test file should use.",
+  "inputs": [],
+  "acceptance": [
+    "module-level setup explained with lines and the import-order constraint",
+    "proposed file layout with class assignment and the harness import line",
+    "state coupling between classes listed or 'none found' with evidence",
+    "result under 4,500 chars"
+  ],
+  "scope": [
+    "tests/**",
+    ".claude/hooks/tests-green.sh"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0044",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Lines 5-14 create TMP, set ORCH_ROOT env, seed .orchestrator/pool.toml, symlink prompts/.claude, and sys.path.insert(REPO) \u2014 all before `from orchestrator import bus,pool,...` at line 14, because bus/pool/executor read ORCH_ROOT at import time to locate STATE/PERSIST/tasks paths; import must come after env+dirs exist.",
+        "evidence": [
+          "tests/test_orchestrator.py:5-14"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "sys.path.insert(0, REPO) at line 13 is needed because tests/ has no package marker, so `from orchestrator import ...` only resolves if repo root is explicitly added.",
+        "evidence": [
+          "tests/test_orchestrator.py:13"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "hook() (module fn) is shared by Hooks, Guardrails, MemorySkill, PlannerMode \u2014 all shell out to .claude/hooks/*.sh via subprocess.run.",
+        "evidence": [
+          "tests/test_orchestrator.py:19-21,514,565,723,769"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "FakeProc/codex_stream (lines 83-90) are used only by Executor; no other class references them.",
+        "evidence": [
+          "tests/test_orchestrator.py:83-90,102-177"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "SpawnBase depends on MergeQueue's side effects (TMP becomes a real git repo with branch goal/G); its own docstring says it must run after MergeQueue and relies on class name being alphabetically later so dir(module) order runs it second.",
+        "evidence": [
+          "tests/test_orchestrator.py:589-621"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Bus.test_lifecycle_and_rules asserts bus.next_id()==\"T-0002\", which only holds if it is the first test in the whole run to call bus.create_task against the shared TMP/.orchestrator \u2014 every other class (Cli, MergeQueue, ReviewVerdict, MemorySkill, SpawnBase, Executor) also creates tasks there.",
+        "evidence": [
+          "tests/test_orchestrator.py:24-39"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Splitting preserves this ordering only if the filename for Bus sorts first alphabetically among test files (discover runs files in name order, classes in dir(module) order within a file), e.g. test_bus.py before test_cli.py, test_executor.py, test_merge.py, test_spawn.py, etc.",
+        "evidence": [
+          "tests/test_orchestrator.py:24-39",
+          ".claude/hooks/tests-green.sh:18,20"
+        ],
+        "confidence": 0.6,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "No tests/__init__.py exists today; unittest discover with a start dir lacking __init__.py inserts that dir itself into sys.path and imports files as bare top-level modules \u2014 so a harness import must be `from _harness import ...`, not `from tests._harness import ...`. Adding tests/__init__.py would flip discover to package-relative imports and require the dotted form instead.",
+        "evidence": [
+          "tests/test_orchestrator.py:1-22",
+          ".claude/hooks/tests-green.sh:18,20"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "REPO = Path(__file__).resolve().parents[1] and HOOKS = REPO/.claude/hooks only resolve correctly if the file defining them stays exactly one directory below repo root (i.e. directly in tests/), independent of which specific file does it.",
+        "evidence": [
+          "tests/test_orchestrator.py:5,16"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "PoolSel, Executor, and Executors each unlink P.PERSIST in their own setUp/fake_codex \u2014 no cross-class state coupling there, safe to split into separate files.",
+        "evidence": [
+          "tests/test_orchestrator.py:43-44,102-107,142,184-185"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Scorecard.setUp uses its own scratch root (TMP/scorecard-src/<ts>) isolated from shared TMP/.orchestrator, and Bench uses bench.FILE with its own unlink/addCleanup \u2014 both independent, but Scorecard's prior_weights tests call into Bench's bench.FILE, so keeping Scorecard+Bench in one file avoids import duplication.",
+        "evidence": [
+          "tests/test_orchestrator.py:239-344,345-469"
+        ],
+        "confidence": 0.55,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Does Cli.test_scorecard_table_and_json's bus.read(role=\"execute\")[-1] break if run before any execute task exists in a given file split order?",
+      "Should SpawnBase get its own minimal git-repo setUpClass instead of relying on MergeQueue running first, to remove the file-order coupling entirely?"
+    ],
+    "suggested_next": [
+      "tests/_harness.py: exposes REPO, TMP, HOOKS, hook(), FakeProc, codex_stream, and a git helper g(*a, cwd=TMP, **k) lifted from MergeQueue/SpawnBase; does the module-level TMP/env/pool.toml/symlink setup and the `from orchestrator import bus, pool as P, spawn, merge, executor, cli, scorecard, bench, STATE` import.",
+      "tests/test_bus.py: Bus  |  import: `from _harness import *` then `from orchestrator import bus`",
+      "tests/test_pool.py: PoolSel, Executors  |  `from orchestrator import pool as P, spawn`",
+      "tests/test_executor.py: Executor (incl. FakeProc, codex_stream)  |  `from orchestrator import bus, pool as P, executor`",
+      "tests/test_scorecard.py: Scorecard, Bench  |  `from orchestrator import scorecard, bench, pool as P, STATE`",
+      "tests/test_spawn.py: ReviewVerdict, Render, SpawnBase  |  `from orchestrator import bus, spawn, pool as P`",
+      "tests/test_merge.py: MergeQueue  |  `from orchestrator import bus, spawn, merge, STATE`  (must sort before test_spawn.py)",
+      "tests/test_hooks.py: Hooks, Guardrails, PlannerMode  |  `from _harness import hook, HOOKS, TMP, REPO` + `from orchestrator import bus`",
+      "tests/test_cli.py: Cli  |  `from orchestrator import cli, bus`",
+      "tests/test_memory_skill.py: MemorySkill  |  `from _harness import hook, TMP, REPO` + `from orchestrator import bus`",
+      "Do NOT add tests/__init__.py \u2014 keep discover's no-package behavior so `from _harness import ...` (bare) resolves."
+    ],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789671470.261419,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0044",
+      "claimed_at": 1789671470.261081
+    },
+    {
+      "ts": 1789671470.305815,
+      "pid": 46414,
+      "account": "B"
+    },
+    {
+      "ts": 1789671557.724013,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Lines 5-14 create TMP, set ORCH_ROOT env, seed .orchestrator/pool.toml, symlink prompts/.claude, and sys.path.insert(REPO) \u2014 all before `from orchestrator import bus,pool,...` at line 14, because bus/pool/executor read ORCH_ROOT at import time to locate STATE/PERSIST/tasks paths; import must come after env+dirs exist.",
+            "evidence": [
+              "tests/test_orchestrator.py:5-14"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "sys.path.insert(0, REPO) at line 13 is needed because tests/ has no package marker, so `from orchestrator import ...` only resolves if repo root is explicitly added.",
+            "evidence": [
+              "tests/test_orchestrator.py:13"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "hook() (module fn) is shared by Hooks, Guardrails, MemorySkill, PlannerMode \u2014 all shell out to .claude/hooks/*.sh via subprocess.run.",
+            "evidence": [
+              "tests/test_orchestrator.py:19-21,514,565,723,769"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "FakeProc/codex_stream (lines 83-90) are used only by Executor; no other class references them.",
+            "evidence": [
+              "tests/test_orchestrator.py:83-90,102-177"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "SpawnBase depends on MergeQueue's side effects (TMP becomes a real git repo with branch goal/G); its own docstring says it must run after MergeQueue and relies on class name being alphabetically later so dir(module) order runs it second.",
+            "evidence": [
+              "tests/test_orchestrator.py:589-621"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Bus.test_lifecycle_and_rules asserts bus.next_id()==\"T-0002\", which only holds if it is the first test in the whole run to call bus.create_task against the shared TMP/.orchestrator \u2014 every other class (Cli, MergeQueue, ReviewVerdict, MemorySkill, SpawnBase, Executor) also creates tasks there.",
+            "evidence": [
+              "tests/test_orchestrator.py:24-39"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Splitting preserves this ordering only if the filename for Bus sorts first alphabetically among test files (discover runs files in name order, classes in dir(module) order within a file), e.g. test_bus.py before test_cli.py, test_executor.py, test_merge.py, test_spawn.py, etc.",
+            "evidence": [
+              "tests/test_orchestrator.py:24-39",
+              ".claude/hooks/tests-green.sh:18,20"
+            ],
+            "confidence": 0.6,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "No tests/__init__.py exists today; unittest discover with a start dir lacking __init__.py inserts that dir itself into sys.path and imports files as bare top-level modules \u2014 so a harness import must be `from _harness import ...`, not `from tests._harness import ...`. Adding tests/__init__.py would flip discover to package-relative imports and require the dotted form instead.",
+            "evidence": [
+              "tests/test_orchestrator.py:1-22",
+              ".claude/hooks/tests-green.sh:18,20"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "REPO = Path(__file__).resolve().parents[1] and HOOKS = REPO/.claude/hooks only resolve correctly if the file defining them stays exactly one directory below repo root (i.e. directly in tests/), independent of which specific file does it.",
+            "evidence": [
+              "tests/test_orchestrator.py:5,16"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "PoolSel, Executor, and Executors each unlink P.PERSIST in their own setUp/fake_codex \u2014 no cross-class state coupling there, safe to split into separate files.",
+            "evidence": [
+              "tests/test_orchestrator.py:43-44,102-107,142,184-185"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Scorecard.setUp uses its own scratch root (TMP/scorecard-src/<ts>) isolated from shared TMP/.orchestrator, and Bench uses bench.FILE with its own unlink/addCleanup \u2014 both independent, but Scorecard's prior_weights tests call into Bench's bench.FILE, so keeping Scorecard+Bench in one file avoids import duplication.",
+            "evidence": [
+              "tests/test_orchestrator.py:239-344,345-469"
+            ],
+            "confidence": 0.55,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Does Cli.test_scorecard_table_and_json's bus.read(role=\"execute\")[-1] break if run before any execute task exists in a given file split order?",
+          "Should SpawnBase get its own minimal git-repo setUpClass instead of relying on MergeQueue running first, to remove the file-order coupling entirely?"
+        ],
+        "suggested_next": [
+          "tests/_harness.py: exposes REPO, TMP, HOOKS, hook(), FakeProc, codex_stream, and a git helper g(*a, cwd=TMP, **k) lifted from MergeQueue/SpawnBase; does the module-level TMP/env/pool.toml/symlink setup and the `from orchestrator import bus, pool as P, spawn, merge, executor, cli, scorecard, bench, STATE` import.",
+          "tests/test_bus.py: Bus  |  import: `from _harness import *` then `from orchestrator import bus`",
+          "tests/test_pool.py: PoolSel, Executors  |  `from orchestrator import pool as P, spawn`",
+          "tests/test_executor.py: Executor (incl. FakeProc, codex_stream)  |  `from orchestrator import bus, pool as P, executor`",
+          "tests/test_scorecard.py: Scorecard, Bench  |  `from orchestrator import scorecard, bench, pool as P, STATE`",
+          "tests/test_spawn.py: ReviewVerdict, Render, SpawnBase  |  `from orchestrator import bus, spawn, pool as P`",
+          "tests/test_merge.py: MergeQueue  |  `from orchestrator import bus, spawn, merge, STATE`  (must sort before test_spawn.py)",
+          "tests/test_hooks.py: Hooks, Guardrails, PlannerMode  |  `from _harness import hook, HOOKS, TMP, REPO` + `from orchestrator import bus`",
+          "tests/test_cli.py: Cli  |  `from orchestrator import cli, bus`",
+          "tests/test_memory_skill.py: MemorySkill  |  `from _harness import hook, TMP, REPO` + `from orchestrator import bus`",
+          "Do NOT add tests/__init__.py \u2014 keep discover's no-package behavior so `from _harness import ...` (bare) resolves."
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789671470.261081,
+  "pid": 46414,
+  "account": "B"
+}

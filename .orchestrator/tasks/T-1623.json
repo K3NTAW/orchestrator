@@ -1,0 +1,216 @@
+{
+  "id": "T-1623",
+  "created_at": 1791026235.956913,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "B8 v4 (fix round of T-1509): a Claude fix round resumes the newest Claude session in its chain on its own branch, through a session worker that mirrors _dispatch_worker",
+  "spec": "Goal T-1403, wave 2, plan label B8-v4. Respec of B8 v3 T-1620 (spec review T-1621 request_changes 2026-10-03; human go 'continue with your recommendations': all amendments), filed as a FIX ROUND of T-1509 so its merge stamps T-1509 and E7 T-1555 stays valid; the worktree is cut from goal/T-1403. Motivation: Codex fix rounds resume the parent thread and send a delta; Claude fix rounds start a fresh `claude -p` with the full packet every round (fix rounds were 41% of execute runs, analysis 2026-10-01).\n\nFacts (scout T-1618 and the Planner on goal/T-1403; locate by symbol):\n- Daemon fix-round dispatch tick (daemon.py, the code handling constraints.fix_round_for): executor.resume_plan(parent, fix) is Codex-only (fresh reasons no_thread, rounds_exhausted, executor_not_codex, incompatible_worktree). Mode resume: bus.update(fix, worktree=parent.worktree, branch=...), spawn_async(_dispatch_reply_worker, fix, parent, _fix_round_delta(parent, fix), plan). Fresh mode in the TICK: pipeline.resume mode 'fresh' is recorded and control falls through to the inline spawn.packet / render('execute') / _dispatch_worker path (not _dispatch_fresh_fix, which is the reply worker's incompatible fallback). A Claude parent always goes fresh today (executor_not_codex). _dispatch_worker and _dispatch_reply_worker handle worker_control.launch_epoch / is_current, render_error holds, the dispatch_error pipeline note, and posting done/failed/held results.\n- spawn.run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None, session_id=None). Fresh order: pool.pick, executor write, packet(), render('execute'), packet_meta, skill telemetry (from the render), pool.reserve, ensure_worktree, bus.claim(task, 'claude:<acct>', wt), account write, run_claude. The resume_task branch (worker_control steering via spawn.resume_worker) reads worker_registry model/tools and skips reserve, worktree and claim; `resume_task is None` guards gate the B4b derivation (spawn.execute_outcome = gitutil.execute_outcome, called with since=pre_head when [spawn].derive_execute_result) and execute_incomplete handling.\n- run_claude(..., *, resume_session=None): task['_resume_session'] adds `--resume <id>` with normal tools. Error shapes: 'budget or error exit (rc=N): ' + result[:500], or 'non-JSON output (rc=N): ' + (stdout+stderr)[-500:]. Live CLI check 2026-10-03: `claude -p hi --resume <unknown id> --output-format json` exits rc=1 with empty stdout and stderr 'No conversation found with session ID: <id>', so run_claude reports reason 'non-JSON output (rc=1): No conversation found with session ID: <id>'.\n- Pool.claude_has_headroom() takes no argument (global: self.pick('execute') is not None). Pool.pick's per-account predicate: 'execute' in a.affinity, not a.cooling(), not over a.daily_budget (day_tokens + planner_day_tokens), a.utilization(cap) < 1.0 - a.reserve.\n- worker_registry keeps STATE/workers/<task_id>.json (live unless status in {cancelled, done, failed, held}); session_id lives in task packet_meta.session_id. Sessions are keyed by cwd and account; `--resume` works only from the worktree and account that created the session.\n\nChange:\n1. executor.claude_resume_plan(fix_task, pool) -> {'mode': 'session', 'session_id', 'account', 'owner_id', 'worktree'} or {'mode': 'fresh', 'reason'}. Walk the constraints.fix_round_for chain upward from fix_task; the owner is the NEWEST task with packet_meta.session_id set and executor starting 'claude:'. Fresh reasons in order: no_fix_round_for; no_session; ancestor_merged (owner.merged_into set); account_unavailable (owner.account missing, or the account fails Pool.pick's per-account predicate, implemented as a private executor helper _account_has_headroom(pool, account_id) reading those same fields); incompatible_worktree (owner worktree missing or not a git worktree); session_busy (worker_registry.get(owner id) live); worktree_busy (another task that is running, or queued with pipeline.dispatched_at and no gated_at, has worktree == owner worktree, e.g. a sibling fix round).\n2. Daemon tick: when resume_plan returns fresh with reason executor_not_codex, call claude_resume_plan(fix, pool). Session mode: spawn_async(_dispatch_session_worker, fix, parent, plan, _fix_round_delta(parent, fix)). Fresh mode: the inline fall-through exactly as today. Both merge pipeline.resume = {'mode', 'reason', 'session_id', 'account', 'owner_id'} into the existing pipeline dict under bus.locked (read-modify-write).\n3. daemon._dispatch_session_worker(fix_id, parent, plan, delta) mirrors _dispatch_reply_worker/_dispatch_worker: same launch_epoch / is_current guard, same exception handling (dispatch_error pipeline note and hold), and it posts the done/failed/held result the same way. It calls spawn.run_worker(fix_id, account_id=plan['account'], session_resume=True, session_id=plan['session_id'], resume_prompt=line + delta) with line = 'Resumed session for fix round <n> of <owner id>; worktree <path>, branch task/<fix id>; commit before the final message.'\n4. Branch strategy: before the session run, in the owner worktree, create and check out task/<fix id> from the owner's HEAD (git checkout -b), so the owner's branch never moves; record worktree = owner worktree and branch = task/<fix id> on the fix task. If the checkout fails, fall back to the fresh path with reason 'branch_failed' (nothing to undo).\n5. spawn.run_worker gains `session_resume=False`. True: no packet render, no skill telemetry; prompt = resume_prompt; model and tools from the FIX task's tier and TOOLS['execute'] (never worker_registry); executor write, pool.reserve, bus.claim(fix id, 'claude:<acct>', owner worktree) and the account write as in the fresh path, no ensure_worktree; t['_resume_session'] = session_id (run_claude's resume_session argument is not used); resume_task stays None so execute_outcome derivation and execute_incomplete handling run; packet_meta.session_id refreshed after the run.\n6. Session-missing fallback: run_worker takes a private keyword `_session_fallback=True` (a parameter, not recursion depth): when the session attempt's result has status 'failed' and its 'reason' (never the output of a successful result) contains 'No conversation found', AND the worktree HEAD equals the HEAD before the attempt: the attempt stays logged as run_claude logged it (one row), the reserve is released, in the owner worktree the owner branch is checked back out and the empty task/<fix id> branch is deleted, the fix task's worktree is reset to None and branch to task/<fix id>, notify.notify names the fix and owner, pipeline.resume becomes {'mode': 'fresh', 'reason': 'session_missing', ...}, and run_worker runs the fresh path once with _session_fallback=False (packet rendered, ensure_worktree for the fix id, same account). If HEAD moved, no retry: the result is handled as a normal failed run.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_daemon.py fix-round dispatch tests with Codex parents pass unchanged; tests/test_spawn.py steering resume tests (grep 'resume_task' / '_resume_session' / 'resume_worker') pass unchanged; tests/test_executor.py resume_plan and _resume_compatible tests pass unchanged. Run tests/test_executor.py, tests/test_spawn.py and tests/test_daemon.py in the foreground after committing; never background a command and never run the full gate.\n\nOut of scope: merge.py, pool.py, worker_control.py, prompts. Rollback: git revert of the merge commit.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests (seams per the scout: test_spawn patches spawn.run_claude, spawn.ensure_worktree, spawn.worker_registry; test_executor patch.object(executor, ...); test_daemon self.swap(executor, ...) and patches daemon.worker_registry); use a real temp git repo for branch checks; never module-level test functions. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_executor.py::test_claude_resume_plan_picks_newest_session_in_chain passes: for a chain fix -> F1 (claude, session S2, worktree W1) -> H (claude, session S1) it returns mode 'session' with session_id S2, owner F1, F1's account and worktree; it returns fresh with reason no_fix_round_for, no_session, ancestor_merged, account_unavailable (owner account cooling or over budget while another account has headroom), incompatible_worktree, session_busy and worktree_busy (a running sibling task on W1) in the matching fixtures",
+    "tests/test_daemon.py::test_fix_round_of_claude_parent_dispatches_session_resume passes: with a Claude parent (resume_plan fresh executor_not_codex) and a session plan, the tick spawns _dispatch_session_worker with a resume_prompt starting 'Resumed session for fix round' and containing the _fix_round_delta text, and merges pipeline.resume mode 'session' into the existing pipeline; with a fresh plan it records mode 'fresh' with the plan's reason and takes the inline packet/render/_dispatch_worker path; a Codex parent still takes the reply path",
+    "tests/test_daemon.py::test_dispatch_session_worker_posts_results_and_handles_errors passes: _dispatch_session_worker posts a done result, a failed result and a held result like _dispatch_worker, skips posting when is_current is false, and on an exception from run_worker records the dispatch_error pipeline note and holds the fix task",
+    "tests/test_spawn.py::test_session_resume_run_uses_delta_prompt_and_own_branch passes: in a temp git repo, run_worker(session_resume=True) checks out task/<fix id> from the owner HEAD in the owner worktree (owner branch unchanged afterwards), passes `--resume S` and the resume prompt (no rendered packet) with the fix tier's model and TOOLS['execute'], does not call ensure_worktree, claims the fix against the owner worktree, takes pool.reserve, logs one run row; a failed resumed run still calls spawn.execute_outcome",
+    "tests/test_spawn.py::test_session_missing_falls_back_to_fresh_once passes: when the session attempt fails with reason 'non-JSON output (rc=1): No conversation found with session ID: S' and HEAD is unchanged, the reserve is released, the owner branch is checked back out, task/<fix id> is deleted, notify is called, the fresh path runs once with the rendered packet and ensure_worktree for the fix id, and pipeline.resume is mode 'fresh' reason 'session_missing'; with HEAD moved there is no retry; a successful result whose output contains 'No conversation found' triggers no retry; a second missing-session failure does not retry again"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_executor.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 50,
+    "timeout_s": 3000,
+    "task_class": "architectural",
+    "route": "full",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B8-v4",
+    "respec_for": "T-1620",
+    "fix_round_for": "T-1509"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791026304.358913,
+      "pipeline": {
+        "first_ready_at": 1791026304.358847
+      }
+    },
+    {
+      "ts": 1791026305.050381,
+      "pipeline": {
+        "first_ready_at": 1791026304.358847,
+        "spec_review_at": 1791026305.0503008,
+        "spec_review_at_lease": 1791027205.0503008
+      }
+    },
+    {
+      "ts": 1791026305.063979,
+      "pipeline": {
+        "first_ready_at": 1791026304.358847,
+        "spec_review_at": 1791026305.0503008,
+        "spec_review_at_lease": 1791027205.0503008,
+        "spec_review_at_done": 1791026305.0638652
+      }
+    },
+    {
+      "ts": 1791031067.794389,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Session-missing fallback has no defined insertion point. In run_worker the failed status is written (post_if_current 'failed', or the derive branch with execute_outcome) after run_claude returns. The release_if_current in the finally block also runs after that. The fallback must run immediately after run_claude, before the is_current check and before any failed write, or the fix task is marked failed and the fresh retry races a terminal status. The finally release then runs again for the retry's reserve, and the spec's explicit 'reserve is released' step would double release. Nothing says which release happens once.",
+          "severity": "high",
+          "line": 1664
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Spec step 4 puts the fix branch task/<fix id> in the owner worktree and leaves that worktree checked out on it. scoped_diff, packet and review code read the worktree HEAD of the owner (src.get('worktree')), so a later review or gate of the owner would see the fix commits. merge, gate and cleanup code in merge.py (out of scope) may assume the owner branch is checked out in the owner worktree. Cleanup of the owner or the fix task could remove a worktree the other still uses. The spec has no criterion or test for these paths, and no step restores the owner branch on success.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "session_resume branch must set disclosure_mode='off', allowlist=TOOLS['execute'], model from the fix tier, and pre_head/goal_id/scope/wt (owner worktree) for the derivation. The fresh path sets these in code the session branch skips, so as written you get a NameError or a skipped execute_incomplete handling. pre_head must be taken before the checkout. The hidden-tool respawn branch must also be bypassed. The 'failed run still calls execute_outcome' criterion only passes if the derive config is on in the test.",
+          "severity": "med",
+          "line": 1584
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "pipeline.resume is merged in the tick under bus.locked. The fallback in run_worker (spawn.py) also rewrites pipeline.resume to session_missing, and spawn.py has no equivalent locking step in the spec. Another daemon path updating pipeline concurrently (hold_note, dispatched_at) can lose the update. The spec should require bus.locked read-modify-write in both places.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "worktree_busy and session_busy are checks made at plan time, and the branch checkout happens later in the worker thread. Two sibling fix rounds ticking in the same pass both pass worktree_busy because dispatched_at is only set after the plan. The spec does not say whether the plan and the dispatched_at write happen under one lock. The helper must also exclude the fix task itself (it has dispatched_at set and no gated_at). Dirty or mid-operation state in the owner worktree (uncommitted files, detached HEAD) is also not checked, and checkout -b would carry dirty files onto the fix branch.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The retry condition 'HEAD equals HEAD before the attempt' relies on pre_head, but the spec never says it is captured before the checkout or when derive_execute_result is off (pre_head is only set when derive is true). Fallback correctness should not depend on that config flag. The match on the substring 'No conversation found' is also tied to CLI error text. A CLI wording change silently turns the fallback into a plain failure with no signal.",
+          "severity": "low",
+          "line": 1650
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "issue": "Acceptance for test_session_missing_falls_back_to_fresh_once bundles five scenarios (retry, HEAD moved, successful result containing the text, second failure, notify) in one test id. It is hard to verify and to diagnose. The 'task/<fix id> deleted' and 'owner branch checked out' checks need the real temp git repo the spec mentions, but the fresh path's ensure_worktree is mocked. The acceptance does not say what the fix task's worktree and branch values should be after fallback beyond the prose.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791031069.176682,
+      "pipeline": {
+        "first_ready_at": 1791026304.358847,
+        "spec_review_at": 1791026305.0503008,
+        "spec_review_at_lease": 1791027205.0503008,
+        "spec_review_at_done": 1791026305.0638652,
+        "spec_review_held_at": 1791031069.176598
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1791031076.357245,
+      "pipeline": {
+        "first_ready_at": 1791026304.358847,
+        "spec_review_at": 1791026305.0503008,
+        "spec_review_at_lease": 1791027205.0503008,
+        "spec_review_at_done": 1791026305.0638652,
+        "spec_review_held_at": 1791031069.176598,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1791031077.83615,
+      "pipeline": {
+        "first_ready_at": 1791026304.358847,
+        "spec_review_at": 1791026305.0503008,
+        "spec_review_at_lease": 1791027205.0503008,
+        "spec_review_at_done": 1791026305.0638652,
+        "spec_review_held_at": 1791031069.176598,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791031069.176682": true
+        }
+      }
+    },
+    {
+      "ts": 1791031275.324961,
+      "status": "superseded",
+      "reason": "parked: B8 parked by the human 2026-10-03 after spec review T-1625"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791026304.358847,
+    "spec_review_at": 1791026305.0503008,
+    "spec_review_at_lease": 1791027205.0503008,
+    "spec_review_at_done": 1791026305.0638652,
+    "spec_review_held_at": 1791031069.176598,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1791031069.176682": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Session-missing fallback has no defined insertion point. In run_worker the failed status is written (post_if_current 'failed', or the derive branch with execute_outcome) after run_claude returns. The release_if_current in the finally block also runs after that. The fallback must run immediately after run_claude, before the is_current check and before any failed write, or the fix task is marked failed and the fresh retry races a terminal status. The finally release then runs again for the retry's reserve, and the spec's explicit 'reserve is released' step would double release. Nothing says which release happens once.",
+      "severity": "high",
+      "line": 1664
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Spec step 4 puts the fix branch task/<fix id> in the owner worktree and leaves that worktree checked out on it. scoped_diff, packet and review code read the worktree HEAD of the owner (src.get('worktree')), so a later review or gate of the owner would see the fix commits. merge, gate and cleanup code in merge.py (out of scope) may assume the owner branch is checked out in the owner worktree. Cleanup of the owner or the fix task could remove a worktree the other still uses. The spec has no criterion or test for these paths, and no step restores the owner branch on success.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "session_resume branch must set disclosure_mode='off', allowlist=TOOLS['execute'], model from the fix tier, and pre_head/goal_id/scope/wt (owner worktree) for the derivation. The fresh path sets these in code the session branch skips, so as written you get a NameError or a skipped execute_incomplete handling. pre_head must be taken before the checkout. The hidden-tool respawn branch must also be bypassed. The 'failed run still calls execute_outcome' criterion only passes if the derive config is on in the test.",
+      "severity": "med",
+      "line": 1584
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "pipeline.resume is merged in the tick under bus.locked. The fallback in run_worker (spawn.py) also rewrites pipeline.resume to session_missing, and spawn.py has no equivalent locking step in the spec. Another daemon path updating pipeline concurrently (hold_note, dispatched_at) can lose the update. The spec should require bus.locked read-modify-write in both places.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "worktree_busy and session_busy are checks made at plan time, and the branch checkout happens later in the worker thread. Two sibling fix rounds ticking in the same pass both pass worktree_busy because dispatched_at is only set after the plan. The spec does not say whether the plan and the dispatched_at write happen under one lock. The helper must also exclude the fix task itself (it has dispatched_at set and no gated_at). Dirty or mid-operation state in the owner worktree (uncommitted files, detached HEAD) is also not checked, and checkout -b would carry dirty files onto the fix branch.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The retry condition 'HEAD equals HEAD before the attempt' relies on pre_head, but the spec never says it is captured before the checkout or when derive_execute_result is off (pre_head is only set when derive is true). Fallback correctness should not depend on that config flag. The match on the substring 'No conversation found' is also tied to CLI error text. A CLI wording change silently turns the fallback into a plain failure with no signal.",
+      "severity": "low",
+      "line": 1650
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "issue": "Acceptance for test_session_missing_falls_back_to_fresh_once bundles five scenarios (retry, HEAD moved, successful result containing the text, second failure, notify) in one test id. It is hard to verify and to diagnose. The 'task/<fix id> deleted' and 'owner branch checked out' checks need the real temp git repo the spec mentions, but the fresh path's ensure_worktree is mocked. The acceptance does not say what the fix task's worktree and branch values should be after fallback beyond the prose.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "parked: B8 parked by the human 2026-10-03 after spec review T-1625"
+}

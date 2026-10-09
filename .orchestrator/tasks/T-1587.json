@@ -1,0 +1,214 @@
+{
+  "id": "T-1587",
+  "created_at": 1790972478.7560651,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "B8 v2 (fix round of T-1509): Claude fix rounds resume the executor's session in the held task's worktree on the same account; fresh with a reason otherwise",
+  "spec": "Goal T-1403, wave 2, plan label B8-v2. Respec of B8 T-1509 (spec review T-1571 request_changes 2026-10-02 16:33) filed as a FIX ROUND of T-1509 (constraints.fix_round_for) so its merge stamps T-1509 and E7 T-1555 (depends_on T-1509) stays valid; T-1509 has no branch, so the worktree is cut from goal/T-1403. Motivation: Codex fix rounds reuse the thread (executor.reply, `codex exec resume`) and send deltas only; Claude fix rounds start a fresh `claude -p` with the full packet, re-reading the repo every round (analysis 2026-10-01: fix rounds are 41% of execute runs).\n\nPlanner-verified facts (goal/T-1403 at 1827be6; locate by symbol):\n- Claude Code keys sessions by working directory: ~/.claude-a/projects/ holds one directory per worktree (540 of them, e.g. -Users-k3ntaw-code-orchestrator-wt-T-1556), and each account is a separate CLAUDE_CONFIG_DIR (pool.toml [[claude_accounts]] config_dir); `claude --resume <id>` finds a session only from the cwd and account that created it.\n- executor.resume_plan(parent, fix_task) returns {'mode': 'fresh'|'resume', 'reason'} with reasons no_thread / rounds_exhausted / executor_not_codex / incompatible_worktree and uses _resume_compatible(parent); the daemon's fix-round dispatch resumes the parent Codex thread in the PARENT'S worktree when compatible (T-1563, T-1569 and T-1578 today ran in wt/T-1556, wt/T-1564, wt/T-1552 and committed on the parent's branch); the daemon shows pipeline.resume.\n- spawn.run_worker(task_id, account_id=None, *, resume_task=None, resume_prompt=None, session_id=None): t['_resume_session'] = session_id makes run_claude add `--resume <id>`; run_claude stores packet_meta.session_id after a run; the existing resume branch reads worker_registry.get(task_id)['model'] and ['tools'] (written for resume_worker, where the same task has a registry entry; a fix task has none); the `resume_task is None` guards gate git-state derivation and execute_incomplete handling (B4b); run_claude's resume_session argument is the steering path that silences log_run.\n- executor._exhausted is where a Claude row dispatch reaches run_worker(t['id'], account_id=acct.id) in a thread, acct = pool.pick('execute'); Pool.claude_has_headroom(acct) exists (B2a). A held task records task['account'] and executor 'claude:<tier>'.\n\nChange:\n1. executor.claude_resume_plan(fix_task, pool, acct) -> {'mode': 'session', 'session_id', 'account', 'held_id', 'worktree', 'branch'} or {'mode': 'fresh', 'reason'}: fix_task has constraints.fix_round_for; held = bus.get(that); session = held.packet_meta.session_id; held.executor starts with 'claude:'; held.account == acct.id and pool.claude_has_headroom(acct); the held worktree exists, its branch is task/<held id> and _resume_compatible(held) is true; otherwise fresh with reason one of no_fix_round_for, no_session, not_claude, account_unavailable, incompatible_worktree. Pure except bus.get, pool reads and the worktree check.\n2. _exhausted(): acct is picked as today; for a fix-round task on a Claude row, plan = claude_resume_plan(t, pool, acct); session mode -> run_worker(t['id'], account_id=acct.id, session_id=plan['session_id'], session_resume=True, resume_prompt=<delta>) where the delta is the fix round's own spec (rendered by the daemon from fix-round.md) prefixed with one line: 'Resumed session for fix round <n> of <held id>; same worktree <path>, branch task/<held id>; commit before the final message.' The fix task records worktree and branch = the held task's (as the daemon does for Codex resumes). pipeline.resume = {'mode': 'session'|'fresh', 'reason', 'session_id', 'account', 'held_id'} is merged into the existing pipeline dict under bus.locked (read-modify-write) before the run; 'session' is a third mode next to resume_plan's 'fresh'|'resume'. Fresh mode -> today's path plus the same record.\n3. spawn.run_worker gains `session_resume=False`: with it True the packet is NOT rendered; the prompt is resume_prompt alone; model, tools and disclosure come from the FIX task's tier and TOOLS['execute'] exactly as a fresh execute run (never from worker_registry); resume_task stays None so the B4b derivation and execute_incomplete guards keep working for the resumed run; run_claude's resume_session argument is not used; t['_resume_session'] adds `--resume <id>`; the run logs through bus.log_run exactly once with resume='session'.\n4. Session-missing fallback: when the resumed run returns an error result (rc != 0 or status failed) with NO prior assistant output whose stderr or message contains 'No conversation found' or both 'session' and 'not found', log that attempt once as outcome 'session_missing' (zero cost when the CLI returned no usage), then leave the session path and run the normal fresh path once (packet rendered, same account, same epoch), setting pipeline.resume = {'mode': 'fresh', 'reason': 'session_missing', ...}; never triggered by model output text; one retry only.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_executor.py fallback/dispatch tests (grep 'run_worker' and 'fix_round_for') patch run_worker and assert its kwargs: update the fix-round ones; tests/test_spawn.py resume tests (grep 'resume_task' / '_resume_session') pass unchanged. Run tests/test_executor.py and tests/test_spawn.py in the foreground after committing; never background a command and never run the full gate.\n\nOut of scope: daemon.py, merge.py, pool.py (use existing accessors), prompts. Rollback: git revert of the merge commit.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [
+    "T-1509",
+    "T-1571"
+  ],
+  "acceptance": [
+    "tests/test_executor.py::test_claude_fix_round_resumes_session_on_same_account: passes: with a held task (executor claude:sonnet, account A, packet_meta.session_id S, an existing worktree on branch task/<held>) and its fix round dispatched to a Claude row with acct A picked, _exhausted calls run_worker with account_id 'A', session_id S, session_resume True and a resume_prompt that names the held worktree and branch, records the fix task's worktree and branch as the held task's, and merges pipeline.resume {'mode': 'session', 'session_id': S, 'account': 'A', 'held_id': ...} into the existing pipeline dict; with no session_id, a non-Claude executor, acct B picked while the held account is A, or an incompatible worktree, it calls run_worker fresh and records mode 'fresh' with reason no_session, not_claude, account_unavailable or incompatible_worktree",
+    "tests/test_spawn.py::test_resumed_fix_round_uses_delta_prompt_and_retries_fresh_on_missing_session: passes: run_worker with session_resume True, resume_prompt and session_id passes `--resume S` and the resume prompt (no rendered packet) to the CLI with the model and tools of the fix task's tier, logs one run with resume 'session'; a non-JSON failure of the resumed run still reaches execute_outcome (the B4b derivation runs); when the first run returns an error result with no prior output containing 'No conversation found', it logs that attempt as 'session_missing', runs once more without --resume with the rendered packet, and sets pipeline.resume mode 'fresh' reason 'session_missing'; a model reply containing 'session not found' does not trigger the retry",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "tests/test_executor.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "full",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B8-v2",
+    "respec_for": "T-1509",
+    "fix_round_for": "T-1509"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790972643.935634,
+      "pipeline": {
+        "first_ready_at": 1790972643.935502
+      }
+    },
+    {
+      "ts": 1790972645.6995788,
+      "pipeline": {
+        "first_ready_at": 1790972643.935502,
+        "spec_review_at": 1790972645.6995049,
+        "spec_review_at_lease": 1790973545.6995049
+      }
+    },
+    {
+      "ts": 1790972645.7352982,
+      "pipeline": {
+        "first_ready_at": 1790972643.935502,
+        "spec_review_at": 1790972645.6995049,
+        "spec_review_at_lease": 1790973545.6995049,
+        "spec_review_at_done": 1790972645.735133
+      }
+    },
+    {
+      "ts": 1790972718.822247,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The session path leaves the fix task's worktree unresolved. Today's non-resume branch of run_worker calls ensure_worktree(task_id) and bus.claim(task_id, ..., wt). That would create wt/<fix id> and overwrite the worktree the spec says to record as the held task's. Claude keys sessions by cwd, so `--resume S` run from the wrong directory fails with 'No conversation found'. The spec never says which cwd run_claude uses or how ensure_worktree and claim are bypassed or pointed at the held worktree. The feature would then always fall back to fresh.",
+          "severity": "high",
+          "line": 1648
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "The delta prompt source is undefined. The spec says the daemon renders the fix round's spec from fix-round.md, but daemon.py is out of scope and _exhausted(pool, t, run, tier) receives no delta. A reviewer cannot tell whether the resume_prompt is read from the fix task spec, rendered in executor, or passed by the daemon. The acceptance test cannot pin it down either.",
+          "severity": "high",
+          "line": 597
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The session_missing logging contradicts 'logs exactly once'. run_claude already calls bus.log_run itself (outcome done/failed) for every attempt. Logging the failed attempt as 'session_missing' therefore double counts unless run_claude gets a new suppress/override parameter, which the spec does not mention. The cost handling (pool.reserve release and _combined_usage across two runs) is also unspecified. This is the double-counting risk the review is meant to catch.",
+          "severity": "high",
+          "line": 1449
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "_exhausted calls `worker = run or run_worker` and checks via inspect.signature whether it accepts account_id. New kwargs (session_id, session_resume, resume_prompt) need the same signature guard. Injected `run` callables in existing tests and other callers would break, and silently dropping the kwargs would turn a session dispatch into a fresh run while pipeline.resume still says 'session'. The spec only tests run_worker patched directly.",
+          "severity": "med",
+          "line": 653
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "A stale or wrong session is possible. packet_meta.session_id on the held task is the session of the held task's last run only. For fix round 2 or later, fix_round_for may still point at the original held task while the newer commits and session live on the previous fix task. The spec has no rule for which task's session is used per round, for concurrent use of one session, or for a held task whose branch has been merged. _resume_compatible(held) is also asserted to fit a parent Codex flow without checking what it actually verifies (not read here).",
+          "severity": "med",
+          "line": 302
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The session_resume branch skips packet, packet_meta, skill telemetry, pool.reserve and the executor='claude:<tier>' write that the fresh execute path performs. The spec does not say which of these are kept. Skipping reserve would run the worker with no budget accounting. Skipping the executor write would leave the executor set to whatever it was before. The fallback retry needs the full fresh setup after the resumed branch already ran, so the control flow must be restructured. The spec does not describe the restructuring.",
+          "severity": "med",
+          "line": 1584
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The retry trigger is fragile. Matching 'session' and 'not found' in stderr or message depends on CLI wording. 'No prior assistant output' is not observable from the current run_claude return shape. Only the model-reply test is acceptance-covered. The match against the model's own text must be explicitly limited to the error fields, and a silent fallback should be visible to the daemon, not only in pipeline.resume.",
+          "severity": "low",
+          "line": 1416
+        }
+      ]
+    },
+    {
+      "ts": 1790972763.867858,
+      "pipeline": {
+        "first_ready_at": 1790972643.935502,
+        "spec_review_at": 1790972645.6995049,
+        "spec_review_at_lease": 1790973545.6995049,
+        "spec_review_at_done": 1790972645.735133,
+        "spec_review_held_at": 1790972763.867785
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790972771.0139241,
+      "pipeline": {
+        "first_ready_at": 1790972643.935502,
+        "spec_review_at": 1790972645.6995049,
+        "spec_review_at_lease": 1790973545.6995049,
+        "spec_review_at_done": 1790972645.735133,
+        "spec_review_held_at": 1790972763.867785,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790972772.492506,
+      "pipeline": {
+        "first_ready_at": 1790972643.935502,
+        "spec_review_at": 1790972645.6995049,
+        "spec_review_at_lease": 1790973545.6995049,
+        "spec_review_at_done": 1790972645.735133,
+        "spec_review_held_at": 1790972763.867785,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790972763.867858": true
+        }
+      }
+    },
+    {
+      "ts": 1791025487.432368,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1620 (B8 v3, 2026-10-03; scout T-1618 pinned the mechanics; decision moved to the daemon fix-round dispatch)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790972643.935502,
+    "spec_review_at": 1790972645.6995049,
+    "spec_review_at_lease": 1790973545.6995049,
+    "spec_review_at_done": 1790972645.735133,
+    "spec_review_held_at": 1790972763.867785,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790972763.867858": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The session path leaves the fix task's worktree unresolved. Today's non-resume branch of run_worker calls ensure_worktree(task_id) and bus.claim(task_id, ..., wt). That would create wt/<fix id> and overwrite the worktree the spec says to record as the held task's. Claude keys sessions by cwd, so `--resume S` run from the wrong directory fails with 'No conversation found'. The spec never says which cwd run_claude uses or how ensure_worktree and claim are bypassed or pointed at the held worktree. The feature would then always fall back to fresh.",
+      "severity": "high",
+      "line": 1648
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "The delta prompt source is undefined. The spec says the daemon renders the fix round's spec from fix-round.md, but daemon.py is out of scope and _exhausted(pool, t, run, tier) receives no delta. A reviewer cannot tell whether the resume_prompt is read from the fix task spec, rendered in executor, or passed by the daemon. The acceptance test cannot pin it down either.",
+      "severity": "high",
+      "line": 597
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The session_missing logging contradicts 'logs exactly once'. run_claude already calls bus.log_run itself (outcome done/failed) for every attempt. Logging the failed attempt as 'session_missing' therefore double counts unless run_claude gets a new suppress/override parameter, which the spec does not mention. The cost handling (pool.reserve release and _combined_usage across two runs) is also unspecified. This is the double-counting risk the review is meant to catch.",
+      "severity": "high",
+      "line": 1449
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "_exhausted calls `worker = run or run_worker` and checks via inspect.signature whether it accepts account_id. New kwargs (session_id, session_resume, resume_prompt) need the same signature guard. Injected `run` callables in existing tests and other callers would break, and silently dropping the kwargs would turn a session dispatch into a fresh run while pipeline.resume still says 'session'. The spec only tests run_worker patched directly.",
+      "severity": "med",
+      "line": 653
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "A stale or wrong session is possible. packet_meta.session_id on the held task is the session of the held task's last run only. For fix round 2 or later, fix_round_for may still point at the original held task while the newer commits and session live on the previous fix task. The spec has no rule for which task's session is used per round, for concurrent use of one session, or for a held task whose branch has been merged. _resume_compatible(held) is also asserted to fit a parent Codex flow without checking what it actually verifies (not read here).",
+      "severity": "med",
+      "line": 302
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The session_resume branch skips packet, packet_meta, skill telemetry, pool.reserve and the executor='claude:<tier>' write that the fresh execute path performs. The spec does not say which of these are kept. Skipping reserve would run the worker with no budget accounting. Skipping the executor write would leave the executor set to whatever it was before. The fallback retry needs the full fresh setup after the resumed branch already ran, so the control flow must be restructured. The spec does not describe the restructuring.",
+      "severity": "med",
+      "line": 1584
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The retry trigger is fragile. Matching 'session' and 'not found' in stderr or message depends on CLI wording. 'No prior assistant output' is not observable from the current run_claude return shape. Only the model-reply test is acceptance-covered. The match against the model's own text must be explicitly limited to the error fields, and a silent fallback should be visible to the daemon, not only in pipeline.resume.",
+      "severity": "low",
+      "line": 1416
+    }
+  ],
+  "hold_reason": "superseded by T-1620 (B8 v3, 2026-10-03; scout T-1618 pinned the mechanics; decision moved to the daemon fix-round dispatch)"
+}

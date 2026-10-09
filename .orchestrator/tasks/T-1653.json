@@ -1,0 +1,1215 @@
+{
+  "id": "T-1653",
+  "created_at": 1791225114.8516119,
+  "parent": "T-1651",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: orchestrator new <path>: create or adopt an empty folder as a git repo, scaffold it with install(), one commit, launch nothing",
+  "spec": "Add a CLI subcommand `orchestrator new <path>` that turns a new or empty folder into a scaffolded orchestrator repo,\nso the Planner never needs mkdir or git init (planner-mode.sh blocks both, for subagents too). It launches nothing.\n\nNew module orchestrator/new_project.py with `create(path) -> list[str]` (report lines) and a small wiring in\norchestrator/cli.py next to the \"install\" and \"goal\" parsers (cli.py:197, 236-238, 654-660).\n\nBehaviour of create(path):\n1. p = Path(path).expanduser(); resolve the parent with os.path.realpath. The parent must exist and be a directory,\n   else raise NewProjectError(\"parent does not exist: ...\").\n2. Accept p only if one of these holds, else raise NewProjectError with the reason and change nothing:\n   a. p does not exist;\n   b. p is an empty directory;\n   c. p is a git toplevel (git rev-parse --show-toplevel equals p) with no commits (git rev-parse --verify HEAD fails)\n      and nothing in it except .git.\n   Anything else (non-empty folder, repo with commits, a file, a path inside another repo's working tree that is not its\n   own toplevel) is refused.\n3. Create the directory (case a), run `git init -b main` (cases a and b), then call the existing\n   orchestrator.install.install(str(p)) and keep its report lines.\n4. git add -A and commit with message\n     \"orchestrator: scaffold (new project)\\n\\nWhat: orchestrator install scaffold for a new project.\\nWhy: the Planner starts new projects through `orchestrator new`.\\nRevert: delete the folder; nothing else depends on it yet.\"\n   using the user's git identity (no -c overrides in production code). If the commit fails, raise NewProjectError\n   with git's stderr (files stay; the message says so).\n5. No remote, no push, no network, no Planner or daemon launch, no write outside p.\n6. Return report lines: \"created <p>\" (or \"used existing <p>\"), \"git init -b main\" when run, install's lines, and\n   \"commit <short sha>\".\n\ncli.py: `new = sub.add_parser(\"new\"); new.add_argument(\"path\")`; on NewProjectError print \"new: <reason>\" to stderr and\nexit 2; on success print the report lines, then\n  Next: ORCH_ROOT=<p> uv run orchestrator daemon   (and the goal start line as an alternative)\n\nTests: new file tests/test_new_project.py, unittest style like tests/test_goals.py (read it for the temp-repo helpers and\nhow install() is exercised; set GIT_AUTHOR_NAME/EMAIL and GIT_COMMITTER_NAME/EMAIL in os.environ for the test process\nonly, and commit.gpgsign=false via GIT_CONFIG_COUNT/KEY/VALUE env). Named tests:\n- test_new_creates_repo_with_scaffold_commit: missing path -> dir exists, branch main, exactly one commit with the\n  message subject above, .orchestrator/pool.toml present, working tree clean.\n- test_new_accepts_empty_dir\n- test_new_accepts_empty_initialised_repo (git init done beforehand, no commits)\n- test_new_refuses_non_empty_dir (one file inside -> NewProjectError, folder unchanged)\n- test_new_refuses_repo_with_commits\n- test_new_refuses_missing_parent\n- test_new_launches_nothing: patch orchestrator.goals.start and subprocess.Popen to fail if called; create() still succeeds\n- test_cli_new_exit_codes: main([\"new\", <bad path>]) exits 2 with \"new:\" on stderr; a good path exits 0 and prints \"Next:\"\n\nRun: uv run python -m pytest -q tests/test_new_project.py tests/test_goals.py (or unittest if pytest is absent).\nCommit on the task branch.\n",
+  "inputs": [
+    "T-1652"
+  ],
+  "acceptance": [
+    "tests/test_new_project.py: the eight named tests exist and pass",
+    "tests/test_goals.py still passes",
+    "orchestrator new refuses non-empty folders, repos with commits and missing parents with exit 2 and changes nothing",
+    "No remote, push, network call or Planner/daemon launch in orchestrator/new_project.py"
+  ],
+  "scope": [
+    "orchestrator/new_project.py",
+    "orchestrator/cli.py",
+    "tests/test_new_project.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1653",
+  "codex_thread": null,
+  "result": {
+    "summary": "The diff meets the four acceptance criteria. All eight named tests exist as unittest methods, and the gate was green. new_project.py has no remote, push, network or Planner/daemon launch. Refusals happen before anything is written. I found only low-severity nits. I did not run the tests myself.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/cli.py",
+        "line": 670,
+        "issue": "The target path is recovered by string-parsing lines[0] ('created X' / 'used existing X') with removeprefix. This breaks silently if the report wording changes. The Next line also leaves paths with spaces unquoted.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/new_project.py",
+        "line": 62,
+        "issue": "If install() or the commit fails after mkdir and git init, the new folder and a partial scaffold are left behind. The commit-failure message says so, but the install-failure message ('install failed for ...') does not and drops install's detail.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/new_project.py",
+        "line": 29,
+        "issue": "p = parent / p.name does not normalise '..' as the final component, so the report and Next line can show an unresolved path. Inherited GIT_DIR or GIT_WORK_TREE in the environment could also skew the toplevel checks.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "5b0988aab753",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791225114.852525,
+      "reviewed_sha": "480b110c199f590680737580593a44f0b8df0cfd"
+    },
+    {
+      "ts": 1791225120.298385,
+      "packet_meta": {
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 13725,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791225120.338161,
+      "packet_meta": {
+        "chars": 12875,
+        "est_tokens": 3218,
+        "presented_tokens": 3218,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "2b1e5bfb26ac2fe2a1aa665cca4a4601f9ff9f925c45529cee6c45135c7a6f3f"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 3373,
+            "est_tokens": 843,
+            "sha256": "889cbc458e92252972cd29b2e15d8fb34b5f005118ca3c2bd6d9d4ec5a73eda1"
+          },
+          "acceptance": {
+            "chars": 320,
+            "est_tokens": 80,
+            "sha256": "3cbe95fd673d7590359c99cdb5754cd68cffb7373ba5ad54da828cf44a629679"
+          },
+          "scope": {
+            "chars": 89,
+            "est_tokens": 22,
+            "sha256": "f66099b389d9c50092d5b81780caa45d5943973a72f5f12d3ba7fa35233c66cf"
+          },
+          "diff": {
+            "chars": 229,
+            "est_tokens": 57,
+            "sha256": "d32a6f024f2b2aa36763f34cf7379dc4e4f741844aceaa0769f94182a7c0acdb"
+          },
+          "changed tests": {
+            "chars": 104,
+            "est_tokens": 26,
+            "sha256": "86554fb6990a15dc64eb54a227c4318c705b097eb23daf661c982d629808d3ba"
+          },
+          "gate": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "42b4c5d7000bdceb1b2bb472507c88581db62a78bd87b5d4a3125daf3eb27355"
+          },
+          "security": {
+            "chars": 129,
+            "est_tokens": 32,
+            "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+          },
+          "evidence": {
+            "chars": 7624,
+            "est_tokens": 1906,
+            "sha256": "a4d84a329ea6032e55b0f2bfca45f7d88cc4b8acdec843e41b59a279e4468164"
+          }
+        },
+        "hash": "5b0988aab753",
+        "version": "5b0988aab753",
+        "candidate_known": true,
+        "base": "480b110c199f",
+        "sources": "task@T-1652 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 2613,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 7710,
+        "routed_reduction_ratio": 0.8651256732495511,
+        "routed_hidden": 0,
+        "routed_ambiguous": 5,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "4190f022d7cd",
+          "2721fffb9f65",
+          "1c8bc7764e3b",
+          "5c39e196cf7a",
+          "0a24bae41dbb",
+          "d3669a962c30",
+          "2ef4cc18db8e",
+          "97f42e848f7b",
+          "b8c1ce37bfb1",
+          "00db509188f0",
+          "041199286363",
+          "051786ba0165",
+          "05367709e33e",
+          "05df0bc9ef62",
+          "0768ddd89e7e",
+          "0f1d68687edd",
+          "0fcd075d9f57",
+          "17f396b5831c",
+          "199b1fe33c55",
+          "1c510a428e02",
+          "2380174927fc",
+          "238f7d061138",
+          "270a093d49c3",
+          "2b0bacecbd62",
+          "2b71081a619f",
+          "36fba3c5b5ac",
+          "3ec2adada116",
+          "413b7f459b23",
+          "4180c7586cb1",
+          "453b6e50c221",
+          "48de25429ecb",
+          "504365aa02ad",
+          "5862192e5902",
+          "622de2bd3ec8",
+          "632f33f78827",
+          "63602ead1a37",
+          "647c5393915d",
+          "65c4d2b5db00",
+          "691ea38ed0c7",
+          "6b0c3088acb2",
+          "6b6a2d72145e",
+          "7566baf004f8",
+          "7657bd5d45a9",
+          "7b29076a9004",
+          "877a3d773ed9",
+          "885bff05e6db",
+          "8f938ad31ca7",
+          "95fc56d31326",
+          "9d078ea9fe66",
+          "9ea39468a2ec",
+          "a595cbbe1665",
+          "a9e3c482cf6d",
+          "aa76d1c58efc",
+          "ab047a2d7f21",
+          "b5bea7faf114",
+          "b839fab17283",
+          "bb680aa235cd",
+          "bbdc9dcb52ab",
+          "c4bd4333eab1",
+          "c6443091de2c",
+          "ca4309bc6c4d",
+          "ce80308dc309",
+          "cf6515afcb5a",
+          "cfea7680a6a3",
+          "d0b9e72fe363",
+          "d39ac091b005",
+          "d500754708e5",
+          "d5efd7f3263e",
+          "d5f076ea66df",
+          "d73fa6e7047f",
+          "de6a00a0ff2f",
+          "df10911c0fd4",
+          "df7350a0e379",
+          "e1f55ae2b248",
+          "e374e3dd1e88",
+          "e42e3e70122c",
+          "e4b388cad1ac",
+          "e91c30e2df13",
+          "eb8a747a72da",
+          "efd6a99ca757",
+          "f1ad580b5a89",
+          "fb5e663e2e39"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 13725,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1791225121.844993,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1653",
+      "claimed_at": 1791225121.844673
+    },
+    {
+      "ts": 1791225121.846582,
+      "account": "A"
+    },
+    {
+      "ts": 1791225127.6521442,
+      "pid": 63834,
+      "account": "A"
+    },
+    {
+      "ts": 1791225158.150486,
+      "packet_meta": {
+        "chars": 12875,
+        "est_tokens": 3218,
+        "presented_tokens": 3218,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "2b1e5bfb26ac2fe2a1aa665cca4a4601f9ff9f925c45529cee6c45135c7a6f3f"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 3373,
+            "est_tokens": 843,
+            "sha256": "889cbc458e92252972cd29b2e15d8fb34b5f005118ca3c2bd6d9d4ec5a73eda1"
+          },
+          "acceptance": {
+            "chars": 320,
+            "est_tokens": 80,
+            "sha256": "3cbe95fd673d7590359c99cdb5754cd68cffb7373ba5ad54da828cf44a629679"
+          },
+          "scope": {
+            "chars": 89,
+            "est_tokens": 22,
+            "sha256": "f66099b389d9c50092d5b81780caa45d5943973a72f5f12d3ba7fa35233c66cf"
+          },
+          "diff": {
+            "chars": 229,
+            "est_tokens": 57,
+            "sha256": "d32a6f024f2b2aa36763f34cf7379dc4e4f741844aceaa0769f94182a7c0acdb"
+          },
+          "changed tests": {
+            "chars": 104,
+            "est_tokens": 26,
+            "sha256": "86554fb6990a15dc64eb54a227c4318c705b097eb23daf661c982d629808d3ba"
+          },
+          "gate": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "42b4c5d7000bdceb1b2bb472507c88581db62a78bd87b5d4a3125daf3eb27355"
+          },
+          "security": {
+            "chars": 129,
+            "est_tokens": 32,
+            "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+          },
+          "evidence": {
+            "chars": 7624,
+            "est_tokens": 1906,
+            "sha256": "a4d84a329ea6032e55b0f2bfca45f7d88cc4b8acdec843e41b59a279e4468164"
+          }
+        },
+        "hash": "5b0988aab753",
+        "version": "5b0988aab753",
+        "candidate_known": true,
+        "base": "480b110c199f",
+        "sources": "task@T-1652 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 2613,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 7710,
+        "routed_reduction_ratio": 0.8651256732495511,
+        "routed_hidden": 0,
+        "routed_ambiguous": 5,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "4190f022d7cd",
+          "2721fffb9f65",
+          "1c8bc7764e3b",
+          "5c39e196cf7a",
+          "0a24bae41dbb",
+          "d3669a962c30",
+          "2ef4cc18db8e",
+          "97f42e848f7b",
+          "b8c1ce37bfb1",
+          "00db509188f0",
+          "041199286363",
+          "051786ba0165",
+          "05367709e33e",
+          "05df0bc9ef62",
+          "0768ddd89e7e",
+          "0f1d68687edd",
+          "0fcd075d9f57",
+          "17f396b5831c",
+          "199b1fe33c55",
+          "1c510a428e02",
+          "2380174927fc",
+          "238f7d061138",
+          "270a093d49c3",
+          "2b0bacecbd62",
+          "2b71081a619f",
+          "36fba3c5b5ac",
+          "3ec2adada116",
+          "413b7f459b23",
+          "4180c7586cb1",
+          "453b6e50c221",
+          "48de25429ecb",
+          "504365aa02ad",
+          "5862192e5902",
+          "622de2bd3ec8",
+          "632f33f78827",
+          "63602ead1a37",
+          "647c5393915d",
+          "65c4d2b5db00",
+          "691ea38ed0c7",
+          "6b0c3088acb2",
+          "6b6a2d72145e",
+          "7566baf004f8",
+          "7657bd5d45a9",
+          "7b29076a9004",
+          "877a3d773ed9",
+          "885bff05e6db",
+          "8f938ad31ca7",
+          "95fc56d31326",
+          "9d078ea9fe66",
+          "9ea39468a2ec",
+          "a595cbbe1665",
+          "a9e3c482cf6d",
+          "aa76d1c58efc",
+          "ab047a2d7f21",
+          "b5bea7faf114",
+          "b839fab17283",
+          "bb680aa235cd",
+          "bbdc9dcb52ab",
+          "c4bd4333eab1",
+          "c6443091de2c",
+          "ca4309bc6c4d",
+          "ce80308dc309",
+          "cf6515afcb5a",
+          "cfea7680a6a3",
+          "d0b9e72fe363",
+          "d39ac091b005",
+          "d500754708e5",
+          "d5efd7f3263e",
+          "d5f076ea66df",
+          "d73fa6e7047f",
+          "de6a00a0ff2f",
+          "df10911c0fd4",
+          "df7350a0e379",
+          "e1f55ae2b248",
+          "e374e3dd1e88",
+          "e42e3e70122c",
+          "e4b388cad1ac",
+          "e91c30e2df13",
+          "eb8a747a72da",
+          "efd6a99ca757",
+          "f1ad580b5a89",
+          "fb5e663e2e39"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 13725,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active",
+        "session_id": "26d06ab7-e4fb-43e5-8808-310c7089d5c7"
+      }
+    },
+    {
+      "ts": 1791225158.176377,
+      "packet_meta": {
+        "chars": 12875,
+        "est_tokens": 3218,
+        "presented_tokens": 3218,
+        "sections": {
+          "_preamble": {
+            "chars": 128,
+            "est_tokens": 32,
+            "sha256": "2b1e5bfb26ac2fe2a1aa665cca4a4601f9ff9f925c45529cee6c45135c7a6f3f"
+          },
+          "skills": {
+            "chars": 56,
+            "est_tokens": 14,
+            "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+          },
+          "Trigger": {
+            "chars": 44,
+            "est_tokens": 11,
+            "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+          },
+          "Objective": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+          },
+          "Procedure": {
+            "chars": 142,
+            "est_tokens": 35,
+            "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+          },
+          "Tools": {
+            "chars": 33,
+            "est_tokens": 8,
+            "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+          },
+          "Evidence requirements": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+          },
+          "Output contract": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+          },
+          "Stop conditions": {
+            "chars": 77,
+            "est_tokens": 19,
+            "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+          },
+          "Failure/recovery": {
+            "chars": 71,
+            "est_tokens": 17,
+            "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+          },
+          "spec": {
+            "chars": 3373,
+            "est_tokens": 843,
+            "sha256": "889cbc458e92252972cd29b2e15d8fb34b5f005118ca3c2bd6d9d4ec5a73eda1"
+          },
+          "acceptance": {
+            "chars": 320,
+            "est_tokens": 80,
+            "sha256": "3cbe95fd673d7590359c99cdb5754cd68cffb7373ba5ad54da828cf44a629679"
+          },
+          "scope": {
+            "chars": 89,
+            "est_tokens": 22,
+            "sha256": "f66099b389d9c50092d5b81780caa45d5943973a72f5f12d3ba7fa35233c66cf"
+          },
+          "diff": {
+            "chars": 229,
+            "est_tokens": 57,
+            "sha256": "d32a6f024f2b2aa36763f34cf7379dc4e4f741844aceaa0769f94182a7c0acdb"
+          },
+          "changed tests": {
+            "chars": 104,
+            "est_tokens": 26,
+            "sha256": "86554fb6990a15dc64eb54a227c4318c705b097eb23daf661c982d629808d3ba"
+          },
+          "gate": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "42b4c5d7000bdceb1b2bb472507c88581db62a78bd87b5d4a3125daf3eb27355"
+          },
+          "security": {
+            "chars": 129,
+            "est_tokens": 32,
+            "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+          },
+          "evidence": {
+            "chars": 7624,
+            "est_tokens": 1906,
+            "sha256": "a4d84a329ea6032e55b0f2bfca45f7d88cc4b8acdec843e41b59a279e4468164"
+          }
+        },
+        "hash": "5b0988aab753",
+        "version": "5b0988aab753",
+        "candidate_known": true,
+        "base": "480b110c199f",
+        "sources": "task@T-1652 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+        "candidate_tokens": 2613,
+        "skill_tokens_presented_l2": 178,
+        "routed_mode": "shadow",
+        "routed_tokens": 7710,
+        "routed_reduction_ratio": 0.8651256732495511,
+        "routed_hidden": 0,
+        "routed_ambiguous": 5,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "4190f022d7cd",
+          "2721fffb9f65",
+          "1c8bc7764e3b",
+          "5c39e196cf7a",
+          "0a24bae41dbb",
+          "d3669a962c30",
+          "2ef4cc18db8e",
+          "97f42e848f7b",
+          "b8c1ce37bfb1",
+          "00db509188f0",
+          "041199286363",
+          "051786ba0165",
+          "05367709e33e",
+          "05df0bc9ef62",
+          "0768ddd89e7e",
+          "0f1d68687edd",
+          "0fcd075d9f57",
+          "17f396b5831c",
+          "199b1fe33c55",
+          "1c510a428e02",
+          "2380174927fc",
+          "238f7d061138",
+          "270a093d49c3",
+          "2b0bacecbd62",
+          "2b71081a619f",
+          "36fba3c5b5ac",
+          "3ec2adada116",
+          "413b7f459b23",
+          "4180c7586cb1",
+          "453b6e50c221",
+          "48de25429ecb",
+          "504365aa02ad",
+          "5862192e5902",
+          "622de2bd3ec8",
+          "632f33f78827",
+          "63602ead1a37",
+          "647c5393915d",
+          "65c4d2b5db00",
+          "691ea38ed0c7",
+          "6b0c3088acb2",
+          "6b6a2d72145e",
+          "7566baf004f8",
+          "7657bd5d45a9",
+          "7b29076a9004",
+          "877a3d773ed9",
+          "885bff05e6db",
+          "8f938ad31ca7",
+          "95fc56d31326",
+          "9d078ea9fe66",
+          "9ea39468a2ec",
+          "a595cbbe1665",
+          "a9e3c482cf6d",
+          "aa76d1c58efc",
+          "ab047a2d7f21",
+          "b5bea7faf114",
+          "b839fab17283",
+          "bb680aa235cd",
+          "bbdc9dcb52ab",
+          "c4bd4333eab1",
+          "c6443091de2c",
+          "ca4309bc6c4d",
+          "ce80308dc309",
+          "cf6515afcb5a",
+          "cfea7680a6a3",
+          "d0b9e72fe363",
+          "d39ac091b005",
+          "d500754708e5",
+          "d5efd7f3263e",
+          "d5f076ea66df",
+          "d73fa6e7047f",
+          "de6a00a0ff2f",
+          "df10911c0fd4",
+          "df7350a0e379",
+          "e1f55ae2b248",
+          "e374e3dd1e88",
+          "e42e3e70122c",
+          "e4b388cad1ac",
+          "e91c30e2df13",
+          "eb8a747a72da",
+          "efd6a99ca757",
+          "f1ad580b5a89",
+          "fb5e663e2e39"
+        ],
+        "prefix_sha": "a7fc6578794f",
+        "prefix_chars": 710,
+        "suffix_chars": 13725,
+        "dynamic_sections": [
+          "skills",
+          "Trigger",
+          "Objective",
+          "Procedure",
+          "Tools",
+          "Evidence requirements",
+          "Output contract",
+          "Stop conditions",
+          "Failure/recovery",
+          "spec",
+          "acceptance",
+          "scope",
+          "diff",
+          "changed tests",
+          "gate",
+          "security",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 390,
+        "instruction_tokens_modular": 390,
+        "role": "review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "specialist",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_routing_mode": "active",
+        "session_id": "26d06ab7-e4fb-43e5-8808-310c7089d5c7",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791225159.2925398,
+      "status": "done",
+      "result": {
+        "summary": "The diff meets the four acceptance criteria. All eight named tests exist as unittest methods, and the gate was green. new_project.py has no remote, push, network or Planner/daemon launch. Refusals happen before anything is written. I found only low-severity nits. I did not run the tests myself.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/cli.py",
+            "line": 670,
+            "issue": "The target path is recovered by string-parsing lines[0] ('created X' / 'used existing X') with removeprefix. This breaks silently if the report wording changes. The Next line also leaves paths with spaces unquoted.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/new_project.py",
+            "line": 62,
+            "issue": "If install() or the commit fails after mkdir and git init, the new folder and a partial scaffold are left behind. The commit-failure message says so, but the install-failure message ('install failed for ...') does not and drops install's detail.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/new_project.py",
+            "line": 29,
+            "issue": "p = parent / p.name does not normalise '..' as the final component, so the report and Next line can show an unresolved path. Inherited GIT_DIR or GIT_WORK_TREE in the environment could also skew the toplevel checks.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "5b0988aab753",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791225159.293844,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1791225159.515372,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 3,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 3,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "480b110c199f590680737580593a44f0b8df0cfd",
+        "packet_version": "5b0988aab753",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 3,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 3,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "480b110c199f590680737580593a44f0b8df0cfd",
+      "packet_version": "5b0988aab753",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "480b110c199f590680737580593a44f0b8df0cfd",
+  "packet_meta": {
+    "chars": 12875,
+    "est_tokens": 3218,
+    "presented_tokens": 3218,
+    "sections": {
+      "_preamble": {
+        "chars": 128,
+        "est_tokens": 32,
+        "sha256": "2b1e5bfb26ac2fe2a1aa665cca4a4601f9ff9f925c45529cee6c45135c7a6f3f"
+      },
+      "skills": {
+        "chars": 56,
+        "est_tokens": 14,
+        "sha256": "8ed8925b62f574fe000d3868befcd7041b46725c8c6c9df0c3fa7c2e56b378df"
+      },
+      "Trigger": {
+        "chars": 44,
+        "est_tokens": 11,
+        "sha256": "e123929bf43daf266ea2eff29fd7cf16e6aea5a67acd3cc5363dd8f08f54f280"
+      },
+      "Objective": {
+        "chars": 100,
+        "est_tokens": 25,
+        "sha256": "c92e5ec355e420e22ee103894f4283776b6dd4c5884aec5032c28a5105592698"
+      },
+      "Procedure": {
+        "chars": 142,
+        "est_tokens": 35,
+        "sha256": "fbc970808dc5007583af0e43b1f42506d025087e2ebf55fedbfe530ac91ae65e"
+      },
+      "Tools": {
+        "chars": 33,
+        "est_tokens": 8,
+        "sha256": "5073838c0134c6e1499d15516ee0932a450e3d295751913c1e061942dc12e532"
+      },
+      "Evidence requirements": {
+        "chars": 83,
+        "est_tokens": 20,
+        "sha256": "a74ec6479cc95c98e33550d6affd033c0bef6a357d89aa20679118647a40a765"
+      },
+      "Output contract": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "165564dccb0029eed87365239173262b66e096e6122c1a88ba2f9c778e795393"
+      },
+      "Stop conditions": {
+        "chars": 77,
+        "est_tokens": 19,
+        "sha256": "8d82329cddc3e88a340e9cba54a86422fe40e2b6352286cb41fc69752519cdf5"
+      },
+      "Failure/recovery": {
+        "chars": 71,
+        "est_tokens": 17,
+        "sha256": "1cd1c4dba59713e6d3a6ba43ca04fe96a3b6356c958e6b7690ac4d72c7bc7034"
+      },
+      "spec": {
+        "chars": 3373,
+        "est_tokens": 843,
+        "sha256": "889cbc458e92252972cd29b2e15d8fb34b5f005118ca3c2bd6d9d4ec5a73eda1"
+      },
+      "acceptance": {
+        "chars": 320,
+        "est_tokens": 80,
+        "sha256": "3cbe95fd673d7590359c99cdb5754cd68cffb7373ba5ad54da828cf44a629679"
+      },
+      "scope": {
+        "chars": 89,
+        "est_tokens": 22,
+        "sha256": "f66099b389d9c50092d5b81780caa45d5943973a72f5f12d3ba7fa35233c66cf"
+      },
+      "diff": {
+        "chars": 229,
+        "est_tokens": 57,
+        "sha256": "d32a6f024f2b2aa36763f34cf7379dc4e4f741844aceaa0769f94182a7c0acdb"
+      },
+      "changed tests": {
+        "chars": 104,
+        "est_tokens": 26,
+        "sha256": "86554fb6990a15dc64eb54a227c4318c705b097eb23daf661c982d629808d3ba"
+      },
+      "gate": {
+        "chars": 109,
+        "est_tokens": 27,
+        "sha256": "42b4c5d7000bdceb1b2bb472507c88581db62a78bd87b5d4a3125daf3eb27355"
+      },
+      "security": {
+        "chars": 129,
+        "est_tokens": 32,
+        "sha256": "41f8fa6e1262495f7611c19c41bff5d7004415f7ff8b9186a26cc20e269d0671"
+      },
+      "evidence": {
+        "chars": 7624,
+        "est_tokens": 1906,
+        "sha256": "a4d84a329ea6032e55b0f2bfca45f7d88cc4b8acdec843e41b59a279e4468164"
+      }
+    },
+    "hash": "5b0988aab753",
+    "version": "5b0988aab753",
+    "candidate_known": true,
+    "base": "480b110c199f",
+    "sources": "task@T-1652 scoped-diff@HEAD specialist: review+adversarial-review routed=shadow",
+    "candidate_tokens": 2613,
+    "skill_tokens_presented_l2": 178,
+    "routed_mode": "shadow",
+    "routed_tokens": 7710,
+    "routed_reduction_ratio": 0.8651256732495511,
+    "routed_hidden": 0,
+    "routed_ambiguous": 5,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "4190f022d7cd",
+      "2721fffb9f65",
+      "1c8bc7764e3b",
+      "5c39e196cf7a",
+      "0a24bae41dbb",
+      "d3669a962c30",
+      "2ef4cc18db8e",
+      "97f42e848f7b",
+      "b8c1ce37bfb1",
+      "00db509188f0",
+      "041199286363",
+      "051786ba0165",
+      "05367709e33e",
+      "05df0bc9ef62",
+      "0768ddd89e7e",
+      "0f1d68687edd",
+      "0fcd075d9f57",
+      "17f396b5831c",
+      "199b1fe33c55",
+      "1c510a428e02",
+      "2380174927fc",
+      "238f7d061138",
+      "270a093d49c3",
+      "2b0bacecbd62",
+      "2b71081a619f",
+      "36fba3c5b5ac",
+      "3ec2adada116",
+      "413b7f459b23",
+      "4180c7586cb1",
+      "453b6e50c221",
+      "48de25429ecb",
+      "504365aa02ad",
+      "5862192e5902",
+      "622de2bd3ec8",
+      "632f33f78827",
+      "63602ead1a37",
+      "647c5393915d",
+      "65c4d2b5db00",
+      "691ea38ed0c7",
+      "6b0c3088acb2",
+      "6b6a2d72145e",
+      "7566baf004f8",
+      "7657bd5d45a9",
+      "7b29076a9004",
+      "877a3d773ed9",
+      "885bff05e6db",
+      "8f938ad31ca7",
+      "95fc56d31326",
+      "9d078ea9fe66",
+      "9ea39468a2ec",
+      "a595cbbe1665",
+      "a9e3c482cf6d",
+      "aa76d1c58efc",
+      "ab047a2d7f21",
+      "b5bea7faf114",
+      "b839fab17283",
+      "bb680aa235cd",
+      "bbdc9dcb52ab",
+      "c4bd4333eab1",
+      "c6443091de2c",
+      "ca4309bc6c4d",
+      "ce80308dc309",
+      "cf6515afcb5a",
+      "cfea7680a6a3",
+      "d0b9e72fe363",
+      "d39ac091b005",
+      "d500754708e5",
+      "d5efd7f3263e",
+      "d5f076ea66df",
+      "d73fa6e7047f",
+      "de6a00a0ff2f",
+      "df10911c0fd4",
+      "df7350a0e379",
+      "e1f55ae2b248",
+      "e374e3dd1e88",
+      "e42e3e70122c",
+      "e4b388cad1ac",
+      "e91c30e2df13",
+      "eb8a747a72da",
+      "efd6a99ca757",
+      "f1ad580b5a89",
+      "fb5e663e2e39"
+    ],
+    "prefix_sha": "a7fc6578794f",
+    "prefix_chars": 710,
+    "suffix_chars": 13725,
+    "dynamic_sections": [
+      "skills",
+      "Trigger",
+      "Objective",
+      "Procedure",
+      "Tools",
+      "Evidence requirements",
+      "Output contract",
+      "Stop conditions",
+      "Failure/recovery",
+      "spec",
+      "acceptance",
+      "scope",
+      "diff",
+      "changed tests",
+      "gate",
+      "security",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 390,
+    "instruction_tokens_modular": 390,
+    "role": "review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "specialist",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_routing_mode": "active",
+    "session_id": "26d06ab7-e4fb-43e5-8808-310c7089d5c7",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791225121.844673,
+  "account": "A",
+  "pid": 63834,
+  "pipeline": {
+    "skills_used": []
+  },
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 3,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 3,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "480b110c199f590680737580593a44f0b8df0cfd",
+    "packet_version": "5b0988aab753",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 3,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 3,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "5b0988aab753",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

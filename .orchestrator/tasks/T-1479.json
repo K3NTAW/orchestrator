@@ -1,0 +1,663 @@
+{
+  "id": "T-1479",
+  "created_at": 1790878822.808158,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: Execute result derived from git state v3: non-JSON-only derivation, is_current before any git mutation, single-lock check-and-post, git timeouts, add -A/--no-verify auto-commit, kill switch pinned",
+  "spec": "Goal T-1403, wave 2, plan label B4v3 (respec of T-1453 after spec review T-1464 request_changes; every risk is\nanswered below). The commit-now resume of T-1435 stays DROPPED (no non_json case has a session).\n\nContract (plan.md): gitutil.execute_outcome(worktree, parent, scope, *, since=None) -> {ahead, head,\ndirty_in_scope, dirty_out_of_scope} | None; hold prefix 'execute_incomplete' (B5 maps it to failure kind\n'incomplete').\n\nEvidence (U2, 2026-10-01): status_reason non_json is set in spawn.run_worker when json.loads of the\n`claude -p --output-format json` stdout fails; every recorded case is 'non-JSON output (rc=143): ' with empty\noutput (SIGTERM). luna T-0526: the worker posted done itself through bus_post_result with a prose summary and\nreconcile marked the process dead. So the signal is the git state of the worktree, and a result the worker\nalready posted must win.\n\nFacts (goal/T-1403; spawn.py/gitutil.py/worker_control.py unchanged since main 355583c):\n- spawn.run_worker sets t['executor'] = 'claude:<tier>' for execute before run_claude; the done path posts\n  {'summary', 'executed_by': f\"claude:{tier}\", 'review'} with no commit; the failed path posts status failed,\n  reason, resume_hint.partial_output. Every write goes through worker_control.write_if_current (bus lock +\n  is_current(epoch)). run_claude returns only after the child process has exited (waits on the Popen); the\n  reaper path (worker_control) can mark the epoch stale while the child is still alive.\n- gitutil._git_in(worktree, *args) has no timeout; _resolve_base(worktree, parent); callers reconcile_dead and\n  changed_paths must keep their behaviour.\n- daemon._dirty_scope_paths parses `git status --porcelain -z --untracked-files=all` (rename pairs, ignores\n  .orchestrator/ and .venv); scopes.matches(path, entries) implements the same matching. Do not import daemon\n  from gitutil.\n\nChange:\n1. gitutil: add keyword-only timeout to _git_in(worktree, *args, timeout=None) (default None keeps every existing\n   caller unchanged, T-1464 #4). execute_outcome(worktree, parent, scope, *, since=None): None when worktree is not\n   a directory, not a git work tree, no base resolves, or any git call fails (non-zero rc, OSError or\n   subprocess.TimeoutExpired, caught explicitly); every git call passes timeout=60. Else {'ahead': rev-list --count\n   <since or base>..HEAD, 'head': sha, 'dirty_in_scope': sorted, 'dirty_out_of_scope': sorted}; dirty paths from\n   the same porcelain -z parsing as daemon._dirty_scope_paths (rename pairs: the new path; deletions included);\n   in/out by scopes.matches(path, scope). gitutil.head_sha(worktree, timeout=60) -> sha | None. Read-only.\n2. spawn.py: module seams `execute_outcome = gitutil.execute_outcome`, `head_sha = gitutil.head_sha` referenced as\n   module attributes. derive = pool.cfg.get('spawn', {}).get('derive_execute_result', True); False -> today's\n   behaviour exactly (kill switch; the default lives in code, no pool.toml edit).\n3. run_worker, role execute only. pre_head = head_sha(worktree) before run_claude. Derivation runs ONLY when\n   r['status'] == 'failed' AND the reason starts with 'non-JSON output' (any rc) AND derive is True (T-1464 #6);\n   held, superseded and every other failed reason keep today's write, the done path keeps today's post and never\n   runs git (T-1464 #1; item 4 of T-1453 is DROPPED). If pre_head is None while the worktree is a git work tree\n   (head_sha failed) -> skip derivation, today's failed write (T-1464 #5): never fall back to the base for\n   'ahead'. o = execute_outcome(worktree, parent, scope, since=pre_head); o None -> today's failed write.\n   Ordering (T-1464 #2, #3): (i) is_current(task_id, epoch) is checked BEFORE any git mutation; stale -> return\n   superseded, touch nothing. (ii) o['ahead'] == 0 -> hold 'execute_incomplete: no commits' with resume_hint\n   {'partial_output': text[:2000] when any, 'dirty_in_scope', 'dirty_out_of_scope', 'head'}; never auto-commit.\n   (iii) dirty_out_of_scope non-empty -> hold 'execute_incomplete: uncommitted changes outside scope', same\n   resume_hint shape. (iv) dirty_in_scope non-empty (ahead > 0, nothing out of scope): the child process is already\n   reaped (run_claude returned); guard: refuse (hold 'execute_incomplete: leftovers not auto-committable: <why>')\n   when more than 40 paths, when any path's last component matches .env*, *.pem, *.key, *.p12, id_rsa*, *.keychain,\n   or when <git-dir>/index.lock exists (git-dir via `git rev-parse --git-dir`). Otherwise re-check is_current, then\n   `git add -A -- <exact paths>` (stages deletions and renames) and `git -c commit.gpgsign=false -c\n   user.name=orchestrator -c user.email=orchestrator@local commit --no-verify -m \"<task id>: auto-commit in-scope\n   leftovers after executor exit (synthetic)\"`, both with timeout=60; non-zero rc or timeout -> hold\n   'execute_incomplete: auto-commit failed: <stderr[:200]>'. Recompute o; still dirty in scope -> that hold.\n   (v) ahead > 0 and clean -> ATOMIC check-and-post (T-1464 #2): inside one bus.locked() section, re-read the task;\n   if not is_current(epoch), or status is 'done', or (result or {}).get('commit') -> the worker's own post wins,\n   write nothing; else post_result done with {'summary': model text when any else 'derived from git state after\n   <reason>', 'commit': head, 'executed_by': t['executor'], 'derived_from': 'git_state', 'synthetic_commit': sha\n   when the auto-commit ran else absent, 'review': same text as the done path}. Implement as\n   worker_control.post_if_current(task_id, epoch, predicate, **fields) or an equivalent single-lock helper\n   (worker_control.py joins scope). Then contracts.process exactly like the done path (repair_session None).\n   The hold writes in (ii)-(iv) also go through write_if_current.\n   bus.log_run(task, role='execute', outcome='derived_done' | 'execute_incomplete', executor=t['executor'],\n   derived_from='git_state') exactly once per derived decision (T-1464 #9).\n\nTests that assert the old behaviour (SPEC RULE; update to the new contract):\n- tests/test_spawn.py::test_failed_without_reason_key_sets_default_and_resume_hint: worktree is a plain directory;\n  execute_outcome returns None; passes unchanged.\n- Add an autouse-style setUp patch in the test_spawn execute run_worker test class(es) that patches\n  spawn.execute_outcome -> None and spawn.head_sha -> None by default (T-1464 #8); the new derivation tests\n  override it. Enumerate with `grep -n \"ensure_worktree\" tests/test_spawn.py` and cover every hit.\n- Build the new tests on tests/_harness.py scratch_repo (goal branch + task worktree), patch run_claude like the\n  neighbouring tests; the fix-round case seeds one commit before the run and asserts the hold.\n\nOut of scope: daemon.py (B5 adds fix rounds for execute_incomplete; the gate hold 'executor did not commit'\nstays), executor.py, failures.py, scorecard.py, pool.toml. Rollback: `git revert` of the merge, or\n[spawn].derive_execute_result = false restores the old behaviour exactly (pinned by acceptance (f)); the Planner\nrecords both in decisions.md at merge.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by the line numbers quoted here.",
+  "inputs": [
+    "T-1468"
+  ],
+  "acceptance": [
+    "tests/test_gitutil.py::test_execute_outcome_reports_ahead_head_and_dirty_split_by_scope: passes: in a scratch repo with a goal branch and a task worktree, gitutil.execute_outcome(worktree, parent, scope) returns ahead (commits since merge-base with goal/<parent>), head sha, and uncommitted paths split into dirty_in_scope / dirty_out_of_scope (untracked and deleted paths included, .orchestrator/ and .venv ignored, scopes.matches rules); with since=<sha of an older commit> ahead counts only commits after it; returns None for a directory that is not a git work tree, when a git call fails, and when a git call raises subprocess.TimeoutExpired (patched); existing _git_in callers see no timeout argument",
+    "tests/test_spawn.py::test_execute_result_derived_from_git_state: passes: run_worker for an execute task whose run_claude returns failed 'non-JSON output (rc=143): ' (a) posts status done with result.commit = the worktree HEAD, executed_by = t['executor'] and derived_from 'git_state' when the run added a commit and the tree is clean, and bus.log_run was called exactly once with outcome 'derived_done'; (b) with one fresh commit plus in-scope uncommitted files, including a deleted tracked file, auto-commits them with --no-verify, posts done with synthetic_commit set and the worktree clean; (c) with an out-of-scope dirty file holds 'execute_incomplete: uncommitted changes outside scope' with resume_hint.dirty_out_of_scope; (d) with a pre-existing commit but none since run start holds 'execute_incomplete: no commits' and auto-commits nothing even with in-scope dirt; (e) when the task is already status done on the bus (worker posted itself) the derived path writes nothing and the check and the post run under one bus lock (bus.locked patched to count entries: the derived check-and-post takes exactly one entry); (f) with pool.cfg['spawn']['derive_execute_result'] False, or a failed reason that is not 'non-JSON output', or head_sha returning None on a git worktree, the task is marked failed exactly as before and the worktree is untouched; (g) a run_claude 'done' result never calls execute_outcome or head_sha after the run",
+    "tests/test_spawn.py::test_auto_commit_refused_for_secrets_index_lock_or_stale_epoch: passes: an in-scope leftover named .env or a present <git-dir>/index.lock holds 'execute_incomplete: leftovers not auto-committable: ...' and leaves the worktree untouched; with worker_control.is_current patched False no git add or commit runs and run_worker returns superseded",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/gitutil.py",
+    "orchestrator/worker_control.py",
+    "tests/test_spawn.py",
+    "tests/test_gitutil.py",
+    "tests/test_worker_control.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1479",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/worker_control.py",
+        "issue": "Acceptance (e) requires the derived check-and-post to take exactly one bus.locked() entry. bus bus.locked() is reentrant and counts depth per entry. is_current, bus.get, bus.post_result and contracts.process may each enter locked() again. A test that patches locked() to count entries will count the nested ones too, and may not equal 1. Also, contracts.process 'exactly like the done path' is not clear about whether it runs inside or outside the lock.",
+        "severity": "med",
+        "line": 215
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The leftover auto-commit (git add and commit) runs outside the bus lock. is_current is re-checked right before it, but the epoch can still go stale between that check and the commit. The worker is then superseded yet the worktree has been mutated. The spec says 'touch nothing when stale' but cannot actually guarantee that for step (iv).",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Auto-committing in-scope leftovers with --no-verify after a SIGTERM may commit half-written or broken files, and the result is posted as done. Only the downstream gate catches this. The synthetic_commit and derived_from fields are not tied to any rule that forces the gate or a review on a synthetic commit.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Derivation applies to any non-JSON failure with any rc, including SIGTERM sent by a cancel, steer or manual kill that does not bump steer_epoch. In that case a deliberately killed worker could be turned into done. The spec relies only on the epoch check and does not say whether cancel and steer paths always bump it.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/gitutil.py",
+        "issue": "Reusing daemon._dirty_scope_paths parsing means copying the porcelain -z logic, since gitutil cannot import daemon. Two parsers can drift. The spec does not say to add a parity test between them, and the .orchestrator/ and .venv ignore rules are duplicated.",
+        "severity": "low",
+        "line": 8
+      },
+      {
+        "path": "tests/test_spawn.py",
+        "issue": "The 'cover every ensure_worktree hit' instruction depends on a grep at implementation time. The new tests for the .env guard, index.lock and 40-path limit boundary are only partly specified. The 40-path limit and the other secret globs (.pem, .key, .p12, id_rsa*, .keychain) have no acceptance test.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Define post_if_current as one bus.locked() entry, with the task re-read and post_result done inline. Say whether contracts.process runs inside or outside the lock. Then state the acceptance (e) count as 'the post_if_current call enters locked once' (patch locked at the post_if_current call site, or count only outermost entries) so it is verifiable under the reentrant lock.",
+      "For step (iv), accept that the stale window cannot be fully closed, and say so. Either hold the bus lock around the add and commit (60s timeouts, which has cost), or on a stale epoch after the commit log the synthetic commit and return superseded without posting. State which one.",
+      "Require that synthetic_commit results cannot skip the tests-green gate, or add 'synthetic_commit' to the result so the daemon and review route can see it. Note that daemon.py is out of scope, so a note for B5 is enough.",
+      "Confirm that every cancel and steer path bumps steer_epoch. Otherwise skip derivation when rc is 143 and the worker is marked cancelled in worker_registry.",
+      "Add a gitutil test that feeds identical porcelain output to execute_outcome and daemon._dirty_scope_paths and compares the path sets (test only, no import in gitutil).",
+      "Add test cases for the 40-path guard (41 paths holds, 40 commits) and parametrize the secret globs in test_auto_commit_refused_for_secrets_index_lock_or_stale_epoch."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790878831.9627368,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11451,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790878831.9828858,
+      "packet_meta": {
+        "chars": 10712,
+        "est_tokens": 2678,
+        "presented_tokens": 2678,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "d0cdcbae6b39113295489fcd82309b7f029743549c673f4e61187894bb88486b"
+          },
+          "spec": {
+            "chars": 7438,
+            "est_tokens": 1859,
+            "sha256": "1cc49b367d967f593fa8f82c89db57565fbe751118fcb86436a3d7c14fa411a0"
+          },
+          "acceptance": {
+            "chars": 2578,
+            "est_tokens": 644,
+            "sha256": "cef1dd7bc04099720c886f7c5d0fe6180246a3dc13f2084b324cf5d6b9a68d3d"
+          },
+          "scope": {
+            "chars": 169,
+            "est_tokens": 42,
+            "sha256": "99e1f3f841eb16c94bd34327ee09512ffe90ca12d2684800d924240a9c8fee10"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 407,
+            "est_tokens": 101,
+            "sha256": "6b49e65fb35186b60a9525dc0adc6453d3cb4aa96eec26132a7ff4ed8d275bea"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "3648039b60b0",
+        "version": "3648039b60b0",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1468 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11451,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790878833.58889,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1479",
+      "claimed_at": 1790878833.588639
+    },
+    {
+      "ts": 1790878833.590365,
+      "account": "A"
+    },
+    {
+      "ts": 1790878845.323607,
+      "pid": 5234,
+      "account": "A"
+    },
+    {
+      "ts": 1790878871.38337,
+      "packet_meta": {
+        "chars": 10712,
+        "est_tokens": 2678,
+        "presented_tokens": 2678,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "d0cdcbae6b39113295489fcd82309b7f029743549c673f4e61187894bb88486b"
+          },
+          "spec": {
+            "chars": 7438,
+            "est_tokens": 1859,
+            "sha256": "1cc49b367d967f593fa8f82c89db57565fbe751118fcb86436a3d7c14fa411a0"
+          },
+          "acceptance": {
+            "chars": 2578,
+            "est_tokens": 644,
+            "sha256": "cef1dd7bc04099720c886f7c5d0fe6180246a3dc13f2084b324cf5d6b9a68d3d"
+          },
+          "scope": {
+            "chars": 169,
+            "est_tokens": 42,
+            "sha256": "99e1f3f841eb16c94bd34327ee09512ffe90ca12d2684800d924240a9c8fee10"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 407,
+            "est_tokens": 101,
+            "sha256": "6b49e65fb35186b60a9525dc0adc6453d3cb4aa96eec26132a7ff4ed8d275bea"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "3648039b60b0",
+        "version": "3648039b60b0",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1468 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11451,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "61ca81b1-364f-4fda-a12e-8e7a91c7cbf5"
+      }
+    },
+    {
+      "ts": 1790878871.407659,
+      "packet_meta": {
+        "chars": 10712,
+        "est_tokens": 2678,
+        "presented_tokens": 2678,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "d0cdcbae6b39113295489fcd82309b7f029743549c673f4e61187894bb88486b"
+          },
+          "spec": {
+            "chars": 7438,
+            "est_tokens": 1859,
+            "sha256": "1cc49b367d967f593fa8f82c89db57565fbe751118fcb86436a3d7c14fa411a0"
+          },
+          "acceptance": {
+            "chars": 2578,
+            "est_tokens": 644,
+            "sha256": "cef1dd7bc04099720c886f7c5d0fe6180246a3dc13f2084b324cf5d6b9a68d3d"
+          },
+          "scope": {
+            "chars": 169,
+            "est_tokens": 42,
+            "sha256": "99e1f3f841eb16c94bd34327ee09512ffe90ca12d2684800d924240a9c8fee10"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 407,
+            "est_tokens": 101,
+            "sha256": "6b49e65fb35186b60a9525dc0adc6453d3cb4aa96eec26132a7ff4ed8d275bea"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "3648039b60b0",
+        "version": "3648039b60b0",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1468 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 11451,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "61ca81b1-364f-4fda-a12e-8e7a91c7cbf5",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790878872.249019,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/worker_control.py",
+            "issue": "Acceptance (e) requires the derived check-and-post to take exactly one bus.locked() entry. bus bus.locked() is reentrant and counts depth per entry. is_current, bus.get, bus.post_result and contracts.process may each enter locked() again. A test that patches locked() to count entries will count the nested ones too, and may not equal 1. Also, contracts.process 'exactly like the done path' is not clear about whether it runs inside or outside the lock.",
+            "severity": "med",
+            "line": 215
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The leftover auto-commit (git add and commit) runs outside the bus lock. is_current is re-checked right before it, but the epoch can still go stale between that check and the commit. The worker is then superseded yet the worktree has been mutated. The spec says 'touch nothing when stale' but cannot actually guarantee that for step (iv).",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Auto-committing in-scope leftovers with --no-verify after a SIGTERM may commit half-written or broken files, and the result is posted as done. Only the downstream gate catches this. The synthetic_commit and derived_from fields are not tied to any rule that forces the gate or a review on a synthetic commit.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Derivation applies to any non-JSON failure with any rc, including SIGTERM sent by a cancel, steer or manual kill that does not bump steer_epoch. In that case a deliberately killed worker could be turned into done. The spec relies only on the epoch check and does not say whether cancel and steer paths always bump it.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/gitutil.py",
+            "issue": "Reusing daemon._dirty_scope_paths parsing means copying the porcelain -z logic, since gitutil cannot import daemon. Two parsers can drift. The spec does not say to add a parity test between them, and the .orchestrator/ and .venv ignore rules are duplicated.",
+            "severity": "low",
+            "line": 8
+          },
+          {
+            "path": "tests/test_spawn.py",
+            "issue": "The 'cover every ensure_worktree hit' instruction depends on a grep at implementation time. The new tests for the .env guard, index.lock and 40-path limit boundary are only partly specified. The 40-path limit and the other secret globs (.pem, .key, .p12, id_rsa*, .keychain) have no acceptance test.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Define post_if_current as one bus.locked() entry, with the task re-read and post_result done inline. Say whether contracts.process runs inside or outside the lock. Then state the acceptance (e) count as 'the post_if_current call enters locked once' (patch locked at the post_if_current call site, or count only outermost entries) so it is verifiable under the reentrant lock.",
+          "For step (iv), accept that the stale window cannot be fully closed, and say so. Either hold the bus lock around the add and commit (60s timeouts, which has cost), or on a stale epoch after the commit log the synthetic commit and return superseded without posting. State which one.",
+          "Require that synthetic_commit results cannot skip the tests-green gate, or add 'synthetic_commit' to the result so the daemon and review route can see it. Note that daemon.py is out of scope, so a note for B5 is enough.",
+          "Confirm that every cancel and steer path bumps steer_epoch. Otherwise skip derivation when rc is 143 and the worker is marked cancelled in worker_registry.",
+          "Add a gitutil test that feeds identical porcelain output to execute_outcome and daemon._dirty_scope_paths and compares the path sets (test only, no import in gitutil).",
+          "Add test cases for the 40-path guard (41 paths holds, 40 commits) and parametrize the secret globs in test_auto_commit_refused_for_secrets_index_lock_or_stale_epoch."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790878872.250527,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/worker_control.py",
+          "issue": "Acceptance (e) requires the derived check-and-post to take exactly one bus.locked() entry. bus bus.locked() is reentrant and counts depth per entry. is_current, bus.get, bus.post_result and contracts.process may each enter locked() again. A test that patches locked() to count entries will count the nested ones too, and may not equal 1. Also, contracts.process 'exactly like the done path' is not clear about whether it runs inside or outside the lock.",
+          "severity": "med",
+          "line": 215
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The leftover auto-commit (git add and commit) runs outside the bus lock. is_current is re-checked right before it, but the epoch can still go stale between that check and the commit. The worker is then superseded yet the worktree has been mutated. The spec says 'touch nothing when stale' but cannot actually guarantee that for step (iv).",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Auto-committing in-scope leftovers with --no-verify after a SIGTERM may commit half-written or broken files, and the result is posted as done. Only the downstream gate catches this. The synthetic_commit and derived_from fields are not tied to any rule that forces the gate or a review on a synthetic commit.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Derivation applies to any non-JSON failure with any rc, including SIGTERM sent by a cancel, steer or manual kill that does not bump steer_epoch. In that case a deliberately killed worker could be turned into done. The spec relies only on the epoch check and does not say whether cancel and steer paths always bump it.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/gitutil.py",
+          "issue": "Reusing daemon._dirty_scope_paths parsing means copying the porcelain -z logic, since gitutil cannot import daemon. Two parsers can drift. The spec does not say to add a parity test between them, and the .orchestrator/ and .venv ignore rules are duplicated.",
+          "severity": "low",
+          "line": 8
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "issue": "The 'cover every ensure_worktree hit' instruction depends on a grep at implementation time. The new tests for the .env guard, index.lock and 40-path limit boundary are only partly specified. The 40-path limit and the other secret globs (.pem, .key, .p12, id_rsa*, .keychain) have no acceptance test.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 10712,
+    "est_tokens": 2678,
+    "presented_tokens": 2678,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "d0cdcbae6b39113295489fcd82309b7f029743549c673f4e61187894bb88486b"
+      },
+      "spec": {
+        "chars": 7438,
+        "est_tokens": 1859,
+        "sha256": "1cc49b367d967f593fa8f82c89db57565fbe751118fcb86436a3d7c14fa411a0"
+      },
+      "acceptance": {
+        "chars": 2578,
+        "est_tokens": 644,
+        "sha256": "cef1dd7bc04099720c886f7c5d0fe6180246a3dc13f2084b324cf5d6b9a68d3d"
+      },
+      "scope": {
+        "chars": 169,
+        "est_tokens": 42,
+        "sha256": "99e1f3f841eb16c94bd34327ee09512ffe90ca12d2684800d924240a9c8fee10"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 407,
+        "est_tokens": 101,
+        "sha256": "6b49e65fb35186b60a9525dc0adc6453d3cb4aa96eec26132a7ff4ed8d275bea"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "3648039b60b0",
+    "version": "3648039b60b0",
+    "candidate_known": false,
+    "base": "db2ae815ac55",
+    "sources": "task@T-1468 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 11451,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "61ca81b1-364f-4fda-a12e-8e7a91c7cbf5",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790878833.588639,
+  "account": "A",
+  "pid": 5234,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/worker_control.py",
+      "issue": "Acceptance (e) requires the derived check-and-post to take exactly one bus.locked() entry. bus bus.locked() is reentrant and counts depth per entry. is_current, bus.get, bus.post_result and contracts.process may each enter locked() again. A test that patches locked() to count entries will count the nested ones too, and may not equal 1. Also, contracts.process 'exactly like the done path' is not clear about whether it runs inside or outside the lock.",
+      "severity": "med",
+      "line": 215
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The leftover auto-commit (git add and commit) runs outside the bus lock. is_current is re-checked right before it, but the epoch can still go stale between that check and the commit. The worker is then superseded yet the worktree has been mutated. The spec says 'touch nothing when stale' but cannot actually guarantee that for step (iv).",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Auto-committing in-scope leftovers with --no-verify after a SIGTERM may commit half-written or broken files, and the result is posted as done. Only the downstream gate catches this. The synthetic_commit and derived_from fields are not tied to any rule that forces the gate or a review on a synthetic commit.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Derivation applies to any non-JSON failure with any rc, including SIGTERM sent by a cancel, steer or manual kill that does not bump steer_epoch. In that case a deliberately killed worker could be turned into done. The spec relies only on the epoch check and does not say whether cancel and steer paths always bump it.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/gitutil.py",
+      "issue": "Reusing daemon._dirty_scope_paths parsing means copying the porcelain -z logic, since gitutil cannot import daemon. Two parsers can drift. The spec does not say to add a parity test between them, and the .orchestrator/ and .venv ignore rules are duplicated.",
+      "severity": "low",
+      "line": 8
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "issue": "The 'cover every ensure_worktree hit' instruction depends on a grep at implementation time. The new tests for the .env guard, index.lock and 40-path limit boundary are only partly specified. The 40-path limit and the other secret globs (.pem, .key, .p12, id_rsa*, .keychain) have no acceptance test.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

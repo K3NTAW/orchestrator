@@ -1,0 +1,191 @@
+{
+  "id": "T-0159",
+  "parent": "T-0109",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): D1 fix rounds on task/T-0157 \u2014 delta 2e32566..8a82703 (T-0151/T-0154, executed by claude:sonnet)",
+  "spec": "Review the delta `git diff 2e32566 8a82703` in worktree wt/T-0157 (fix rounds T-0151 and T-0154 on top of the already-reviewed T-0120 commit, rebased onto goal/T-0109; files orchestrator/daemon.py, tests/test_daemon.py, .orchestrator/pool.toml, CLAUDE.md, .orchestrator/prompts/planner.md). It answers review T-0150; confirm each item resolved: (1) reviews_expected(t) used by gate() and merge_reviewed(); an orphaned complexity-7 task merges on one approve (test); (2) a failed or held sibling review holds the source task with hold_reason naming the sibling and notifies once, no unbounded wait (test); (3) second review never on the executor's model: Claude-executed \u2192 both reviews on the non-executing tier, the second carrying constraints.avoid_account and second_review; Codex-executed \u2192 tiers differ (test); docstring, pool.toml [review] comment and README paragraph say the same; (4) CLAUDE.md line, tests/test_daemon.py docstring and prompts/planner.md say 6 with the pool.toml pointer and test_planner_md_matches_claude_md_lists is green; (5) merged_at stamped on the source task before merge.merge. Also: `git diff 1b94384 2e32566 -- README.md .orchestrator/pool.toml` shows the T-0120 conflict resolution kept T-0121's scout limits and scouts line; reconcile_dead and the orphaned branch intact; no shell strings from config. Run `uv run python -m unittest tests.test_daemon tests.test_goals -q` once. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0157"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five T-0150 items confirmed resolved or named unresolved with evidence",
+    "Conflict resolution kept both D1 and D2 content"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "CLAUDE.md",
+    ".orchestrator/prompts/planner.md",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0151",
+      "T-0154",
+      "T-0157"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0159",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 400,
+        "issue": "T-0150 item 2 only half-fixed. The failed/held-sibling escape hatch lives inside `for r in bus.read(status=\"done\", role=\"review\")`, so it only fires when at least one review reaches done with an approve. If BOTH reviews of a complexity-7 task fail (spawn.run_worker sets status='failed' on 'review returned no parseable verdict' - the exact T-0139/T-0135 mode, and a prompt/diff problem that fails one review usually fails its twin), merge_reviewed never iterates either of them: src stays status=done with gated_at stamped, gate() skips it forever, no hold, no hold_reason, no notify. Same for the single-review 4-6 path when its one review fails. That is the identical silent-stall class item 2 named. The sweep needs to be over done-but-unmerged execute tasks (or over all reviews of src, not just done ones), not over done reviews.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 364,
+        "issue": "`avoid_account` is always None here, so the 'different account when possible' promise in pool.toml:26 and README.md:34 is never attempted. `existing[0]` is the snapshot bus.create_task returned three lines up - create_task (bus.py:92) sets assigned_to=None and no 'account' key at all, and it is never re-read - so `.get(\"account\") or .get(\"assigned_to\")` is None on every gate-created second review. Verified by running gate() on a complexity-7 claude:opus-executed task: constraints == {'avoid_account': None, 'second_review': True}. Separately, nothing consumes constraints.avoid_account: spawn.run_worker (spawn.py:214-225) derives `avoid` only from the reviewed execute task's account and never reads the review's own constraints, so even a non-None value would be ignored and both reviews deterministically land on the same non-executor account. Either re-read the task (bus.get(existing[0]['id'])) and honour the key in run_worker, or drop the dead field and say in pool.toml/README that both reviews share an account.",
+        "severity": "med"
+      },
+      {
+        "path": "CLAUDE.md",
+        "line": 18,
+        "issue": "Step 7 still promises '7-10 cross-model adversarial', which the new Claude-executor branch makes false for the common case. gate() now puts BOTH reviews of a Claude-fallback-executed 7-10 task on review_tier(t) - one single tier - so a claude:opus-executed task is graded twice by sonnet and never cross-model. Confirmed by running gate(): tiers == ['sonnet','sonnet']. T-0150 item 3 asked to either route the second review off-model or 'drop the claim and state the tradeoff explicitly'; the docstring, pool.toml and README were reworded but the two governing docs were not. Identical stale line at .orchestrator/prompts/planner.md:15, which test_planner_md_matches_claude_md_lists keeps in lockstep, so both need the same edit.",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 327,
+        "issue": "`self.assertIn(\"avoid_account\", reviews[1][\"constraints\"])` asserts only that the key exists; it passes against the always-None value the code actually produces, so the test cannot fail for the defect it was written to cover. Either assert the concrete account id (after making gate() re-read r1) or delete the assertion rather than leave a green test standing behind an inert field.",
+        "severity": "med"
+      },
+      {
+        "path": "README.md",
+        "line": 34,
+        "issue": "'complexity >= two_reviews_from spawns two' is now wrong for an orphaned result: reviews_expected() (daemon.py:305) returns 1 for any orphaned task whatever its complexity, and gate()'s orphaned branch opens exactly one review. The paragraph documents the two-review rule that item 1 just carved the orphaned exception out of, so a reader gets the pre-fix behaviour. One clause is enough.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789741323.116404,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0159",
+      "claimed_at": 1789741323.1158888
+    },
+    {
+      "ts": 1789741323.154863,
+      "pid": 11949,
+      "account": "A"
+    },
+    {
+      "ts": 1789741571.956473,
+      "status": "done",
+      "result": {
+        "summary": "Items 1, 4, 5 fully resolved with meaningful tests; item 3 resolved in code but two docs still overclaim and the avoid_account plumbing is inert; item 2 only half-resolved - the all-reviews-failed case is still the same silent unbounded wait. Conflict resolution kept both D1 and D2 content (git diff 1b94384 2e32566 touches only the added [review] table and the Pipeline paragraph; T-0121's scout-cap line and scout.md/pool.toml limits untouched). `uv run python -m unittest tests.test_daemon tests.test_goals -q` = 76 tests OK. reconcile_dead and the orphaned branch in gate() intact; no shell strings built from config.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 400,
+            "issue": "T-0150 item 2 only half-fixed. The failed/held-sibling escape hatch lives inside `for r in bus.read(status=\"done\", role=\"review\")`, so it only fires when at least one review reaches done with an approve. If BOTH reviews of a complexity-7 task fail (spawn.run_worker sets status='failed' on 'review returned no parseable verdict' - the exact T-0139/T-0135 mode, and a prompt/diff problem that fails one review usually fails its twin), merge_reviewed never iterates either of them: src stays status=done with gated_at stamped, gate() skips it forever, no hold, no hold_reason, no notify. Same for the single-review 4-6 path when its one review fails. That is the identical silent-stall class item 2 named. The sweep needs to be over done-but-unmerged execute tasks (or over all reviews of src, not just done ones), not over done reviews.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 364,
+            "issue": "`avoid_account` is always None here, so the 'different account when possible' promise in pool.toml:26 and README.md:34 is never attempted. `existing[0]` is the snapshot bus.create_task returned three lines up - create_task (bus.py:92) sets assigned_to=None and no 'account' key at all, and it is never re-read - so `.get(\"account\") or .get(\"assigned_to\")` is None on every gate-created second review. Verified by running gate() on a complexity-7 claude:opus-executed task: constraints == {'avoid_account': None, 'second_review': True}. Separately, nothing consumes constraints.avoid_account: spawn.run_worker (spawn.py:214-225) derives `avoid` only from the reviewed execute task's account and never reads the review's own constraints, so even a non-None value would be ignored and both reviews deterministically land on the same non-executor account. Either re-read the task (bus.get(existing[0]['id'])) and honour the key in run_worker, or drop the dead field and say in pool.toml/README that both reviews share an account.",
+            "severity": "med"
+          },
+          {
+            "path": "CLAUDE.md",
+            "line": 18,
+            "issue": "Step 7 still promises '7-10 cross-model adversarial', which the new Claude-executor branch makes false for the common case. gate() now puts BOTH reviews of a Claude-fallback-executed 7-10 task on review_tier(t) - one single tier - so a claude:opus-executed task is graded twice by sonnet and never cross-model. Confirmed by running gate(): tiers == ['sonnet','sonnet']. T-0150 item 3 asked to either route the second review off-model or 'drop the claim and state the tradeoff explicitly'; the docstring, pool.toml and README were reworded but the two governing docs were not. Identical stale line at .orchestrator/prompts/planner.md:15, which test_planner_md_matches_claude_md_lists keeps in lockstep, so both need the same edit.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 327,
+            "issue": "`self.assertIn(\"avoid_account\", reviews[1][\"constraints\"])` asserts only that the key exists; it passes against the always-None value the code actually produces, so the test cannot fail for the defect it was written to cover. Either assert the concrete account id (after making gate() re-read r1) or delete the assertion rather than leave a green test standing behind an inert field.",
+            "severity": "med"
+          },
+          {
+            "path": "README.md",
+            "line": 34,
+            "issue": "'complexity >= two_reviews_from spawns two' is now wrong for an orphaned result: reviews_expected() (daemon.py:305) returns 1 for any orphaned task whatever its complexity, and gate()'s orphaned branch opens exactly one review. The paragraph documents the two-review rule that item 1 just carved the orphaned exception out of, so a reader gets the pre-fix behaviour. One clause is enough.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789741586.408542,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 400,
+            "issue": "T-0150 item 2 only half-fixed. The failed/held-sibling escape hatch lives inside `for r in bus.read(status=\"done\", role=\"review\")`, so it only fires when at least one review reaches done with an approve. If BOTH reviews of a complexity-7 task fail (spawn.run_worker sets status='failed' on 'review returned no parseable verdict' - the exact T-0139/T-0135 mode, and a prompt/diff problem that fails one review usually fails its twin), merge_reviewed never iterates either of them: src stays status=done with gated_at stamped, gate() skips it forever, no hold, no hold_reason, no notify. Same for the single-review 4-6 path when its one review fails. That is the identical silent-stall class item 2 named. The sweep needs to be over done-but-unmerged execute tasks (or over all reviews of src, not just done ones), not over done reviews.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 364,
+            "issue": "`avoid_account` is always None here, so the 'different account when possible' promise in pool.toml:26 and README.md:34 is never attempted. `existing[0]` is the snapshot bus.create_task returned three lines up - create_task (bus.py:92) sets assigned_to=None and no 'account' key at all, and it is never re-read - so `.get(\"account\") or .get(\"assigned_to\")` is None on every gate-created second review. Verified by running gate() on a complexity-7 claude:opus-executed task: constraints == {'avoid_account': None, 'second_review': True}. Separately, nothing consumes constraints.avoid_account: spawn.run_worker (spawn.py:214-225) derives `avoid` only from the reviewed execute task's account and never reads the review's own constraints, so even a non-None value would be ignored and both reviews deterministically land on the same non-executor account. Either re-read the task (bus.get(existing[0]['id'])) and honour the key in run_worker, or drop the dead field and say in pool.toml/README that both reviews share an account.",
+            "severity": "med"
+          },
+          {
+            "path": "CLAUDE.md",
+            "line": 18,
+            "issue": "Step 7 still promises '7-10 cross-model adversarial', which the new Claude-executor branch makes false for the common case. gate() now puts BOTH reviews of a Claude-fallback-executed 7-10 task on review_tier(t) - one single tier - so a claude:opus-executed task is graded twice by sonnet and never cross-model. Confirmed by running gate(): tiers == ['sonnet','sonnet']. T-0150 item 3 asked to either route the second review off-model or 'drop the claim and state the tradeoff explicitly'; the docstring, pool.toml and README were reworded but the two governing docs were not. Identical stale line at .orchestrator/prompts/planner.md:15, which test_planner_md_matches_claude_md_lists keeps in lockstep, so both need the same edit.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 327,
+            "issue": "`self.assertIn(\"avoid_account\", reviews[1][\"constraints\"])` asserts only that the key exists; it passes against the always-None value the code actually produces, so the test cannot fail for the defect it was written to cover. Either assert the concrete account id (after making gate() re-read r1) or delete the assertion rather than leave a green test standing behind an inert field.",
+            "severity": "med"
+          },
+          {
+            "path": "README.md",
+            "line": 34,
+            "issue": "'complexity >= two_reviews_from spawns two' is now wrong for an orphaned result: reviews_expected() (daemon.py:305) returns 1 for any orphaned task whatever its complexity, and gate()'s orphaned branch opens exactly one review. The paragraph documents the two-review rule that item 1 just carved the orphaned exception out of, so a reader gets the pre-fix behaviour. One clause is enough.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789741586.410599,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789741323.1158888,
+  "pid": 11949,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

@@ -1,0 +1,221 @@
+{
+  "id": "T-0069",
+  "parent": "T-0065",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "Scout S4: kgpt test suite, local gate and handbook rules \u2014 what an orchestrator tests.sh must run and what new tools must document",
+  "spec": "Read-only scout over /Users/k3ntaw/code/kgpt. Read Makefile (test, lint, typecheck targets), conftest.py, .env.test, .github/workflows/ci.yml, kernel/tests/test_handbook.py, kernel/tests/test_projects.py, gateway/tests/test_projects_routes.py, gateway/tests/test_github_connections.py, docs/handbook/07-permissions.md, docs/handbook/08-modules.md, and CLAUDE.md. Report: (1) the exact commands to run lint, typecheck, python tests and web typecheck, how long they take, and which tests skip without a database and how to run them with `make dev`; (2) what test_handbook.py asserts, so new tools and tiers are documented in the right pages; (3) the permission tiers and autonomy ceilings a new READ_EXTERNAL / WRITE_LOCAL / WRITE_EXTERNAL tool must respect, with the enforcing code path:line; (4) how existing project and github tests set up fixtures (DB fixtures, owner context) so new tests can copy the pattern; (5) a proposed `.orchestrator/tests.sh` for kgpt that fails loudly (set -e) and runs the fast, database-free gate, stating what it does not cover. Also try running `make lint` and `make typecheck` in the repo and report the result and wall time. Cite path:line, one confidence per finding.",
+  "inputs": [],
+  "acceptance": [
+    "Result gives the exact gate commands with measured wall time and the lint/typecheck outcome on current main",
+    "Result explains test_handbook.py assertions and the tier/autonomy rules with path:line",
+    "Result proposes a tests.sh body and names what it does not cover"
+  ],
+  "scope": [
+    "/Users/k3ntaw/code/kgpt/**"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0069",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Exact gate commands: lint = `uv run --frozen ruff check .` then `uv run --frozen ruff format --check .` (measured 0.33s, all pass on current main); typecheck = `uv run --frozen mypy` (measured 1.55s, 'Success: no issues found in 171 source files'); python tests = `uv run --frozen pytest -q -rs` (Makefile's `make test` sources `.env.test` first if present) (measured 32.30s wall, 620 passed / 418 skipped without a database or Redis); web typecheck = `npm run typecheck` i.e. `tsc -b --noEmit` in clients/web (measured 1.89s, no errors).",
+        "evidence": [
+          "Makefile:70",
+          "Makefile:88",
+          "Makefile:96",
+          "clients/web/package.json:6"
+        ],
+        "confidence": 0.97,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "418 tests skip without a database/Redis; all use the `db` (or `app_engine`, or a redis-probing) fixture which calls `pytest.skip(...)` when unreachable rather than failing. CI enforces the opposite: it fails if any test is reported as 'skipped' via a final `pytest -q 2>&1 | tee ...; ! grep -q skipped`, so a real CI run must provide Postgres, Redis, KGPT_APP_DB_PASSWORD and KGPT_ADMIN_EMAILS.",
+        "evidence": [
+          "conftest.py:127-146",
+          "conftest.py:241-258",
+          "conftest.py:62-72",
+          ".github/workflows/ci.yml:18-52",
+          ".github/workflows/ci.yml:87-88"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Contrary to the task's framing, the repo explicitly forbids running database-backed tests against `make dev`'s database: .env.test's comment says the test instance is 'a throwaway container, separate from `make dev`' because the `db` fixture TRUNCATEs all app tables, and conftest.py refuses any KGPT_TEST_DATABASE_URL whose db name doesn't contain 'test' (pytest_configure raises pytest.UsageError, not a skip). To run the DB/Redis-backed tests locally: start disposable containers \u2014 `docker run -d --name kgpt-test-pg -p 55432:5432 -e POSTGRES_USER=kgpt -e POSTGRES_PASSWORD=... -e POSTGRES_DB=kgpt_test postgres:16` and `docker run -d --name kgpt-test-redis -p 56379:6379 redis:7-alpine` \u2014 run `alembic upgrade head` against kgpt_test (this also creates the restricted `kgpt_app` role needed by `app_engine`), export `KGPT_TEST_DATABASE_URL`, `KGPT_TEST_REDIS_URL`, and `KGPT_APP_DB_PASSWORD`, then run `make test`.",
+        "evidence": [
+          ".env.test:1-6",
+          "conftest.py:62-72",
+          "conftest.py:241-258",
+          "conftest.py:30"
+        ],
+        "confidence": 0.92,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "kernel/tests/test_handbook.py enforces two drift guards that any new tool/tier work must satisfy: (a) test_the_documented_modules_match_the_actual_manifests asserts every non-template module name from load_manifests() and every tool.name on it appears verbatim as text in docs/handbook/08-modules.md; (b) test_the_documented_permission_vocabulary_is_the_real_one asserts every Tier.value and every Autonomy.value from kgpt_kernel.tools.tiers appears verbatim in docs/handbook/07-permissions.md. Neither checks prose quality or that a *description* is accurate \u2014 only that the literal name/value string is present somewhere in the page.",
+        "evidence": [
+          "kernel/tests/test_handbook.py:109-121",
+          "kernel/tests/test_handbook.py:124-131"
+        ],
+        "confidence": 0.97,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Two more test_handbook.py assertions bound how docs can grow: the cached index (handbook.index()) must be <3000 chars and must be a literal substring of static_system_prompt() (byte-identical across calls), so adding a new tier/tool to 07/08 pages doesn't blow the per-turn token budget or destabilize the prompt cache.",
+        "evidence": [
+          "kernel/tests/test_handbook.py:78-88"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Whether the orchestrator wants a second, slower tests.sh (or a flag) that spins up the throwaway Postgres/Redis containers to cover the 418 skipped tests, given the .env.test warning about TRUNCATE and concurrent agent sessions sharing one Postgres via the advisory lock.",
+      "Whether new tools intended for a module currently at 'observe' or 'suggest' autonomy (per docs/handbook/07-permissions.md:36) need a manifest-level autonomy bump, which is validated but capped only for 'finance' today (kernel/kgpt_kernel/tools/tiers.py:117)."
+    ],
+    "suggested_next": [
+      "Land .orchestrator/tests.sh as the fast gate and wire the daemon's tests-green.sh to call it plus the two handbook drift tests explicitly (test_the_documented_modules_match_the_actual_manifests, test_the_documented_permission_vocabulary_is_the_real_one) before merge.",
+      "For any spec touching a new tool's tier, require the spec's acceptance criteria to name both the manifest entry and the exact page/heading in 08-modules.md and 07-permissions.md it must update, since the test only checks string presence, not placement quality."
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 10032,
+      "trimmed": {
+        "findings": 5
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789729673.859979,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0069",
+      "claimed_at": 1789729673.8595421
+    },
+    {
+      "ts": 1789729673.8918889,
+      "pid": 36003,
+      "account": "A"
+    },
+    {
+      "ts": 1789729819.0845718,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Exact gate commands: lint = `uv run --frozen ruff check .` then `uv run --frozen ruff format --check .` (measured 0.33s, all pass on current main); typecheck = `uv run --frozen mypy` (measured 1.55s, 'Success: no issues found in 171 source files'); python tests = `uv run --frozen pytest -q -rs` (Makefile's `make test` sources `.env.test` first if present) (measured 32.30s wall, 620 passed / 418 skipped without a database or Redis); web typecheck = `npm run typecheck` i.e. `tsc -b --noEmit` in clients/web (measured 1.89s, no errors).",
+            "evidence": [
+              "Makefile:70",
+              "Makefile:88",
+              "Makefile:96",
+              "clients/web/package.json:6"
+            ],
+            "confidence": 0.97,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "418 tests skip without a database/Redis; all use the `db` (or `app_engine`, or a redis-probing) fixture which calls `pytest.skip(...)` when unreachable rather than failing. CI enforces the opposite: it fails if any test is reported as 'skipped' via a final `pytest -q 2>&1 | tee ...; ! grep -q skipped`, so a real CI run must provide Postgres, Redis, KGPT_APP_DB_PASSWORD and KGPT_ADMIN_EMAILS.",
+            "evidence": [
+              "conftest.py:127-146",
+              "conftest.py:241-258",
+              "conftest.py:62-72",
+              ".github/workflows/ci.yml:18-52",
+              ".github/workflows/ci.yml:87-88"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Contrary to the task's framing, the repo explicitly forbids running database-backed tests against `make dev`'s database: .env.test's comment says the test instance is 'a throwaway container, separate from `make dev`' because the `db` fixture TRUNCATEs all app tables, and conftest.py refuses any KGPT_TEST_DATABASE_URL whose db name doesn't contain 'test' (pytest_configure raises pytest.UsageError, not a skip). To run the DB/Redis-backed tests locally: start disposable containers \u2014 `docker run -d --name kgpt-test-pg -p 55432:5432 -e POSTGRES_USER=kgpt -e POSTGRES_PASSWORD=... -e POSTGRES_DB=kgpt_test postgres:16` and `docker run -d --name kgpt-test-redis -p 56379:6379 redis:7-alpine` \u2014 run `alembic upgrade head` against kgpt_test (this also creates the restricted `kgpt_app` role needed by `app_engine`), export `KGPT_TEST_DATABASE_URL`, `KGPT_TEST_REDIS_URL`, and `KGPT_APP_DB_PASSWORD`, then run `make test`.",
+            "evidence": [
+              ".env.test:1-6",
+              "conftest.py:62-72",
+              "conftest.py:241-258",
+              "conftest.py:30"
+            ],
+            "confidence": 0.92,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "kernel/tests/test_handbook.py enforces two drift guards that any new tool/tier work must satisfy: (a) test_the_documented_modules_match_the_actual_manifests asserts every non-template module name from load_manifests() and every tool.name on it appears verbatim as text in docs/handbook/08-modules.md; (b) test_the_documented_permission_vocabulary_is_the_real_one asserts every Tier.value and every Autonomy.value from kgpt_kernel.tools.tiers appears verbatim in docs/handbook/07-permissions.md. Neither checks prose quality or that a *description* is accurate \u2014 only that the literal name/value string is present somewhere in the page.",
+            "evidence": [
+              "kernel/tests/test_handbook.py:109-121",
+              "kernel/tests/test_handbook.py:124-131"
+            ],
+            "confidence": 0.97,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Two more test_handbook.py assertions bound how docs can grow: the cached index (handbook.index()) must be <3000 chars and must be a literal substring of static_system_prompt() (byte-identical across calls), so adding a new tier/tool to 07/08 pages doesn't blow the per-turn token budget or destabilize the prompt cache.",
+            "evidence": [
+              "kernel/tests/test_handbook.py:78-88"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Whether the orchestrator wants a second, slower tests.sh (or a flag) that spins up the throwaway Postgres/Redis containers to cover the 418 skipped tests, given the .env.test warning about TRUNCATE and concurrent agent sessions sharing one Postgres via the advisory lock.",
+          "Whether new tools intended for a module currently at 'observe' or 'suggest' autonomy (per docs/handbook/07-permissions.md:36) need a manifest-level autonomy bump, which is validated but capped only for 'finance' today (kernel/kgpt_kernel/tools/tiers.py:117)."
+        ],
+        "suggested_next": [
+          "Land .orchestrator/tests.sh as the fast gate and wire the daemon's tests-green.sh to call it plus the two handbook drift tests explicitly (test_the_documented_modules_match_the_actual_manifests, test_the_documented_permission_vocabulary_is_the_real_one) before merge.",
+          "For any spec touching a new tool's tier, require the spec's acceptance criteria to name both the manifest entry and the exact page/heading in 08-modules.md and 07-permissions.md it must update, since the test only checks string presence, not placement quality."
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 10032,
+          "trimmed": {
+            "findings": 5
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789729673.8595421,
+  "pid": 36003,
+  "account": "A"
+}

@@ -1,0 +1,85 @@
+{
+  "id": "T-0040",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 1,
+  "title": "B4e: bench.fetch_html fails loudly if scrapling stops exposing impersonate/stealthy_headers/headers (re-review T-0039)",
+  "spec": "Why: re-review T-0039 on bench.py (full text: /Users/k3ntaw/code/orchestrator/.orchestrator/tasks/T-0039.json) closed all T-0033 findings but flagged (MED, bench.py:~218-230) that _supported_params introspects scrapling's Fetcher.get kwargs TypedDict at runtime and fetch_html silently omits any kwarg whose name is not found. A scrapling upgrade that renames or restructures those parameters would quietly drop stealthy_headers=False and impersonate=None, re-enabling browser impersonation against the recorded decision.\n\nWhat (2 files: orchestrator/bench.py, tests/test_orchestrator.py; worktree off goal/T-0005):\n1. fetch_html: after computing `supported`, require {\"impersonate\", \"stealthy_headers\", \"headers\"} <= supported; otherwise raise `RuntimeError(\"scrapling Fetcher.get no longer exposes <missing>; refusing to fetch without an identified, non-impersonating request \u2014 pin scrapling or update bench.fetch_html\")`. Never fall back to defaults. fetch() catches that RuntimeError and returns {\"error\": str(e)} without touching bench.json.\n2. tests: monkeypatch _supported_params (or the function that yields `supported`) to return a set missing \"stealthy_headers\" and assert fetch_html raises RuntimeError with \"stealthy_headers\" in the message, and fetch() returns an error dict leaving an existing bench.json byte-identical. Keep the source-inspection test.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"bench: refuse to fetch if scrapling stops exposing impersonate/stealthy_headers/headers (re-review T-0039)\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new refusal tests",
+    "fetch_html raises RuntimeError naming the missing parameter when introspection lacks impersonate, stealthy_headers or headers",
+    "fetch() returns an error dict and leaves bench.json untouched in that case",
+    "git diff --stat limited to orchestrator/bench.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/bench.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0040",
+  "codex_thread": null,
+  "result": {
+    "summary": "implemented but not committed by the worker because the suite was red on goal/T-0005 (b680ef5 cap change broke PoolSel); diff saved as a patch and landed via T-0042 (d84a3d3). Superseded.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789668319.389196,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789668319.39336,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0040",
+      "claimed_at": 1789668319.393284
+    },
+    {
+      "ts": 1789668319.40088,
+      "pid": 99698,
+      "account": "A"
+    },
+    {
+      "ts": 1789668497.7736168,
+      "status": "done",
+      "result": {
+        "summary": "Implementation is done and my new tests pass in isolation, but the full-suite run required by the acceptance criteria (`uv run python -m unittest tests/test_orchestrator.py`) is not green \u2014 there's a pre-existing, unrelated failure I did not introduce.\n\n**Files changed** (matches scope exactly):\n```\norchestrator/bench.py       | +16 -3\ntests/test_orchestrator.py  | +23\n```\n\n**What I implemented**\n- `orchestrator/bench.py`: added `REQUIRED_PARAMS = {\"impersonate\", \"stealthy_headers\", \"headers\"}`. `fetch_html` now checks `REQUIRED_PARAMS - supported` and raises `RuntimeError(\"scrapling Fetcher.get no longer exposes <missing>; refusing to fetch without an identified, non-impersonating request -- pin scrapling or update bench.fetch_html\")` before ever calling `Fetcher.get`. `fetch()` catches that `RuntimeError` and returns `{\"error\": str(e)}` without touching `bench.json`.\n- `tests/test_orchestrator.py`: two new tests in `Bench` \u2014 one monkeypatches `_supported_params` to omit `\"stealthy_headers\"` and asserts `fetch_html()` raises `RuntimeError` naming it; the other does the same through `fetch(force=True, ...)` and asserts an error dict comes back and `bench.json` bytes are unchanged. Kept the existing source-inspection test untouched.\n\n**Verified in isolation** \u2014 all 12 `Bench` tests pass, including the two new ones (`uv run python -m unittest tests.test_orchestrator.Bench -v` \u2192 OK).\n\n**Blocker \u2014 pre-existing failure, not caused by this task:**\n```\nERROR: test_affinity_reserve_cooldown_budget (tests.test_orchestrator.PoolSel.test_affinity_reserve_cooldown_budget)\nAttributeError: 'NoneType' object has no attribute 'id'\n```\nI confirmed this fails identically on the base commit with my changes stashed out \u2014 it's a regression from `b680ef5` (`window_cap_tokens 2M -> 10M`, 2026-09-17): the test's hardcoded token-fraction assertions (`0.7 * cap`, the 0.65 reserve line) were calibrated for a 2M cap and no longer hold at 10M. That file/test is outside this task's scope (`orchestrator/bench.py`, and only the bench-related tests in `tests/test_orchestrator.py`), so I did not touch it.\n\nNet: `uv run python -m unittest tests/test_orchestrator.py` currently exits 1 (`errors=1`), not 0, solely because of that unrelated `PoolSel` test. I have **not committed** since the literal acceptance criterion (\"exits 0\") isn't met for the whole suite, and fixing `PoolSel` would be scope creep on a different, already-merged decision (T-0005 window cap change).\n\nRecommend either: (a) approve committing my two-file diff as-is with the pre-existing `PoolSel` failure called out separately for its own fix task, or (b) tell me to also patch `PoolSel`'s thresholds \u2014 but that's a second, unrelated fix outside this spec's scope list.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789668886.769969,
+      "status": "failed",
+      "result": {
+        "summary": "implemented but not committed by the worker because the suite was red on goal/T-0005 (b680ef5 cap change broke PoolSel); diff saved as a patch and landed via T-0042 (d84a3d3). Superseded.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789668319.393284,
+  "pid": 99698,
+  "account": "A"
+}

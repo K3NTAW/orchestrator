@@ -1,0 +1,96 @@
+{
+  "id": "T-0406",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H4 fix round 5: executor.start's finally must not release the reservation when the fallback branch hands the task to a background run_worker thread; ownership passes to that thread, which releases at its end (review T-0402)",
+  "spec": "STEP 0: the worktree must contain ade6b74, 530c2ab, c1ba47c, aca3bb2, d54104f and a214aaf (T-0362, T-0392, T-0395, T-0398, T-0400) in git log; never drop or amend them.\nReview T-0402 on T-0400, one high finding:\n1. orchestrator/executor.py:178 start()'s finally releases the reservation unconditionally, including on _exhausted()'s fallback branch, which only starts a background thread (run_worker(task_id, account_id=...)) and returns; the reservation is released the instant start() returns, before the thread's own reserve, so the primary Codex-cooling path runs with no reservation counted. Fix: make reservation ownership explicit: start() releases in finally only when it ran the work itself (Codex path) or exited without handing off (refused, held, exception); on the fallback hand-off it transfers ownership by leaving the reservation in place (or re-keying it to the worker's run key) and run_worker releases at its end in its own finally, reusing the existing reservation instead of creating a second one. Test: tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes (Codex cooling, start() returns after spawning the worker thread, the reservation still exists until the mocked run_worker completes, then it is released exactly once) and tests/test_executor.py::test_refused_or_exception_path_releases_immediately.\nKeep every T-0362 lineage test green (test_exhausted_hold_releases_dispatch_reservation, test_reservation_owner_matches_running_executor, test_failed_dispatch_stamp_releases_reservation, test_fallback_claude_when_codex_cooling, and the pool and daemon reservation tests). Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0404"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows a214aaf, d54104f, aca3bb2, c1ba47c, 530c2ab and ade6b74 below your commit",
+    "tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes and ::test_refused_or_exception_path_releases_immediately pass",
+    "tests/test_executor.py::test_exhausted_hold_releases_dispatch_reservation, ::test_fallback_claude_when_codex_cooling and tests/test_daemon.py::test_reservation_owner_matches_running_executor, ::test_failed_dispatch_stamp_releases_reservation, ::test_depends_on_gates_dispatch still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/pool.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0406",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_executor.py",
+        "line": 166,
+        "issue": "Running `.claude/hooks/tests-green.sh \"$PWD\"` (the full suite, as acceptance criterion 4 requires) fails with exit code 2, not 0. test_fallback_handoff_keeps_reservation_until_worker_finishes fails intermittently with: AssertionError: 'T-0010' unexpectedly found in {...}. Reproduced by direct invocation (confirmed exit 2, not a flake of my harness). Root cause: _exhausted() in executor.py spawns the fallback worker via `threading.Thread(..., daemon=True).start()` and returns immediately without ever joining it; when the full suite runs, a prior test's still-in-flight background thread writes/reads the shared reservation PERSIST file after a later test has unlinked/recreated it and reused the same sequential task id (T-0010), producing a stray reservation entry the new test's assertNotIn fails on. This is a genuine test-isolation gap introduced by the new daemon-thread + shared-file reservation design, and it directly violates the stated acceptance bar ('.claude/hooks/tests-green.sh exits 0 in the worktree'). The tests pass individually/in isolation but not as part of the full suite.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789909801.879242,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0406",
+      "claimed_at": 1789909801.878834
+    },
+    {
+      "ts": 1789909801.880474,
+      "account": "B"
+    },
+    {
+      "ts": 1789909801.915257,
+      "pid": 43176,
+      "account": "B"
+    },
+    {
+      "ts": 1789910234.236533,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_executor.py",
+            "line": 166,
+            "issue": "Running `.claude/hooks/tests-green.sh \"$PWD\"` (the full suite, as acceptance criterion 4 requires) fails with exit code 2, not 0. test_fallback_handoff_keeps_reservation_until_worker_finishes fails intermittently with: AssertionError: 'T-0010' unexpectedly found in {...}. Reproduced by direct invocation (confirmed exit 2, not a flake of my harness). Root cause: _exhausted() in executor.py spawns the fallback worker via `threading.Thread(..., daemon=True).start()` and returns immediately without ever joining it; when the full suite runs, a prior test's still-in-flight background thread writes/reads the shared reservation PERSIST file after a later test has unlinked/recreated it and reused the same sequential task id (T-0010), producing a stray reservation entry the new test's assertNotIn fails on. This is a genuine test-isolation gap introduced by the new daemon-thread + shared-file reservation design, and it directly violates the stated acceptance bar ('.claude/hooks/tests-green.sh exits 0 in the worktree'). The tests pass individually/in isolation but not as part of the full suite.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789910234.2381928,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789909801.878834,
+  "account": "B",
+  "pid": 43176,
+  "review_verdict": "request_changes"
+}

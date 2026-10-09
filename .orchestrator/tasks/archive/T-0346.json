@@ -1,0 +1,110 @@
+{
+  "id": "T-0346",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G8: semantic review triggers (authorization, migrations, public interfaces, dependencies) next to security_paths, and review approval bound to the reviewed commit and re-assessed after a rebase that changes the diff",
+  "spec": "Depends on G7 (T-0272, daemon.py) and G2b (T-0267, merge.py). Today daemon.gate() decides the review policy from changed_paths against [review].security_paths globs only; a review's verdict is stored as review_verdict on the review task and on the source task without the commit it looked at; merge_reviewed() then calls merge.merge, which rebases the task branch onto goal/<parent> and runs tests, so a rebase with real conflicts resolved or with semantic drift still merges under the old approval. The analysis: security-path review alone misses consequential changes; add semantic triggers; bind approval to the reviewed changes and reassess after meaningful rebase changes.\nChange:\n1. pool.toml [review] gains semantic_paths (globs, defaults: pyproject.toml, uv.lock, Dockerfile*, docker/**, **/migrations/**, orchestrator/serve.py, orchestrator/mcp.py, orchestrator/bus_mcp.py, orchestrator/cli.py) and semantic_patterns (regexes matched against added lines of the diff, defaults: authorization words such as bearer, token, authenticate, authorize, permission; ALTER TABLE or create table; __all__ =; @mcp.tool or add_parser(; def with a public name whose signature changed is out of scope). daemon.gate() evaluates security_paths first (unchanged), then semantic_paths, then semantic_patterns over `git diff <base>..<head>` added lines; review_reason records semantic_path:<glob> or semantic_pattern:<name>; one review on security_review_tier with the checklist, same as security paths.\n2. Binding: when the daemon creates a review task it stores reviewed_sha = the task branch head on the review task and pipeline.reviewed_sha on the source task; merge_reviewed() checks the branch head before merging: if it moved past reviewed_sha, the approval is void: reset reviews_expected accounting, spawn a fresh review (notify), do not merge. In merge.merge, after the rebase, compute the diff hash of goal..branch before and after the rebase (git diff with --stat and content hashed); if the rebased diff differs from the reviewed diff (conflicts resolved or rebase altered hunks) and the task had a review, stop before the fast-forward and return status 'rebase_changed_diff' so merge_reviewed holds the task with hold_reason 'merge rebase_changed_diff' for a re-review; a clean rebase that only moves the base keeps the approval.\n3. README Pipeline: semantic triggers and the binding rule; pool.toml comments.\nTests in tests/test_daemon.py: test_semantic_path_triggers_review, test_semantic_pattern_triggers_review, test_review_records_reviewed_sha, test_head_moved_after_approval_spawns_new_review; tests/test_merge.py::test_rebase_changing_diff_returns_status, ::test_clean_rebase_keeps_approval.",
+  "inputs": [
+    "T-0277"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_semantic_path_triggers_review, ::test_semantic_pattern_triggers_review, ::test_review_records_reviewed_sha, ::test_head_moved_after_approval_spawns_new_review pass",
+    "tests/test_merge.py::test_rebase_changing_diff_returns_status, ::test_clean_rebase_keeps_approval pass",
+    "pool.toml [review] documents semantic_paths and semantic_patterns; README updated",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py",
+    "tests/test_merge.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0346",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/merge.py",
+        "line": 15,
+        "issue": "_diff_hash returns None on any git error (nonzero returncode from `git diff --stat`/`--binary`), and merge() only runs the rebase-changed-diff guard when both before_diff and after_diff are non-None. A transient git failure on either call silently skips the reviewed_sha approval-binding check and lets the merge proceed, unlike the rebase-conflict path just below which fails closed with status=\"failed\". No test covers this failure mode.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 594,
+        "issue": "_added_diff_lines returns None on any nonzero returncode from its own git diff call, and _matching_semantic_pattern treats that as \"no match\" rather than failing closed. This contradicts changed_paths()'s documented fail-closed contract (diff_unavailable) that the rest of _review_plan relies on: if the first diff call (name-only) succeeds but this second, independent diff call (--unified=0) fails, semantic pattern detection is silently skipped and the task can merge with review_reason \"none\" despite containing a matched-worthy authorization/schema/export/tool change.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789853522.296633,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0346",
+      "claimed_at": 1789853522.2963352
+    },
+    {
+      "ts": 1789853522.297738,
+      "account": "B"
+    },
+    {
+      "ts": 1789853522.327518,
+      "pid": 45116,
+      "account": "B"
+    },
+    {
+      "ts": 1789853682.143407,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/merge.py",
+            "line": 15,
+            "issue": "_diff_hash returns None on any git error (nonzero returncode from `git diff --stat`/`--binary`), and merge() only runs the rebase-changed-diff guard when both before_diff and after_diff are non-None. A transient git failure on either call silently skips the reviewed_sha approval-binding check and lets the merge proceed, unlike the rebase-conflict path just below which fails closed with status=\"failed\". No test covers this failure mode.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 594,
+            "issue": "_added_diff_lines returns None on any nonzero returncode from its own git diff call, and _matching_semantic_pattern treats that as \"no match\" rather than failing closed. This contradicts changed_paths()'s documented fail-closed contract (diff_unavailable) that the rest of _review_plan relies on: if the first diff call (name-only) succeeds but this second, independent diff call (--unified=0) fails, semantic pattern detection is silently skipped and the task can merge with review_reason \"none\" despite containing a matched-worthy authorization/schema/export/tool change.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789853682.1454551,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789853522.2963352,
+  "account": "B",
+  "pid": 45116,
+  "review_verdict": "request_changes"
+}

@@ -1,0 +1,44 @@
+{
+  "id": "T-1414",
+  "created_at": 1790805637.5501928,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "gate._run treats PermissionError from os.killpg like ProcessLookupError (macOS EPERM on a zombie-only process group)",
+  "spec": "Why: on macOS, os.killpg(pgid, sig) raises PermissionError (EPERM), not ProcessLookupError, when every process left in the group is a zombie. orchestrator/gate.py _run catches only ProcessLookupError around each killpg (lines ~51, 58, 65-66, 71). On 2026-10-01 T-1408's gate went red on tests/test_gate_timeout.py test_cleanup_command_runs_on_timeout with PermissionError at gate.py:65 (the os.killpg(proc.pid, 0) probe after the SIGTERM grace). In production the same race crashes run_gate on a timeout instead of returning timed_out, which the daemon would record as a gate failure.\n\nWhat: in gate._run treat PermissionError exactly like ProcessLookupError at every os.killpg call (the group is gone or unkillable zombies; reap with proc.wait/communicate as today). Keep the return shape and the wall-clock deadline logic from T-1407. Add the test with os.killpg patched to raise PermissionError on the probe and on SIGKILL: run_bounded on a sleeping child with a tiny timeout returns timed_out True and does not raise.\n\nWork on the task branch cut from goal/T-1403 (after T-1407 merged). Commit first, then run the focused test in the foreground; never background a command, never the full gate.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_gate_timeout.py::test_killpg_permission_error_is_treated_as_gone passes: with os.killpg raising PermissionError for the probe and SIGKILL, run_bounded on a timed-out child returns timed_out True without raising",
+    "tests/test_gate_timeout.py passes as a whole, run three times in a row; .claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/gate.py",
+    "tests/test_gate_timeout.py"
+  ],
+  "depends_on": [
+    "T-1407"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 2700,
+    "task_class": "debugging",
+    "route": "straightforward",
+    "plan_label": "A3b",
+    "goal_branch": "goal/T-1403"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790806834.1093519,
+      "status": "superseded",
+      "reason": "folded into fix round T-1420 for T-1407 (depended on T-1407 merging while T-1407 needed this fix: deadlock)"
+    }
+  ],
+  "reason": "folded into fix round T-1420 for T-1407 (depended on T-1407 merging while T-1407 needed this fix: deadlock)"
+}

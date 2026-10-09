@@ -1,0 +1,122 @@
+{
+  "id": "T-0227",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "E2 fix round 1: timeout from config, jev logs invisible to cost/scorecard run globs, budget >=, locked state, cached key, redaction test (from review T-0226)",
+  "spec": "Fix round on task/T-0214 (commit 7692cc7 on goal/T-0201). STEP 0: your worktree was cut from goal/T-0201 and lacks that commit; run `git reset --hard task/T-0214` and confirm `git log --oneline -1` shows 7692cc7. Then address the opus review T-0226:\n1. orchestrator/jev.py ask(): timeout_s=None in the signature; None means cfg[\"timeout_s\"] from pool.toml [jev].\n2. Log collision: jev usage lines must not be counted as worker runs. Write them to .orchestrator/runs/jev/<date>.jsonl (a subdirectory) and make cli.cost() and scorecard.build()/by_task()/by_goal() only read top-level .orchestrator/runs/*.jsonl lines that carry a role key (skip lines without role, count them nowhere). Keep the E3 contract in mind: the tool-call gate will log to .orchestrator/runs/jev/gate.jsonl, so document that path in a jev.py module comment.\n3. Budget check uses >= so daily_budget_tokens = 0 blocks every call.\n4. _add_day_tokens: read-modify-write under an flock on .orchestrator/jev_state.json (same pattern as pool._save_planner_account) with atomic replace; a corrupt file logs one warning and keeps the previous in-memory tally rather than resetting to 0 within the process.\n5. _api_key(): resolve once per process and cache for 10 minutes (module-level cache with timestamp); never log the value.\n6. Redaction before truncation, and a capture-based test asserting a sk- style token placed in the state never appears in the request body.\nTests: tests/test_jev.py gains test_timeout_from_config, test_budget_zero_blocks, test_state_lock_and_atomic_write, test_api_key_cached, test_redacted_before_send; tests/test_scorecard.py and tests/test_cli.py gain a test that a jev line in runs/ is ignored. Commit on the task branch when green.",
+  "inputs": [
+    "T-0214",
+    "T-0226"
+  ],
+  "acceptance": [
+    "git log on the task branch contains 7692cc7 below the fix commit",
+    "tests/test_jev.py::test_timeout_from_config, ::test_budget_zero_blocks, ::test_state_lock_and_atomic_write, ::test_api_key_cached, ::test_redacted_before_send pass",
+    "tests/test_scorecard.py::test_jev_lines_ignored and tests/test_cli.py::test_cost_ignores_jev_lines pass",
+    "All tests from T-0214 still pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev.py",
+    "orchestrator/cli.py",
+    "orchestrator/scorecard.py",
+    "tests/test_jev.py",
+    "tests/test_scorecard.py",
+    "tests/test_cli.py"
+  ],
+  "depends_on": [
+    "T-0205"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "fix_round_for": "T-0214",
+    "planner_note": "complexity 3 on purpose: one opus review already ran; remaining items are two med and four low; merges directly at a green gate per the 2026-09-19 review decision"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0227",
+  "codex_thread": null,
+  "result": {
+    "summary": "7692cc7 sits below the fix commit, as required. Done.\n\n## Summary\nAddressed all 6 points from opus review T-0226 on `orchestrator/jev.py`:\n1. `ask(..., timeout_s=None)` \u2014 falls back to `cfg[\"timeout_s\"]` when not given explicitly.\n2. Jev usage lines now go to `.orchestrator/runs/jev/<date>.jsonl` (own subdir); `cli.cost()` and `scorecard`'s `build()`/`by_task()`/`by_goal()` (via `_read_jsonl_entries`) now also skip any top-level run line missing a `role` key. Module docstring documents the E3 gate's `runs/jev/gate.jsonl` path.\n3. Budget check changed to `>=` so `daily_budget_tokens=0` blocks every call.\n4. `_add_day_tokens` does a locked (flock on a sidecar `jev_state.lock`) read-modify-write with atomic replace (tempfile + `os.replace`); a corrupt state file logs a warning and falls back to the in-process `_tally_cache` instead of resetting to 0.\n5. `_api_key()` caches the resolved key for 10 minutes (module-level cache + `time.monotonic` timestamp); never logs the value.\n6. State is now redacted before truncation, preventing a token straddling the cutoff from leaking a partial fragment.\n\n**Files changed:** `orchestrator/jev.py`, `orchestrator/cli.py`, `orchestrator/scorecard.py`, `tests/test_jev.py`, `tests/test_scorecard.py`, `tests/test_cli.py`.\n\n**Test output:** all green \u2014 `.claude/hooks/tests-green.sh` exits 0; `test_jev.py` (11 tests incl. the 5 new ones), `test_scorecard.py::test_jev_lines_ignored`, and `test_cli.py::test_cost_ignores_jev_lines` all pass. No failures to report.\n\nCommitted as `1fbbe5f` on `task/T-0227`, with `7692cc7` (T-0214) below it.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789816475.032247,
+      "pipeline": {
+        "dispatched_at": 1789816475.032202
+      }
+    },
+    {
+      "ts": 1789816475.066965,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789816475.0697138,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789816476.1466198,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0227",
+      "claimed_at": 1789816476.1461241
+    },
+    {
+      "ts": 1789816476.148267,
+      "account": "B"
+    },
+    {
+      "ts": 1789816476.157569,
+      "pid": 31734,
+      "account": "B"
+    },
+    {
+      "ts": 1789816852.8750348,
+      "status": "done",
+      "result": {
+        "summary": "7692cc7 sits below the fix commit, as required. Done.\n\n## Summary\nAddressed all 6 points from opus review T-0226 on `orchestrator/jev.py`:\n1. `ask(..., timeout_s=None)` \u2014 falls back to `cfg[\"timeout_s\"]` when not given explicitly.\n2. Jev usage lines now go to `.orchestrator/runs/jev/<date>.jsonl` (own subdir); `cli.cost()` and `scorecard`'s `build()`/`by_task()`/`by_goal()` (via `_read_jsonl_entries`) now also skip any top-level run line missing a `role` key. Module docstring documents the E3 gate's `runs/jev/gate.jsonl` path.\n3. Budget check changed to `>=` so `daily_budget_tokens=0` blocks every call.\n4. `_add_day_tokens` does a locked (flock on a sidecar `jev_state.lock`) read-modify-write with atomic replace (tempfile + `os.replace`); a corrupt state file logs a warning and falls back to the in-process `_tally_cache` instead of resetting to 0.\n5. `_api_key()` caches the resolved key for 10 minutes (module-level cache + `time.monotonic` timestamp); never logs the value.\n6. State is now redacted before truncation, preventing a token straddling the cutoff from leaking a partial fragment.\n\n**Files changed:** `orchestrator/jev.py`, `orchestrator/cli.py`, `orchestrator/scorecard.py`, `tests/test_jev.py`, `tests/test_scorecard.py`, `tests/test_cli.py`.\n\n**Test output:** all green \u2014 `.claude/hooks/tests-green.sh` exits 0; `test_jev.py` (11 tests incl. the 5 new ones), `test_scorecard.py::test_jev_lines_ignored`, and `test_cli.py::test_cost_ignores_jev_lines` all pass. No failures to report.\n\nCommitted as `1fbbe5f` on `task/T-0227`, with `7692cc7` (T-0214) below it.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789816905.7639859,
+      "pipeline": {
+        "dispatched_at": 1789816475.032202,
+        "gated_at": 1789816905.763853
+      }
+    },
+    {
+      "ts": 1789816942.890304,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "sha": "c6e6d8156fdc77afad2c323a58cb5c4264963646"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789816475.032202,
+    "gated_at": 1789816905.763853
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789816476.1461241,
+  "account": "B",
+  "pid": 31734,
+  "merged_into": "goal/T-0201",
+  "sha": "c6e6d8156fdc77afad2c323a58cb5c4264963646"
+}

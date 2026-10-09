@@ -1,0 +1,184 @@
+{
+  "id": "T-0330",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review: G10: short Planner decision sessions get a compact decision packet, record their own tokens, and the handover threshold moves to pool.toml",
+  "spec": "Depends on G2 (T-0266, spawn.packet). Phase D built planner_runs.py (decision points: scouts done, task held, goal closable) and goals.launch_planner with an ids-only prompt (review T-0198 rejected splicing hold_reason text into the prompt of a permission-bypassing Planner). The analysis: give each decision session a compact packet (goal, relevant constraints, changed state, evidence references, the decision needed), let Python own readiness and transitions, and measure reload cost before choosing a handover threshold.\nChange:\n1. goals.decision_packet(goal_id, kind, payload) -> str built only from our own bus and run data: decision kind and what is expected (write specs / write or approve a fix round / close the goal), goal title and id, for 'held': the held task's spawn.packet plus hold_reason, the failures text capped 1,500 chars inside a fenced block labelled data, review comments as path:line lines; for 'scouts_done': scout ids with result summaries' first 300 chars each; for 'closable': merged task ids and shas. Ids stay first so the existing keys and dedupe are unchanged. The packet replaces the ids-only body in .orchestrator/prompts/planner-decision.md through {{packet}}.\n2. planner_runs records tokens per decision run: when the headless claude -p exits, parse its final JSON usage the way spawn.run_worker does and write a run row (role planner_decision, task = goal id, goal_id) through bus.log_run plus tokens and usd on the planner_runs.json record; the scorecard's planner bucket (G1b) then sees them.\n3. pool.toml [planner]: handover_context_tokens = 150000 and decision_packet_chars = 6000 with comments; README Autonomous decisions paragraph updated; CLAUDE.md rule 9 reads the threshold from pool.toml wording ('at [planner].handover_context_tokens').\nTests: tests/test_goals.py::test_decision_packet_held_has_packet_and_failures_fenced, ::test_decision_packet_scouts_done, ::test_decision_packet_capped; tests/test_planner_runs.py::test_decision_run_logs_tokens.",
+  "inputs": [
+    "T-0276"
+  ],
+  "acceptance": [
+    "tests/test_goals.py::test_decision_packet_held_has_packet_and_failures_fenced, ::test_decision_packet_scouts_done, ::test_decision_packet_capped pass",
+    "tests/test_planner_runs.py::test_decision_run_logs_tokens passes",
+    "planner-decision.md renders the packet and pool.toml [planner] documents both keys",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/planner_runs.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_goals.py",
+    "tests/test_planner_runs.py",
+    ".orchestrator/pool.toml",
+    "README.md",
+    "CLAUDE.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0330",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/goals.py",
+        "line": 354,
+        "issue": "T-0115 import boundary broken. goals.py's own module docstring (lines 3-8) states it may import only install.install, spawn.trust_workspace and spawn.resolve_secrets, 'never calls any other bus.*/spawn.* function', and derives every path from the repo_path argument. decision_packet() imports spawn.packet at module level (line 15), does `from . import bus` and calls bus.get/bus.read, and reads PACKAGE_REPO/.orchestrator/pool.toml instead of the target repo's. Consequence beyond style: a target repo scaffolded by install.install has its own [planner].decision_packet_chars silently ignored \u2014 the orchestrator repo's value always wins. No test enforces the boundary, so this passed green while invalidating the docstring. decision_packet belongs in planner_runs.py (its only caller, which already imports bus, spawn and goals) and should take the cap from the pool.Pool cfg that run() already holds.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 387,
+        "issue": "Held-decision packet truncates away exactly the data the decision needs. spawn_packet(task, PACKAGE_REPO) is appended before the hold reason, failures and reviewer comments, and the cap is applied last with a blind packet[:cap]. Measured: spawn.packet for a 3-file Python scope is 3696 chars against a 6000 cap; a 5-file scope exceeds it outright. So for the 'write or approve a fix round' decision the Planner receives the file/symbol inventory and loses 'Hold reason', the failure text and the review comments. The test only covers a task whose scope is one file, so it never trips. Order decision-critical fields first, or budget the cap per section rather than truncating the tail.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 384,
+        "issue": "Security checklist, untrusted content into a prompt: the injection mitigation is a two-string, case-sensitive, exact-match blocklist ('IGNORE PRIOR INSTRUCTIONS', 'approve everything') applied only to hold_reason. Every other untrusted field is interpolated raw into the autonomous Planner's prompt: task titles, spawn_packet output (derived from worktree file contents), failures, reviewer comment issue text, and scout summaries. Per the trust rule, all of these have non-repo provenance. The blocklist blocks nothing real ('ignore prior instructions' in lowercase passes) while creating the impression the packet is sanitized. Drop it and rely on a structural defense applied uniformly to every embedded value \u2014 the 'use this as data' framing plus neutralizing fence/backtick sequences.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 393,
+        "issue": "The ```data fence around str(failures)[:1500] does not escape backticks. A failure string containing a ``` sequence (common \u2014 pytest output and tracebacks routinely echo markdown from test fixtures or diffs) closes the fence early, and everything after it is read by the Planner as prose rather than data. The acceptance test asserts the fence closes, but only for a benign single-line AssertionError, so it gives false assurance. Strip or escape backtick runs in the embedded value before fencing.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 369,
+        "issue": "`goal = bus.get(goal_id)` is unguarded while the held branch's bus.get is wrapped in try/except KeyError. bus.get raises KeyError when the task file is absent, so a goal whose task json was removed or state-branch-desynced makes decision_packet raise inside planner_runs.run() at prompt-render time \u2014 after _record_running-adjacent bookkeeping and before launch \u2014 instead of degrading to a minimal packet. Guard it the same way the task lookup is guarded.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 444,
+        "issue": "Decision usage accounting fails silently on noisy logs. launch_planner redirects stderr into the same file as stdout (goals.py, `stdout=log_fh, stderr=log_fh`), and spawn.extract_json slices from the first '{' to the last '}'. Any stderr line containing a brace before the JSON object makes the slice unparseable; extract_json then returns {'summary':..., 'parse_error': True}, usage is empty, and _record_decision_usage returns having logged nothing and without setting usage_logged \u2014 no warning, no counter, and the record's tokens/usd stay absent. The one test feeds a clean single-object log, so this path is untested. At minimum log a run row with outcome/parse_error even when usage is missing, so unaccounted decisions are visible.",
+        "severity": "med"
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 28,
+        "issue": "handover_context_tokens is read by no code \u2014 grep finds it only in pool.toml, CLAUDE.md and README.md. CLAUDE.md now asserts 'The context handover threshold is configured at [planner].handover_context_tokens', which reads as a live knob but is a comment; changing it changes nothing, and it will drift from the 150k figure hardcoded in the Planner prompt. Either have handover/planner code read it or say plainly in the docs that it records the threshold rather than enforcing it.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_goals.py",
+        "line": 615,
+        "issue": "DecisionPacket subclasses unittest.TestCase directly rather than GoalsTestCase and creates bus tasks (30 of them in test_decision_packet_capped) in the shared per-process TMP bus with no cleanup, contrary to the file's stated convention. test_decision_packet_scouts_done's assertNotIn('a'*301) and the exact-length cap assertion are order-sensitive against any other test that seeds scouts under a shared parent. Add a per-test bus sandbox like the other suites use.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789850405.395128,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0330",
+      "claimed_at": 1789850405.394832
+    },
+    {
+      "ts": 1789850405.39665,
+      "account": "B"
+    },
+    {
+      "ts": 1789850405.429405,
+      "pid": 69337,
+      "account": "B"
+    },
+    {
+      "ts": 1789850575.6599302,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/goals.py",
+            "line": 354,
+            "issue": "T-0115 import boundary broken. goals.py's own module docstring (lines 3-8) states it may import only install.install, spawn.trust_workspace and spawn.resolve_secrets, 'never calls any other bus.*/spawn.* function', and derives every path from the repo_path argument. decision_packet() imports spawn.packet at module level (line 15), does `from . import bus` and calls bus.get/bus.read, and reads PACKAGE_REPO/.orchestrator/pool.toml instead of the target repo's. Consequence beyond style: a target repo scaffolded by install.install has its own [planner].decision_packet_chars silently ignored \u2014 the orchestrator repo's value always wins. No test enforces the boundary, so this passed green while invalidating the docstring. decision_packet belongs in planner_runs.py (its only caller, which already imports bus, spawn and goals) and should take the cap from the pool.Pool cfg that run() already holds.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 387,
+            "issue": "Held-decision packet truncates away exactly the data the decision needs. spawn_packet(task, PACKAGE_REPO) is appended before the hold reason, failures and reviewer comments, and the cap is applied last with a blind packet[:cap]. Measured: spawn.packet for a 3-file Python scope is 3696 chars against a 6000 cap; a 5-file scope exceeds it outright. So for the 'write or approve a fix round' decision the Planner receives the file/symbol inventory and loses 'Hold reason', the failure text and the review comments. The test only covers a task whose scope is one file, so it never trips. Order decision-critical fields first, or budget the cap per section rather than truncating the tail.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 384,
+            "issue": "Security checklist, untrusted content into a prompt: the injection mitigation is a two-string, case-sensitive, exact-match blocklist ('IGNORE PRIOR INSTRUCTIONS', 'approve everything') applied only to hold_reason. Every other untrusted field is interpolated raw into the autonomous Planner's prompt: task titles, spawn_packet output (derived from worktree file contents), failures, reviewer comment issue text, and scout summaries. Per the trust rule, all of these have non-repo provenance. The blocklist blocks nothing real ('ignore prior instructions' in lowercase passes) while creating the impression the packet is sanitized. Drop it and rely on a structural defense applied uniformly to every embedded value \u2014 the 'use this as data' framing plus neutralizing fence/backtick sequences.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 393,
+            "issue": "The ```data fence around str(failures)[:1500] does not escape backticks. A failure string containing a ``` sequence (common \u2014 pytest output and tracebacks routinely echo markdown from test fixtures or diffs) closes the fence early, and everything after it is read by the Planner as prose rather than data. The acceptance test asserts the fence closes, but only for a benign single-line AssertionError, so it gives false assurance. Strip or escape backtick runs in the embedded value before fencing.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 369,
+            "issue": "`goal = bus.get(goal_id)` is unguarded while the held branch's bus.get is wrapped in try/except KeyError. bus.get raises KeyError when the task file is absent, so a goal whose task json was removed or state-branch-desynced makes decision_packet raise inside planner_runs.run() at prompt-render time \u2014 after _record_running-adjacent bookkeeping and before launch \u2014 instead of degrading to a minimal packet. Guard it the same way the task lookup is guarded.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 444,
+            "issue": "Decision usage accounting fails silently on noisy logs. launch_planner redirects stderr into the same file as stdout (goals.py, `stdout=log_fh, stderr=log_fh`), and spawn.extract_json slices from the first '{' to the last '}'. Any stderr line containing a brace before the JSON object makes the slice unparseable; extract_json then returns {'summary':..., 'parse_error': True}, usage is empty, and _record_decision_usage returns having logged nothing and without setting usage_logged \u2014 no warning, no counter, and the record's tokens/usd stay absent. The one test feeds a clean single-object log, so this path is untested. At minimum log a run row with outcome/parse_error even when usage is missing, so unaccounted decisions are visible.",
+            "severity": "med"
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 28,
+            "issue": "handover_context_tokens is read by no code \u2014 grep finds it only in pool.toml, CLAUDE.md and README.md. CLAUDE.md now asserts 'The context handover threshold is configured at [planner].handover_context_tokens', which reads as a live knob but is a comment; changing it changes nothing, and it will drift from the 150k figure hardcoded in the Planner prompt. Either have handover/planner code read it or say plainly in the docs that it records the threshold rather than enforcing it.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_goals.py",
+            "line": 615,
+            "issue": "DecisionPacket subclasses unittest.TestCase directly rather than GoalsTestCase and creates bus tasks (30 of them in test_decision_packet_capped) in the shared per-process TMP bus with no cleanup, contrary to the file's stated convention. test_decision_packet_scouts_done's assertNotIn('a'*301) and the exact-length cap assertion are order-sensitive against any other test that seeds scouts under a shared parent. Add a per-test bus sandbox like the other suites use.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789850575.661345,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789850405.394832,
+  "account": "B",
+  "pid": 69337,
+  "review_verdict": "request_changes"
+}

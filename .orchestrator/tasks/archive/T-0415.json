@@ -1,0 +1,182 @@
+{
+  "id": "T-0415",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 3,
+  "title": "H4 fix round 8: the reservation ledger and notified_state live only in their own flock-guarded file and are never serialized by Pool.save(), so a long-lived Pool snapshot cannot overwrite concurrent reservations (review T-0413)",
+  "spec": "STEP 0: the worktree must contain the T-0362 lineage through 5976bb2 (T-0411) in git log; never drop or amend them.\nReview T-0413 on T-0411, one high finding: Pool.save() (pool.py:204) blindly serializes self.reservations, reservation_history and notified_state while reserve(), release() and sweep_reservations() do locked read-modify-write through _reservation_file(); every Pool() keeps its own snapshot and Pool objects live across long operations (executor._run holds one through a subprocess of up to 1800 s and then calls pool.save() after a rate-limit hit at executor.py:126), so a stale snapshot overwrites reservations made meanwhile. This is the same hazard that leaked the executor running counters before H5a.\nFix: (1) remove reservations, reservation_history and notified_state from what Pool.save() writes and from what Pool() loads into mutable attributes; they live exclusively in the reservation file (or a separate reservations.json and notified.json under STATE) and are read fresh, under the flock, inside reserve(), release(), heartbeat(), sweep_reservations(), live_reservations() and the notify-per-transition helper; Pool.save() keeps writing only account and executor cooldowns and day counters. (2) Any code that read pool.reservations or pool.notified_state as attributes now calls the locked accessors. (3) Test: tests/test_pool.py::test_save_never_overwrites_concurrent_reservations (Pool A loads, Pool B reserves, Pool A saves a cooldown change; B's reservation is still in the file), and ::test_notified_state_survives_pool_save. Keep every lineage test green (reservation, estimate, goal cap, notify, dispatch, fallback hand-off, thread registry). Run .claude/hooks/tests-green.sh from the worktree root twice (exit 0 both), then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0411",
+    "T-0413"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 5976bb2 and the rest of the T-0362 lineage below your commit",
+    "tests/test_pool.py::test_save_never_overwrites_concurrent_reservations and ::test_notified_state_survives_pool_save pass",
+    "grep shows Pool.save() writes no reservations, reservation_history or notified_state keys and no code reads them as plain Pool attributes",
+    "tests/test_pool.py reservation tests, tests/test_daemon.py::test_notify_once_per_transition, ::test_budget_refusal_leaves_task_queued_without_repair, ::test_dispatch_passes_no_placeholder_ids and tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes, ::test_worker_refusal_requeues_without_hold still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 1200,
+    "fix_round_for": "T-0411",
+    "task_class": "budget"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0415",
+  "codex_thread": "01a0bf0d-87ef-77c0-902e-e10357c651d9",
+  "result": {
+    "summary": "Implemented and committed as `a364c6b`.\n\nSummary: reservation state now uses fresh locked accessors; `Pool.save()` preserves concurrent reservations and notifications. Both hook runs passed 571 tests.\n\nFiles changed: `orchestrator/pool.py`, `tests/test_pool.py`, `tests/test_daemon.py`\n\nFailures-only output: none. `scripts/tests_green.sh` was unavailable.",
+    "executed_by": "codex:luna",
+    "thread": "01a0bf0d-87ef-77c0-902e-e10357c651d9",
+    "usage": {
+      "input_tokens": 1442477,
+      "cached_input_tokens": 1383424,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 7433,
+      "reasoning_output_tokens": 2601
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789911728.750386,
+      "pipeline": {
+        "dispatched_at": 1789911728.750329
+      }
+    },
+    {
+      "ts": 1789911730.1082282,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0415",
+      "claimed_at": 1789911730.107844
+    },
+    {
+      "ts": 1789911730.10959,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1789912144.720153,
+      "codex_thread": "01a0bf0d-87ef-77c0-902e-e10357c651d9"
+    },
+    {
+      "ts": 1789912144.7237382,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed as `a364c6b`.\n\nSummary: reservation state now uses fresh locked accessors; `Pool.save()` preserves concurrent reservations and notifications. Both hook runs passed 571 tests.\n\nFiles changed: `orchestrator/pool.py`, `tests/test_pool.py`, `tests/test_daemon.py`\n\nFailures-only output: none. `scripts/tests_green.sh` was unavailable.",
+        "executed_by": "codex:luna",
+        "thread": "01a0bf0d-87ef-77c0-902e-e10357c651d9",
+        "usage": {
+          "input_tokens": 1442477,
+          "cached_input_tokens": 1383424,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7433,
+          "reasoning_output_tokens": 2601
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789912236.347836,
+      "pipeline": {
+        "dispatched_at": 1789911728.750329,
+        "gated_at": 1789912236.347726,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789912474.815021,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789912485.972113,
+      "pipeline": {
+        "dispatched_at": 1789911728.750329,
+        "gated_at": 1789912236.347726,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789912485.9720142
+      }
+    },
+    {
+      "ts": 1789912486.275451,
+      "status": "failed",
+      "reason": "rebase_conflict",
+      "resume_hint": {
+        "conflicts": [
+          "orchestrator/daemon.py"
+        ],
+        "hunks": "diff --cc orchestrator/daemon.py\nindex ab110d0,36cacff..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -587,54 -561,6 +572,57 @@@ def dispatch(pool)\n                      complete(t[\"id\"], \"spec_review_at\")\n                  except Exception as e:\n                      hold_failed(t[\"id\"], \"spec_review_error\", \"spec_review\", e)\n++<<<<<<< HEAD\n +    if pool.notification_transition(\"budget_refusals\", budget_refused) and budget_refused:\n +        notify(\"budget reservation refused; tasks remain queued\")\n +\n +    # Reviews are normally spawned when they are created, so they are not part of the execute loop above.\n +    # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread\n +    # that vanished before bus.claim.  The per-requeue stamp prevents every daemon tick spawning another copy.\n +    max_workers = pool.cfg.get(\"limits\", {}).get(\"max_parallel_claude_workers\", 4)\n +    review_slots = max(0, max_workers - running_claude_workers(pool) - inflight_claude_dispatches())\n +    respawn_after = pool.cfg.get(\"daemon\", {}).get(\"respawn_after_s\", 120)\n +    now = time.time()\n +    for task in bus.read(status=\"queued\"):\n +        if review_slots <= 0:\n +            break\n +        if task.get(\"role\") not in (\"review\", \"spec_review\"):\n +            continue\n +        if stale(task):\n +            continue\n +        pipeline = task.get(\"pipeline\") or {}\n +        events = task.get(\"events\") or []\n +        requeued_at = max((event.get(\"ts\", 0) for event in events\n +                           if event.get(\"reason\") == \"process died; requeued\"),\n +                          default=task.get(\"claimed_at\") or 0)\n +        if pipeline.get(\"respawned_at\", 0) > requeued_at:\n +            continue\n +        died = any(event.get(\"reason\") == \"process died; requeued\" for event in events)\n +        created_at = min((event.get(\"ts\", 0) for event in events), default=0)\n +        if not created_at:\n +            try:\n +                created_at = (bus.TASKS / f\"{task['id']}.json\").stat().st_mtime\n +            except OSError:\n +                created_at = now\n +        if not died and now - created_at < respawn_after:\n +            continue\n +        with bus.locked():\n +            current = bus.get(task[\"id\"])\n +            current_pipeline = dict(current.get(\"pipeline\") or {})\n +            current_events = current.get(\"events\") or []\n +            current_requeued_at = max((event.get(\"ts\", 0) for event in current_events\n +                                       if event.get(\"reason\") == \"process died; requeued\"),\n +                                      default=current.get(\"claimed_at\") or 0)\n +            if (current.get(\"status\") != \"queued\" or\n +                    current_pipeline.get(\"respawned_at\", 0) > current_requeued_at):\n +                continue\n +            current_pipeline[\"respawned_at\"] = now\n +            bus.update(task[\"id\"], pipeline=current_pipeline)\n +            spawn_async(spawn.run_worker, task[\"id\"])\n +        review_slots -= 1\n +\n++=======\n++>>>>>>> 5976bb2 (T-0411 move reservation ownership to workers)\n  \n  def review_tier(t):\n      \"\"\"Never let a model review its own output (CLAUDE.md rule): a task the daemon fell back to a Claude tier for\n"
+      }
+    },
+    {
+      "ts": 1789912486.396789,
+      "status": "held",
+      "hold_reason": "merge conflict",
+      "pipeline": {
+        "dispatched_at": 1789911728.750329,
+        "gated_at": 1789912236.347726,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789912485.9720142
+      }
+    },
+    {
+      "ts": 1789915459.3123589,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "rebase T-0431 df2ae89",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789915618.661001,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0431 df2ae89",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789911728.750329,
+    "gated_at": 1789912236.347726,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789912485.9720142
+  },
+  "claimed_at": 1789911730.107844,
+  "rounds": 0,
+  "executor": "luna",
+  "review_verdict": "approve",
+  "reason": "rebase_conflict",
+  "resume_hint": {
+    "conflicts": [
+      "orchestrator/daemon.py"
+    ],
+    "hunks": "diff --cc orchestrator/daemon.py\nindex ab110d0,36cacff..0000000\n--- a/orchestrator/daemon.py\n+++ b/orchestrator/daemon.py\n@@@ -587,54 -561,6 +572,57 @@@ def dispatch(pool)\n                      complete(t[\"id\"], \"spec_review_at\")\n                  except Exception as e:\n                      hold_failed(t[\"id\"], \"spec_review_error\", \"spec_review\", e)\n++<<<<<<< HEAD\n +    if pool.notification_transition(\"budget_refusals\", budget_refused) and budget_refused:\n +        notify(\"budget reservation refused; tasks remain queued\")\n +\n +    # Reviews are normally spawned when they are created, so they are not part of the execute loop above.\n +    # Recover the two pre-claim failure modes: a dead worker requeued by reconcile_dead, and a spawn thread\n +    # that vanished before bus.claim.  The per-requeue stamp prevents every daemon tick spawning another copy.\n +    max_workers = pool.cfg.get(\"limits\", {}).get(\"max_parallel_claude_workers\", 4)\n +    review_slots = max(0, max_workers - running_claude_workers(pool) - inflight_claude_dispatches())\n +    respawn_after = pool.cfg.get(\"daemon\", {}).get(\"respawn_after_s\", 120)\n +    now = time.time()\n +    for task in bus.read(status=\"queued\"):\n +        if review_slots <= 0:\n +            break\n +        if task.get(\"role\") not in (\"review\", \"spec_review\"):\n +            continue\n +        if stale(task):\n +            continue\n +        pipeline = task.get(\"pipeline\") or {}\n +        events = task.get(\"events\") or []\n +        requeued_at = max((event.get(\"ts\", 0) for event in events\n +                           if event.get(\"reason\") == \"process died; requeued\"),\n +                          default=task.get(\"claimed_at\") or 0)\n +        if pipeline.get(\"respawned_at\", 0) > requeued_at:\n +            continue\n +        died = any(event.get(\"reason\") == \"process died; requeued\" for event in events)\n +        created_at = min((event.get(\"ts\", 0) for event in events), default=0)\n +        if not created_at:\n +            try:\n +                created_at = (bus.TASKS / f\"{task['id']}.json\").stat().st_mtime\n +            except OSError:\n +                created_at = now\n +        if not died and now - created_at < respawn_after:\n +            continue\n +        with bus.locked():\n +            current = bus.get(task[\"id\"])\n +            current_pipeline = dict(current.get(\"pipeline\") or {})\n +            current_events = current.get(\"events\") or []\n +            current_requeued_at = max((event.get(\"ts\", 0) for event in current_events\n +                                       if event.get(\"reason\") == \"process died; requeued\"),\n +                                      default=current.get(\"claimed_at\") or 0)\n +            if (current.get(\"status\") != \"queued\" or\n +                    current_pipeline.get(\"respawned_at\", 0) > current_requeued_at):\n +                continue\n +            current_pipeline[\"respawned_at\"] = now\n +            bus.update(task[\"id\"], pipeline=current_pipeline)\n +            spawn_async(spawn.run_worker, task[\"id\"])\n +        review_slots -= 1\n +\n++=======\n++>>>>>>> 5976bb2 (T-0411 move reservation ownership to workers)\n  \n  def review_tier(t):\n      \"\"\"Never let a model review its own output (CLAUDE.md rule): a task the daemon fell back to a Claude tier for\n"
+  },
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0431 df2ae89"
+}

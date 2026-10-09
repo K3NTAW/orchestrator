@@ -1,0 +1,92 @@
+{
+  "id": "T-0138",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "C-O10: run_claude always returns a reason on failure; run_worker never KeyErrors on it",
+  "spec": "Why: spawn.run_claude returns {\"status\": \"failed\", \"output\": out} when the claude process exits non-zero but printed JSON (typical when --max-budget-usd is reached). run_worker then reads r[\"reason\"] (spawn.py \u2248line 264) and raises KeyError; the outer handler records \"post_result failed: 'reason'\" and the worker's real failure and partial output are lost (gotchas.md 2026-09-18: review T-0134).\n\nChange orchestrator/spawn.py: (1) in run_claude, the non-zero-exit JSON path returns {\"status\": \"failed\", \"output\": out, \"reason\": <text>} where text = \"budget or error exit (rc=<rc>): \" + (out.get(\"result\") or \"\")[:500] when out.get(\"is_error\") or rc != 0; (2) run_worker uses r.get(\"reason\", \"unknown failure\") in both the held and failed branches; (3) in the failed branch, when r.get(\"output\") has a \"result\" string, also store it as resume_hint={\"partial_output\": result[:2000]} so a reviewer's partial findings survive. No other behaviour change; no new dependency.\n\nTests in tests/test_spawn.py (use the existing pattern for stubbing subprocess.Popen / run_claude): (a) claude exits 1 with JSON {\"is_error\": true, \"result\": \"budget exceeded\"} \u2192 run_claude returns status failed with a reason containing \"budget exceeded\" and rc=1; (b) run_worker with run_claude patched to return {\"status\": \"failed\", \"output\": {\"result\": \"partial\"}} (no reason key) \u2192 task ends failed with reason \"unknown failure\" and resume_hint.partial_output == \"partial\", no exception. Finish with: summary, files changed, failures-only test output. Commit on the task branch when green.",
+  "inputs": [],
+  "acceptance": [
+    "run_claude's non-zero-exit JSON path returns a reason string containing the rc and the first 500 chars of result (test a)",
+    "run_worker uses r.get('reason') and stores partial output in resume_hint on failure; no KeyError (test b)",
+    "uv run python -m unittest discover -q tests green; no new dependency; only spawn.py and tests/test_spawn.py change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 1500,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_spawn.py"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0138",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0138` (5aff342), working tree clean.\n\n**Summary**\n\nFixed the KeyError in `run_worker` when `run_claude`'s non-zero-exit JSON path (e.g. hitting `--max-budget-usd`) had no `\"reason\"` key, which was swallowing the real failure and any partial output.\n\n**Files changed**\n- `orchestrator/spawn.py`\n  - `run_claude`: the \"done\" check now also fails on `out.get(\"is_error\")`, not just a non-zero return code. On failure it sets `reason = f\"budget or error exit (rc={rc}): \" + result[:500]`.\n  - `run_worker`: held/failed branches use `r.get(\"reason\", \"unknown failure\")` instead of `r[\"reason\"]`; failure branch also stashes `output.result[:2000]` into `resume_hint.partial_output` when present.\n- `tests/test_spawn.py`\n  - `RunClaudeBudgetExitReason`: rc=1 + `{\"is_error\": true, \"result\": \"budget exceeded\"}` \u2192 `status=\"failed\"`, reason contains `rc=1` and `\"budget exceeded\"`.\n  - `RunWorkerMissingReason`: `run_claude` returns `{\"status\": \"failed\", \"output\": {\"result\": \"partial\"}}` (no `reason`) \u2192 task ends `failed`, `reason == \"unknown failure\"`, `resume_hint.partial_output == \"partial\"`, no exception.\n\n**Test output** (failures-only; none \u2014 full suite green)\n```\nRan 21 tests in 0.833s\nOK\n```\n`skills/executor/implement-spec/scripts/tests_green.sh` exit code 0.\n\nNo new dependencies; only the two scoped files changed.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789737658.28643,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789737659.27449,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0138",
+      "claimed_at": 1789737659.274101
+    },
+    {
+      "ts": 1789737659.281263,
+      "pid": 60465,
+      "account": "B"
+    },
+    {
+      "ts": 1789737776.959232,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0138` (5aff342), working tree clean.\n\n**Summary**\n\nFixed the KeyError in `run_worker` when `run_claude`'s non-zero-exit JSON path (e.g. hitting `--max-budget-usd`) had no `\"reason\"` key, which was swallowing the real failure and any partial output.\n\n**Files changed**\n- `orchestrator/spawn.py`\n  - `run_claude`: the \"done\" check now also fails on `out.get(\"is_error\")`, not just a non-zero return code. On failure it sets `reason = f\"budget or error exit (rc={rc}): \" + result[:500]`.\n  - `run_worker`: held/failed branches use `r.get(\"reason\", \"unknown failure\")` instead of `r[\"reason\"]`; failure branch also stashes `output.result[:2000]` into `resume_hint.partial_output` when present.\n- `tests/test_spawn.py`\n  - `RunClaudeBudgetExitReason`: rc=1 + `{\"is_error\": true, \"result\": \"budget exceeded\"}` \u2192 `status=\"failed\"`, reason contains `rc=1` and `\"budget exceeded\"`.\n  - `RunWorkerMissingReason`: `run_claude` returns `{\"status\": \"failed\", \"output\": {\"result\": \"partial\"}}` (no `reason`) \u2192 task ends `failed`, `reason == \"unknown failure\"`, `resume_hint.partial_output == \"partial\"`, no exception.\n\n**Test output** (failures-only; none \u2014 full suite green)\n```\nRan 21 tests in 0.833s\nOK\n```\n`skills/executor/implement-spec/scripts/tests_green.sh` exit code 0.\n\nNo new dependencies; only the two scoped files changed.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789737816.2684119,
+      "pipeline": {
+        "gated_at": 1789737816.268302
+      }
+    },
+    {
+      "ts": 1789737833.641414,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "5aff34217b37ccab96c79c0240d15a154bf94fcc"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789737659.274101,
+  "pid": 60465,
+  "account": "B",
+  "pipeline": {
+    "gated_at": 1789737816.268302
+  },
+  "merged_into": "goal/T-0073",
+  "sha": "5aff34217b37ccab96c79c0240d15a154bf94fcc"
+}

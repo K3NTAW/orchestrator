@@ -1,0 +1,1219 @@
+{
+  "id": "T-1548",
+  "created_at": 1790934653.440695,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 4,
+  "title": "E6v2: acceptance gate v2: every acceptance path that looks like a test file (any language) must exist and be in the task diff",
+  "spec": "Goal T-1403, wave 2, plan label E6v2 (refile of T-1507; content unchanged). Evidence: luna T-0104 passed the gate without backend/test/oauth.test.ts and google-oauth.test.ts although its acceptance named them (plan.md backlog); fix rounds are 41% of execute runs, partly missing non-Python acceptance tests (analysis finding 5).\n\nFacts (goal/T-1403; acceptance.py and the daemon gate unchanged since main 355583c; re-check daemon.py line numbers on the current goal branch, B2a T-1504 has merged since):\n- orchestrator/acceptance.py:8-11 _TEST_ID only matches tests/<...>.py::name; named_tests() (23-37) and missing_tests() (52-66) check that the named Python function is defined. Non-Python paths are never checked.\n- orchestrator/daemon.py gate() (~1437-1450): after the dirty-scope check, missing = acceptance.missing_tests(...); non-empty -> stamp gated_at, hold gate_red with resume_hint {'failures': ['FAILED path::name (missing: ...)'], 'missing_tests': missing}, gate_reds += 1, and skip the gate run.\n- daemon.py:26-27 changed_paths(task) wraps gitutil.changed_paths (diff base..HEAD names, None when unavailable).\n- tests/test_daemon.py:161 patches daemon.acceptance.missing_tests; most daemon gate tests use acceptance like ['pass'] with no test-file path, so the new check returns [] for them.\n\nChange:\n1. acceptance.py: test_file_paths(acceptance) -> sorted unique paths from whitespace tokens (strip surrounding quotes, backticks, brackets and trailing ':,;.'): skip tokens containing '*' or ending in '/'; drop tokens containing '::' whose left side ends in '.py' (missing_tests owns those); for other '::' tokens use the left side. A token is a test file when it has a file extension and either a path component is exactly 'test', 'tests' or '__tests__', or the file name matches *.test.<js|jsx|ts|tsx|mjs|cjs>, *.spec.<same>, *Test.swift, *Tests.swift, *Test.kt, *Tests.kt, *Test.java, *Tests.java. '.claude/hooks/tests-green.sh' must not match. missing_test_files(worktree, acceptance, changed=None) -> paths that are not files under worktree, or (when changed is a list) not in changed.\n2. daemon.gate(): compute files = acceptance.missing_test_files(worktree, acceptance, changed_paths(t)) next to the existing missing_tests call; when either list is non-empty, one gate_red hold whose failures list holds the existing lines plus 'FAILED <path> (missing: test file not in task diff)' per file and resume_hint gains 'missing_test_files': files. Same stamp/gate_reds/_hold_stale_high handling as today; no second code path.\n3. roadmap.py's missing_tests call is unchanged.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_acceptance.py tests (13-75) pin Python-id behaviour and must pass unchanged; tests/test_failures.py (~32-39) parses 'FAILED ... (missing: test not defined)' lines, keep that text for Python ids. Run tests/test_acceptance.py, tests/test_failures.py and tests/test_daemon.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.\n\nRe-filed 2026-10-02 10:40 (replaces T-1507): B2b T-1506 is parked after five spec-review rounds; depends_on re-pointed to the merged B2a T-1504; spec, acceptance and scope unchanged.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_acceptance.py::test_missing_test_files_requires_test_paths_in_diff: passes: acceptance.test_file_paths() extracts backend/test/oauth.test.ts, web/src/a.spec.ts, apple/AppTests/FooTests.swift, android/app/src/test/BarTest.kt and tests/test_x.py (bare, no ::) but not tests/test_x.py::test_y (handled by missing_tests), .claude/hooks/tests-green.sh, globs or directories; missing_test_files(worktree, acceptance, changed) returns those absent from the worktree or not in changed (changed None -> existence only)",
+    "tests/test_daemon.py::test_gate_holds_when_acceptance_test_file_missing_from_diff: passes: daemon.gate holds a done execute task gate_red with resume_hint.missing_test_files and a 'FAILED <path> (missing: test file not in task diff)' failure line, without running tests-green, when its acceptance names backend/test/oauth.test.ts that the task diff does not contain",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/acceptance.py",
+    "orchestrator/daemon.py",
+    "tests/test_acceptance.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-1504"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "E6v2",
+    "goal_branch": "goal/T-1403",
+    "respec_for": "T-1507"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1548",
+  "codex_thread": "01a0fc18-08e5-78f2-affc-d07b6113fe35",
+  "result": {
+    "summary": "Summary: Implemented acceptance test-file extraction and diff validation; committed as `06264e4`.\n\nFiles changed:\n- `orchestrator/acceptance.py`\n- `orchestrator/daemon.py`\n- `tests/test_acceptance.py`\n- `tests/test_daemon.py`\n\nFailures-only test output:\n- `scripts/failures_only.sh` unavailable.\n- Compatible focused run: 253 tests passed.\n- Worktree clean.",
+    "executed_by": "codex:luna",
+    "thread": "01a0fc18-08e5-78f2-affc-d07b6113fe35",
+    "usage": {
+      "input_tokens": 802193,
+      "cached_input_tokens": 754176,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6882,
+      "reasoning_output_tokens": 2803,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790934659.799655,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613
+      }
+    },
+    {
+      "ts": 1790934659.801047,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790934659.800998,
+        "dispatched_at_lease": 1790935559.800998
+      }
+    },
+    {
+      "ts": 1790934659.801989,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790934659.800998,
+        "dispatched_at_lease": 1790935559.800998
+      }
+    },
+    {
+      "ts": 1790935572.367307,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613
+      }
+    },
+    {
+      "ts": 1790935603.000299,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227
+      }
+    },
+    {
+      "ts": 1790935603.001712,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227
+      }
+    },
+    {
+      "ts": 1790935609.537375,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7226,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790935609.5389519,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883
+      }
+    },
+    {
+      "ts": 1790935825.268756,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        }
+      }
+    },
+    {
+      "ts": 1790935827.173384,
+      "packet_meta": {
+        "chars": 6347,
+        "est_tokens": 1586,
+        "presented_tokens": 1586,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "813dd0be3645c96ff78b585ab8c161b29b2169d23b1aea517fcc12842d90cb60"
+          },
+          "objective": {
+            "chars": 3672,
+            "est_tokens": 918,
+            "sha256": "d72eca01904ce755041e01f329bc2dc8441b1b70cbddde1da9b17662bd62bab6"
+          },
+          "acceptance": {
+            "chars": 957,
+            "est_tokens": 239,
+            "sha256": "862e25a51c73368aeaa785355e96d24a8f69b45353216f44820b41dc44658726"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "f9958731ef9c038e4df241f4873b99aa6e6fad99123cc33e1ecdb5ce760c25f5"
+          },
+          "read_scope": {
+            "chars": 961,
+            "est_tokens": 240,
+            "sha256": "00bc63862d8216469032951bf29fafc3fb4a9bee3791ed5d53d3e49af87c0b3e"
+          },
+          "constraints": {
+            "chars": 198,
+            "est_tokens": 49,
+            "sha256": "68f0f0f0a2f916f56afef01f82074d1b2aff43acf3a403823d1b19ab77c4fadf"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "74b7cf24924a",
+        "version": "74b7cf24924a",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@e9b20feac56f gotchas@f1002439aca4 memory@notes over cap by 1547 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "f1002439aca4",
+        "candidate_tokens": 4043,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 10991,
+        "routed_reduction_ratio": 0.8945954745238482,
+        "routed_hidden": 25,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "54e85d13621e",
+          "d1bcc8a22c70",
+          "280aeafb81cb",
+          "ba806228cc84",
+          "dccf10632e4f",
+          "63407adb9b84",
+          "82b56fcd7c9e",
+          "10357d124edf",
+          "378b437efe7b",
+          "504365aa02ad",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "1630905b7e26",
+          "5b214f33e7b9",
+          "1b3e7bba9f42",
+          "f1f488433820",
+          "35338ea64677",
+          "2f87a59f2668",
+          "dff760e36fd6",
+          "8090dd640913",
+          "7ab83b9fd234",
+          "19da72126eab",
+          "d9abd8408b22",
+          "9874d59ad980",
+          "be797972d439",
+          "fcce9503499b",
+          "7a609a70b0fd",
+          "3c406f3c7d00",
+          "ed1498b82eae",
+          "b0c54c31f10e",
+          "e071ac9f3be0",
+          "6f5dca562441",
+          "b6d165270cc1",
+          "b28d1b598f1d",
+          "0e135f16e790",
+          "e038c81995bb",
+          "13cb2d5ffc04",
+          "cba9d18d8c3a",
+          "6b908db1475c",
+          "28ef32b6e8d1",
+          "98bdbf928100",
+          "5be3c2a5a97c",
+          "bbc1810f106f",
+          "675732ae2dd8",
+          "a0817663b23a",
+          "3ddd55314002",
+          "296e9fda9a3e",
+          "15193022ff32",
+          "dbdc944847fd",
+          "c7f32dce691c",
+          "71d298ac52dd",
+          "993f09e44a1e",
+          "2d233fa8ffc9",
+          "daadb7e436bb",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e",
+          "12208bb79454"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7226,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790935827.174865,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1548",
+      "claimed_at": 1790935827.174634
+    },
+    {
+      "ts": 1790935827.175902,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1790936017.4508622,
+      "codex_thread": "01a0fc18-08e5-78f2-affc-d07b6113fe35",
+      "codex_thread_head": "06264e4adbd025e71e15080b50fbda3c9a83cbfa"
+    },
+    {
+      "ts": 1790936017.453132,
+      "packet_meta": {
+        "chars": 6347,
+        "est_tokens": 1586,
+        "presented_tokens": 1586,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "813dd0be3645c96ff78b585ab8c161b29b2169d23b1aea517fcc12842d90cb60"
+          },
+          "objective": {
+            "chars": 3672,
+            "est_tokens": 918,
+            "sha256": "d72eca01904ce755041e01f329bc2dc8441b1b70cbddde1da9b17662bd62bab6"
+          },
+          "acceptance": {
+            "chars": 957,
+            "est_tokens": 239,
+            "sha256": "862e25a51c73368aeaa785355e96d24a8f69b45353216f44820b41dc44658726"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "f9958731ef9c038e4df241f4873b99aa6e6fad99123cc33e1ecdb5ce760c25f5"
+          },
+          "read_scope": {
+            "chars": 961,
+            "est_tokens": 240,
+            "sha256": "00bc63862d8216469032951bf29fafc3fb4a9bee3791ed5d53d3e49af87c0b3e"
+          },
+          "constraints": {
+            "chars": 198,
+            "est_tokens": 49,
+            "sha256": "68f0f0f0a2f916f56afef01f82074d1b2aff43acf3a403823d1b19ab77c4fadf"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "74b7cf24924a",
+        "version": "74b7cf24924a",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@e9b20feac56f gotchas@f1002439aca4 memory@notes over cap by 1547 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "f1002439aca4",
+        "candidate_tokens": 4043,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 10991,
+        "routed_reduction_ratio": 0.8945954745238482,
+        "routed_hidden": 25,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "54e85d13621e",
+          "d1bcc8a22c70",
+          "280aeafb81cb",
+          "ba806228cc84",
+          "dccf10632e4f",
+          "63407adb9b84",
+          "82b56fcd7c9e",
+          "10357d124edf",
+          "378b437efe7b",
+          "504365aa02ad",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "1630905b7e26",
+          "5b214f33e7b9",
+          "1b3e7bba9f42",
+          "f1f488433820",
+          "35338ea64677",
+          "2f87a59f2668",
+          "dff760e36fd6",
+          "8090dd640913",
+          "7ab83b9fd234",
+          "19da72126eab",
+          "d9abd8408b22",
+          "9874d59ad980",
+          "be797972d439",
+          "fcce9503499b",
+          "7a609a70b0fd",
+          "3c406f3c7d00",
+          "ed1498b82eae",
+          "b0c54c31f10e",
+          "e071ac9f3be0",
+          "6f5dca562441",
+          "b6d165270cc1",
+          "b28d1b598f1d",
+          "0e135f16e790",
+          "e038c81995bb",
+          "13cb2d5ffc04",
+          "cba9d18d8c3a",
+          "6b908db1475c",
+          "28ef32b6e8d1",
+          "98bdbf928100",
+          "5be3c2a5a97c",
+          "bbc1810f106f",
+          "675732ae2dd8",
+          "a0817663b23a",
+          "3ddd55314002",
+          "296e9fda9a3e",
+          "15193022ff32",
+          "dbdc944847fd",
+          "c7f32dce691c",
+          "71d298ac52dd",
+          "993f09e44a1e",
+          "2d233fa8ffc9",
+          "daadb7e436bb",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e",
+          "12208bb79454"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 7226,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790936017.9315379,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790936017.9346402,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented acceptance test-file extraction and diff validation; committed as `06264e4`.\n\nFiles changed:\n- `orchestrator/acceptance.py`\n- `orchestrator/daemon.py`\n- `tests/test_acceptance.py`\n- `tests/test_daemon.py`\n\nFailures-only test output:\n- `scripts/failures_only.sh` unavailable.\n- Compatible focused run: 253 tests passed.\n- Worktree clean.",
+        "executed_by": "codex:luna",
+        "thread": "01a0fc18-08e5-78f2-affc-d07b6113fe35",
+        "usage": {
+          "input_tokens": 802193,
+          "cached_input_tokens": 754176,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6882,
+          "reasoning_output_tokens": 2803,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790936058.1378,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790936058.67396,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790936058.673732,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_x.py::test_y (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_x.py",
+            "test_y"
+          ]
+        ]
+      }
+    },
+    {
+      "ts": 1790936061.9608629,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_x.py::test_y (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_x.py",
+            "test_y"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_x.py::test_y"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_x (unittest.loader._FailedTest.test_x)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_x\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'tests.test_x'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1790936061.9624808,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790936058.673732,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1790936063.435606,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790936058.673732,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790936058.67396": true
+        }
+      }
+    },
+    {
+      "ts": 1790936230.3985548,
+      "codex_thread": "01a0fc18-08e5-78f2-affc-d07b6113fe35",
+      "codex_thread_head": "06264e4adbd025e71e15080b50fbda3c9a83cbfa"
+    },
+    {
+      "ts": 1790936230.7099981,
+      "rounds": 1
+    },
+    {
+      "ts": 1790936488.488846,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790936058.673732,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790936058.67396": true
+        },
+        "first_green_at": 1790936488.48657,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790936759.328749,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1549 06264e4adbd025e71e15080b50fbda3c9a83cbfa",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790934659.799613,
+        "dispatched_at": 1790935603.000227,
+        "dispatched_at_lease": 1790936503.000227,
+        "dispatched_at_done": 1790935609.538883,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790935825.26842
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790936058.673732,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1790936058.67396": true
+        },
+        "first_green_at": 1790936488.48657,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790936759.326772
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790934659.799613,
+    "dispatched_at": 1790935603.000227,
+    "dispatched_at_lease": 1790936503.000227,
+    "dispatched_at_done": 1790935609.538883,
+    "handoff": {
+      "baseline": "luna",
+      "selected": "luna",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790935825.26842
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "2b8e83caf1a0601111bd6fdc90512303ca9ae799",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:sonnet": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790936058.673732,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_skipped": {
+      "1790936058.67396": true
+    },
+    "first_green_at": 1790936488.48657,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790936759.326772
+  },
+  "packet_meta": {
+    "chars": 6347,
+    "est_tokens": 1586,
+    "presented_tokens": 1586,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "813dd0be3645c96ff78b585ab8c161b29b2169d23b1aea517fcc12842d90cb60"
+      },
+      "objective": {
+        "chars": 3672,
+        "est_tokens": 918,
+        "sha256": "d72eca01904ce755041e01f329bc2dc8441b1b70cbddde1da9b17662bd62bab6"
+      },
+      "acceptance": {
+        "chars": 957,
+        "est_tokens": 239,
+        "sha256": "862e25a51c73368aeaa785355e96d24a8f69b45353216f44820b41dc44658726"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+      },
+      "write_scope": {
+        "chars": 119,
+        "est_tokens": 29,
+        "sha256": "f9958731ef9c038e4df241f4873b99aa6e6fad99123cc33e1ecdb5ce760c25f5"
+      },
+      "read_scope": {
+        "chars": 961,
+        "est_tokens": 240,
+        "sha256": "00bc63862d8216469032951bf29fafc3fb4a9bee3791ed5d53d3e49af87c0b3e"
+      },
+      "constraints": {
+        "chars": 198,
+        "est_tokens": 49,
+        "sha256": "68f0f0f0a2f916f56afef01f82074d1b2aff43acf3a403823d1b19ab77c4fadf"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "74b7cf24924a",
+    "version": "74b7cf24924a",
+    "candidate_known": true,
+    "base": "355583cf1c12",
+    "sources": "pool.toml@e9b20feac56f gotchas@f1002439aca4 memory@notes over cap by 1547 chars: acceptance kept whole routed=shadow",
+    "policy_version": "e9b20feac56f",
+    "gotchas": "f1002439aca4",
+    "candidate_tokens": 4043,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 10991,
+    "routed_reduction_ratio": 0.8945954745238482,
+    "routed_hidden": 25,
+    "routed_ambiguous": 18,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "54e85d13621e",
+      "d1bcc8a22c70",
+      "280aeafb81cb",
+      "ba806228cc84",
+      "dccf10632e4f",
+      "63407adb9b84",
+      "82b56fcd7c9e",
+      "10357d124edf",
+      "378b437efe7b",
+      "504365aa02ad",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "718b545b1eca",
+      "5b872ee10528",
+      "622de2bd3ec8",
+      "667ed6b21b31",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "b676757c3fa9",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "a595cbbe1665",
+      "d500754708e5",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "d0b9e72fe363",
+      "00db509188f0",
+      "041199286363",
+      "acfaa314d8bc",
+      "4e7c92225364",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "1630905b7e26",
+      "5b214f33e7b9",
+      "1b3e7bba9f42",
+      "f1f488433820",
+      "35338ea64677",
+      "2f87a59f2668",
+      "dff760e36fd6",
+      "8090dd640913",
+      "7ab83b9fd234",
+      "19da72126eab",
+      "d9abd8408b22",
+      "9874d59ad980",
+      "be797972d439",
+      "fcce9503499b",
+      "7a609a70b0fd",
+      "3c406f3c7d00",
+      "ed1498b82eae",
+      "b0c54c31f10e",
+      "e071ac9f3be0",
+      "6f5dca562441",
+      "b6d165270cc1",
+      "b28d1b598f1d",
+      "0e135f16e790",
+      "e038c81995bb",
+      "13cb2d5ffc04",
+      "cba9d18d8c3a",
+      "6b908db1475c",
+      "28ef32b6e8d1",
+      "98bdbf928100",
+      "5be3c2a5a97c",
+      "bbc1810f106f",
+      "675732ae2dd8",
+      "a0817663b23a",
+      "3ddd55314002",
+      "296e9fda9a3e",
+      "15193022ff32",
+      "dbdc944847fd",
+      "c7f32dce691c",
+      "71d298ac52dd",
+      "993f09e44a1e",
+      "2d233fa8ffc9",
+      "daadb7e436bb",
+      "e146114ba8ec",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "e175a2554b06",
+      "575022ff3493",
+      "cc3f3bcac15a",
+      "ae61acc3156e",
+      "a48883e9da6e",
+      "a98276b73bf8",
+      "985ffb7f01b9",
+      "2993e8419e50",
+      "c6139725224e",
+      "12208bb79454"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 7226,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 411,
+    "instruction_tokens_modular": 411,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790935827.174634,
+  "rounds": 1,
+  "executor": "luna",
+  "codex_thread_head": "06264e4adbd025e71e15080b50fbda3c9a83cbfa",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": [
+      "FAILED tests/test_x.py::test_y (missing: test not defined)"
+    ],
+    "missing_tests": [
+      [
+        "tests/test_x.py",
+        "test_y"
+      ]
+    ],
+    "flaky_runs": [
+      {
+        "ids": [
+          "tests/test_x.py::test_y"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_x (unittest.loader._FailedTest.test_x)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_x\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'tests.test_x'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+      }
+    ]
+  },
+  "merged_into": "goal/T-1403",
+  "merged_via": "fix round T-1549 06264e4adbd025e71e15080b50fbda3c9a83cbfa"
+}

@@ -1,0 +1,144 @@
+{
+  "id": "T-0254",
+  "parent": "T-0240",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 3,
+  "title": "F5 fix round 1: resume argv must not carry -s/--sandbox either (review T-0251 request_changes on T-0249)",
+  "spec": "STEP 0: the worktree must contain 68b8ba0 \"Fix Codex resume argv handling\" (T-0249) in git log; if not, run git checkout -B task/T-0254 task/T-0249. Never drop that commit.\nReview T-0251 (high): orchestrator/executor.py argv_for(\"resume\", ...) still appends the access list, and when pool.toml [codex] dangerous_full_access is false that list is ['-s', 'workspace-write'], which `codex exec resume` rejects the same way it rejected -C (verified on this machine: error: unexpected argument '-s' found). It only works today because dangerous_full_access is true. The docstring's observed option list for resume has --dangerously-bypass-approvals-and-sandbox and --config but no -s/--sandbox.\nChange executor.py:\n1. argv_for(\"resume\"): translate the access list: keep --dangerously-bypass-approvals-and-sandbox as is; replace ['-s', '<mode>'] with ['--config', 'sandbox_mode=\"<mode>\"'] (resume accepts --config); never emit -s or --sandbox on resume. Fresh exec argv stays byte-identical.\n2. When _run returns the 'codex argv error:' failure (rc 2 usage error), also bus.log_run the attempt with outcome failed and the reason, and bus.update the task with resume_hint {'argv_error': reason[:300]} so the failure is visible on the bus, still without consuming a round.\nTests in tests/test_executor.py: test_resume_argv_translates_sandbox_to_config (access ['-s','workspace-write'] yields --config sandbox_mode=\"workspace-write\" and no -s), test_resume_argv_keeps_bypass_flag, test_argv_error_logs_run_and_hint. Keep the three T-0249 tests green.",
+  "inputs": [
+    "T-0249",
+    "T-0251"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 68b8ba0 below your commit",
+    "tests/test_executor.py::test_resume_argv_translates_sandbox_to_config, ::test_resume_argv_keeps_bypass_flag, ::test_argv_error_logs_run_and_hint pass and the T-0249 tests still pass",
+    "argv_for('resume', ...) output contains neither '-s' nor '--sandbox' for either access mode, and argv_for('exec', ...) is unchanged",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1200,
+    "fix_round_for": "T-0249"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0254",
+  "codex_thread": "01a0baa2-19a1-7fe1-af11-d687d280a649",
+  "result": {
+    "summary": "Codex (sol) committed 7516ddf on top of 68b8ba0 (T-0249) in wt/T-0254: argv_for('resume') keeps --dangerously-bypass-approvals-and-sandbox, translates -s/--sandbox <mode> into --config sandbox_mode=\"<mode>\" and never emits -s; exec argv unchanged; a codex argv usage error now logs a failed run row and stamps resume_hint.argv_error on the task without consuming a round. Tests test_resume_argv_translates_sandbox_to_config, test_resume_argv_keeps_bypass_flag, test_argv_error_logs_run_and_hint added, T-0249 tests kept. tests-green.sh wt/T-0254 exited 0 (Planner, 19:22). Addresses review T-0251 high finding. Posted by hand.",
+    "executed_by": "codex:sol",
+    "sha": "7516ddf",
+    "carries": "68b8ba0",
+    "confidence": 0.9,
+    "provenance": "repo"
+  },
+  "events": [
+    {
+      "ts": 1789837579.3669739,
+      "pipeline": {
+        "dispatched_at": 1789837579.3669271
+      }
+    },
+    {
+      "ts": 1789837580.443011,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0254",
+      "claimed_at": 1789837580.4425972
+    },
+    {
+      "ts": 1789837580.4449642,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789837719.3976011,
+      "codex_thread": "01a0baa2-19a1-7fe1-af11-d687d280a649"
+    },
+    {
+      "ts": 1789837832.473272,
+      "status": "done",
+      "result": {
+        "summary": "Codex (sol) committed 7516ddf on top of 68b8ba0 (T-0249) in wt/T-0254: argv_for('resume') keeps --dangerously-bypass-approvals-and-sandbox, translates -s/--sandbox <mode> into --config sandbox_mode=\"<mode>\" and never emits -s; exec argv unchanged; a codex argv usage error now logs a failed run row and stamps resume_hint.argv_error on the task without consuming a round. Tests test_resume_argv_translates_sandbox_to_config, test_resume_argv_keeps_bypass_flag, test_argv_error_logs_run_and_hint added, T-0249 tests kept. tests-green.sh wt/T-0254 exited 0 (Planner, 19:22). Addresses review T-0251 high finding. Posted by hand.",
+        "executed_by": "codex:sol",
+        "sha": "7516ddf",
+        "carries": "68b8ba0",
+        "confidence": 0.9,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789837910.07849,
+      "pipeline": {
+        "dispatched_at": 1789837579.3669271,
+        "gated_at": 1789837910.078378
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_survives_jev_exception (test_handover.Handover.test_handover_survives_jev_exception) (target='orchestrator.jev.ask')\nTraceback (most recent call last):\nAssertionError: 305 != 2\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789838020.072333,
+      "status": "done",
+      "hold_reason": null,
+      "pipeline": {
+        "dispatched_at": 1789837579.3669271
+      },
+      "resume_hint": {
+        "planner": "gate_red 19:25 was test_handover_survives_jev_exception (305 != 2), unrelated to this diff and green on two Planner reruns; re-gated by the Planner"
+      }
+    },
+    {
+      "ts": 1789838092.657909,
+      "pipeline": {
+        "dispatched_at": 1789837579.3669271,
+        "gated_at": 1789838092.6577642
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_survives_jev_exception (test_handover.Handover.test_handover_survives_jev_exception) (target='orchestrator.jev.ask')\nTraceback (most recent call last):\nAssertionError: 305 != 2\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789838357.642108,
+      "status": "failed",
+      "reason": "tests_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_survives_jev_exception (test_handover.Handover.test_handover_survives_jev_exception) (target='orchestrator.handover.jev_rank.rank')\nTraceback (most recent call last):\nAssertionError: 308 != 2\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789839825.681515,
+      "status": "done",
+      "merged_into": "goal/T-0240",
+      "merged_via": "rebased as T-0258 fe7026a",
+      "hold_reason": null,
+      "reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789837579.3669271,
+    "gated_at": 1789838092.6577642
+  },
+  "claimed_at": 1789837580.4425972,
+  "rounds": 0,
+  "executor": "sol",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_handover_survives_jev_exception (test_handover.Handover.test_handover_survives_jev_exception) (target='orchestrator.handover.jev_rank.rank')\nTraceback (most recent call last):\nAssertionError: 308 != 2\nFAILED (failures=1)\n"
+  },
+  "reason": null,
+  "merged_into": "goal/T-0240",
+  "merged_via": "rebased as T-0258 fe7026a"
+}

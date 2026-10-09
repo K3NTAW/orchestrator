@@ -1,0 +1,79 @@
+{
+  "id": "T-0145",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: C-O4 v3: `orchestrator serve` \u2014 bearer-authed HTTP API over goals (spec round 3 after T-0143; supersedes T-0142)",
+  "spec": "Why: the kgpt `modules/orchestrator` (Phase C, kgpt side) forwards start_goal/goal_status/list_goals/cancel_goal to a per-user endpoint; this is that endpoint, running in the executor container on the home network. Spec round 3 folds in spec reviews T-0140 and T-0143. Scope is 6 files by Planner decision: the requester field belongs in goals.py with its record, and README waits for the C-O5 runbook.\n\ngoals.py (small, additive): start(repo_path, goal_text, account_id=\"A\", reinstall=False, requester=None) stores `requester` (string or None) on the goals.json record; _status_entry()/status()/list_goals() return it. Nothing else in goals.py changes. tests/test_goals.py: one test that start() with requester=\"alice\" records it and status() returns it.\n\nserve.py with starlette (import from the mcp dependency tree; if starlette or uvicorn is not importable, exit at startup with one line; do not add a dependency). serve.py does `from . import goals` and calls goals.start / goals.list_goals / goals.status / goals.stop through the module attribute, never `from .goals import start`, so tests can patch orchestrator.goals.* (T-0143 risk 2). All route handlers are plain `def` (not async) so starlette runs them in its threadpool: goals.start, git clone and goals.stop block for seconds and must not stall /healthz or other requests. Every response entry that describes a goal carries \"repo\": <slug> (the repos.toml key the caller used), added by serve.py on top of what goals.* returns, so multi-repo listings map back to slugs (T-0143 risk 3). Routes:\n- GET /healthz (no auth) \u2192 200 {\"status\": \"ok\"}.\n- POST /goals body {repo, goal, requester?, account?}: 400 {\"reason\": ...} when repo or goal is missing, goal is empty/whitespace, or requester is present and not a string, or account is present and not a string (T-0143 risk 4; untrusted input is validated, never passed through); resolve slug via .orchestrator/repos.toml (slug \u2192 {path, git_url}); 404 {\"reason\": \"unknown repo\"} for an unknown slug; when path is missing and git_url is set, clone under a per-slug lock: fcntl flock on <ORCH_WORK>/.locks/<slug>.lock (mkdir -p; mirror goals.py's _with_goals_lock pattern), re-check that path is still missing inside the lock, then `git clone <git_url> <ORCH_WORK>/<slug>` as an argv list (ORCH_WORK env, default /work); clone failure \u2192 502 {\"reason\": \"clone failed\", \"detail\": stderr[-500:]} (T-0143 risk 1); BEFORE calling start, call goals.list_goals(path) and if any record has record_status == \"running\" and planner_alive is True \u2192 409 {\"reason\": \"goal already running\", \"goal_id\": <id>}; then goals.start(path, goal, account_id=body.get(\"account\", \"A\"), requester=body.get(\"requester\")); launched true \u2192 201 {goal_id, repo: slug, status: \"running\", requester}; launched false \u2192 422 {\"reason\": r[\"reason\"]} (covers every precheck refusal); never a 500 for an expected refusal.\n- GET /goals[?repo=slug] \u2192 200 list: goals.list_goals(path) per configured repo (all repos when no filter; 404 unknown slug), each entry with \"repo\": slug.\n- GET /goals/{repo}/{goal_id} \u2192 200 goals.status(path, goal_id) entry with \"repo\": slug; 404 when the repo or goal is unknown.\n- POST /goals/{repo}/{goal_id}/cancel \u2192 goals.stop(path, goal_id); {\"error\": \"unknown goal\"} \u2192 404; else 200 {goal_id, repo: slug, status: \"stopped\"}.\nAuth: every route except /healthz requires `Authorization: Bearer <ORCH_SERVICE_TOKEN>` (env; the server refuses to start with one line and non-zero exit when unset), compared with hmac.compare_digest; 401 {\"reason\": \"unauthorized\"} otherwise. The token is never stored, logged or echoed; access log lines contain method, path, status only.\ncli.py: `serve [--host 127.0.0.1] [--port 8090]` runs uvicorn with the app. `.orchestrator/repos.toml.example` with one commented entry showing slug, path, git_url.\n\nTests tests/test_serve.py with starlette's TestClient and orchestrator.goals.start/list_goals/status/stop patched via unittest.mock.patch (no real git, no Popen): healthz_no_auth, rejects_missing_or_wrong_bearer, unknown_repo_404, empty_goal_400, bad_requester_type_400, start_returns_goal_id_and_requester (201; start called with requester and account kwargs; response repo == slug), start_refusal_422, second_start_409_while_running (list_goals returns a running+alive record \u2192 409 and start NOT called), list_entries_carry_slug, clone_runs_under_lock_once (path missing + git_url set; subprocess.run patched: called once with an argv list starting [\"git\", \"clone\", ...]; lock file created under ORCH_WORK/.locks), cancel_marks_stopped, cancel_unknown_404, handlers_are_sync (no route endpoint is a coroutine function), serve_imports_goals_as_module (assert serve.goals is orchestrator.goals). No new dependency; finish with summary, files changed, failures-only test output; commit on the task branch when green.",
+  "inputs": [
+    "T-0144"
+  ],
+  "acceptance": [
+    "tests/test_serve.py has the fourteen named tests, green; tests/test_goals.py gains the requester test, green",
+    "goals.start accepts requester and status()/list_goals() return it; no other goals.py change (diff)",
+    "serve.py calls goals.* through the module attribute; every handler is a plain def; every start() refusal maps to 422; 409 comes from list_goals; every goal entry in a response carries repo = slug; requester/account are validated as strings or 400",
+    "First-use clone runs under a per-slug flock with a re-check inside the lock, as an argv list, once (test)",
+    "`uv run orchestrator serve` without ORCH_SERVICE_TOKEN exits non-zero with one line; no route logs, stores or echoes the bearer",
+    "`uv run python -m unittest discover -q tests` green; no new dependency; only the six scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "orchestrator/cli.py",
+    "orchestrator/goals.py",
+    "tests/test_serve.py",
+    "tests/test_goals.py",
+    ".orchestrator/repos.toml.example"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0145",
+  "codex_thread": null,
+  "result": {
+    "summary": "not run: duplicate of T-0146. The daemon created this generic spec review once its dispatch loop reached T-0144; the Planner's T-0146 carries the round-3 final-round instruction (approve unless contract-breaking or security). Killed at start.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789739693.583313,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0145",
+      "claimed_at": 1789739693.582741
+    },
+    {
+      "ts": 1789739693.592057,
+      "pid": 19914,
+      "account": "B"
+    },
+    {
+      "ts": 1789739714.921173,
+      "status": "failed",
+      "reason": "non-JSON output (rc=143): "
+    },
+    {
+      "ts": 1789739716.009542,
+      "status": "failed",
+      "result": {
+        "summary": "not run: duplicate of T-0146. The daemon created this generic spec review once its dispatch loop reached T-0144; the Planner's T-0146 carries the round-3 final-round instruction (approve unless contract-breaking or security). Killed at start.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789739693.582741,
+  "pid": 19914,
+  "account": "B",
+  "reason": "non-JSON output (rc=143): "
+}

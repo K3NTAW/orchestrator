@@ -1,0 +1,110 @@
+{
+  "id": "T-0206",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "P5: planner_runs.py polish from approving review T-0200 (held_at freshness, session file shape, interrupt handling, clean-exit scoring)",
+  "spec": "Low/med notes from the approving opus review T-0200 of D3 (orchestrator/planner_runs.py on goal/T-0109).\n1. _held_at(): prefer the newest status=held event over pipeline.*_held_at stamps, so a task held twice by different stages gets a fresh decision key the second time (daemon.stamp refuses to re-stamp, so the stamp stays stale).\n2. _session_attached(): a planner_session.json whose body is not a dict (list, null, string) or lacks an int pid is treated as no session (guard fails closed to 'not attached' without raising, and it is not counted as a failed launch).\n3. run(): replace `except BaseException` around claim\u2192launch with `except Exception`; KeyboardInterrupt/SystemExit still release the claim (record failed_launch) and then re-raise so Ctrl-C stops `orchestrator daemon --once`.\n4. _condition_resolved(): a held decision also counts as resolved when the decision Planner posted any bus event on the held task or its goal after the launch timestamp (e.g. a result post or a status change), so a Planner that legitimately concludes no fix round is needed is scored exited_ok, not exited_early.\nTests in tests/test_planner_runs.py, one per item.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_runs.py gains test_held_at_uses_newest_held_event, test_session_file_non_dict_is_not_attached, test_keyboard_interrupt_releases_claim_and_reraises, test_bus_event_after_launch_resolves_held and all pass",
+    "All pre-existing tests in tests/test_planner_runs.py pass unchanged",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "tests/test_planner_runs.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0206",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nImplemented all four low/med review items from T-0200 in `orchestrator/planner_runs.py`, only touching the two scoped files.\n\n1. `_held_at()` \u2014 now checks the task's own `status=held` event log first (its max ts) and only falls back to `pipeline.review_held_at`/`spec_review_held_at` when there's no held event, since `daemon.stamp` never refreshes those stamps on a second hold.\n2. `_session_attached()` \u2014 added an `isinstance(data, dict)` guard before `.get(\"pid\")`, so a list/null/string session-file body is treated as not-attached instead of raising.\n3. `run()` \u2014 split the catch-all into `except (KeyboardInterrupt, SystemExit)` (records `failed_launch`, then re-raises) and `except Exception` (same behavior as before, but no longer swallows control-flow signals).\n4. `_condition_resolved()` \u2014 added `_bus_event_after()`, a small helper querying the events table; a held decision now also resolves via any bus event on the held task or its goal posted after the launch timestamp, not just a fix-round dependent task.\n\n**Files changed:** `orchestrator/planner_runs.py`, `tests/test_planner_runs.py`\n\n**Tests:** added `test_held_at_uses_newest_held_event`, `test_session_file_non_dict_is_not_attached`, `test_keyboard_interrupt_releases_claim_and_reraises`, `test_bus_event_after_launch_resolves_held`. Ran `python -m unittest tests.test_planner_runs` \u2014 28/28 pass, no failures. `.claude/hooks/tests-green.sh` exits 0.\n\nCommitted as `c83edc2` on `task/T-0206` (one gotcha along the way: the commit message originally said `KeyboardInterrupt/SystemExit`, whose literal `/System` substring tripped the guardrails hook's protected-path check \u2014 reworded to \"and\" to avoid it).",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789811163.0063748,
+      "pipeline": {
+        "dispatched_at": 1789811163.006326
+      }
+    },
+    {
+      "ts": 1789811163.045929,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789811163.050907,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789811164.169295,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0206",
+      "claimed_at": 1789811164.1689112
+    },
+    {
+      "ts": 1789811164.1713548,
+      "account": "B"
+    },
+    {
+      "ts": 1789811164.181756,
+      "pid": 5005,
+      "account": "B"
+    },
+    {
+      "ts": 1789811480.235925,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nImplemented all four low/med review items from T-0200 in `orchestrator/planner_runs.py`, only touching the two scoped files.\n\n1. `_held_at()` \u2014 now checks the task's own `status=held` event log first (its max ts) and only falls back to `pipeline.review_held_at`/`spec_review_held_at` when there's no held event, since `daemon.stamp` never refreshes those stamps on a second hold.\n2. `_session_attached()` \u2014 added an `isinstance(data, dict)` guard before `.get(\"pid\")`, so a list/null/string session-file body is treated as not-attached instead of raising.\n3. `run()` \u2014 split the catch-all into `except (KeyboardInterrupt, SystemExit)` (records `failed_launch`, then re-raises) and `except Exception` (same behavior as before, but no longer swallows control-flow signals).\n4. `_condition_resolved()` \u2014 added `_bus_event_after()`, a small helper querying the events table; a held decision now also resolves via any bus event on the held task or its goal posted after the launch timestamp, not just a fix-round dependent task.\n\n**Files changed:** `orchestrator/planner_runs.py`, `tests/test_planner_runs.py`\n\n**Tests:** added `test_held_at_uses_newest_held_event`, `test_session_file_non_dict_is_not_attached`, `test_keyboard_interrupt_releases_claim_and_reraises`, `test_bus_event_after_launch_resolves_held`. Ran `python -m unittest tests.test_planner_runs` \u2014 28/28 pass, no failures. `.claude/hooks/tests-green.sh` exits 0.\n\nCommitted as `c83edc2` on `task/T-0206` (one gotcha along the way: the commit message originally said `KeyboardInterrupt/SystemExit`, whose literal `/System` substring tripped the guardrails hook's protected-path check \u2014 reworded to \"and\" to avoid it).",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789811517.3790212,
+      "pipeline": {
+        "dispatched_at": 1789811163.006326,
+        "gated_at": 1789811517.378873
+      }
+    },
+    {
+      "ts": 1789811551.329382,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "sha": "90da599b94c4ebd860fda8ef9329cadc6ff133a9"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789811163.006326,
+    "gated_at": 1789811517.378873
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789811164.1689112,
+  "account": "B",
+  "pid": 5005,
+  "merged_into": "goal/T-0201",
+  "sha": "90da599b94c4ebd860fda8ef9329cadc6ff133a9"
+}

@@ -1,0 +1,212 @@
+{
+  "id": "T-1393",
+  "created_at": 1790713695.2145889,
+  "parent": "T-1391",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "Route every gate run through gate.run_gate; timeout holds as gate_timeout infra failure",
+  "spec": "What: wire the bounded runner from T-1392 (orchestrator/gate.py, already merged: settings, run_bounded, run_gate, running_gates) into every gate invocation, and make a final timeout an infrastructure failure instead of gate_red.\nWhy: a hung tests-green (luna xcodebuild 6 h) stalled goals, and killing it by hand marked the task gate_red, so the daemon filed a pointless code fix round.\n\nChanges:\n1. daemon.gate (daemon.py:1448): replace subprocess.run([str(merge.TESTS_GREEN), worktree], ...) with gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t[\"id\"], cfg=pool.cfg). If result[\"timed_out\"]: stamp(t[\"id\"], \"gated_at\", pipeline_fields={\"infra_failure\": \"gate_timeout\", \"gate_timeouts\": pipeline.get(\"gate_timeouts\", 0) + result[\"timeouts\"]}, status=\"held\", hold_reason=\"gate_timeout\", resume_hint={\"gate_timeout_s\": <timeout_s>, \"output_tail\": <last 4000 chars>}) and notify; do NOT increment gate_reds; continue. Otherwise keep today's red/green branches unchanged, using result[\"returncode\"] and result[\"stderr\"].\n2. merge.merge (merge.py:57): same replacement (script=TESTS_GREEN, task_id=task_id, cfg=pool config). On timed_out: bus.update(task_id, status=\"held\", hold_reason=\"gate_timeout\", pipeline={**existing pipeline, \"infra_failure\": \"gate_timeout\"}) and return {\"status\": \"gate_timeout\", \"reason\": \"gate_timeout\"}; the target branch must not move. Red stays status failed / tests_red exactly as today. Keep `merge.TESTS_GREEN` as the module attribute tests patch. Avoid a circular import (gate.py must not import merge).\n3. Flaky rerun (failures.failure_kind, failures.py:152): run the rerun through gate.run_bounded (process-group kill) instead of subprocess.run(timeout=...). Keep the result shapes and classification exactly as today (a rerun timeout still appends {\"ids\",\"timed_out\":True,\"timeout_s\",\"output\"} and returns \"code_defect\"). daemon.auto_fix_round (daemon.py:169) passes rerun_timeout=min(flaky_rerun_timeout_s, gate.settings(pool.cfg)[\"timeout_s\"]).\n4. daemon.auto_fix_round (daemon.py:148): skip a held task whose hold_reason is \"gate_timeout\" or whose pipeline.infra_failure is set, before failure_kind runs: no fix round, no rerun.\n5. planner_runs.build_ctx (planner_runs.py:1021-1026): if the task's pipeline.infra_failure is set, ctx[\"infra_failure_kind\"] = that value, so decision.route (decision.py:89) returns route \"none\" (waits for the human) instead of launching a fix-round decision.\nNever treat a timeout as success anywhere. Do not change decision.py. Grep first for exact current names; patch targets in tests: daemon.gate.run_gate or merge.TESTS_GREEN with a real sleeping script plus a tiny [gate].timeout_s in the cfg passed in. Extend tests/test_gate_timeout.py (created by T-1392; keep its tests).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_gate_timeout.py::test_daemon_gate_timeout_holds_as_infra_failure passes: daemon.gate on a done task whose gate always times out leaves status held, hold_reason gate_timeout, pipeline.infra_failure gate_timeout, gate_reds unchanged, and the gate was attempted twice",
+    "tests/test_gate_timeout.py::test_gate_timeout_files_no_fix_round passes: auto_fix_round on that held task creates no task and runs no rerun, and planner_runs.build_ctx for it yields infra_failure_kind gate_timeout so decision.route returns route none",
+    "tests/test_gate_timeout.py::test_merge_path_honours_timeout passes: merge.merge with TESTS_GREEN pointing at a sleeping script and a tiny timeout returns status gate_timeout, the target branch sha is unchanged, and the task is held gate_timeout with pipeline.infra_failure set",
+    "tests/test_gate_timeout.py::test_flaky_rerun_kills_tree_on_timeout passes: a hung rerun in failure_kind is killed with its children and recorded as timed_out, classification unchanged (code_defect)",
+    "tests/test_gate_timeout.py::test_daemon_fast_red_gate_unchanged passes: a fast red gate still holds gate_red with gate_reds incremented and no infra_failure",
+    "existing tests/test_daemon.py, tests/test_merge.py, tests/test_failures.py, tests/test_planner_runs.py pass; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/failures.py",
+    "orchestrator/planner_runs.py",
+    "tests/test_gate_timeout.py"
+  ],
+  "depends_on": [
+    "T-1392"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 80,
+    "timeout_s": 2700,
+    "task_class": "debugging",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/gate.py",
+      "orchestrator/decision.py",
+      "orchestrator/notify.py",
+      "tests/test_daemon.py",
+      "tests/test_merge.py",
+      "tests/test_failures.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "consumes orchestrator/gate.py from T-1392: run_gate(worktree,*,script,task_id=None,cfg=None)->{returncode,stdout,stderr,timed_out,attempts,timeouts}; run_bounded(argv,*,cwd,timeout_s,input=None,kill_grace_s)->{returncode,stdout,stderr,timed_out,duration_s}; settings(cfg)->{timeout_s,cleanup_cmd,cleanup_timeout_s}. Produces hold_reason 'gate_timeout' + pipeline.infra_failure 'gate_timeout'; merge.merge returns {'status':'gate_timeout'}"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790722981.3998778,
+      "pipeline": {
+        "first_ready_at": 1790722981.399767
+      }
+    },
+    {
+      "ts": 1790722983.4431272,
+      "pipeline": {
+        "first_ready_at": 1790722981.399767,
+        "spec_review_at": 1790722983.442678,
+        "spec_review_at_lease": 1790723883.442678
+      }
+    },
+    {
+      "ts": 1790722983.5359528,
+      "pipeline": {
+        "first_ready_at": 1790722981.399767,
+        "spec_review_at": 1790722983.442678,
+        "spec_review_at_lease": 1790723883.442678,
+        "spec_review_at_done": 1790722983.535815
+      }
+    },
+    {
+      "ts": 1790723508.6581702,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "daemon.gate's own subprocess.run([str(merge.TESTS_GREEN),...]) call at daemon.py:1448 is the exact thing the file's shared gate_green() helper (test_daemon.py:151-163) and ~10 direct mock.patch.object(daemon.subprocess,'run',...) sites (e.g. lines 143,162,297,2554,2589,3132,3155,3201,3226,3303,4128) intercept by argv match on [str(merge.TESTS_GREEN)]. gate.run_gate calls subprocess.Popen inside orchestrator/gate.py, never daemon.subprocess.run, so once daemon.gate is rewired these patches stop intercepting the tests-green call entirely and every one of those tests will try to run the real hook or otherwise diverge. tests/test_daemon.py is not in scope, so the executor has no path to fix this, yet acceptance requires 'existing tests/test_daemon.py ... pass'.",
+          "severity": "high",
+          "line": 1448
+        },
+        {
+          "path": "tests/test_merge.py",
+          "issue": "test_merge.py:325 does `patch(\"orchestrator.merge.subprocess.run\", side_effect=run_gate_only)` and asserts the captured call argv equals [str(merge.TESTS_GREEN), str(wt)] (line 331). Replacing merge.py:57's subprocess.run with gate.run_gate means this call now goes through gate.py's own Popen, so the patched merge.subprocess.run is never invoked and this test breaks. test_merge.py is not in scope.",
+          "severity": "high",
+          "line": 57
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "test_flaky_rerun_has_timeout_and_timeout_is_not_flaky (test_daemon.py:1907) fakes a hung rerun by monkeypatching daemon.subprocess.run to raise subprocess.TimeoutExpired for the non-probe call, asserting kwargs['timeout']==17 and specific resume_hint contents. gate.run_bounded (via Popen+communicate) swallows TimeoutExpired internally and returns a dict instead of raising, so after failures.py's rerun switches to gate.run_bounded this mock is dead code and the assertions will fail (the real fallback unittest command will actually execute and fail differently, not time out). Also note: the spec's 'existing tests' table maps this regression risk to tests/test_failures.py, but the rerun/failure_kind tests actually live in tests/test_daemon.py (test_failures.py has no failure_kind/rerun coverage) -- the spec reviewed the wrong file for this risk.",
+          "severity": "high",
+          "line": 1907
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The instructed insertion span (1021-1026) spans both sides of the cooling-account override loop (1022-1025) that can reassign `infra`. If the new 'ctx[\"infra_failure_kind\"] = pipeline.infra_failure when set' override is placed before that loop rather than after it, a task held gate_timeout whose account/executor is also coincidentally cooling would get its infra_failure_kind silently clobbered with an unrelated kind (e.g. quota/auth), even though decision.route still lands on 'none' either way -- but build_ctx's own acceptance criterion for T-1397 explicitly requires infra_failure_kind to equal 'gate_timeout', so this ordering ambiguity is a real correctness gap for any overlap of the two conditions, not just a cosmetic one.",
+          "severity": "med",
+          "line": 1021
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec's timeout branch is written to sit immediately after the gate.run_gate call at line 1448 and `continue` before ever reaching the existing `_hold_stale_high(t)` check at 1449-1450. Skipping that check on timeout means a task that went stale during the very multi-hour hang this spec targets never gets flagged stale_high -- and because stamping 'gated_at' with hold_reason=gate_timeout removes the task from all future gate() passes (gate() only reads status='done'), that staleness check can never run for this task again through this path.",
+          "severity": "med",
+          "line": 1448
+        },
+        {
+          "path": "orchestrator/merge.py",
+          "issue": "merge.merge(task_id, target=None, *, refresh_repomap=True) has no cfg/pool parameter and none of its ~13 existing callers (daemon.py x3, mcp.py, cli.py, 10+ in test_merge.py) pass one. The spec's 'cfg=pool config' phrasing doesn't say whether merge.py should just call the module function pool.config() internally (no signature change, works because gate.settings already defaults cfg=None to pool.config()) or add a new parameter -- ambiguity here risks an executor adding an unnecessary signature change that ripples through every caller.",
+          "severity": "low",
+          "line": 29
+        }
+      ]
+    },
+    {
+      "ts": 1790723562.506459,
+      "pipeline": {
+        "first_ready_at": 1790722981.399767,
+        "spec_review_at": 1790722983.442678,
+        "spec_review_at_lease": 1790723883.442678,
+        "spec_review_at_done": 1790722983.535815,
+        "spec_review_held_at": 1790723562.5063722
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790723569.968066,
+      "pipeline": {
+        "first_ready_at": 1790722981.399767,
+        "spec_review_at": 1790722983.442678,
+        "spec_review_at_lease": 1790723883.442678,
+        "spec_review_at_done": 1790722983.535815,
+        "spec_review_held_at": 1790723562.5063722,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790723570.262238,
+      "pipeline": {
+        "first_ready_at": 1790722981.399767,
+        "spec_review_at": 1790722983.442678,
+        "spec_review_at_lease": 1790723883.442678,
+        "spec_review_at_done": 1790722983.535815,
+        "spec_review_held_at": 1790723562.5063722,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790723562.506459": true
+        }
+      }
+    },
+    {
+      "ts": 1790749903.580791,
+      "status": "superseded",
+      "reason": "respec as T-1399: spec review findings folded in (test seams migrated, stale check kept, ctx override after cooling loop, no merge signature change)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790722981.399767,
+    "spec_review_at": 1790722983.442678,
+    "spec_review_at_lease": 1790723883.442678,
+    "spec_review_at_done": 1790722983.535815,
+    "spec_review_held_at": 1790723562.5063722,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790723562.506459": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "daemon.gate's own subprocess.run([str(merge.TESTS_GREEN),...]) call at daemon.py:1448 is the exact thing the file's shared gate_green() helper (test_daemon.py:151-163) and ~10 direct mock.patch.object(daemon.subprocess,'run',...) sites (e.g. lines 143,162,297,2554,2589,3132,3155,3201,3226,3303,4128) intercept by argv match on [str(merge.TESTS_GREEN)]. gate.run_gate calls subprocess.Popen inside orchestrator/gate.py, never daemon.subprocess.run, so once daemon.gate is rewired these patches stop intercepting the tests-green call entirely and every one of those tests will try to run the real hook or otherwise diverge. tests/test_daemon.py is not in scope, so the executor has no path to fix this, yet acceptance requires 'existing tests/test_daemon.py ... pass'.",
+      "severity": "high",
+      "line": 1448
+    },
+    {
+      "path": "tests/test_merge.py",
+      "issue": "test_merge.py:325 does `patch(\"orchestrator.merge.subprocess.run\", side_effect=run_gate_only)` and asserts the captured call argv equals [str(merge.TESTS_GREEN), str(wt)] (line 331). Replacing merge.py:57's subprocess.run with gate.run_gate means this call now goes through gate.py's own Popen, so the patched merge.subprocess.run is never invoked and this test breaks. test_merge.py is not in scope.",
+      "severity": "high",
+      "line": 57
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "test_flaky_rerun_has_timeout_and_timeout_is_not_flaky (test_daemon.py:1907) fakes a hung rerun by monkeypatching daemon.subprocess.run to raise subprocess.TimeoutExpired for the non-probe call, asserting kwargs['timeout']==17 and specific resume_hint contents. gate.run_bounded (via Popen+communicate) swallows TimeoutExpired internally and returns a dict instead of raising, so after failures.py's rerun switches to gate.run_bounded this mock is dead code and the assertions will fail (the real fallback unittest command will actually execute and fail differently, not time out). Also note: the spec's 'existing tests' table maps this regression risk to tests/test_failures.py, but the rerun/failure_kind tests actually live in tests/test_daemon.py (test_failures.py has no failure_kind/rerun coverage) -- the spec reviewed the wrong file for this risk.",
+      "severity": "high",
+      "line": 1907
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The instructed insertion span (1021-1026) spans both sides of the cooling-account override loop (1022-1025) that can reassign `infra`. If the new 'ctx[\"infra_failure_kind\"] = pipeline.infra_failure when set' override is placed before that loop rather than after it, a task held gate_timeout whose account/executor is also coincidentally cooling would get its infra_failure_kind silently clobbered with an unrelated kind (e.g. quota/auth), even though decision.route still lands on 'none' either way -- but build_ctx's own acceptance criterion for T-1397 explicitly requires infra_failure_kind to equal 'gate_timeout', so this ordering ambiguity is a real correctness gap for any overlap of the two conditions, not just a cosmetic one.",
+      "severity": "med",
+      "line": 1021
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec's timeout branch is written to sit immediately after the gate.run_gate call at line 1448 and `continue` before ever reaching the existing `_hold_stale_high(t)` check at 1449-1450. Skipping that check on timeout means a task that went stale during the very multi-hour hang this spec targets never gets flagged stale_high -- and because stamping 'gated_at' with hold_reason=gate_timeout removes the task from all future gate() passes (gate() only reads status='done'), that staleness check can never run for this task again through this path.",
+      "severity": "med",
+      "line": 1448
+    },
+    {
+      "path": "orchestrator/merge.py",
+      "issue": "merge.merge(task_id, target=None, *, refresh_repomap=True) has no cfg/pool parameter and none of its ~13 existing callers (daemon.py x3, mcp.py, cli.py, 10+ in test_merge.py) pass one. The spec's 'cfg=pool config' phrasing doesn't say whether merge.py should just call the module function pool.config() internally (no signature change, works because gate.settings already defaults cfg=None to pool.config()) or add a new parameter -- ambiguity here risks an executor adding an unnecessary signature change that ripples through every caller.",
+      "severity": "low",
+      "line": 29
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "respec as T-1399: spec review findings folded in (test seams migrated, stale check kept, ctx override after cooling loop, no merge signature change)"
+}

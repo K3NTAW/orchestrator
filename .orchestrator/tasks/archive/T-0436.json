@@ -1,0 +1,228 @@
+{
+  "id": "T-0436",
+  "parent": "T-0353",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: H3b v3: wire decision routes into the daemon (spec reviews T-0430 and T-0434 folded in) \u2014 shared failures module breaks the import cycle, per-task packet sections under one goal claim, off-tick close gate after the dedup check, bounded PR-create failure handling, cursor per goal with cursor_at_launch on records",
+  "spec": "Replaces T-0433 (T-0365 before it) after spec reviews T-0430 and T-0434. Build on goal/T-0353 (H3a decision.py, H2 launch attribution, H7 failure kinds and signatures, H6 acceptance gate, G7 v4 auto fix rounds, G8 semantic triggers merged; H4 reservations merging).\n1. Shared helpers, no import cycle: new module orchestrator/failures.py holding the pure and bus-only helpers both daemon.py and planner_runs.py need: test id extraction from failure text (the H6/H7 validated extractor), rejecting_reviews(task), path_in_scope(path, scope), failure_kind, failure_signature, changed_paths and the unified-diff helper, touch_areas(task) with the [review.areas] tables. failures.py imports only bus, spawn, merge and stdlib, never daemon or planner_runs; daemon.py re-exports or calls them (existing names keep working, existing tests untouched); planner_runs.build_ctx imports failures at module scope. No deferred imports of daemon inside planner_runs.\n2. build_ctx(point) fills every field decision.route reads (decision.py lines 84-148) from these sources: routes = [planner.routes]; infra_failure_kind = quota | auth | unavailable from the pool's cooldown or usage-limit reason for the account or executor involved or pipeline.failure_kind quota/permissions, else None (present); premium_launches = escalate launches recorded for the goal. held: failing_ids (failures extractor over resume_hint.failures), in_scope_review_comments (every rejecting review comment path inside scope), auto_fix_rounds_used (lineage count of constraints.auto_round), auto_fix_rounds ([daemon].auto_fix_rounds), failure_signature, signature_repeated (equals an earlier lineage signature), spec_review_request_changes (spec_review tasks with inputs[0] in the lineage and verdict request_changes), blocked_scouts (scout ids under the goal with status blocked), touches_auth/migrations/interfaces/data_deletion (touch_areas; unavailable diff sets all four True). scouts_done: goal_complexity, scout_count, all_scouts_posted, blocked_scouts from the bus; security_trigger = any goal scope path matches [review].security_paths; semantic_trigger = goal spec or scope matches [review].semantic_paths or semantic_patterns. closable: all_children_merged (every execute child done with merged_into); gate_state from the cached close gate (item 4): green | red | unknown.\n3. Claims and packets: one claim record per goal launch, kind \"goal\", payload_key = state_version (sha12 over sorted (task id, status, hold_reason, merged_into, last event seq) of the goal's children); _blocked and gave_up apply to it; per-point records remain history; the module docstring documents the scheme. The dedup check on state_version runs before any other work for that goal in the tick. Packet: one section per held task that routes to escalate (hold_reason, failing ids, review comments, branch and head sha, route reason, evidence, cheaper steps) plus one section for scouts_done when present; held tasks that route to routine are excluded from the packet (auto_fix_round handles them) and never trigger a launch on their own; an identical state_version never launches twice; unrelated goals never share a packet; a blocked scout or a security hold launches in the same tick as its point. Test with two simultaneously held siblings under one goal, one routine-fixable and one escalate-worthy: exactly one launch whose packet carries only the escalate sibling, and the routine sibling gets its automatic fix round.\n4. Closable: after the dedup check passes and all children are merged, the daemon dispatches the goal-head gate off-tick via spawn_async (a fresh worktree at the goal head, tests-green bounded by [limits].timeout_s.execute) and records pipeline.close_gate = {sha, state, ts} on the GOAL task; build_ctx reads that cache for the current head sha and reports unknown until it lands; unknown means no launch and no rerun in the same tick; the gate is rerun only when the head sha changes. Routine close (gate green, everything merged) runs off-tick too: stamp(goal, \"closed_at\") under bus.locked() first, then idempotent effects each checked by evidence before acting: retrospective entry (record script, or the no-new-learning marker) present in decisions.md; PR exists (gh pr list --head goal/<id> --json url) else gh pr create from the fixed template; GOAL result posted with pr_url. gh failures: record pipeline.close_error with the message, notify once per transition, retry on a later tick after [daemon].close_retry_s (default 900) up to [daemon].close_max_attempts (default 3), then route escalate with reason close_failed; gh failures never count toward the launch gave_up counter; a crash between the stamp and an effect is reconciled by the same evidence checks.\n5. investigate launches on [planner.routes].investigate_tier, escalate on the premium tier; route, reason, evidence, cheaper_steps into the claim record (H2 fields); [planner.routes].enabled = false restores per-point escalation. Infra failures (auth, quota, unavailable markers) set a pool cooldown with reason, do not count toward gave_up, notify once per transition, and leave the cursor unchanged. Soft premium budget: exceeding [planner.routes].premium_launches_soft_per_goal still launches and records exception: true.\n6. Cursor: one per-goal processed-event cursor lives in planner_runs.json (goal_cursors[goal_id]); it advances only after a launch is recorded as started; each launch record carries cursor_at_launch (the value read when its packet was built) for attribution.\nTests in tests/test_planner_runs.py, tests/test_daemon.py and tests/test_failures.py: test_failures_module_has_no_daemon_import, test_ctx_fields_complete_for_each_kind, test_routine_hold_launches_no_model, test_two_held_siblings_one_packet_only_escalate_section, test_closable_gate_runs_off_tick_once_per_head, test_closable_unknown_gate_launches_nothing, test_closable_routine_is_idempotent_across_ticks, test_close_gh_failure_retries_then_escalates_without_gave_up, test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_two_goals_two_packets, test_cursor_advances_only_after_launch_start, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch, test_touch_areas_fail_closed_without_diff. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0435"
+  ],
+  "acceptance": [
+    "tests/test_failures.py::test_failures_module_has_no_daemon_import passes and grep shows planner_runs.py imports failures at module scope and never imports daemon",
+    "tests/test_planner_runs.py and tests/test_daemon.py: test_ctx_fields_complete_for_each_kind, test_routine_hold_launches_no_model, test_two_held_siblings_one_packet_only_escalate_section, test_closable_gate_runs_off_tick_once_per_head, test_closable_unknown_gate_launches_nothing, test_closable_routine_is_idempotent_across_ticks, test_close_gh_failure_retries_then_escalates_without_gave_up, test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_two_goals_two_packets, test_cursor_advances_only_after_launch_start, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch, test_touch_areas_fail_closed_without_diff pass",
+    "every launch record carries route, reason, evidence, cheaper_steps, state_version and cursor_at_launch; planner_runs.json holds goal_cursors per goal; the routine close stamps closed_at before any side effect",
+    "pool.toml documents [review.areas], [daemon].close_retry_s and close_max_attempts; the planner_runs module docstring documents the goal-record claim scheme",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/failures.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    "orchestrator/goals.py",
+    ".orchestrator/prompts/planner-decision.md",
+    ".orchestrator/pool.toml",
+    "tests/test_failures.py",
+    "tests/test_planner_runs.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0436",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "failures.py must hold changed_paths and 'the unified-diff helper' (daemon.py's _added_diff_lines, line 836), but both depend on _resolve_base (line 459) and _git_in (line 442). The spec's helper list for failures.py never mentions moving these, and failures.py is forbidden from importing daemon. An executor either duplicates git-subprocess logic in two modules or fails test_failures_module_has_no_daemon_import.",
+        "severity": "high",
+        "line": 459
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "run() and reconcile() currently do a deferred `from . import daemon` (lines 513, 720) solely to call daemon.notify() on gave_up. The spec demands 'No deferred imports of daemon inside planner_runs' plus a grep-checked acceptance criterion that planner_runs never imports daemon, but failures.py's helper list has no notify() replacement, so satisfying the letter of the spec silently drops gave_up notifications.",
+        "severity": "high",
+        "line": 513
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Item 3 replaces per-(goal_id,kind,payload_key) dedup with a single goal-level claim keyed by a state_version hash over all children, aggregated into one packet. decision_points()/_blocked()/run() (lines 201, 168, 454) and ~43 existing tests (e.g. test_decision_points_scouts_done_held_closable, test_held_key_changes_with_each_new_hold, test_run_launches_once_per_key) assert the current independent per-kind model directly. The spec never states whether the old model is removed or kept alongside the new one -- kept side by side risks double-launching a headless Planner for the same held task (once via the legacy 'held' point, once via the new packet); removed, it breaks the 'keep every existing test green' requirement.",
+        "severity": "high",
+        "line": 201
+      },
+      {
+        "path": "orchestrator/decision.py",
+        "issue": "decision.py (out of scope, unmodifiable) routes closable's gate_state='unknown' to result('escalate', 'unknown:gate_state') at lines 146-149, and per item 5 escalate always launches on the premium tier. Item 4 explicitly requires 'unknown means no launch and no rerun in the same tick,' but the spec never says build_ctx/the caller must short-circuit before calling decision.route() for that state -- a naive wiring launches a premium-tier Planner every tick until the off-tick gate lands.",
+        "severity": "med",
+        "line": 146
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Item 4 has daemon.py itself run `gh pr list`/`gh pr create` and post the GOAL result off-tick with no LLM or human step -- there is no existing gh automation anywhere in the repo today (zero grep hits), and CLAUDE.md step 8 currently has the Planner (an agent) open goal/<parent> -> main. This spec quietly moves that decision into deterministic daemon code with automatic retries, without calling out that this is a policy/autonomy change.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Enumerate exactly which git-diff helpers (_resolve_base, _git_in) move into failures.py alongside changed_paths/the unified-diff helper, or explicitly permit failures.py to duplicate that small amount of git-subprocess logic instead of importing daemon.",
+      "Specify where gave_up/notify reporting lives once planner_runs stops importing daemon -- e.g. move notify() itself into failures.py or bus.py, or explicitly carve out an exception allowing a deferred daemon import solely for notify().",
+      "Clarify whether the new goal-level state_version claim scheme fully replaces decision_points()'s per-(goal_id,kind,payload_key) model, or wraps it -- and if it replaces it, say explicitly that the listed existing tests should be rewritten rather than kept green as-is, so the two launch paths cannot fire on the same held task in the same tick.",
+      "State explicitly that build_ctx/the caller must treat gate_state=='unknown' as a terminal no-launch case before ever calling decision.route(), since decision.py itself (unmodifiable) would otherwise escalate and launch on that state.",
+      "Call out the gh pr create/list automation in item 4 as an explicit new autonomy decision (daemon acting without any model/human review of the merged diff before opening the PR to main), so it gets sign-off rather than landing as a side effect of a closable-gate refactor."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789915473.572076,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0436",
+      "claimed_at": 1789915473.571716
+    },
+    {
+      "ts": 1789915473.5731032,
+      "account": "B"
+    },
+    {
+      "ts": 1789915473.5791261,
+      "pid": 36651,
+      "account": "B"
+    },
+    {
+      "ts": 1789915742.10215,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "failures.py must hold changed_paths and 'the unified-diff helper' (daemon.py's _added_diff_lines, line 836), but both depend on _resolve_base (line 459) and _git_in (line 442). The spec's helper list for failures.py never mentions moving these, and failures.py is forbidden from importing daemon. An executor either duplicates git-subprocess logic in two modules or fails test_failures_module_has_no_daemon_import.",
+            "severity": "high",
+            "line": 459
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "run() and reconcile() currently do a deferred `from . import daemon` (lines 513, 720) solely to call daemon.notify() on gave_up. The spec demands 'No deferred imports of daemon inside planner_runs' plus a grep-checked acceptance criterion that planner_runs never imports daemon, but failures.py's helper list has no notify() replacement, so satisfying the letter of the spec silently drops gave_up notifications.",
+            "severity": "high",
+            "line": 513
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Item 3 replaces per-(goal_id,kind,payload_key) dedup with a single goal-level claim keyed by a state_version hash over all children, aggregated into one packet. decision_points()/_blocked()/run() (lines 201, 168, 454) and ~43 existing tests (e.g. test_decision_points_scouts_done_held_closable, test_held_key_changes_with_each_new_hold, test_run_launches_once_per_key) assert the current independent per-kind model directly. The spec never states whether the old model is removed or kept alongside the new one -- kept side by side risks double-launching a headless Planner for the same held task (once via the legacy 'held' point, once via the new packet); removed, it breaks the 'keep every existing test green' requirement.",
+            "severity": "high",
+            "line": 201
+          },
+          {
+            "path": "orchestrator/decision.py",
+            "issue": "decision.py (out of scope, unmodifiable) routes closable's gate_state='unknown' to result('escalate', 'unknown:gate_state') at lines 146-149, and per item 5 escalate always launches on the premium tier. Item 4 explicitly requires 'unknown means no launch and no rerun in the same tick,' but the spec never says build_ctx/the caller must short-circuit before calling decision.route() for that state -- a naive wiring launches a premium-tier Planner every tick until the off-tick gate lands.",
+            "severity": "med",
+            "line": 146
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Item 4 has daemon.py itself run `gh pr list`/`gh pr create` and post the GOAL result off-tick with no LLM or human step -- there is no existing gh automation anywhere in the repo today (zero grep hits), and CLAUDE.md step 8 currently has the Planner (an agent) open goal/<parent> -> main. This spec quietly moves that decision into deterministic daemon code with automatic retries, without calling out that this is a policy/autonomy change.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Enumerate exactly which git-diff helpers (_resolve_base, _git_in) move into failures.py alongside changed_paths/the unified-diff helper, or explicitly permit failures.py to duplicate that small amount of git-subprocess logic instead of importing daemon.",
+          "Specify where gave_up/notify reporting lives once planner_runs stops importing daemon -- e.g. move notify() itself into failures.py or bus.py, or explicitly carve out an exception allowing a deferred daemon import solely for notify().",
+          "Clarify whether the new goal-level state_version claim scheme fully replaces decision_points()'s per-(goal_id,kind,payload_key) model, or wraps it -- and if it replaces it, say explicitly that the listed existing tests should be rewritten rather than kept green as-is, so the two launch paths cannot fire on the same held task in the same tick.",
+          "State explicitly that build_ctx/the caller must treat gate_state=='unknown' as a terminal no-launch case before ever calling decision.route(), since decision.py itself (unmodifiable) would otherwise escalate and launch on that state.",
+          "Call out the gh pr create/list automation in item 4 as an explicit new autonomy decision (daemon acting without any model/human review of the merged diff before opening the PR to main), so it gets sign-off rather than landing as a side effect of a closable-gate refactor."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789915742.103584,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "failures.py must hold changed_paths and 'the unified-diff helper' (daemon.py's _added_diff_lines, line 836), but both depend on _resolve_base (line 459) and _git_in (line 442). The spec's helper list for failures.py never mentions moving these, and failures.py is forbidden from importing daemon. An executor either duplicates git-subprocess logic in two modules or fails test_failures_module_has_no_daemon_import.",
+          "severity": "high",
+          "line": 459
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "run() and reconcile() currently do a deferred `from . import daemon` (lines 513, 720) solely to call daemon.notify() on gave_up. The spec demands 'No deferred imports of daemon inside planner_runs' plus a grep-checked acceptance criterion that planner_runs never imports daemon, but failures.py's helper list has no notify() replacement, so satisfying the letter of the spec silently drops gave_up notifications.",
+          "severity": "high",
+          "line": 513
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Item 3 replaces per-(goal_id,kind,payload_key) dedup with a single goal-level claim keyed by a state_version hash over all children, aggregated into one packet. decision_points()/_blocked()/run() (lines 201, 168, 454) and ~43 existing tests (e.g. test_decision_points_scouts_done_held_closable, test_held_key_changes_with_each_new_hold, test_run_launches_once_per_key) assert the current independent per-kind model directly. The spec never states whether the old model is removed or kept alongside the new one -- kept side by side risks double-launching a headless Planner for the same held task (once via the legacy 'held' point, once via the new packet); removed, it breaks the 'keep every existing test green' requirement.",
+          "severity": "high",
+          "line": 201
+        },
+        {
+          "path": "orchestrator/decision.py",
+          "issue": "decision.py (out of scope, unmodifiable) routes closable's gate_state='unknown' to result('escalate', 'unknown:gate_state') at lines 146-149, and per item 5 escalate always launches on the premium tier. Item 4 explicitly requires 'unknown means no launch and no rerun in the same tick,' but the spec never says build_ctx/the caller must short-circuit before calling decision.route() for that state -- a naive wiring launches a premium-tier Planner every tick until the off-tick gate lands.",
+          "severity": "med",
+          "line": 146
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Item 4 has daemon.py itself run `gh pr list`/`gh pr create` and post the GOAL result off-tick with no LLM or human step -- there is no existing gh automation anywhere in the repo today (zero grep hits), and CLAUDE.md step 8 currently has the Planner (an agent) open goal/<parent> -> main. This spec quietly moves that decision into deterministic daemon code with automatic retries, without calling out that this is a policy/autonomy change.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789915473.571716,
+  "account": "B",
+  "pid": 36651,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "failures.py must hold changed_paths and 'the unified-diff helper' (daemon.py's _added_diff_lines, line 836), but both depend on _resolve_base (line 459) and _git_in (line 442). The spec's helper list for failures.py never mentions moving these, and failures.py is forbidden from importing daemon. An executor either duplicates git-subprocess logic in two modules or fails test_failures_module_has_no_daemon_import.",
+      "severity": "high",
+      "line": 459
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "run() and reconcile() currently do a deferred `from . import daemon` (lines 513, 720) solely to call daemon.notify() on gave_up. The spec demands 'No deferred imports of daemon inside planner_runs' plus a grep-checked acceptance criterion that planner_runs never imports daemon, but failures.py's helper list has no notify() replacement, so satisfying the letter of the spec silently drops gave_up notifications.",
+      "severity": "high",
+      "line": 513
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Item 3 replaces per-(goal_id,kind,payload_key) dedup with a single goal-level claim keyed by a state_version hash over all children, aggregated into one packet. decision_points()/_blocked()/run() (lines 201, 168, 454) and ~43 existing tests (e.g. test_decision_points_scouts_done_held_closable, test_held_key_changes_with_each_new_hold, test_run_launches_once_per_key) assert the current independent per-kind model directly. The spec never states whether the old model is removed or kept alongside the new one -- kept side by side risks double-launching a headless Planner for the same held task (once via the legacy 'held' point, once via the new packet); removed, it breaks the 'keep every existing test green' requirement.",
+      "severity": "high",
+      "line": 201
+    },
+    {
+      "path": "orchestrator/decision.py",
+      "issue": "decision.py (out of scope, unmodifiable) routes closable's gate_state='unknown' to result('escalate', 'unknown:gate_state') at lines 146-149, and per item 5 escalate always launches on the premium tier. Item 4 explicitly requires 'unknown means no launch and no rerun in the same tick,' but the spec never says build_ctx/the caller must short-circuit before calling decision.route() for that state -- a naive wiring launches a premium-tier Planner every tick until the off-tick gate lands.",
+      "severity": "med",
+      "line": 146
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Item 4 has daemon.py itself run `gh pr list`/`gh pr create` and post the GOAL result off-tick with no LLM or human step -- there is no existing gh automation anywhere in the repo today (zero grep hits), and CLAUDE.md step 8 currently has the Planner (an agent) open goal/<parent> -> main. This spec quietly moves that decision into deterministic daemon code with automatic retries, without calling out that this is a policy/autonomy change.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

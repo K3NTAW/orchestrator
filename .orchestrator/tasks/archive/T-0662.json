@@ -1,0 +1,445 @@
+{
+  "id": "T-0662",
+  "created_at": 1789984250.742224,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 4,
+  "title": "R21: first-pass success is undefined for every task that passes the gate first time (gate_reds never stamped as 0); promotion.format_report kwarg clash; strategy first_pass_rate over known values only",
+  "spec": "Why: running the merged reports on live telemetry exposed three defects. (1) Phase I P0 metric: scorecard computes first_pass = fixes == 0 and reds == 0 only when reds is not None (scorecard.py:1027, 1147, 1306), but daemon.gate() stamps pipeline.gate_reds only on a red gate, so a task that passes first time has gate_reds None and first_pass None: T-0598 (green first try, merged) reports first_pass None and every strategy row shows first_pass 0.000. First-pass success, the roadmap's primary quality metric, is therefore undefined exactly for the successes. (2) `orchestrator promotion` crashes: promotion.format_report (promotion.py:173) passes **row and reasons= to str.format while row already has a reasons key (TypeError). (3) strategy.scorecard first_pass_rate divides by all rows so unknown (None) values count as failures.\nWhat (four small fixes, tests are unittest.TestCase methods, test modules import _harness first):\n1. daemon.gate(): when the gate is green, the stamped fields include gate_reds = pipeline.get(\"gate_reds\", 0) (explicit 0 when absent) next to first_green_at, so a first-pass task carries gate_reds 0; existing red-path counting unchanged.\n2. scorecard.py: in the three first_pass derivations treat reds as 0 when first_green_at is set and gate_reds is missing (a green gate with no recorded reds means none happened); keep None only when first_green_at is missing. Add tests: a merged task with first_green_at and no gate_reds counts as first_pass True in efficiency(), executor_economics() and by_task.\n3. promotion.format_report: build the reasons suffix from row.get(\"reasons\") and format without passing reasons twice (e.g. format(**{k: v for k, v in row.items() if k != \"reasons\"}, reasons=suffix)); test with a row that has a non-empty reasons list.\n4. strategy.scorecard: first_pass_rate = mean over rows whose first_pass is not None, with first_pass_defined_count reported; None when no row is defined; test with mixed None/True/False rows.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_green_gate_stamps_gate_reds_zero \u2014 a green gate on a task without prior reds leaves pipeline.gate_reds 0 and first_green_at set",
+    "tests/test_scorecard.py::test_first_pass_defined_when_green_without_recorded_reds \u2014 a merged lineage root with first_green_at, no gate_reds and no fix rounds has first_pass True in efficiency()['tasks'], executor_economics and by_task",
+    "tests/test_promotion.py::test_format_report_with_reasons_does_not_raise \u2014 format_report on a row with reasons ['insufficient_evidence'] returns a line containing that reason",
+    "tests/test_strategy.py::test_first_pass_rate_ignores_unknown_values \u2014 rows with first_pass None, True, False yield first_pass_rate 0.5 and first_pass_defined_count 2"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/promotion.py",
+    "orchestrator/strategy.py",
+    "tests/test_daemon.py",
+    "tests/test_scorecard.py",
+    "tests/test_promotion.py",
+    "tests/test_strategy.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 1800,
+    "task_class": "debugging",
+    "route": "straightforward",
+    "read_scope": [
+      "orchestrator/daemon.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/promotion.py",
+      "orchestrator/strategy.py",
+      "tests/test_daemon.py",
+      "tests/test_scorecard.py",
+      "tests/test_promotion.py",
+      "tests/test_strategy.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "gate() green stamp includes gate_reds 0 when absent; scorecard first_pass True/False whenever first_green_at is set; promotion.format_report(rows) signature unchanged; strategy scorecard rows gain first_pass_defined_count; no other behaviour change"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0662",
+  "codex_thread": "01a0c360-6b47-7c50-9149-4dea07a6e14d",
+  "result": {
+    "summary": "Gate: green \u2014 934 tests passed.\n\nCommit: `3f37d8f4ac7b293058bd7aef3ae855b2f1b13656`\n\nSummary: fixed green-gate stamping, first-pass calculations, promotion report formatting, and strategy defined-value rates. Added regression tests across all eight scoped files. Worktree is clean.\n\nFailures-only output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c360-6b47-7c50-9149-4dea07a6e14d",
+    "usage": {
+      "input_tokens": 724505,
+      "cached_input_tokens": 681472,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 3990,
+      "reasoning_output_tokens": 932,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789984257.454452,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405
+      }
+    },
+    {
+      "ts": 1789984257.456487,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118
+      }
+    },
+    {
+      "ts": 1789984261.413847,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358
+      }
+    },
+    {
+      "ts": 1789984270.858861,
+      "packet_meta": {
+        "chars": 4894,
+        "est_tokens": 1223,
+        "hash": "5425dac359e6",
+        "version": "5425dac359e6",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@449b76c28a8a gotchas@2b630a1622c5 memory@notes over cap by 94 chars: acceptance kept whole",
+        "policy_version": "449b76c28a8a",
+        "gotchas": "2b630a1622c5"
+      }
+    },
+    {
+      "ts": 1789984270.860679,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0662",
+      "claimed_at": 1789984270.860516
+    },
+    {
+      "ts": 1789984270.861773,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789984611.716105,
+      "codex_thread": "01a0c360-6b47-7c50-9149-4dea07a6e14d",
+      "codex_thread_head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+    },
+    {
+      "ts": 1789984611.7212648,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        }
+      }
+    },
+    {
+      "ts": 1789984611.724096,
+      "status": "done",
+      "result": {
+        "summary": "Gate: green \u2014 934 tests passed.\n\nCommit: `3f37d8f4ac7b293058bd7aef3ae855b2f1b13656`\n\nSummary: fixed green-gate stamping, first-pass calculations, promotion report formatting, and strategy defined-value rates. Added regression tests across all eight scoped files. Worktree is clean.\n\nFailures-only output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c360-6b47-7c50-9149-4dea07a6e14d",
+        "usage": {
+          "input_tokens": 724505,
+          "cached_input_tokens": 681472,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 3990,
+          "reasoning_output_tokens": 932,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789984636.997876,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789984758.2072651,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789984758.207125,
+        "gated_at_lease": 1789985658.207125,
+        "first_green_at": 1789984758.2062972,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789984758.306378,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789984758.207125,
+        "gated_at_lease": 1789985658.207125,
+        "first_green_at": 1789984758.2062972,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0662",
+          "goal_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789984758.305883,
+          "head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+        }
+      }
+    },
+    {
+      "ts": 1789984758.532985,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789984758.207125,
+        "gated_at_lease": 1789985658.207125,
+        "first_green_at": 1789984758.2062972,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0662",
+          "goal_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789984758.305883,
+          "head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+        },
+        "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+      }
+    },
+    {
+      "ts": 1789984758.539823,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789984758.207125,
+        "gated_at_lease": 1789985658.207125,
+        "first_green_at": 1789984758.2062972,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0662",
+          "goal_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789984758.305883,
+          "head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+        },
+        "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+        "gated_at_done": 1789984758.539693
+      }
+    },
+    {
+      "ts": 1789984863.268398,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789984886.435945,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789984758.207125,
+        "gated_at_lease": 1789985658.207125,
+        "first_green_at": 1789984758.2062972,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0662",
+          "goal_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789984758.305883,
+          "head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+        },
+        "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+        "gated_at_done": 1789984758.539693,
+        "merged_at": 1789984886.43579,
+        "merged_at_lease": 1789985786.43579
+      }
+    },
+    {
+      "ts": 1789985008.817052,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+    },
+    {
+      "ts": 1789985009.3526132,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789984758.207125,
+        "gated_at_lease": 1789985658.207125,
+        "first_green_at": 1789984758.2062972,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0662",
+          "goal_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789984758.305883,
+          "head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+        },
+        "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+        "gated_at_done": 1789984758.539693,
+        "merged_at": 1789984886.43579,
+        "merged_at_lease": 1789985786.43579,
+        "accepted_at": 1789985009.352244
+      }
+    },
+    {
+      "ts": 1789985009.479979,
+      "pipeline": {
+        "first_ready_at": 1789984257.454405,
+        "dispatched_at": 1789984257.4564118,
+        "dispatched_at_lease": 1789985157.4564118,
+        "dispatched_at_done": 1789984261.41358,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789984758.207125,
+        "gated_at_lease": 1789985658.207125,
+        "first_green_at": 1789984758.2062972,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0662",
+          "goal_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789984758.305883,
+          "head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+        },
+        "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+        "gated_at_done": 1789984758.539693,
+        "merged_at": 1789984886.43579,
+        "merged_at_lease": 1789985786.43579,
+        "accepted_at": 1789985009.352244,
+        "merged_at_done": 1789985009.479826
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789984257.454405,
+    "dispatched_at": 1789984257.4564118,
+    "dispatched_at_lease": 1789985157.4564118,
+    "dispatched_at_done": 1789984261.41358,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "30c4837860b33eff2efbe9479443cb749c3ed584"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789984758.207125,
+    "gated_at_lease": 1789985658.207125,
+    "first_green_at": 1789984758.2062972,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0662",
+      "goal_head": "f72564d524b2fd5d88aa3b8d2c95f2a9560dd62c",
+      "moved_count": 0,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789984758.305883,
+      "head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+    },
+    "reviewed_sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+    "gated_at_done": 1789984758.539693,
+    "merged_at": 1789984886.43579,
+    "merged_at_lease": 1789985786.43579,
+    "accepted_at": 1789985009.352244,
+    "merged_at_done": 1789985009.479826
+  },
+  "packet_meta": {
+    "chars": 4894,
+    "est_tokens": 1223,
+    "hash": "5425dac359e6",
+    "version": "5425dac359e6",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@449b76c28a8a gotchas@2b630a1622c5 memory@notes over cap by 94 chars: acceptance kept whole",
+    "policy_version": "449b76c28a8a",
+    "gotchas": "2b630a1622c5"
+  },
+  "claimed_at": 1789984270.860516,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0561",
+  "sha": "3f37d8f4ac7b293058bd7aef3ae855b2f1b13656"
+}

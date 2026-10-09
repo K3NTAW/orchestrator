@@ -1,0 +1,129 @@
+{
+  "id": "T-0480",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P2b fix round 1 applied on task/T-0466 at c6c17c1 (reply worker handles held, refused and incompatible outcomes; resume_plan single source; compat change falls back to fresh on the fix task) \u2014 re-review of T-0466 after T-0478 request_changes, security checklist on (daemon.py, executor.py)",
+  "spec": "Review the diff of task/T-0466 (head c6c17c1, two commits over goal/T-0445 at 29606ef: 21c34a7 P2b and c6c17c1 the fix round) against the T-0466 acceptance criteria and the T-0478 findings: (1) _dispatch_reply_worker handles every executor.reply status (done, failed, held with requeue by clearing dispatched_at and its _done marker, refused as parent_merged, incompatible falling back to a fresh dispatch on the fix task, exceptions) and always posts a result on the fix task; (2) executor.resume_plan is the single compatibility source used by dispatch and reply; (3) parent thread bookkeeping (codex_thread, codex_thread_head, rounds) changes only on an actual resume; (4) the five T-0479 tests and five T-0466 tests exist and pass; (5) security checklist for daemon.py and executor.py (no argv injection from failure text, no unbounded reads, locks preserved). Verdict approve or request_changes with path:line comments.",
+  "inputs": [
+    "T-0466"
+  ],
+  "acceptance": [
+    "verdict approve or request_changes with path:line comments on every T-0478 finding and the security checklist"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 25,
+    "timeout_s": 1200,
+    "review_reason": "security_paths:orchestrator/*.py; re-review after T-0478",
+    "reviewed_sha": "cd91054"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0480",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/executor.py",
+        "line": 140,
+        "issue": "In `_run`, `log_task = task.get(\"_run_task_id\", task[\"id\"])` was introduced so `bus.log_run` attributes fix-round runs to the fix task (line 122, 142, 146 all use `log_task`), but the sibling `bus.update(task[\"id\"], status=\"held\", hold_reason=f\"codex usage limit; resets in {secs // 60} min\", ...)` on this line still uses `task[\"id\"]`, which for a fix-round reply is the PARENT's id (since `reply()` sets `t = {**t, \"_run_task_id\": fix_round_task_id, ...}` but `t[\"id\"]` stays the parent's real id from `bus.get(task_id)`). Hitting a codex usage limit mid fix-round resume therefore overwrites the parent task's `status`/`hold_reason` (e.g. clobbering \"gate_red\" with \"codex usage limit...\"), even though the fix task's own held/budget state is separately and correctly recorded by `_dispatch_reply_worker`'s `elif r[\"status\"] == \"held\":` branch via `bus.post_result`/`clear_stage`. Same pattern at line 124 (`bus.update(task[\"id\"], resume_hint=...)` on argv error) and at reply()'s own early returns (executor.py:352-355 rounds-exhausted sets `status=\"failed\"` on the parent id, and 358-360 sets `status=\"held\", hold_reason=\"executor ... unavailable\"` on the parent id).",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "line": 354,
+        "issue": "`bus.update(task_id, status=\"failed\", reason=f\"fix loop exceeded {MAX_ROUNDS} rounds; escalate or re-spec\")` runs with `task_id` bound to the parent's id when called via the new `fix_round_task_id=`/`plan=` path (daemon.py `_dispatch_reply_worker` calls `executor.reply(parent_id, delta, fix_round_task_id=task_id, plan=plan)`). If this branch is ever reached for a fix round (e.g. rounds incremented by a concurrent caller between `resume_plan`'s check and this increment), it force-fails the PARENT task directly instead of the fix task, bypassing the fix task's own `bus.post_result` bookkeeping that the rest of this feature relies on.",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 22,
+        "issue": "`test_reply_worker_handles_held_requeues_fix_task_for_retry` stubs out `executor.reply` entirely (`self.swap(executor, \"reply\", reply)`), so it never exercises the real `reply()`/`_run()` internals where the parent-id status clobbering described above actually lives; the test's `assertIsNone(bus.get(parent).get(\"result\"))` doesn't check `status`/`hold_reason`, so it would pass even with the bug present. None of the added tests call the real `reply()` through a simulated codex usage-limit or rounds-exhausted event with `fix_round_task_id` set, so this regression has no coverage.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789933637.707614,
+      "constraints": {
+        "read_only": true,
+        "budget_turns": 25,
+        "timeout_s": 1200,
+        "review_reason": "security_paths:orchestrator/*.py; re-review after T-0478",
+        "reviewed_sha": "cd91054"
+      }
+    },
+    {
+      "ts": 1789933639.4707148,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0480",
+      "claimed_at": 1789933639.470281
+    },
+    {
+      "ts": 1789933639.47218,
+      "account": "B"
+    },
+    {
+      "ts": 1789933639.508321,
+      "pid": 22111,
+      "account": "B"
+    },
+    {
+      "ts": 1789933920.168596,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/executor.py",
+            "line": 140,
+            "issue": "In `_run`, `log_task = task.get(\"_run_task_id\", task[\"id\"])` was introduced so `bus.log_run` attributes fix-round runs to the fix task (line 122, 142, 146 all use `log_task`), but the sibling `bus.update(task[\"id\"], status=\"held\", hold_reason=f\"codex usage limit; resets in {secs // 60} min\", ...)` on this line still uses `task[\"id\"]`, which for a fix-round reply is the PARENT's id (since `reply()` sets `t = {**t, \"_run_task_id\": fix_round_task_id, ...}` but `t[\"id\"]` stays the parent's real id from `bus.get(task_id)`). Hitting a codex usage limit mid fix-round resume therefore overwrites the parent task's `status`/`hold_reason` (e.g. clobbering \"gate_red\" with \"codex usage limit...\"), even though the fix task's own held/budget state is separately and correctly recorded by `_dispatch_reply_worker`'s `elif r[\"status\"] == \"held\":` branch via `bus.post_result`/`clear_stage`. Same pattern at line 124 (`bus.update(task[\"id\"], resume_hint=...)` on argv error) and at reply()'s own early returns (executor.py:352-355 rounds-exhausted sets `status=\"failed\"` on the parent id, and 358-360 sets `status=\"held\", hold_reason=\"executor ... unavailable\"` on the parent id).",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "line": 354,
+            "issue": "`bus.update(task_id, status=\"failed\", reason=f\"fix loop exceeded {MAX_ROUNDS} rounds; escalate or re-spec\")` runs with `task_id` bound to the parent's id when called via the new `fix_round_task_id=`/`plan=` path (daemon.py `_dispatch_reply_worker` calls `executor.reply(parent_id, delta, fix_round_task_id=task_id, plan=plan)`). If this branch is ever reached for a fix round (e.g. rounds incremented by a concurrent caller between `resume_plan`'s check and this increment), it force-fails the PARENT task directly instead of the fix task, bypassing the fix task's own `bus.post_result` bookkeeping that the rest of this feature relies on.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 22,
+            "issue": "`test_reply_worker_handles_held_requeues_fix_task_for_retry` stubs out `executor.reply` entirely (`self.swap(executor, \"reply\", reply)`), so it never exercises the real `reply()`/`_run()` internals where the parent-id status clobbering described above actually lives; the test's `assertIsNone(bus.get(parent).get(\"result\"))` doesn't check `status`/`hold_reason`, so it would pass even with the bug present. None of the added tests call the real `reply()` through a simulated codex usage-limit or rounds-exhausted event with `fix_round_task_id` set, so this regression has no coverage.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789933920.171097,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789933639.470281,
+  "account": "B",
+  "pid": 22111,
+  "review_verdict": "request_changes"
+}

@@ -1,0 +1,197 @@
+{
+  "id": "T-0683",
+  "created_at": 1789998140.527972,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: Q5: orchestrator/planner_scorecard.py + `scorecard --planner-routing` \u2014 Planner outcomes by model \u00d7 decision type \u00d7 band \u00d7 class \u00d7 architectural, non-inferiority evidence per class, economics (P7, P13, P16)",
+  "spec": "Why: no code joins Planner invocations to downstream engineering outcomes; premium_summary (planner_runs.py:843) counts launches and tokens only. The router (Q4) needs class_evidence and the brief (P7/P13/P16) needs a Planner scorecard with cold-start priors and a CLI.\nWhat: new module orchestrator/planner_scorecard.py plus cli.py flag `scorecard --planner-routing [--json]`.\n- Inputs: invocation rows from schedlog.read(\"planner_invocations\") merged by launch_id (later phases override; rows: launch_id, goal_id, decision_type, model, tier, band, task_class, architectural, started_at, material, reescalation, total_tokens, usd, latency_s, outcome), skip rows, bus tasks (root/tasks/*.json) and spec_review/review tasks. Tolerate missing files and malformed lines (count them in card[\"malformed\"]).\n- Attribution window: an invocation owns the goal's execute tasks whose lineage root (attribution.lineage) was created at or after started_at and before the goal's next invocation started_at; fix rounds count toward the root's owning invocation. A held-kind invocation also owns the fix-round task whose constraints.fix_round_for is that held task.\n- group_key(row) -> \"model|decision_type|band|task_class|arch\" (arch = 'arch' or 'plain').\n- build(root=STATE, *, cfg=None, min_samples=None) -> {\"groups\": {key: metrics}, \"n\": total invocations, \"malformed\", \"min_samples\"}; metrics per group: n, material_rate, downstream_accepted_rate (owned roots with merged_into), first_pass_rate (owned roots with pipeline.lineage_fix_rounds == 0 or no fix-round children), fix_round_rate, avg_fix_rounds, gate_red_rate (pipeline.gate_reds > 0), review_request_changes_rate (reviews with inputs[0] in owned ids and verdict request_changes), spec_review_approval_rate, replanning_rate (a later architectural_replan invocation for the same goal), reescalation_rate (rows reescalation True), human_intervention_rate (goal has an interactive attribution row after started_at when planner_telemetry.interactive_by_goal is available; else None), tokens_mean, usd_mean, latency_mean, evidence \"sufficient\"|\"insufficient\" (n >= min_samples; default from [planner.routing].min_samples 20 or [promotion].min_samples).\n- class_evidence(model, decision_type, band, task_class, architectural, *, root=STATE, cfg=None) -> {\"n\", \"noninferior\": True|False|None, \"deltas\": {metric: delta}, \"reescalation_rate\", \"baseline_model\"}: compares the group with the same class group for the escalation tier's model (cfg [models].planner; fall back to tier fable rows). Non-inferior when both groups have n >= min_samples and first_pass_rate delta >= -0.02, avg_fix_rounds delta <= 0.05, gate_success (1 - gate_red_rate) delta >= -0.02, review_request_changes_rate delta <= 0.10, reescalation_rate <= 0.2 (thresholds from promotion.CRITERIA where names match, overridable under [promotion]); None when either side is insufficient; False when any threshold fails. Tokens, usd and latency never enter the verdict (docstring + test).\n- economics(root=STATE) -> per model {\"planner_usd_per_accepted_goal\", \"planner_tokens_per_accepted_goal\", \"pipeline_usd_after_planning\" (sum of scorecard.by_task usd for owned tasks per invocation, mean), \"expected_total_cost_after_planning\" by decision_type (mean of planner usd + pipeline usd)}; accepted goals via scorecard.accepted_goals.\n- format(card) -> text table sorted by key; format_evidence(evidence) one line. cli.py: `sc.add_argument(\"--planner-routing\", action=\"store_true\")`, dispatch to planner_scorecard.build/format (json with --json), conflict message with --planner like the existing --parallelism/--planner pair.",
+  "inputs": [
+    "T-0682"
+  ],
+  "acceptance": [
+    "tests/test_planner_scorecard.py::test_groups_by_model_type_band_class_arch \u2014 invocations for two models and two decision types produce four group keys with n, material_rate and downstream_accepted_rate from owned tasks in the attribution window",
+    "tests/test_planner_scorecard.py::test_attribution_window_and_fix_rounds_follow_root \u2014 a root task created after invocation A and its fix round created after invocation B both count toward A; a held-kind invocation owns the fix round with fix_round_for",
+    "tests/test_planner_scorecard.py::test_class_evidence_noninferior_equivalent_worse_and_insufficient \u2014 opus equal to fable gives noninferior True; opus with first_pass 0.3 lower gives False with the failing delta named; n below min_samples gives None; a group with 1e9 tokens and 0 usd changes no verdict",
+    "tests/test_planner_scorecard.py::test_reescalation_penalises_class \u2014 reescalation_rate 0.5 on an otherwise equal class gives noninferior False with reason reescalation",
+    "tests/test_planner_scorecard.py::test_cli_flag_and_malformed_tolerance \u2014 `scorecard --planner-routing --json` prints a card with groups and malformed count for a runs dir containing one malformed line; text output lists group keys"
+  ],
+  "scope": [
+    "orchestrator/planner_scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_planner_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0683",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_scorecard.py",
+        "issue": "Sole input source schedlog stream \"planner_invocations\" has no producer anywhere in the codebase (verified via grep for planner_invocations, decision_type, architectural_replan). Scope/depends_on don't add an emitter. build() will tolerate the missing file and silently return n=0 forever in production, while synthetic-fixture unit tests pass, masking that the feature is disconnected end-to-end.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "issue": "Spec's default path \"[planner.routing].min_samples\" names a nonexistent table; the real table is [planner.routes] and it has no min_samples key. The config override this spec promises can never actually be set.",
+        "severity": "high",
+        "line": 37
+      },
+      {
+        "path": "orchestrator/planner_scorecard.py",
+        "issue": "class_evidence's claim that thresholds come \"from promotion.CRITERIA where names match\" is false as written \u2014 CRITERIA's keys (first_pass_delta, fix_rounds_delta, gate_success_delta, review_findings_delta) don't textually match the spec's own metric names (first_pass_rate, avg_fix_rounds, gate_success, review_request_changes_rate). The mapping is left to implementer guesswork and could diverge from promotion.py's semantics for what should be one shared criteria set.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_scorecard.py",
+        "issue": "planner_telemetry module doesn't exist at all (not just interactive_by_goal). Spec should explicitly require guarding the import itself (ImportError), not just a missing attribute, or the CLI will hard-crash instead of degrading human_intervention_rate to None.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add a companion task (in scope or as an explicit depends_on) that emits schedlog.append(\"planner_invocations\", row) at the real Planner-invocation call sites, and name where launch_id/decision_type/band/task_class/architectural actually originate today (they don't exist as concepts anywhere currently) \u2014 or explicitly scope this packet as read-side-only groundwork and say so in acceptance criteria so reviewers don't expect a populated scorecard post-merge.",
+      "Replace \"[planner.routing].min_samples\" with the config path that actually exists \u2014 either add min_samples under [planner.routes] in pool.toml as part of this task's scope, or drop the planner.routing fallback entirely and default straight from [promotion].min_samples.",
+      "Spell out the explicit metric-name -> promotion.CRITERIA-key mapping (e.g. a literal dict) instead of \"where names match\", so class_evidence and promotion.py can't silently diverge on the same non-inferiority definition.",
+      "Require the planner_telemetry lookup to be wrapped in try/except ImportError (not just missing-attribute handling), since the module doesn't exist in the repo yet."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998142.722838,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0683",
+      "claimed_at": 1789998142.722486
+    },
+    {
+      "ts": 1789998142.72383,
+      "account": "B"
+    },
+    {
+      "ts": 1789998143.126783,
+      "pid": 87183,
+      "account": "B"
+    },
+    {
+      "ts": 1789998289.1182132,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_scorecard.py",
+            "issue": "Sole input source schedlog stream \"planner_invocations\" has no producer anywhere in the codebase (verified via grep for planner_invocations, decision_type, architectural_replan). Scope/depends_on don't add an emitter. build() will tolerate the missing file and silently return n=0 forever in production, while synthetic-fixture unit tests pass, masking that the feature is disconnected end-to-end.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "issue": "Spec's default path \"[planner.routing].min_samples\" names a nonexistent table; the real table is [planner.routes] and it has no min_samples key. The config override this spec promises can never actually be set.",
+            "severity": "high",
+            "line": 37
+          },
+          {
+            "path": "orchestrator/planner_scorecard.py",
+            "issue": "class_evidence's claim that thresholds come \"from promotion.CRITERIA where names match\" is false as written \u2014 CRITERIA's keys (first_pass_delta, fix_rounds_delta, gate_success_delta, review_findings_delta) don't textually match the spec's own metric names (first_pass_rate, avg_fix_rounds, gate_success, review_request_changes_rate). The mapping is left to implementer guesswork and could diverge from promotion.py's semantics for what should be one shared criteria set.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_scorecard.py",
+            "issue": "planner_telemetry module doesn't exist at all (not just interactive_by_goal). Spec should explicitly require guarding the import itself (ImportError), not just a missing attribute, or the CLI will hard-crash instead of degrading human_intervention_rate to None.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add a companion task (in scope or as an explicit depends_on) that emits schedlog.append(\"planner_invocations\", row) at the real Planner-invocation call sites, and name where launch_id/decision_type/band/task_class/architectural actually originate today (they don't exist as concepts anywhere currently) \u2014 or explicitly scope this packet as read-side-only groundwork and say so in acceptance criteria so reviewers don't expect a populated scorecard post-merge.",
+          "Replace \"[planner.routing].min_samples\" with the config path that actually exists \u2014 either add min_samples under [planner.routes] in pool.toml as part of this task's scope, or drop the planner.routing fallback entirely and default straight from [promotion].min_samples.",
+          "Spell out the explicit metric-name -> promotion.CRITERIA-key mapping (e.g. a literal dict) instead of \"where names match\", so class_evidence and promotion.py can't silently diverge on the same non-inferiority definition.",
+          "Require the planner_telemetry lookup to be wrapped in try/except ImportError (not just missing-attribute handling), since the module doesn't exist in the repo yet."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998289.119422,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_scorecard.py",
+          "issue": "Sole input source schedlog stream \"planner_invocations\" has no producer anywhere in the codebase (verified via grep for planner_invocations, decision_type, architectural_replan). Scope/depends_on don't add an emitter. build() will tolerate the missing file and silently return n=0 forever in production, while synthetic-fixture unit tests pass, masking that the feature is disconnected end-to-end.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Spec's default path \"[planner.routing].min_samples\" names a nonexistent table; the real table is [planner.routes] and it has no min_samples key. The config override this spec promises can never actually be set.",
+          "severity": "high",
+          "line": 37
+        },
+        {
+          "path": "orchestrator/planner_scorecard.py",
+          "issue": "class_evidence's claim that thresholds come \"from promotion.CRITERIA where names match\" is false as written \u2014 CRITERIA's keys (first_pass_delta, fix_rounds_delta, gate_success_delta, review_findings_delta) don't textually match the spec's own metric names (first_pass_rate, avg_fix_rounds, gate_success, review_request_changes_rate). The mapping is left to implementer guesswork and could diverge from promotion.py's semantics for what should be one shared criteria set.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_scorecard.py",
+          "issue": "planner_telemetry module doesn't exist at all (not just interactive_by_goal). Spec should explicitly require guarding the import itself (ImportError), not just a missing attribute, or the CLI will hard-crash instead of degrading human_intervention_rate to None.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789998142.722486,
+  "account": "B",
+  "pid": 87183,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_scorecard.py",
+      "issue": "Sole input source schedlog stream \"planner_invocations\" has no producer anywhere in the codebase (verified via grep for planner_invocations, decision_type, architectural_replan). Scope/depends_on don't add an emitter. build() will tolerate the missing file and silently return n=0 forever in production, while synthetic-fixture unit tests pass, masking that the feature is disconnected end-to-end.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Spec's default path \"[planner.routing].min_samples\" names a nonexistent table; the real table is [planner.routes] and it has no min_samples key. The config override this spec promises can never actually be set.",
+      "severity": "high",
+      "line": 37
+    },
+    {
+      "path": "orchestrator/planner_scorecard.py",
+      "issue": "class_evidence's claim that thresholds come \"from promotion.CRITERIA where names match\" is false as written \u2014 CRITERIA's keys (first_pass_delta, fix_rounds_delta, gate_success_delta, review_findings_delta) don't textually match the spec's own metric names (first_pass_rate, avg_fix_rounds, gate_success, review_request_changes_rate). The mapping is left to implementer guesswork and could diverge from promotion.py's semantics for what should be one shared criteria set.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_scorecard.py",
+      "issue": "planner_telemetry module doesn't exist at all (not just interactive_by_goal). Spec should explicitly require guarding the import itself (ImportError), not just a missing attribute, or the CLI will hard-crash instead of degrading human_intervention_rate to None.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

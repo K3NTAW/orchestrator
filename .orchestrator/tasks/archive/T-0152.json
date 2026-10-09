@@ -1,0 +1,136 @@
+{
+  "id": "T-0152",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review (other model, opus, security checklist): C-O4 v4 `orchestrator serve` (T-0147, executed by claude:sonnet)",
+  "spec": "Review the T-0147 delta: `git diff 674b390 be42500` in worktree wt/T-0147 (orchestrator/serve.py new, orchestrator/cli.py, orchestrator/goals.py, tests/test_serve.py, tests/test_goals.py, .orchestrator/repos.toml.example). This is a network-facing service: apply the security checklist (skills/review/adversarial-review/references/security-checklist.md) even though complexity is 6. Check against the acceptance criteria: (1) bearer auth on every route except /healthz via hmac.compare_digest, 401 otherwise, token never stored/logged/echoed, server refuses to start without ORCH_SERVICE_TOKEN; (2) all handlers plain def; goals imported as a module (serve.goals is orchestrator.goals); (3) per-slug flock under ORCH_WORK/.locks spanning clone-check + running-check + goals.start; clone as argv list with timeout; TimeoutExpired \u2192 504; failure \u2192 502 with stderr only in the redacted log, never in the body; \"path missing\" = directory absent on disk; (4) 400 for missing/invalid repo, goal, requester, account (type-checked strings); 404 unknown slug / not configured / unknown goal; 409 from list_goals when a running record has planner_alive; 422 for any start() refusal; never 500 for expected refusals; (5) every goal entry carries repo = slug; GET single goal returns one entry or 404 from an empty status() list; (6) goals.py change is additive requester only; (7) the eighteen named tests exist, patch orchestrator.goals.* and subprocess.run, spawn no real processes; (8) injection surfaces: slug used in paths (path traversal through a slug like \"../x\"? repos.toml is operator-controlled but the request body's repo is untrusted: confirm the slug is only ever a lookup key and never joined into a path before the lookup succeeds), header parsing, JSON body parsing errors \u2192 400 not 500; (9) no new dependency. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0147"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Security checklist applied; the slug/path, auth and clone-stderr surfaces explicitly assessed",
+    "Each of the nine points confirmed with evidence from the delta"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "orchestrator/cli.py",
+    "orchestrator/goals.py",
+    "tests/test_serve.py",
+    "tests/test_goals.py",
+    ".orchestrator/repos.toml.example"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0152",
+  "codex_thread": null,
+  "result": {
+    "summary": "Posted to T-0152.\n\n```json\n{\"verdict\":\"request_changes\",\"comments\":[\n{\"path\":\"orchestrator/serve.py\",\"line\":79,\"issue\":\"hmac.compare_digest on str raises TypeError for non-ASCII input, so an unauthenticated request whose Authorization header carries any byte >0x7F (uvicorn/h11 decode headers as latin-1) crashes every route with a 500 instead of a clean 401. Reproduced against create_app() with a raw ASGI scope and header b'Bearer \\\\xe9': TypeError, status 500. A non-ASCII ORCH_SERVICE_TOKEN would 500 every request. Fix: compare bytes, or try/except -> 401.\",\"severity\":\"med\"},\n{\"path\":\"orchestrator/serve.py\",\"line\":17,\"issue\":\"starlette, uvicorn and anyio are imported directly but not declared in pyproject.toml; they resolve only transitively through mcp>=2. The failure message points the operator at 'the mcp dependency group', which does not exist (no [project.optional-dependencies] in pyproject).\",\"severity\":\"low\"},\n{\"path\":\"orchestrator/serve.py\",\"line\":93,\"issue\":\"No bound on request body or on goal. goal goes into argv for Popen(['claude','-p',prompt,...]) (goals.py:342-348); a multi-megabyte goal raises OSError E2BIG and surfaces as an unhandled 500.\",\"severity\":\"low\"},\n{\"path\":\"orchestrator/serve.py\",\"line\":196,\"issue\":\"No per-requester authorization: requester is recorded and echoed but never enforced, so any token holder can cancel or read another requester's goal. Fine only if kgpt scopes users itself, which is neither documented nor tested.\",\"severity\":\"low\"},\n{\"path\":\"tests/test_serve.py\",\"line\":172,\"issue\":\"test_clone_runs_under_lock_once_with_timeout asserts only that the .lock file exists, which _lock_path creates as a side effect of any request. It never proves the flock is held or that concurrent creates serialize.\",\"severity\":\"low\"},\n{\"path\":\"tests/test_serve.py\",\"line\":131,\"issue\":\"The unfiltered GET /goals multi-repo fan-out (serve.py:160-165), the 'repo not configured' branch and the 'invalid json body' 400 branch are untested.\",\"severity\":\"low\"}",
+    "parse_error": true,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789740417.371234,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0152",
+      "claimed_at": 1789740417.370794
+    },
+    {
+      "ts": 1789740417.41081,
+      "pid": 53399,
+      "account": "A"
+    },
+    {
+      "ts": 1789740596.1678662,
+      "status": "done",
+      "result": {
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/serve.py",
+            "line": 79,
+            "issue": "hmac.compare_digest on str raises TypeError for non-ASCII input, so an unauthenticated request whose Authorization header carries any byte >0x7F (uvicorn/h11 decode headers as latin-1) crashes every route with a 500 instead of a clean 401. Confirmed by driving create_app() directly with header b'Bearer \\xe9': RAISED TypeError 'comparing strings with non-ASCII characters is not supported', status 500. Violates the checklist's fail-closed rule; a non-ASCII ORCH_SERVICE_TOKEN would also 500 every request. Fix: compare bytes (provided.encode('utf-8','surrogateescape') vs token.encode(...)) or wrap in try/except returning 401.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 17,
+            "issue": "starlette, uvicorn and anyio are imported directly but are not declared in pyproject.toml [project.dependencies]; they resolve only transitively through mcp>=2 (mcp 2.2.0 requires starlette/anyio/uvicorn, uvicorn conditionally on sys_platform != 'emscripten'). The failure message also directs the operator to 'the mcp dependency group', which does not exist -- pyproject has no [project.optional-dependencies] at all. Declare them explicitly and fix the message.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 93,
+            "issue": "No bound on request body or on the goal string. goal is passed to goals.start, which embeds it verbatim in argv for Popen(['claude','-p',prompt,...]) (goals.py:342-348); a multi-megabyte goal raises OSError E2BIG out of Popen and surfaces as an unhandled 500. Auth-gated, but add a max length on goal and a body-size cap.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 196,
+            "issue": "No per-requester authorization: requester is recorded (goals.py:357) and echoed back, but cancel_goal and get_goal authorize only on the shared service token, so any token holder can cancel or read any other requester's goal. Acceptable only if kgpt is the sole caller and enforces user scoping itself -- that assumption is not stated in the module docstring and not tested.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_serve.py",
+            "line": 172,
+            "issue": "test_clone_runs_under_lock_once_with_timeout asserts only that the .lock file exists, which _lock_path creates as a side effect of any request; it never proves the flock is held or that two concurrent creates serialize. The name promises more than the assertion checks, and the create-race the lock exists for is untested.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_serve.py",
+            "line": 131,
+            "issue": "The unfiltered GET /goals branch (serve.py:160-165, fan-out across every configured repo and the 'path' in cfg filter) has no test; only the ?repo= single-slug path is covered. The _resolve_repo 'repo not configured' branch and the 'invalid json body' 400 branch are likewise untested.",
+            "severity": "low"
+          }
+        ],
+        "checklist": {
+          "input_validation": "repo/goal/requester/account type-and-empty checked at serve.py:104-111; unknown account falls through to goals.start's refusal -> 422, no 500. No shell: git clone and Popen both take argv lists. No length bound (see comment 3).",
+          "slug_path_surface": "PASS -- slug is only ever used after _resolve_repo confirms membership in repos.toml (serve.py:113 before _with_repo_lock at 143), so the f-string in _lock_path (line 62) and cfg['path'] are operator-controlled, not caller-controlled. Path params cannot contain '/'. No traversal.",
+          "authn_authz": "Every route except /healthz calls _auth_error first; constant-time compare used (correct primitive) but crashes on non-ASCII (comment 1). No per-user authz (comment 4). Fails closed when ORCH_SERVICE_TOKEN is unset/empty since empty provided is rejected before compare.",
+          "secrets": "PASS -- clone stderr never reaches a response body (502 returns only {'reason':'clone failed'}); CREDENTIAL_RE redacts ://user:tok@ before logging, verified by test output 'fatal: https://***@host/repo.git failed'. Minor edge: a password containing '@' leaks its tail because [^/@\\s]+ stops at the first '@'. AccessLogMiddleware logs method/path/status only, never headers.",
+          "crypto": "PASS -- hmac.compare_digest, no hand-rolled comparison.",
+          "data": "PASS -- no deletes or migrations; requester is a new optional field, additive, defaults to None for existing records via record.get (goals.py:394).",
+          "dependencies": "FAIL -- see comment 2.",
+          "errors": "Starlette's default handler returns bare 'Internal Server Error' with no traceback to the client, so no stack-trace leak; but the auth path does not fail closed on malformed input (comment 1).",
+          "concurrency": "PASS -- _with_repo_lock serializes clone + duplicate-check + start per slug, and goals.json mutation is independently guarded by _with_goals_lock (goals.py:169-183), so the unlocked GET paths that call _reconcile -> _set_goal_status are safe. Residual: two slugs pointing at one path bypass the serve lock, but goals.start's own _running_goal check refuses (422 rather than 409)."
+        },
+        "evidence": {
+          "tests_run": "python -m unittest tests.test_serve -v -> 18 tests OK; tests/test_goals.py requester test reviewed, matches goals.py:357/394",
+          "contract_checks": "goals.list_goals == status() so the 409 probe's record_status/planner_alive keys are real (goals.py:392-412); goals.stop returns {'error':'unknown goal'} or {'stopped': id}, so cancel_goal's 404/200 mapping is total",
+          "confirmed_defect": "non-ASCII Authorization header -> TypeError -> 500, reproduced against create_app() with a raw ASGI scope"
+        },
+        "confidence": 0.85,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789740613.7038348,
+      "status": "done",
+      "result": {
+        "summary": "Posted to T-0152.\n\n```json\n{\"verdict\":\"request_changes\",\"comments\":[\n{\"path\":\"orchestrator/serve.py\",\"line\":79,\"issue\":\"hmac.compare_digest on str raises TypeError for non-ASCII input, so an unauthenticated request whose Authorization header carries any byte >0x7F (uvicorn/h11 decode headers as latin-1) crashes every route with a 500 instead of a clean 401. Reproduced against create_app() with a raw ASGI scope and header b'Bearer \\\\xe9': TypeError, status 500. A non-ASCII ORCH_SERVICE_TOKEN would 500 every request. Fix: compare bytes, or try/except -> 401.\",\"severity\":\"med\"},\n{\"path\":\"orchestrator/serve.py\",\"line\":17,\"issue\":\"starlette, uvicorn and anyio are imported directly but not declared in pyproject.toml; they resolve only transitively through mcp>=2. The failure message points the operator at 'the mcp dependency group', which does not exist (no [project.optional-dependencies] in pyproject).\",\"severity\":\"low\"},\n{\"path\":\"orchestrator/serve.py\",\"line\":93,\"issue\":\"No bound on request body or on goal. goal goes into argv for Popen(['claude','-p',prompt,...]) (goals.py:342-348); a multi-megabyte goal raises OSError E2BIG and surfaces as an unhandled 500.\",\"severity\":\"low\"},\n{\"path\":\"orchestrator/serve.py\",\"line\":196,\"issue\":\"No per-requester authorization: requester is recorded and echoed but never enforced, so any token holder can cancel or read another requester's goal. Fine only if kgpt scopes users itself, which is neither documented nor tested.\",\"severity\":\"low\"},\n{\"path\":\"tests/test_serve.py\",\"line\":172,\"issue\":\"test_clone_runs_under_lock_once_with_timeout asserts only that the .lock file exists, which _lock_path creates as a side effect of any request. It never proves the flock is held or that concurrent creates serialize.\",\"severity\":\"low\"},\n{\"path\":\"tests/test_serve.py\",\"line\":131,\"issue\":\"The unfiltered GET /goals multi-repo fan-out (serve.py:160-165), the 'repo not configured' branch and the 'invalid json body' 400 branch are untested.\",\"severity\":\"low\"}",
+        "parse_error": true,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789740417.370794,
+  "pid": 53399,
+  "account": "A"
+}

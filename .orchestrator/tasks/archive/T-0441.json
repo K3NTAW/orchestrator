@@ -1,0 +1,115 @@
+{
+  "id": "T-0441",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H3b v4 (final; spec reviews T-0430, T-0434, T-0436 folded in, further spec review waived): decision routes wired into the daemon \u2014 failures.py plus gitutil and notify modules break the cycle, per-point claim records kept with a per-goal last_state_version guard, gate_state from merge evidence with an unknown short-circuit before route(), routine close keeps the PR with the Planner unless auto_open_pr is on",
+  "spec": "Replaces T-0435 (and T-0437, T-0433, T-0365) after spec reviews T-0430, T-0434 and T-0436; the Planner waives a fourth spec review, the code review still fires. Build on goal/T-0353 at df2ae89 (H3a decision.py, H2, H4, H5b, H6, H7, G7 v4, G8 merged).\n1. Modules, no cycle (T-0436 risks 1 and 2): new orchestrator/gitutil.py holds _git_in, _resolve_base, changed_paths and the unified-diff helper (_added_diff_lines); new orchestrator/notify.py holds notify() and the notify-once-per-transition helper; new orchestrator/failures.py holds the validated test-id extractor, rejecting_reviews(task), path_in_scope(path, scope), failure_kind, failure_signature and touch_areas(task) using [review.areas] tables (defaults shipped in pool.toml; unavailable diff sets all four areas True). Import rules: gitutil and notify import only stdlib, bus, spawn, merge; failures imports gitutil, bus, spawn, merge; daemon imports all three and keeps its old names as re-exports so existing tests pass unchanged; planner_runs imports failures, gitutil and notify at module scope and never imports daemon (the two deferred daemon imports at run() and reconcile() become notify.notify). Test: test_failures_module_has_no_daemon_import and test_planner_runs_never_imports_daemon (grep-based, both modules).\n2. build_ctx(point) in planner_runs fills every field decision.route reads (decision.py lines 84-148): routes = [planner.routes]; infra_failure_kind = quota | auth | unavailable from the pool cooldown or usage-limit reason for the account or executor involved or pipeline.failure_kind quota/permissions, else None (present); premium_launches = escalate launches recorded for the goal. held: failing_ids (failures extractor over resume_hint.failures), in_scope_review_comments (every rejecting review comment path inside scope), auto_fix_rounds_used (lineage count of constraints.auto_round), auto_fix_rounds ([daemon].auto_fix_rounds), failure_signature, signature_repeated, spec_review_request_changes (spec_review tasks with inputs[0] in the lineage and verdict request_changes), blocked_scouts, touches_auth/migrations/interfaces/data_deletion (touch_areas). scouts_done: goal_complexity, scout_count, all_scouts_posted, blocked_scouts; security_trigger = any goal scope path matches [review].security_paths; semantic_trigger = goal spec or scope matches [review].semantic_paths or semantic_patterns. closable: all_children_merged (every execute child done with merged_into); gate_state = green when the goal branch head equals the sha recorded by the last successful merge into it (merge runs tests-green before fast-forwarding), red when the last recorded merge attempt for that head failed its gate, else unknown; build_ctx and tick never run a test suite. Test: test_ctx_fields_complete_for_each_kind.\n3. Short-circuits before decision.route (T-0436 risk 4): a closable point with gate_state unknown is skipped for the tick (no route call, no launch, one debug line); a held point whose task already has a live fix round is skipped; only then is route() called.\n4. Claims (T-0436 risk 3): keep the existing per-(goal_id, kind, payload_key) records, _find_record, _blocked, decision_points and every existing test unchanged. Add coalescing as a launch grouping: within a tick all non-routine points of one goal launch together once; each covered point gets its own record carrying launch_id, state_version (sha12 over sorted (task id, status, hold_reason, merged_into, last event seq) of the goal children), route, reason, evidence, cheaper_steps, cursor_at_launch (H2 fields plus these). A per-goal guard in planner_runs.json (goal_launches[goal_id] = {last_state_version, cursor}) blocks a launch when the state_version equals the last launched one; an infra failure does not update it. Unrelated goals never share a launch; a blocked scout or a security hold launches in the same tick as its point.\n5. Packets: one section per non-routine held task (task id, hold_reason, failure kind and signature, failing ids, review comments, branch and head sha, route and reason) plus a scouts_done section when present; routine held tasks are excluded (auto_fix_round handles them) and never trigger a launch alone; the goal route is the highest severity among the sections (escalate over investigate) and picks the tier: [planner.routes].investigate_tier or the premium tier. Test with two held siblings, one routine-fixable and one escalate-worthy: one launch carrying only the escalate section, and the routine sibling gets its fix round.\n6. Routine close (T-0436 risk 5): order fixed: state_version guard, gate_state green from merge evidence, stamp(goal_id, \"closed_at\") under bus.locked(), then idempotent effects each checked by evidence: the retrospective entry (record script or the no-new-learning marker; skipped when an entry for the goal id exists) and the GOAL result. The PR stays a Planner or human step by default: [planner.routes].auto_open_pr = false (default) makes the close post the GOAL result with pr_url null and note \"PR pending: Planner opens goal/<id> to main\" and notify once; with auto_open_pr = true the close runs gh pr list --head then gh pr create from the fixed template, records pipeline.close_error on failure, notifies once per transition, retries on a later tick after [daemon].close_retry_s (default 900) up to [daemon].close_max_attempts (default 3), then routes escalate with reason close_failed; gh failures never count toward gave_up; a crash between the stamp and an effect is reconciled by the evidence checks.\n7. Infra failures (auth, quota, unavailable markers in stderr or exit) set a pool cooldown with reason, do not count toward gave_up, notify once per transition and leave the cursor and last_state_version unchanged. Soft premium budget: exceeding [planner.routes].premium_launches_soft_per_goal still launches and records exception: true. [planner.routes].enabled = false restores per-point escalation.\nTests in tests/test_planner_runs.py, tests/test_daemon.py, tests/test_failures.py: test_failures_module_has_no_daemon_import, test_planner_runs_never_imports_daemon, test_ctx_fields_complete_for_each_kind, test_routine_hold_launches_no_model, test_two_held_siblings_one_launch_only_escalate_section, test_closable_unknown_gate_skips_before_route, test_closable_gate_state_from_merge_record_never_runs_suite, test_closable_routine_is_idempotent_across_ticks, test_close_default_leaves_pr_to_planner, test_close_auto_open_pr_failure_retries_then_escalates_without_gave_up, test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_two_goals_two_launches, test_cursor_advances_only_after_launch_start, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch, test_touch_areas_fail_closed_without_diff. Every existing test stays green (the per-point dedup tests unchanged); .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0439"
+  ],
+  "acceptance": [
+    "tests/test_failures.py::test_failures_module_has_no_daemon_import and tests/test_planner_runs.py::test_planner_runs_never_imports_daemon pass (grep-based)",
+    "tests/test_planner_runs.py and tests/test_daemon.py: test_ctx_fields_complete_for_each_kind, test_routine_hold_launches_no_model, test_two_held_siblings_one_launch_only_escalate_section, test_closable_unknown_gate_skips_before_route, test_closable_gate_state_from_merge_record_never_runs_suite, test_closable_routine_is_idempotent_across_ticks, test_close_default_leaves_pr_to_planner, test_close_auto_open_pr_failure_retries_then_escalates_without_gave_up, test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_two_goals_two_launches, test_cursor_advances_only_after_launch_start, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch, test_touch_areas_fail_closed_without_diff pass",
+    "existing per-point dedup tests (test_decision_points_scouts_done_held_closable, test_held_key_changes_with_each_new_hold, test_run_launches_once_per_key) pass unchanged; every launch record carries route, reason, evidence, cheaper_steps, launch_id, state_version and cursor_at_launch",
+    "pool.toml documents [review.areas], [planner.routes].auto_open_pr (default false), [daemon].close_retry_s and close_max_attempts; the planner_runs module docstring documents the goal_launches guard",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/failures.py",
+    "orchestrator/gitutil.py",
+    "orchestrator/notify.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    ".orchestrator/prompts/planner-decision.md",
+    ".orchestrator/pool.toml",
+    "tests/test_failures.py",
+    "tests/test_planner_runs.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0441",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 1301,
+        "issue": "routine_close() calls _open_pr(goal) \u2014 two `gh` subprocess calls (60s timeout each, hitting the GitHub API) \u2014 entirely inside the `with bus.locked():` block (line 1283). bus.locked() is a cross-process flock shared by the daemon, its worker threads, and any attached Planner session (per its own docstring: it exists to serialize bus writes). With [planner.routes].auto_open_pr=true and a slow/unresponsive `gh` call, this can hold that lock for up to ~120s, stalling dispatch/gate/merge and any attached interactive Planner session system-wide on every tick that hits this path. The gh calls should happen outside the lock, with only the resulting bus.update()/post_result() protected by it.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 176,
+        "issue": "auto_fix_round gates the new routed-hold path with `.get(\"routes\", {}).get(\"enabled\", False)` (defaults to False/disabled), but decision.route() itself and pool.toml's own comment (\"Default true; enabled = false restores the previous behaviour\") treat a missing enabled key as True. The two call sites reading the same config key disagree on its default, so a pool.toml that omits [planner.routes].enabled would silently run auto_fix_round on the legacy code_defect-only heuristic while planner_runs.tick() routes as if enabled. The committed pool.toml sets enabled=true explicitly so this doesn't misfire today, but it's a latent inconsistency.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789916790.373388,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0441",
+      "claimed_at": 1789916790.372982
+    },
+    {
+      "ts": 1789916790.3746738,
+      "account": "B"
+    },
+    {
+      "ts": 1789916790.422684,
+      "pid": 78755,
+      "account": "B"
+    },
+    {
+      "ts": 1789917222.949864,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 1301,
+            "issue": "routine_close() calls _open_pr(goal) \u2014 two `gh` subprocess calls (60s timeout each, hitting the GitHub API) \u2014 entirely inside the `with bus.locked():` block (line 1283). bus.locked() is a cross-process flock shared by the daemon, its worker threads, and any attached Planner session (per its own docstring: it exists to serialize bus writes). With [planner.routes].auto_open_pr=true and a slow/unresponsive `gh` call, this can hold that lock for up to ~120s, stalling dispatch/gate/merge and any attached interactive Planner session system-wide on every tick that hits this path. The gh calls should happen outside the lock, with only the resulting bus.update()/post_result() protected by it.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 176,
+            "issue": "auto_fix_round gates the new routed-hold path with `.get(\"routes\", {}).get(\"enabled\", False)` (defaults to False/disabled), but decision.route() itself and pool.toml's own comment (\"Default true; enabled = false restores the previous behaviour\") treat a missing enabled key as True. The two call sites reading the same config key disagree on its default, so a pool.toml that omits [planner.routes].enabled would silently run auto_fix_round on the legacy code_defect-only heuristic while planner_runs.tick() routes as if enabled. The committed pool.toml sets enabled=true explicitly so this doesn't misfire today, but it's a latent inconsistency.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789917222.952383,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789916790.372982,
+  "account": "B",
+  "pid": 78755,
+  "review_verdict": "request_changes"
+}

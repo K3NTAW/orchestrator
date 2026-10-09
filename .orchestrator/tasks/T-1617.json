@@ -1,0 +1,249 @@
+{
+  "id": "T-1617",
+  "created_at": 1791025233.491891,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "B5 v3 (fix round of T-1554): fix rounds for incomplete and failed execute tasks, with embedded leftovers, convert-only-when-filed, in-lock recheck and a per-pass limit",
+  "spec": "Goal T-1403, wave 2, plan label B5-v3. Respec of B5 v2 T-1586 (spec review T-1588 request_changes 2026-10-02 22:30; human go 2026-10-03), filed as a FIX ROUND of T-1554 (constraints.fix_round_for) so its merge stamps T-1554 and E7 T-1555 (depends_on T-1554) stays valid; T-1554 has no branch, so the worktree is cut from goal/T-1403. Evidence: plan-log.md backlog 2026-09-27 (luna A2 T-0465 ended status failed and sat ~2 h with 16 uncommitted files; nothing files a fix round for a failed execute task). B4b (merged) turns a dead Claude run into a hold 'execute_incomplete: ...' with resume_hint {dirty_in_scope, dirty_out_of_scope, head, partial_output}; this task makes the daemon act on it.\n\nFacts (goal/T-1403; locate by symbol): failures.failure_kind(task, worktree, ...) reads task.hold_reason only; returns conflict, environment, permissions, quota, invalid_spec, code_defect (also for review request_changes holds with rejecting comments, D-fixkind), unknown, flaky. daemon.auto_fix_round(pool) iterates bus.read(status='held', role='execute') only; routine for code_defect+gate_red with parsed test ids or code_defect+review request_changes with in-scope comments; files 'fix round n' through bus.create_task with _fix_round_spec rendering .orchestrator/prompts/fix-round.md (fields {branch} {failed_acceptance} {failure_kind} {failure_text} {head_sha} {held_id} {n} {original_acceptance} {review_comments} {root_id} {root_title}); the round key is planner_runs._held_at (latest status=held event ts) compared with pipeline.auto_fix_hold_key; the chain check skips when a non-failed task has fix_round_for == id; failure_signature hashes kind, test ids and review comments; the autonomous block ([planner].autonomous and decision.routes_enabled) overwrites routine from decision.route. Failed execute tasks today: merge tests_red (reason 'tests_red', resume_hint.failures = stderr tail), rebase_conflict, spawn 'non-JSON output (rc=...)', daemon 'dispatch error: ...', spawn 'post_result failed: ...'; supersede notes use status failed/superseded with free text ('superseded by ...', 'not run: ...', 'parent_merged', 'cancelled').\n\nChange:\n1. failures.failure_kind: reason = hold_reason or task['reason']. Before the conflict check: reason starting 'execute_incomplete' -> 'incomplete'. A failed task's reason 'tests_red' is an explicit alias of the gate_red path: the quota-marker exemption (_strip_test_ids) applies, test ids come from resume_hint.failures, the flaky rerun runs only when the worktree directory exists (existing guard), otherwise the result is 'code_defect'. gate_red holds are untouched. Everything else unchanged.\n2. daemon.auto_fix_round candidates = held execute tasks (as today) + failed execute tasks. Filters for failed tasks run cheapest first, in this order: has a parent; reason does not start with 'superseded', 'not run', 'parent_merged', 'cancelled' or 'rebase_conflict'; latest status=failed event ts newer than now - [daemon].failed_round_max_age_s (default 21600); merged_into unset; then the exclusion scan; then lineage/stale; then already_merged(t) (git); failure_kind last. Exclusion scan: only role == 'execute' tasks that are not superseded/failed and name the candidate in constraints.fix_round_for, constraints.respec_for or inputs exclude it; review, spec_review and gate rows never exclude a candidate. At most [daemon].failed_rounds_per_pass (default 2) failed candidates get a round per pass; the rest wait for later passes (say so in a comment). Add daemon._failed_at(t) (latest failed event ts, fallback created_at). routine additionally when kind == 'incomplete' (any reason), when the task is failed with reason 'tests_red' and _test_ids(resume_hint.failures) parses at least one id (treated like gate_red), and when a failed task's reason starts with 'non-JSON', 'dispatch error' or 'post_result failed' with kind unknown (routine as kind 'incomplete': re-run the work). rebase_conflict stays non-routine. pipeline.failure_kind is written for failed tasks exactly as for held ones.\n3. Conversion: a failed candidate is converted ONLY in the same locked block that files its round: status 'held', hold_reason = its original reason VERBATIM (no prefix), pipeline.prior_status = 'failed', pipeline.failure_kind, pipeline.converted_at = now. A failed candidate that gets no round (not routine, cap reached, repeated signature, per-pass limit) keeps status 'failed' and records pipeline.auto_fix_skipped exactly as holds do; nothing shows it as held. Other held-task consumers (planner_runs held decision points, worker_control, dependents) see a converted task as an ordinary hold with that reason; no change to those modules.\n4. Atomicity, key and race: the conversion, the bus.create_task of the round and pipeline.auto_fix_hold_keys (a list holding the failed ts used as key, and later the held ts) all happen inside ONE bus.locked() block. Inside that block the task is re-read and the round is filed only if its status is still 'failed' (or still 'held' for hold candidates), the chain check (no non-failed child with fix_round_for == id) and the exclusion scan still pass, and the key is not in auto_fix_hold_keys; otherwise the block does nothing. On later passes the key is _held_at(t) and the task is skipped when it is in auto_fix_hold_keys; the chain check stays the primary idempotence guard. A second pass right after the first files nothing.\n5. failure_signature: for kind 'incomplete' and for failed-task reruns include the reason class (text before the first ':'), sorted dirty_in_scope + dirty_out_of_scope and resume_hint.head; an identical state is 'repeated' (escalate), a different head or dirty set gets a round up to the cap.\n6. Autonomous block: skipped when the candidate is a converted failed task or kind == 'incomplete'; pipeline.auto_fix_route = 'routine_incomplete' recorded; decision.py and planner_runs.py untouched.\n7. _fix_round_spec / fix-round.md: new field {incomplete_note}: empty unless kind is incomplete, else a paragraph: the previous run ended '<reason>'; commits so far are on <branch> (head <sha>). Leftovers: at filing time auto_fix_round captures them from the held worktree itself (daemon runs `git -C <wt> diff` for tracked changes plus each untracked in-scope file as a diff against /dev/null), bounded by [daemon].incomplete_diff_chars (default 20000) with a 'cut' marker, and embeds them in the round's spec under a 'Leftovers (apply with git apply)' heading; the note tells the executor the diff may be applied with `git apply` in its own worktree. When the held worktree is missing, the note says so and lists only the recorded dirty paths (dirty_in_scope / dirty_out_of_scope). Then: finish the acceptance, commit, do not run the full gate. failure_text for incomplete rounds is the partial_output when present. The cap [daemon].auto_fix_rounds applies unchanged.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_failures.py failure_kind tests pass unchanged (hold_reason based); tests/test_daemon.py auto_fix_round tests build held tasks only and pass unchanged; the fix-round prompt tests (grep 'fix-round' / '_fix_round_spec') pin the rendered text: update them for the new field. Run tests/test_failures.py and tests/test_daemon.py in the foreground after committing; never background a command and never run the full gate.\n\nOut of scope: spawn.py, merge.py, planner_runs.py, decision.py, worker_control. Rollback: git revert of the merge commit; converted tasks are returned to failed by bus.update(status=pipeline.prior_status).\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests; never module-level test functions. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_failures.py::test_failure_kind_incomplete_for_execute_incomplete_hold_and_failed_reason: passes: failure_kind returns 'incomplete' for hold_reason 'execute_incomplete: no commits' and for a failed task (hold_reason None, reason 'execute_incomplete: uncommitted changes outside scope'); a failed task with reason 'tests_red' whose resume_hint.failures names one Python test id classifies as 'code_defect', or 'flaky' when a rerun of the parsed ids passes, exactly like gate_red, and as 'code_defect' when the worktree directory is missing; failure_signature differs for two incomplete failures with different heads or dirty sets and is equal for identical ones",
+    "tests/test_daemon.py::test_auto_fix_round_files_rounds_for_incomplete_and_failed_execute_tasks: passes: auto_fix_round files 'fix round 1' for a held task 'execute_incomplete: no commits' (failure_kind incomplete), for a failed task with reason 'non-JSON output (rc=143): ' (converted to held with hold_reason equal to that reason verbatim, pipeline.prior_status 'failed', in the same pass), and for a failed task with reason tests_red whose resume_hint.failures parse to test ids; files nothing for failed tasks whose reason starts with 'superseded', 'not run', 'parent_merged' or 'cancelled', for rebase_conflict, for a failed task older than [daemon].failed_round_max_age_s, for one named by another execute task's respec_for or fix_round_for, or for one already merged; a second pass right after the first files nothing; the auto_fix_rounds cap and the repeated-signature guard hold; with [planner].autonomous True and routes enabled the incomplete round is still filed and pipeline.auto_fix_route is 'routine_incomplete'",
+    "tests/test_daemon.py::test_auto_fix_round_embeds_leftovers_and_converts_only_when_filed: passes: for an incomplete held task whose fixture worktree has a dirty tracked in-scope file and an untracked in-scope file, the round's spec contains a 'Leftovers (apply with git apply)' heading with a hunk for each; with the worktree removed the note says so and lists the recorded dirty paths; a failed candidate that gets no round (non-routine kind, or the per-pass limit) keeps status 'failed' and records pipeline.auto_fix_skipped",
+    "tests/test_daemon.py::test_auto_fix_round_rechecks_in_lock_and_limits_failed_per_pass: passes: a failed task that becomes superseded between the scan and the lock (patch bus.locked or the re-read) is left untouched and no round is filed; with three eligible failed tasks and failed_rounds_per_pass 2, pass one files two rounds and pass two files the third; a failed task that has a done review row naming it in inputs is still a candidate"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/failures.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_failures.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "full",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B5-v3",
+    "respec_for": "T-1586",
+    "fix_round_for": "T-1554"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791025326.4612448,
+      "pipeline": {
+        "first_ready_at": 1791025326.461181
+      }
+    },
+    {
+      "ts": 1791025326.780559,
+      "pipeline": {
+        "first_ready_at": 1791025326.461181,
+        "spec_review_at": 1791025326.780482,
+        "spec_review_at_lease": 1791026226.780482
+      }
+    },
+    {
+      "ts": 1791025326.7924302,
+      "pipeline": {
+        "first_ready_at": 1791025326.461181,
+        "spec_review_at": 1791025326.780482,
+        "spec_review_at_lease": 1791026226.780482,
+        "spec_review_at_done": 1791025326.792348
+      }
+    },
+    {
+      "ts": 1791025451.394627,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Leftover capture runs `git diff` in the held worktree, then diffs each untracked path from resume_hint.dirty_in_scope against /dev/null. Those paths come from a dead worker's output, which is untrusted. Nothing in the spec says to confine them to the worktree, so a `../` path or a symlink could read files outside it. The diff can also hold secrets, and it is written into a bus spec and a prompt. The spec sets no subprocess timeout and no error handling, and the call runs inside the daemon pass. `git diff` also adds nothing for binary or huge files beyond the char cap.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Where the leftovers are captured is not stated. `bus.locked()` must stay short, so the git calls have to run before the lock. The worktree can change between capture and filing, and the spec does not say whether that matters. The embedded diff and partial_output must be passed through `fence_data` (the existing backtick fencing helper), or a diff containing triple backticks breaks out of the prompt fence. The spec only names `fence_data` for failure_text.",
+          "severity": "med",
+          "line": 114
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Keys, conversion and the later pass are underspecified. `pipeline.auto_fix_hold_keys` (a list) replaces the existing singular `auto_fix_hold_key`. The spec does not say whether the old key is still written for held candidates, or how an already-stamped singular key is migrated; no test references it, but a stamped task would be filed twice. The held ts exists only after `bus.update(status='held')`, so the block must re-read the task to append it. Without that, the converted task shows up next pass with an unrecorded key and only the chain check protects it. The list also grows without bound.",
+          "severity": "med",
+          "line": 219
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "A converted task is held, no longer failed, so the routine rules written as 'failed task with reason non-JSON/dispatch error/post_result failed/tests_red' stop matching it on later passes. Its kind is 'unknown', or 'code_defect' with reason 'tests_red' instead of 'gate_red'. A failed round-1 child does not satisfy the chain check, so the converted original needs a defined rule: either match on pipeline.prior_status == 'failed', or say it is always skipped via the key. Otherwise round 2 behaviour is accidental and the cap/signature logic is hit unpredictably.",
+          "severity": "med",
+          "line": 171
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "A task cut by failed_rounds_per_pass is stated to record auto_fix_skipped, which triggers the 'automatic fix round escalated' notify. A deferred task would be reported as escalated and then still get a round next pass. Record nothing for deferral, or use a separate marker without a notify. Say whether the limit counts filed rounds or candidates examined. The ordering of failed candidates (oldest first?) is also unspecified, which makes the 'three eligible, two then one' test nondeterministic unless it is pinned.",
+          "severity": "med",
+          "line": 232
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Treating non-JSON, dispatch error and post_result failed as routine kind 'incomplete' re-runs work on infrastructure failures. If one of these is really an auth, quota or outage problem, every affected task gets a round, up to the cap each, with no backoff. The quota check in failure_kind only inspects the reason and failures text, which for these tasks often hold only the rc string. Also, `worker_control.post_if_current` writes the failed reason as the payload reason with a `non_json` registry marker; check that the reason text actually starts with 'non-JSON' for this path, because the filter is a string prefix and worker_control is out of scope.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/failures.py",
+          "issue": "The 'tests_red' alias has to replace each `reason == \"gate_red\"` comparison in failure_kind: the quota exemption and the two flaky-rerun checks. The spec names the quota exemption and the rerun but not the 'previous flaky_runs show returncode 0' check, so a partial edit is likely. The reason is lowercased from `hold_reason or task['reason']`, so the 'execute_incomplete' prefix check must happen on that lowercased value. Note that failure_kind writes to the bus (rejected_ids, flaky_runs) and runs a rerun of up to 600 s inside the daemon pass, now also for failed tasks. Run it last, as the spec says, and also after the per-pass limit.",
+          "severity": "low",
+          "line": 124
+        },
+        {
+          "path": "orchestrator/failures.py",
+          "issue": "failure_signature for failed-task reruns includes reason class, dirty sets and head. For 'tests_red' failed tasks, resume_hint.failures is a stderr tail that can vary per run, so the ids-based signature behaves differently from gate_red. The spec should state that ids remain the signature input for tests_red. For incomplete, a missing head or missing dirty lists must be handled as empty, not raise or collapse to one value.",
+          "severity": "low",
+          "line": 73
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "The three daemon acceptance tests need real git worktrees (tracked and untracked dirty files, worktree removed) plus patched bus.locked, already_merged and failure_kind. Since the spec forbids the full gate and background runs, say how fixtures create the repo (tempfile + `git init`) and that the in-lock supersede race is simulated by patching `bus.get` or `bus.locked`, not by timing. 'No round filed' assertions should also check that status stays 'failed' and pipeline is untouched.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/prompts/fix-round.md",
+          "issue": "The new {incomplete_note} field is added to a template that is `str.format`-ed. Any other caller or test that renders the template without the field will KeyError; the spec says only to update the pinned prompt tests. Confirm that `_fix_round_spec` is the sole renderer. The note must not itself contain braces from user data inside the template; the diff is passed as a value, so that part is fine.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791025453.1096919,
+      "pipeline": {
+        "first_ready_at": 1791025326.461181,
+        "spec_review_at": 1791025326.780482,
+        "spec_review_at_lease": 1791026226.780482,
+        "spec_review_at_done": 1791025326.792348,
+        "spec_review_held_at": 1791025453.109601
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1791025462.847881,
+      "pipeline": {
+        "first_ready_at": 1791025326.461181,
+        "spec_review_at": 1791025326.780482,
+        "spec_review_at_lease": 1791026226.780482,
+        "spec_review_at_done": 1791025326.792348,
+        "spec_review_held_at": 1791025453.109601,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1791025464.81785,
+      "pipeline": {
+        "first_ready_at": 1791025326.461181,
+        "spec_review_at": 1791025326.780482,
+        "spec_review_at_lease": 1791026226.780482,
+        "spec_review_at_done": 1791025326.792348,
+        "spec_review_held_at": 1791025453.109601,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1791025453.1096919": true
+        }
+      }
+    },
+    {
+      "ts": 1791026241.905654,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1622 (B5 v4, option 2); human go 2026-10-03"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791025326.461181,
+    "spec_review_at": 1791025326.780482,
+    "spec_review_at_lease": 1791026226.780482,
+    "spec_review_at_done": 1791025326.792348,
+    "spec_review_held_at": 1791025453.109601,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1791025453.1096919": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Leftover capture runs `git diff` in the held worktree, then diffs each untracked path from resume_hint.dirty_in_scope against /dev/null. Those paths come from a dead worker's output, which is untrusted. Nothing in the spec says to confine them to the worktree, so a `../` path or a symlink could read files outside it. The diff can also hold secrets, and it is written into a bus spec and a prompt. The spec sets no subprocess timeout and no error handling, and the call runs inside the daemon pass. `git diff` also adds nothing for binary or huge files beyond the char cap.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Where the leftovers are captured is not stated. `bus.locked()` must stay short, so the git calls have to run before the lock. The worktree can change between capture and filing, and the spec does not say whether that matters. The embedded diff and partial_output must be passed through `fence_data` (the existing backtick fencing helper), or a diff containing triple backticks breaks out of the prompt fence. The spec only names `fence_data` for failure_text.",
+      "severity": "med",
+      "line": 114
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Keys, conversion and the later pass are underspecified. `pipeline.auto_fix_hold_keys` (a list) replaces the existing singular `auto_fix_hold_key`. The spec does not say whether the old key is still written for held candidates, or how an already-stamped singular key is migrated; no test references it, but a stamped task would be filed twice. The held ts exists only after `bus.update(status='held')`, so the block must re-read the task to append it. Without that, the converted task shows up next pass with an unrecorded key and only the chain check protects it. The list also grows without bound.",
+      "severity": "med",
+      "line": 219
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "A converted task is held, no longer failed, so the routine rules written as 'failed task with reason non-JSON/dispatch error/post_result failed/tests_red' stop matching it on later passes. Its kind is 'unknown', or 'code_defect' with reason 'tests_red' instead of 'gate_red'. A failed round-1 child does not satisfy the chain check, so the converted original needs a defined rule: either match on pipeline.prior_status == 'failed', or say it is always skipped via the key. Otherwise round 2 behaviour is accidental and the cap/signature logic is hit unpredictably.",
+      "severity": "med",
+      "line": 171
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "A task cut by failed_rounds_per_pass is stated to record auto_fix_skipped, which triggers the 'automatic fix round escalated' notify. A deferred task would be reported as escalated and then still get a round next pass. Record nothing for deferral, or use a separate marker without a notify. Say whether the limit counts filed rounds or candidates examined. The ordering of failed candidates (oldest first?) is also unspecified, which makes the 'three eligible, two then one' test nondeterministic unless it is pinned.",
+      "severity": "med",
+      "line": 232
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Treating non-JSON, dispatch error and post_result failed as routine kind 'incomplete' re-runs work on infrastructure failures. If one of these is really an auth, quota or outage problem, every affected task gets a round, up to the cap each, with no backoff. The quota check in failure_kind only inspects the reason and failures text, which for these tasks often hold only the rc string. Also, `worker_control.post_if_current` writes the failed reason as the payload reason with a `non_json` registry marker; check that the reason text actually starts with 'non-JSON' for this path, because the filter is a string prefix and worker_control is out of scope.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/failures.py",
+      "issue": "The 'tests_red' alias has to replace each `reason == \"gate_red\"` comparison in failure_kind: the quota exemption and the two flaky-rerun checks. The spec names the quota exemption and the rerun but not the 'previous flaky_runs show returncode 0' check, so a partial edit is likely. The reason is lowercased from `hold_reason or task['reason']`, so the 'execute_incomplete' prefix check must happen on that lowercased value. Note that failure_kind writes to the bus (rejected_ids, flaky_runs) and runs a rerun of up to 600 s inside the daemon pass, now also for failed tasks. Run it last, as the spec says, and also after the per-pass limit.",
+      "severity": "low",
+      "line": 124
+    },
+    {
+      "path": "orchestrator/failures.py",
+      "issue": "failure_signature for failed-task reruns includes reason class, dirty sets and head. For 'tests_red' failed tasks, resume_hint.failures is a stderr tail that can vary per run, so the ids-based signature behaves differently from gate_red. The spec should state that ids remain the signature input for tests_red. For incomplete, a missing head or missing dirty lists must be handled as empty, not raise or collapse to one value.",
+      "severity": "low",
+      "line": 73
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "The three daemon acceptance tests need real git worktrees (tracked and untracked dirty files, worktree removed) plus patched bus.locked, already_merged and failure_kind. Since the spec forbids the full gate and background runs, say how fixtures create the repo (tempfile + `git init`) and that the in-lock supersede race is simulated by patching `bus.get` or `bus.locked`, not by timing. 'No round filed' assertions should also check that status stays 'failed' and pipeline is untouched.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/prompts/fix-round.md",
+      "issue": "The new {incomplete_note} field is added to a template that is `str.format`-ed. Any other caller or test that renders the template without the field will KeyError; the spec says only to update the pinned prompt tests. Confirm that `_fix_round_spec` is the sole renderer. The note must not itself contain braces from user data inside the template; the diff is passed as a value, so that part is fine.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "superseded by T-1622 (B5 v4, option 2); human go 2026-10-03"
+}

@@ -1,0 +1,448 @@
+{
+  "id": "T-0600",
+  "created_at": 1789972331.2708962,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "R16 v3: orchestrator/stale.py \u2014 complete stale-work evidence with a git adapter for gitutil, freshness bound to the task worktree, and pinned risk reasons (AP P12)",
+  "spec": "Why: daemon.stale_check (orchestrator/daemon.py:1050-1070) compares only moved paths against scope plus changed files and grades none/low/high; brief P7 also requires interface, relevant-test, dependency, graph-relationship and overlapping-merge signals with base, goal head, relevant paths, risk, action and conflict outcome. v3 after spec reviews T-0576 and T-0595.\nWhat: new pure module orchestrator/stale.py; daemon delegation is a later task; today's stale_check keys stay a subset. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in that file; no pytest fixtures.\n- Git: the injectable callable has the shape git(*args, cwd) -> CompletedProcess (default: subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True)). gitutil.moved_paths and gitutil.changed_paths take git(cwd, *args); stale.py wraps with the named adapter _gitutil_git(git) -> lambda cwd, *args: git(*args, cwd=cwd) and passes it as their git= parameter. interference.graph_fresh_for(files, graph, git=_fresh_git) receives _fresh_git = lambda worktree, *args: git(*args, cwd=task['worktree']) so freshness is diffed on the task branch, not ROOT.\n- load_links(root=ROOT) -> {\"files\": {node_id: source_file}, \"links\": [{\"source\", \"target\", \"relation\"}]} from graphify-out/graph.json (nodes[].id/source_file, links[].source/target/relation); None when absent or malformed.\n- evidence(task, *, goal_ref=None, graph_links=None, graph=None, tasks=None, git=None) -> {\"base\": task_ref, \"goal_head\", \"moved_count\", \"stale_paths\", \"signals\": {\"scoped_files_changed\", \"changed_files_moved\", \"tests_changed\", \"interface_changed\": [{\"symbol\", \"file\", \"consumer\"}], \"graph_relationships\": [{\"source_file\", \"target_file\"}], \"dependency_changed\": [ids], \"overlapping_merge\": [ids]}, \"risk\", \"risk_reasons\", \"graph\"}. Worktree only from task['worktree']; goal_ref default goal/<parent> or main.\n  Signals: moved = gitutil.moved_paths(task_ref, goal_ref, cwd=task['worktree'], git=adapter); changed = gitutil.changed_paths(task, git=adapter); scoped_files_changed = moved matching scope patterns (fnmatch); changed_files_moved = moved \u2229 changed; tests_changed = moved paths equal to tests/test_<stem>.py for stems of changed or scoped orchestrator/*.py; interface_changed (needs graph_links and graph): nodes whose source_file is a moved file with a link of any relation to a node whose source_file is a changed or scoped task file, only when graph_fresh_for(moved \u222a task files, graph, git=_fresh_git) is True; graph_relationships = distinct (moved file, task file) pairs behind those links; dependency_changed = depends_on ids whose task record sha is not an ancestor of task_ref (git merge-base --is-ancestor <sha> <task_ref>, rc 1 = not ancestor); overlapping_merge = execute tasks in `tasks` with merged_into == goal_ref whose scope literals or task.get('changed_files', []) intersect the task's changed or scope paths and whose sha is not an ancestor of task_ref (changed_files optional; a later merge task populates it).\n  graph field: 'absent' when graph_links or graph is None; 'stale' when graph_fresh_for is not True; 'skipped' when the graph is present and fresh but no moved path or task path appears as any node's source_file (nothing to compare); 'used' otherwise.\n  Risk and pinned reasons (risk_reasons lists every fired signal in this order): high with any of changed_files_moved, interface_changed, dependency_changed; medium with any of tests_changed, graph_relationships, overlapping_merge; low with scoped_files_changed only; none with []; unknown with ['git_failed'] when gitutil.GitError or the git callable raises.\n- row(task, evidence, action, conflict=None) -> dict for schedlog.append('stale', ...) with task, goal_id, base, goal_head, changed_relevant_paths, risk, risk_reasons, action (recorded|rebased|rebase_conflict|revalidated), conflict paths. Never mutates git; never discards work.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_stale.py::test_interface_change_in_moved_file_consumed_by_task_is_high_risk \u2014 graph_links with a link from a node in a moved file to a node in the task's changed file, fresh graph, yields interface_changed non-empty, risk high, risk_reasons containing interface_changed and graph used",
+    "tests/test_stale.py::test_relevant_test_change_is_medium_risk \u2014 tests/test_foo.py moved while the task changed orchestrator/foo.py yields tests_changed, risk medium, risk_reasons ['tests_changed']",
+    "tests/test_stale.py::test_dependency_merged_after_branch_point_is_high_risk \u2014 a depends_on task whose sha is not an ancestor (git callable answers merge-base --is-ancestor with rc 1) yields dependency_changed and risk high",
+    "tests/test_stale.py::test_overlapping_earlier_merge_uses_scope_literals_and_optional_changed_files \u2014 a merged execute task matching by scope literal and one matching only through changed_files both appear in overlapping_merge; risk medium",
+    "tests/test_stale.py::test_git_adapter_and_freshness_use_task_worktree \u2014 every recorded git call carries cwd equal to task['worktree'], including the diff graph_fresh_for issues",
+    "tests/test_stale.py::test_absent_stale_skipped_graph_and_git_failure \u2014 graph_links None yields graph absent with deterministic signals intact; a stale graph yields graph stale and no interface signal; a fresh graph with no matching files yields graph skipped; a git callable raising GitError yields risk unknown and risk_reasons ['git_failed']; row() carries base, goal_head, changed_relevant_paths, risk, risk_reasons, action"
+  ],
+  "scope": [
+    "orchestrator/stale.py",
+    "tests/test_stale.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/daemon.py",
+      "orchestrator/gitutil.py",
+      "orchestrator/interference.py",
+      "orchestrator/schedlog.py",
+      "graphify-out/graph.json",
+      "tests/test_daemon.py",
+      "tests/test_gitutil.py",
+      "tests/test_interference.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "load_links(root=ROOT) -> {files, links[{source,target,relation}]}|None; evidence(task, *, goal_ref=None, graph_links=None, graph=None, tasks=None, git=None) -> dict with keys base, goal_head, moved_count, stale_paths, signals{...}, risk, risk_reasons, graph; row(task, evidence, action, conflict=None); git callable git(*args, cwd) -> CompletedProcess adapted via _gitutil_git for gitutil; worktree only from task['worktree']; must not import daemon"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0600",
+  "codex_thread": "01a0c2ad-d6cf-7fc2-be31-749aa4a5ae8d",
+  "result": {
+    "summary": "Implemented complete stale-work evidence collection with git adapters, graph freshness, dependency/overlap signals, pinned risk reasons, and schedlog row shaping.\n\n- Files changed: `orchestrator/stale.py`, `tests/test_stale.py`\n- Gate: green \u2014 844 tests passed\n- Commit: `a10b6db65c45d540737fdc0d0db09560df3190bd`\n- Failures-only output: empty\n- Worktree: clean",
+    "executed_by": "codex:sol",
+    "thread": "01a0c2ad-d6cf-7fc2-be31-749aa4a5ae8d",
+    "usage": {
+      "input_tokens": 410245,
+      "cached_input_tokens": 383232,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6167,
+      "reasoning_output_tokens": 316,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789972331.271725,
+      "spec_review_verdict": "approve",
+      "spec_review_waived": "Planner decision 2026-09-21 09:20 after spec-review rounds T-0576 and T-0595: every raised risk folded into v3 (git adapter, worktree-bound freshness, graph=skipped defined)"
+    },
+    {
+      "ts": 1789972535.171229,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856
+      }
+    },
+    {
+      "ts": 1789972535.1733482,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117
+      }
+    },
+    {
+      "ts": 1789972535.875731,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464
+      }
+    },
+    {
+      "ts": 1789972567.4564328,
+      "packet_meta": {
+        "chars": 3085,
+        "est_tokens": 771,
+        "hash": "b0036f3768e7",
+        "version": "b0036f3768e7",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@ef740c717cf2 gotchas@88af06d27cfa memory@notes",
+        "policy_version": "ef740c717cf2",
+        "gotchas": "88af06d27cfa"
+      }
+    },
+    {
+      "ts": 1789972567.460626,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0600",
+      "claimed_at": 1789972567.457251
+    },
+    {
+      "ts": 1789972567.4730299,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789972782.189058,
+      "codex_thread": "01a0c2ad-d6cf-7fc2-be31-749aa4a5ae8d",
+      "codex_thread_head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+    },
+    {
+      "ts": 1789972782.19278,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        }
+      }
+    },
+    {
+      "ts": 1789972782.194953,
+      "status": "done",
+      "result": {
+        "summary": "Implemented complete stale-work evidence collection with git adapters, graph freshness, dependency/overlap signals, pinned risk reasons, and schedlog row shaping.\n\n- Files changed: `orchestrator/stale.py`, `tests/test_stale.py`\n- Gate: green \u2014 844 tests passed\n- Commit: `a10b6db65c45d540737fdc0d0db09560df3190bd`\n- Failures-only output: empty\n- Worktree: clean",
+        "executed_by": "codex:sol",
+        "thread": "01a0c2ad-d6cf-7fc2-be31-749aa4a5ae8d",
+        "usage": {
+          "input_tokens": 410245,
+          "cached_input_tokens": 383232,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6167,
+          "reasoning_output_tokens": 316,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789972792.919253,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789972888.386092,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789972888.38598,
+        "gated_at_lease": 1789973788.38598,
+        "first_green_at": 1789972888.385649,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789972888.44851,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789972888.38598,
+        "gated_at_lease": 1789973788.38598,
+        "first_green_at": 1789972888.385649,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0600",
+          "goal_head": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789972888.4481778,
+          "head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+        }
+      }
+    },
+    {
+      "ts": 1789972888.6110651,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789972888.38598,
+        "gated_at_lease": 1789973788.38598,
+        "first_green_at": 1789972888.385649,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0600",
+          "goal_head": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789972888.4481778,
+          "head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+        },
+        "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+      }
+    },
+    {
+      "ts": 1789972888.6174378,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789972888.38598,
+        "gated_at_lease": 1789973788.38598,
+        "first_green_at": 1789972888.385649,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0600",
+          "goal_head": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789972888.4481778,
+          "head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+        },
+        "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+        "gated_at_done": 1789972888.617353
+      }
+    },
+    {
+      "ts": 1789973066.670665,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789973572.832574,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789972888.38598,
+        "gated_at_lease": 1789973788.38598,
+        "first_green_at": 1789972888.385649,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0600",
+          "goal_head": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789972888.4481778,
+          "head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+        },
+        "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+        "gated_at_done": 1789972888.617353,
+        "merged_at": 1789973572.832459,
+        "merged_at_lease": 1789974472.832459
+      }
+    },
+    {
+      "ts": 1789973659.670982,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "558a7acdcb740a89dc21314afa494845e54b6619"
+    },
+    {
+      "ts": 1789973659.983818,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789972888.38598,
+        "gated_at_lease": 1789973788.38598,
+        "first_green_at": 1789972888.385649,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0600",
+          "goal_head": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789972888.4481778,
+          "head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+        },
+        "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+        "gated_at_done": 1789972888.617353,
+        "merged_at": 1789973572.832459,
+        "merged_at_lease": 1789974472.832459,
+        "accepted_at": 1789973659.983519
+      }
+    },
+    {
+      "ts": 1789973660.077,
+      "pipeline": {
+        "first_ready_at": 1789972535.170856,
+        "dispatched_at": 1789972535.173117,
+        "dispatched_at_lease": 1789973435.173117,
+        "dispatched_at_done": 1789972535.875464,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789972888.38598,
+        "gated_at_lease": 1789973788.38598,
+        "first_green_at": 1789972888.385649,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0600",
+          "goal_head": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789972888.4481778,
+          "head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+        },
+        "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+        "gated_at_done": 1789972888.617353,
+        "merged_at": 1789973572.832459,
+        "merged_at_lease": 1789974472.832459,
+        "accepted_at": 1789973659.983519,
+        "merged_at_done": 1789973660.07688
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_waived": "Planner decision 2026-09-21 09:20 after spec-review rounds T-0576 and T-0595: every raised risk folded into v3 (git adapter, worktree-bound freshness, graph=skipped defined)",
+  "pipeline": {
+    "first_ready_at": 1789972535.170856,
+    "dispatched_at": 1789972535.173117,
+    "dispatched_at_lease": 1789973435.173117,
+    "dispatched_at_done": 1789972535.875464,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "fd58539054f5acb87a61b81680e61c0891a84d52"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789972888.38598,
+    "gated_at_lease": 1789973788.38598,
+    "first_green_at": 1789972888.385649,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0600",
+      "goal_head": "8515a18c15029a1ecab6b6f6b6988ff5ba4c363c",
+      "moved_count": 0,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789972888.4481778,
+      "head": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+    },
+    "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+    "gated_at_done": 1789972888.617353,
+    "merged_at": 1789973572.832459,
+    "merged_at_lease": 1789974472.832459,
+    "accepted_at": 1789973659.983519,
+    "merged_at_done": 1789973660.07688
+  },
+  "packet_meta": {
+    "chars": 3085,
+    "est_tokens": 771,
+    "hash": "b0036f3768e7",
+    "version": "b0036f3768e7",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@ef740c717cf2 gotchas@88af06d27cfa memory@notes",
+    "policy_version": "ef740c717cf2",
+    "gotchas": "88af06d27cfa"
+  },
+  "claimed_at": 1789972567.457251,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0561",
+  "sha": "558a7acdcb740a89dc21314afa494845e54b6619"
+}

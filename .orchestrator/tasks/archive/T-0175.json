@@ -1,0 +1,198 @@
+{
+  "id": "T-0175",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "review (other model, opus): C-O7a fix round 1 on task/T-0174 \u2014 delta 2cf1d45..8c65a97 (T-0174, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0174 delta: `git diff 2cf1d45 8c65a97` in worktree wt/T-0174 (orchestrator/pool.py, orchestrator/cli.py, tests/test_pool.py, tests/test_cli.py, README.md). Fix round for review T-0170; confirm each item resolved: (1) day and window counters gated independently, offset always advances (test with a same-day out-of-window line); (2) pick wraps the tally: one stderr line and proceeds, never a traceback; vanished files and non-string timestamps skipped (tests); (3) pick prints an expanded config_dir (test); (4) missing-dir warning once per account per process (test) and README matches; (5) hold message on stderr, stdout empty, exit 3 (test); (6) planner offsets/counters live in .orchestrator/planner_usage.json under a flock, written only by tally_planner, read by utilization/status; pool.save() does not touch them; a stale Pool save does not clobber them (test); (7) an end-to-end pick test against a real .jsonl. Also confirm the T-0167 guarantees still hold (encode_project_dir, rollover reset now applied to the planner file, daily-budget check includes planner numbers, privacy: nothing but usage numbers and timestamps leaves a transcript line) and that the flock on planner_usage.json cannot deadlock with bus.locked() or the pool's own save (different files, no nesting). Run `uv run python -m unittest tests.test_pool tests.test_cli -q` once. This is the second review of C-O7a: approve unless a defect would miscount usage or break the launcher's pick contract in production; smaller points as notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0174"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the seven T-0170 items confirmed resolved or named unresolved with evidence",
+    "T-0167 guarantees and lock discipline confirmed"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/cli.py",
+    "tests/test_pool.py",
+    "tests/test_cli.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0167",
+      "T-0174"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0175",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/pool.py",
+        "line": 238,
+        "issue": "The missing-transcripts `continue` skips both the rollover and _save_planner_account, so a planner_usage.json entry for an account whose transcripts dir later disappears (config_dir change, repo move -> a different encoded ROOT, profile reset) is never rewritten again. Meanwhile tally's self.save() does persist the rolled `day`/`window_started` into pool_state, so after the first boundary the pool has a fresh day/window while every short-lived `orchestrator pick` process reloads the stale planner_day/window_tokens and counts them against utilization and the daily budget indefinitely. Not reachable today (an entry only exists while the dir exists), but two lines close it: a.utilization(self.cap) and _save_planner_account(...) before the continue.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 295,
+        "issue": "tally_planner still ends in self.save(). Item 6 took the monotonic offsets out of the raced blob, but the full pool_state.json rewrite from a Pool loaded before a possibly slow multi-MB transcript read remains, and can revert a cooldown()/record() another process made during the read. Nothing tally_planner mutates now needs to reach pool_state (a missed window_started roll simply rolls again next call), so the save() can go.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 229,
+        "issue": "`now=` is only half honoured: `today` derives from it, but the rollover check inside utilization() and window_lo/window_hi come from time.time()/date.today(). A caller passing now= gets a mixed clock; no test passes it. Thread it through or drop the parameter.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 285,
+        "issue": "A usage key present but null (`\"cache_read_input_tokens\": null`) makes `None // 10` raise TypeError. The daemon and pick both catch it, but the raise aborts the account's tally before _save_planner_account, so the offsets never advance and the same line re-raises on every later tick. `(usage.get(k) or 0)` per key removes the sticky failure.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 170,
+        "issue": "planner_usage.json stores the counters without the day/window_started they belong to, which now live in a different file. Removing pool_state.json (the documented way to forget cooldowns, and what the tests do in setUp) attributes yesterday's planner_day_tokens and the previous window's planner_window_tokens to a fresh day/window, over-reporting until the next boundary. Storing `day` and `window_started` in each entry and zeroing on mismatch makes the split-file state self-checking.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789753682.549506,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0175",
+      "claimed_at": 1789753682.549166
+    },
+    {
+      "ts": 1789753682.605747,
+      "pid": 77527,
+      "account": "B"
+    },
+    {
+      "ts": 1789753930.731349,
+      "status": "done",
+      "result": {
+        "verdict": "approve",
+        "summary": "All seven T-0170 items resolved. Evidence: (1) pool.py:280-289 gates in_day/in_window independently, `continue` only when neither matches, offset advances at line 263 before any filter; test_tally_gates_day_and_window_independently asserts day=15/window=0. (2) cli.py:68-71 wraps tally_planner in try/except Exception with one stderr line and proceeds; pool.py:243-246 and 254-257 skip vanished files, 274 skips non-string timestamps (tests: tally_failure_prints_one_stderr_line_and_proceeds, skips_line_with_deleted_file_between_glob_and_read, skips_non_string_timestamp). (3) cli.py:74 prints os.path.expanduser(config_dir); both CLI tests assert no '~' and the e2e one asserts the literal ~/.claude-a expansion. (4) pool.py:14/233-238 dedupes on the directory path in a module-level set; test_missing_transcripts_dir_warns_once_per_process asserts one line over two calls; README.md now says 'one stderr line per account per process'. (5) cli.py:72-73 prints the hold to stderr and raises SystemExit(3); test asserts stdout empty, stderr text, code 3. (6) offsets+counters moved to .orchestrator/planner_usage.json, written only by _save_planner_account (pool.py:35-54) under flock on the file itself; save() excludes PLANNER_ACCOUNT_FIELDS (178-180) and _load excludes them from pool_state and reloads from the new file (161-175); test_planner_usage_lives_outside_pool_state_and_survives_stale_save covers both halves. Pre-existing pool_state.json entries from 2cf1d45 are ignored and self-heal by a full re-read. (7) test_pick_planner_end_to_end_real_transcript drives cli.main() with a real .jsonl under a patched HOME, no tally mock. T-0167 guarantees hold: encode_project_dir unchanged and tested (pool.py:21); rollover zeroes planner_window_tokens/planner_day_tokens in utilization() (73-80) with offsets kept (test_tally_resets_on_rollover) and the zeroed values are re-persisted by the tally that follows; pick()'s budget check adds planner_day_tokens (195); usage formula at 285 matches spawn.py:153 byte for byte; privacy OK \u2014 the only data leaving a transcript line are the four usage ints and the timestamp, the single print (236) carries a directory path, nothing reaches the bus. Lock discipline: pool.py never touches bus locks and holds no other lock across the flock; planner_usage.json (flocked) and pool_state.json (plain write_text) are different files with no nesting, so no deadlock path. Tests: `uv run python -m unittest tests.test_pool tests.test_cli -q` -> Ran 29 tests, OK. Four notes below, none of which miscounts usage in the current configuration or breaks the pick contract.",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 238,
+            "issue": "The missing-transcripts `continue` skips both the rollover and _save_planner_account, so a planner_usage.json entry for an account whose transcripts dir later disappears (config_dir change, repo move -> a different encoded ROOT, profile reset) is never rewritten again. Meanwhile tally's self.save() does persist the rolled `day`/`window_started` into pool_state, so after the first boundary the pool has a fresh day/window while every short-lived `orchestrator pick` process reloads the stale planner_day/window_tokens and counts them against utilization and the daily budget indefinitely. Not reachable today (an entry only exists while the dir exists), but it is two lines to close: run a.utilization(self.cap) and _save_planner_account(...) before the continue.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 295,
+            "issue": "tally_planner still ends in self.save(). Item 6 took the monotonic offsets out of the raced blob, but the full pool_state.json rewrite from a Pool loaded before a possibly slow multi-MB transcript read remains, and can revert a cooldown()/record() another process made during the read. Nothing tally_planner mutates now needs to reach pool_state (a missed window_started roll simply rolls again next call), so the save() can just go.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 229,
+            "issue": "`now=` is only half honoured: `today` derives from it, but the rollover check inside utilization() and window_lo/window_hi come from time.time()/date.today(). A caller passing now= gets a mixed clock; no test passes it. Thread it through or drop the parameter.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 285,
+            "issue": "A usage key present but null (`\"cache_read_input_tokens\": null`) makes `None // 10` raise TypeError. The daemon and pick both catch it, but the raise aborts the account's tally before _save_planner_account, so the offsets never advance and the same line re-raises on every later tick. `(usage.get(k) or 0)` per key removes the sticky failure.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 170,
+            "issue": "planner_usage.json stores the counters without the day/window_started they belong to, which now live in a different file. Removing pool_state.json (the documented way to forget cooldowns, and what the tests do in setUp) attributes yesterday's planner_day_tokens and the previous window's planner_window_tokens to a fresh day/window, over-reporting until the next boundary. Storing `day` and `window_started` in each entry and zeroing on mismatch makes the split-file state self-checking.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789753941.921407,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 238,
+            "issue": "The missing-transcripts `continue` skips both the rollover and _save_planner_account, so a planner_usage.json entry for an account whose transcripts dir later disappears (config_dir change, repo move -> a different encoded ROOT, profile reset) is never rewritten again. Meanwhile tally's self.save() does persist the rolled `day`/`window_started` into pool_state, so after the first boundary the pool has a fresh day/window while every short-lived `orchestrator pick` process reloads the stale planner_day/window_tokens and counts them against utilization and the daily budget indefinitely. Not reachable today (an entry only exists while the dir exists), but two lines close it: a.utilization(self.cap) and _save_planner_account(...) before the continue.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 295,
+            "issue": "tally_planner still ends in self.save(). Item 6 took the monotonic offsets out of the raced blob, but the full pool_state.json rewrite from a Pool loaded before a possibly slow multi-MB transcript read remains, and can revert a cooldown()/record() another process made during the read. Nothing tally_planner mutates now needs to reach pool_state (a missed window_started roll simply rolls again next call), so the save() can go.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 229,
+            "issue": "`now=` is only half honoured: `today` derives from it, but the rollover check inside utilization() and window_lo/window_hi come from time.time()/date.today(). A caller passing now= gets a mixed clock; no test passes it. Thread it through or drop the parameter.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 285,
+            "issue": "A usage key present but null (`\"cache_read_input_tokens\": null`) makes `None // 10` raise TypeError. The daemon and pick both catch it, but the raise aborts the account's tally before _save_planner_account, so the offsets never advance and the same line re-raises on every later tick. `(usage.get(k) or 0)` per key removes the sticky failure.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 170,
+            "issue": "planner_usage.json stores the counters without the day/window_started they belong to, which now live in a different file. Removing pool_state.json (the documented way to forget cooldowns, and what the tests do in setUp) attributes yesterday's planner_day_tokens and the previous window's planner_window_tokens to a fresh day/window, over-reporting until the next boundary. Storing `day` and `window_started` in each entry and zeroing on mismatch makes the split-file state self-checking.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789753941.9227881,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789753952.939269,
+      "pipeline": {
+        "merged_at": 1789753952.939201
+      }
+    }
+  ],
+  "claimed_at": 1789753682.549166,
+  "pid": 77527,
+  "account": "B",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789753952.939201
+  }
+}

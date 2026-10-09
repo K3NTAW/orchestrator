@@ -1,0 +1,127 @@
+{
+  "id": "T-0089",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model): C-O2a host-portable auth and secrets (T-0079)",
+  "spec": "Review the diff of T-0079 (branch task/T-0079, worktree wt/T-0079) against its acceptance. Executed by claude:sonnet as the Codex fallback, so this review is on opus. Check especially: the token value never reaches a log line, the bus, or the run log (grep the diff for print/log/json.dumps of env values); CLAUDE_CODE_OAUTH_TOKEN is only set when the account has oauth_token_env AND the variable is set, and is absent otherwise; the env: secret form skips a missing variable with a note naming the variable, not the value; the command form is byte-for-byte the old behaviour; pool.toml still parses with tomllib and its values are unchanged; existing tests untouched. Verdict approve or request_changes with path:line findings.",
+  "inputs": [
+    "T-0079"
+  ],
+  "acceptance": [
+    "Verdict posted with path:line findings",
+    "Each acceptance criterion of T-0079 marked met or not met with evidence"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/pool.py",
+    "tests/test_spawn.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0089",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 118,
+        "issue": "Accounts WITHOUT oauth_token_env still inherit an ambient CLAUDE_CODE_OAUTH_TOKEN from the daemon's environment, because env = {**os.environ, ...}. `claude setup-token` prints a token under that exact canonical name, so the obvious headless setup (export CLAUDE_CODE_OAUTH_TOKEN for account A, oauth_token_env=TOK_B for B) silently runs every unconfigured account under A's identity, overriding the CLAUDE_CONFIG_DIR binding that the module docstring promises. That breaks per-account rate-limit accounting and the other-account guarantees (review on a different account, challenge on account B). Fix is one line: else branch doing env.pop('CLAUDE_CODE_OAUTH_TOKEN', None). The new test's setUp scrubs the ambient var precisely because this pass-through exists, so it is not covered. Not a regression of prior behaviour, hence not blocking.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "line": 86,
+        "issue": "`if val:` treats an env var that is set but empty as missing, and the stderr note then claims \"env var X is not set\", which is wrong for the empty case. An operator debugging a truncated systemd EnvironmentFile gets a misleading message. Use `val is not None` or word the note as \"not set or empty\".",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_spawn.py",
+        "line": 207,
+        "issue": "setUp replaces Popen on the shared subprocess module (spawn.subprocess IS subprocess), so every subprocess.run in the process is also rerouted through FakePopen for the duration. It only passes today because [secrets.execute] is absent from pool.toml and the task dict presets worktree; adding a [secrets.execute] entry later makes secrets_for_role call subprocess.run -> FakePopen.communicate(input=...) -> TypeError, with no hint that the cause is the patch. Patch spawn's own reference or accept **kwargs in FakePopen.communicate.",
+        "severity": "low"
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 138,
+        "issue": "The new option is only documented in README: pool.toml's [[claude_accounts]] tables carry no commented `oauth_token_env = \"...\"` example, unlike the env: form which did get an inline comment. A reader configuring a headless host from the config file alone will not discover the key. Spec item (4) only mandated the secrets comment, so this is a doc gap, not a missed criterion.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789732593.83604,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0089",
+      "claimed_at": 1789732593.835683
+    },
+    {
+      "ts": 1789732593.862509,
+      "pid": 185,
+      "account": "B"
+    },
+    {
+      "ts": 1789732718.87292,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 118,
+            "issue": "Accounts WITHOUT oauth_token_env still inherit an ambient CLAUDE_CODE_OAUTH_TOKEN from the daemon's environment, because env = {**os.environ, ...}. `claude setup-token` prints a token under that exact canonical name, so the obvious headless setup (export CLAUDE_CODE_OAUTH_TOKEN for account A, oauth_token_env=TOK_B for B) silently runs every unconfigured account under A's identity, overriding the CLAUDE_CONFIG_DIR binding that the module docstring promises. That breaks per-account rate-limit accounting and the other-account guarantees (review on a different account, challenge on account B). Fix is one line: else branch doing env.pop('CLAUDE_CODE_OAUTH_TOKEN', None). The new test's setUp scrubs the ambient var precisely because this pass-through exists, so it is not covered. Not a regression of prior behaviour, hence not blocking.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "line": 86,
+            "issue": "`if val:` treats an env var that is set but empty as missing, and the stderr note then claims \"env var X is not set\", which is wrong for the empty case. An operator debugging a truncated systemd EnvironmentFile gets a misleading message. Use `val is not None` or word the note as \"not set or empty\".",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_spawn.py",
+            "line": 207,
+            "issue": "setUp replaces Popen on the shared subprocess module (spawn.subprocess IS subprocess), so every subprocess.run in the process is also rerouted through FakePopen for the duration. It only passes today because [secrets.execute] is absent from pool.toml and the task dict presets worktree; adding a [secrets.execute] entry later makes secrets_for_role call subprocess.run -> FakePopen.communicate(input=...) -> TypeError, with no hint that the cause is the patch. Patch spawn's own reference or accept **kwargs in FakePopen.communicate.",
+            "severity": "low"
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 138,
+            "issue": "The new option is only documented in README: pool.toml's [[claude_accounts]] tables carry no commented `oauth_token_env = \"...\"` example, unlike the env: form which did get an inline comment. A reader configuring a headless host from the config file alone will not discover the key. Spec item (4) only mandated the secrets comment, so this is a doc gap, not a missed criterion.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789732718.875545,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789732593.835683,
+  "pid": 185,
+  "account": "B",
+  "review_verdict": "approve"
+}

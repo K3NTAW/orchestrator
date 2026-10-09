@@ -1,0 +1,719 @@
+{
+  "id": "T-0802",
+  "created_at": 1790087066.320587,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 5,
+  "title": "P10/P11/P22 tool disclosure, shadow: measure tool-definition tokens per role, compute a task-class-based minimal tool set from a Level-0 catalog, log tool_disclosure decisions; allowlists unchanged",
+  "spec": "Facts (Planner grep, provenance repo): worker tool exposure is the per-role Claude Code allowlist in spawn.py:24-31 (scout/triage/review/challenge/spec_review/execute; execute is the Claude fallback only, Codex executors get the Codex CLI's own tools); the bus MCP exposes bus_post_result/bus_read/... to workers (orchestrator/bus_mcp.py) and the orchestrator MCP exposes 11 Planner tools (orchestrator/mcp.py:76-170). Tool schemas for Claude Code built-ins are not controlled by this repo, so P10 here means: know what each role is offered, estimate its schema cost, and compute (shadow) the minimum set a task class needs.\nDo:\n1. orchestrator/tool_catalog.py (new): CATALOG = Level-0 entries {tool_id: {\"line\": one-line purpose, \"category\": one of read, search, edit, shell, test, git, bus, memory, graph, browser, executor, review, \"est_schema_tokens\": int}} for every id that appears in spawn.py allowlists (Read, Grep, Glob, Edit, Write, each Bash(...) pattern as its own id, mcp__bus__* tools) plus the orchestrator MCP tools (codex, codex_reply, spawn_scout, spawn_review, spawn_challenge, spawn_spec_review, merge, status, executor_fallback, hold_account, resume_account). est_schema_tokens: measure MCP tools from their docstring + signature (chars//4) at import time; built-ins use a fixed table with a comment saying they are estimates (Read 350, Grep 400, Glob 200, Edit 300, Write 200, Bash 500 per pattern group, MCP tools measured). `level0(ids) -> str` renders the compact catalog (\"- codex \u2014 implement software tasks\"). `disclosed(role) -> list[str]` parses the allowlist for a role. `tokens(ids) -> int`.\n2. `minimal_set(task, role) -> dict` deterministic: categories needed by task_class \u00d7 role (table in the module: e.g. review \u2192 read, search, git, bus; scout \u2192 read, search, git, bus; execute refactor \u2192 read, search, edit, test, git, bus; execute with tests in acceptance adds test; docs-only scope (all paths .md) drops test and shell). Returns {\"keep\": ids, \"drop\": ids, \"reason\": str, \"mandatory\": ids} where mandatory = bus_post_result for every role and everything the role's safety needs (never dropped: Read for all, Bash(git *) for review/scout, tests-green for execute).\n3. Shadow wiring: in spawn.run_worker (and the Claude execute fallback) when promotion.mode(\"tool_disclosure\") in (\"shadow\",\"active\") (active treated as shadow with a one-time notify warning): compute disclosed(role), tokens, minimal_set; record decision_log.record(kind=\"tool_disclosure\", subject=task id, candidates=disclosed ids, hard_constraints=mandatory, deterministic={\"task_class\", \"role\", \"kept\", \"dropped\", \"tokens_disclosed\", \"tokens_minimal\"}, selected=\"allowlist unchanged (shadow)\", reason=minimal_set reason, mode=mode); add tool_tokens_disclosed and tool_tokens_minimal to the task's packet_meta so bus.log_run carries them into the run's context (bus.py copied keys). The allowlist passed to the worker is byte-identical to today (assert in a test).\n4. P22 measurement hooks: `tool_catalog.recovery_events(root)` scans runs for rows where a worker asked for a tool outside its allowlist (grep the existing run rows for permission denials if any field carries them; if none exists today, document that this signal is not yet recorded and return an empty list with a note field). context_scorecard gains per-role columns tool_tokens_disclosed (avg) and tool_tokens_minimal (avg) and tool_reduction = minimal/disclosed.\n5. Codex executors: record the same tool_disclosure decision with role \"codex_execute\" using a fixed CODEX_TOOLS entry (\"codex CLI built-ins; not controlled here\", est 0) so the scorecard shows the gap honestly.\nTests (unittest, `import _harness` first): tests/test_tool_catalog.py::test_catalog_covers_every_allowlisted_id (every id parsed from spawn allowlists has a CATALOG entry), ::test_minimal_set_never_drops_mandatory, ::test_docs_only_task_drops_test_and_shell; tests/test_spawn.py::test_worker_allowlist_unchanged_under_tool_disclosure_shadow (the allowed-tools argument built for a review worker is identical with mode off and shadow; a tool_disclosure decision row exists in shadow only). docs/context-economy/06-tool-disclosure.md (\u226460 lines): the catalog, the category table, what shadow logs, what active would do (P11 escalation path: a worker that needs a hidden optional tool posts a bus event and the Planner re-spawns with the wider set; not implemented), revert path (mode off).\nDo not change any allowlist string. Do not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_tool_catalog.py::test_catalog_covers_every_allowlisted_id passes",
+    "tests/test_tool_catalog.py::test_minimal_set_never_drops_mandatory passes",
+    "tests/test_tool_catalog.py::test_docs_only_task_drops_test_and_shell passes",
+    "tests/test_spawn.py::test_worker_allowlist_unchanged_under_tool_disclosure_shadow passes",
+    "docs/context-economy/06-tool-disclosure.md exists; spawn.py allowlist strings unchanged (git diff shows no change to lines 24-31 values); .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/tool_catalog.py",
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_tool_catalog.py",
+    "tests/test_spawn.py",
+    "docs/context-economy/06-tool-disclosure.md"
+  ],
+  "depends_on": [
+    "T-0800"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "straightforward"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0802",
+  "codex_thread": "01a0c9be-5ca0-72e3-b632-b3b354cd7156",
+  "result": {
+    "summary": "Summary: implemented tool catalog, minimal-set shadow decisions, token telemetry, scorecard columns, recovery hooks, tests, and documentation. All targeted tests pass (14/14); allowlist values are unchanged; worktree is clean.\n\nFiles changed: 7 scoped files.\n\nGate result: **RED on final permitted full run**; the sole failure was fixed afterward and verified with its targeted test, but the two-run cap prevented another full gate.\n\nCommit: `71b01dc961201f2c6af449a4bb860f3d70aa8838`\n\nFailures-only output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_codex_run_row_has_packet_meta_and_prompt_chars (test_executor.Executor.test_codex_run_row_has_packet_meta_and_prompt_chars)\nTraceback (most recent call last):\nAssertionError: {'cha[2146 chars]68a2ec'], 'tool_tokens_disclosed': 0, 'tool_tokens_minimal': 0} != {'cha[2146 chars]68a2ec']}\nFAILED (failures=1)\n```",
+    "executed_by": "codex:sol",
+    "thread": "01a0c9be-5ca0-72e3-b632-b3b354cd7156",
+    "usage": {
+      "input_tokens": 1190473,
+      "cached_input_tokens": 1124096,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 11413,
+      "reasoning_output_tokens": 2009,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790091039.079817,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482
+      }
+    },
+    {
+      "ts": 1790091039.081356,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127
+      }
+    },
+    {
+      "ts": 1790091042.0560782,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889
+      }
+    },
+    {
+      "ts": 1790091090.339435,
+      "packet_meta": {
+        "chars": 1541,
+        "est_tokens": 385,
+        "hash": "8d3a534651fe",
+        "version": "8d3a534651fe",
+        "base": "e8c4687d6d62",
+        "sources": "pool.toml@958205df7bf1 gotchas@83bafa85b358 memory@notes",
+        "policy_version": "958205df7bf1",
+        "gotchas": "83bafa85b358"
+      }
+    },
+    {
+      "ts": 1790091090.3415911,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0802",
+      "claimed_at": 1790091090.340391
+    },
+    {
+      "ts": 1790091090.343649,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790091747.622257,
+      "codex_thread": "01a0c9be-5ca0-72e3-b632-b3b354cd7156",
+      "codex_thread_head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+    },
+    {
+      "ts": 1790091747.628788,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790091747.632444,
+      "status": "done",
+      "result": {
+        "summary": "Summary: implemented tool catalog, minimal-set shadow decisions, token telemetry, scorecard columns, recovery hooks, tests, and documentation. All targeted tests pass (14/14); allowlist values are unchanged; worktree is clean.\n\nFiles changed: 7 scoped files.\n\nGate result: **RED on final permitted full run**; the sole failure was fixed afterward and verified with its targeted test, but the two-run cap prevented another full gate.\n\nCommit: `71b01dc961201f2c6af449a4bb860f3d70aa8838`\n\nFailures-only output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_codex_run_row_has_packet_meta_and_prompt_chars (test_executor.Executor.test_codex_run_row_has_packet_meta_and_prompt_chars)\nTraceback (most recent call last):\nAssertionError: {'cha[2146 chars]68a2ec'], 'tool_tokens_disclosed': 0, 'tool_tokens_minimal': 0} != {'cha[2146 chars]68a2ec']}\nFAILED (failures=1)\n```",
+        "executed_by": "codex:sol",
+        "thread": "01a0c9be-5ca0-72e3-b632-b3b354cd7156",
+        "usage": {
+          "input_tokens": 1190473,
+          "cached_input_tokens": 1124096,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 11413,
+          "reasoning_output_tokens": 2009,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790091778.46853,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790091905.141651,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790091905.6760771,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        }
+      }
+    },
+    {
+      "ts": 1790091905.7742238,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        },
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+      }
+    },
+    {
+      "ts": 1790091905.7880452,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        },
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+        "gated_at_done": 1790091905.787906
+      }
+    },
+    {
+      "ts": 1790092069.774782,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        },
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+        "gated_at_done": 1790091905.787906,
+        "review_held_at": 1790092069.774532
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-0819"
+    },
+    {
+      "ts": 1790092071.070026,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        },
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+        "gated_at_done": 1790091905.787906,
+        "review_held_at": 1790092069.774532,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790092071.561165,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        },
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+        "gated_at_done": 1790091905.787906,
+        "review_held_at": 1790092069.774532,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790092069.774782": true
+        }
+      }
+    },
+    {
+      "ts": 1790093455.696384,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790093638.634048,
+      "hold_reason": "review request_changes: T-0819 (request_changes)"
+    },
+    {
+      "ts": 1790093897.9464178,
+      "codex_thread": "01a0c9be-5ca0-72e3-b632-b3b354cd7156",
+      "codex_thread_head": "6c3c2b541a84a6923a772c8b9ff2af566c261eda"
+    },
+    {
+      "ts": 1790093897.950987,
+      "rounds": 1
+    },
+    {
+      "ts": 1790094178.462205,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        },
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+        "gated_at_done": 1790091905.787906,
+        "review_held_at": 1790092069.774532,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790092069.774782": true
+        },
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790094531.191534,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "merged_via": "fix round T-0821 6c3c2b541a84a6923a772c8b9ff2af566c261eda",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790091039.0797482,
+        "dispatched_at": 1790091039.08127,
+        "dispatched_at_lease": 1790091939.08127,
+        "dispatched_at_done": 1790091042.055889,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0826923076923076
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790091905.14143,
+        "gated_at_lease": 1790092805.14143,
+        "first_green_at": 1790091905.1401181,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0802",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790091905.675529,
+          "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+        },
+        "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+        "gated_at_done": 1790091905.787906,
+        "review_held_at": 1790092069.774532,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790092069.774782": true
+        },
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790094531.189506
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790091039.0797482,
+    "dispatched_at": 1790091039.08127,
+    "dispatched_at_lease": 1790091939.08127,
+    "dispatched_at_done": 1790091042.055889,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "7cdd79171bd11b0724d4b0dfed7fd21f4b6a4ed8",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0826923076923076
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790091905.14143,
+    "gated_at_lease": 1790092805.14143,
+    "first_green_at": 1790091905.1401181,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0802",
+      "goal_head": "goal/T-0760",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790091905.675529,
+      "head": "71b01dc961201f2c6af449a4bb860f3d70aa8838"
+    },
+    "reviewed_sha": "71b01dc961201f2c6af449a4bb860f3d70aa8838",
+    "gated_at_done": 1790091905.787906,
+    "review_held_at": 1790092069.774532,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790092069.774782": true
+    },
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790094531.189506
+  },
+  "packet_meta": {
+    "chars": 1541,
+    "est_tokens": 385,
+    "hash": "8d3a534651fe",
+    "version": "8d3a534651fe",
+    "base": "e8c4687d6d62",
+    "sources": "pool.toml@958205df7bf1 gotchas@83bafa85b358 memory@notes",
+    "policy_version": "958205df7bf1",
+    "gotchas": "83bafa85b358"
+  },
+  "claimed_at": 1790091090.340391,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "6c3c2b541a84a6923a772c8b9ff2af566c261eda",
+  "hold_reason": null,
+  "review_verdict": "request_changes",
+  "merged_into": "goal/T-0760",
+  "merged_via": "fix round T-0821 6c3c2b541a84a6923a772c8b9ff2af566c261eda"
+}

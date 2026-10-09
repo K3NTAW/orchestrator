@@ -1,0 +1,1059 @@
+{
+  "id": "T-1428",
+  "created_at": 1790837933.340333,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 3,
+  "title": "Correct token and USD accounting for Codex usage: cached input is part of input_tokens, and cache reads are priced as cache reads",
+  "spec": "Why: usage analysis 2026-10-01: Pool._usage_tokens (pool.py around 311) sums input_tokens + cached_input_tokens + cache_read_input_tokens + cache creation + output. Codex usage reports input_tokens INCLUDING the cached part (cached_input_tokens is a subset), so cached tokens are counted twice and priced at the full rate via [limits].default_tokens_per_usd (250k/USD). Example: T-0237 counted 779k tokens vs 273k real; the scorecard shows sol $1,408 and astra $917, not comparable with Claude. Callers: bus.py:378-381 (run-row usd), executor.py:202, pool.py:257-262 (reservations), 308, 394-395 (accounting). Claude usage (input_tokens excludes cache reads/creation) is correct today and must stay unchanged.\nWhat: in _usage_tokens, when cached_input_tokens is present treat it as part of input_tokens (do not add it); keep the Claude keys as they are. In the derived-usd path, weight cached_input_tokens and cache_read_input_tokens by [limits].cache_read_weight (new key, default 0.1, documented in .orchestrator/pool.toml is NOT in scope: read it with a default in code). Recorded usd/total_cost_usd keep priority. Do not rewrite historical run rows; the fix applies to new rows and to on-the-fly derivations.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Acceptance ids are tests/<file>.py::<method name>; write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py::test_codex_usage_counts_cached_input_once passes: Pool._usage_tokens({'input_tokens': 1000, 'cached_input_tokens': 900, 'output_tokens': 50}) == 1050 and a Claude-shaped usage {'input_tokens': 100, 'cache_read_input_tokens': 900, 'cache_creation_input_tokens': 10, 'output_tokens': 50} still totals 1060",
+    "tests/test_pool.py::test_derived_usd_weights_cache_reads passes: usd_of on usage without a recorded usd charges cached_input_tokens and cache_read_input_tokens at [limits].cache_read_weight (default 0.1) of the full rate and everything else at the full rate; a recorded usd or total_cost_usd still wins",
+    "existing tests in tests/test_pool.py pass; .claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "E2",
+    "goal_branch": "goal/T-1403",
+    "source": "usage analysis 2026-10-01"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1428",
+  "codex_thread": "01a0f648-10cd-76f3-a07e-2277aa7b34bf",
+  "result": {
+    "summary": "Gate: passed (`.claude/hooks/tests-green.sh .`).\n\nCommit: `f2f5901f950607d6946166c0796338d66623943e` \u2014 `T-1428 correct Codex cache token accounting`\n\nSummary: Codex cached input is counted once; cache reads use the default 0.1 pricing weight. Added acceptance tests.\n\nFiles changed: `orchestrator/pool.py`, `tests/test_pool.py`\n\nFailures-only test output: empty.",
+    "executed_by": "codex:terra",
+    "thread": "01a0f648-10cd-76f3-a07e-2277aa7b34bf",
+    "usage": {
+      "input_tokens": 277054,
+      "cached_input_tokens": 247296,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 2656,
+      "reasoning_output_tokens": 933,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790837971.0635588,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521
+      }
+    },
+    {
+      "ts": 1790838076.936977,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911
+      }
+    },
+    {
+      "ts": 1790838076.939919,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911
+      }
+    },
+    {
+      "ts": 1790838087.904577,
+      "packet_meta": {
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5838,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790838087.915563,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475
+      }
+    },
+    {
+      "ts": 1790838306.5145018,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        }
+      }
+    },
+    {
+      "ts": 1790838311.0694022,
+      "packet_meta": {
+        "chars": 4959,
+        "est_tokens": 1239,
+        "presented_tokens": 1239,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "5352a0d3f8da2a536eb7a497fa573a9614b495424cdc479917b945e85609176d"
+          },
+          "objective": {
+            "chars": 1677,
+            "est_tokens": 419,
+            "sha256": "24d2d52126599636e1ff9262852b9c147273173bce3d3dd5501531c8228fb497"
+          },
+          "acceptance": {
+            "chars": 740,
+            "est_tokens": 185,
+            "sha256": "9788713fb6d9e8639d3b6a921aeb1f142add3cbd0833849a3e51f252964bf463"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "f6aa23ce4bc1bc04673061ad871fbd31edb0b39a474a5128cc59df1c974e4e9c"
+          },
+          "write_scope": {
+            "chars": 59,
+            "est_tokens": 14,
+            "sha256": "e721a177605390915e19844b61a6b468ca269f3d84f43a01a28cbdf7532c3170"
+          },
+          "read_scope": {
+            "chars": 263,
+            "est_tokens": 65,
+            "sha256": "38a04c8c1cbaea69c32fc5a4e066d9f1b164f38468772729f75374d55b648243"
+          },
+          "constraints": {
+            "chars": 211,
+            "est_tokens": 52,
+            "sha256": "941224072da2221fb6a7cc15d725ce8ee1cbfbe5b7e8e2bbb889ed246691883f"
+          },
+          "relevant_tests": {
+            "chars": 1005,
+            "est_tokens": 251,
+            "sha256": "c3cf05eeb0470039b6d2ff6792720df87c94f399986134d7cf69ea167327463e"
+          },
+          "symbols": {
+            "chars": 596,
+            "est_tokens": 149,
+            "sha256": "68f9d6f650bbcc9969e524f108f5222282c39492d53c85fc33caca5d0aa15b4b"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "1d791fd5cb80",
+        "version": "1d791fd5cb80",
+        "candidate_known": true,
+        "base": "f914a1b49df1",
+        "sources": "pool.toml@28baab364e77 gotchas@08c8baf66189 memory@notes over cap by 159 chars: acceptance kept whole routed=shadow",
+        "policy_version": "28baab364e77",
+        "gotchas": "08c8baf66189",
+        "candidate_tokens": 2611,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 7840,
+        "routed_reduction_ratio": 0.8765652951699463,
+        "routed_hidden": 17,
+        "routed_ambiguous": 20,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "0145a6f41e02",
+          "cf05fbaaa294",
+          "5b20eb3f5471",
+          "01a721f90d7b",
+          "a5df6f9a2718",
+          "fa623dac123f",
+          "7dddc8eedf86",
+          "504365aa02ad",
+          "65c4d2b5db00",
+          "2ccea77faf96",
+          "d39ac091b005",
+          "df7350a0e379",
+          "4e7c92225364",
+          "5893a1c64463",
+          "5d6558009221",
+          "e7b4c83446b8",
+          "be33624d61ba",
+          "9937d0bf0065",
+          "5e34173be368",
+          "202ac798fcd3",
+          "07acc0c211d2",
+          "08df71fe3307",
+          "e11f27bc5383",
+          "d8d9fdef6f94",
+          "c18b29d51de9",
+          "4f3f7fe25e8e",
+          "e050ccc5d543",
+          "e422169995a6",
+          "ff52e317081f",
+          "95d929606c76",
+          "110082776e38",
+          "b7d430988fa9",
+          "30bfc143515d",
+          "37b0167bad22",
+          "b9eb730088eb",
+          "b49e8dbe7471",
+          "170c96acee9a",
+          "39d57ac9106b",
+          "ce5e9887ef77",
+          "9da84fe9a6ab",
+          "3f387006e667",
+          "9a89ad7954a3",
+          "d65245898507",
+          "d20c8d42d069",
+          "3037c6d26ebe",
+          "271ca802fd19",
+          "545faee2d445",
+          "dcb88ebf18a5",
+          "b754d0bf1207",
+          "69d4bdcfcb5b",
+          "55eac0d4ec3a",
+          "0e796a1e2e04",
+          "eca217cec99e",
+          "26d07b37f8ed",
+          "d0203e46d77f",
+          "8dd1b33b93e0",
+          "3dc94d32ddba",
+          "32fc0b04e3ee",
+          "db2fdc0105c0"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5838,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790838311.079541,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1428",
+      "claimed_at": 1790838311.0751228
+    },
+    {
+      "ts": 1790838311.091012,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1790838425.174873,
+      "codex_thread": "01a0f648-10cd-76f3-a07e-2277aa7b34bf",
+      "codex_thread_head": "f2f5901f950607d6946166c0796338d66623943e"
+    },
+    {
+      "ts": 1790838425.18078,
+      "packet_meta": {
+        "chars": 4959,
+        "est_tokens": 1239,
+        "presented_tokens": 1239,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "5352a0d3f8da2a536eb7a497fa573a9614b495424cdc479917b945e85609176d"
+          },
+          "objective": {
+            "chars": 1677,
+            "est_tokens": 419,
+            "sha256": "24d2d52126599636e1ff9262852b9c147273173bce3d3dd5501531c8228fb497"
+          },
+          "acceptance": {
+            "chars": 740,
+            "est_tokens": 185,
+            "sha256": "9788713fb6d9e8639d3b6a921aeb1f142add3cbd0833849a3e51f252964bf463"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "f6aa23ce4bc1bc04673061ad871fbd31edb0b39a474a5128cc59df1c974e4e9c"
+          },
+          "write_scope": {
+            "chars": 59,
+            "est_tokens": 14,
+            "sha256": "e721a177605390915e19844b61a6b468ca269f3d84f43a01a28cbdf7532c3170"
+          },
+          "read_scope": {
+            "chars": 263,
+            "est_tokens": 65,
+            "sha256": "38a04c8c1cbaea69c32fc5a4e066d9f1b164f38468772729f75374d55b648243"
+          },
+          "constraints": {
+            "chars": 211,
+            "est_tokens": 52,
+            "sha256": "941224072da2221fb6a7cc15d725ce8ee1cbfbe5b7e8e2bbb889ed246691883f"
+          },
+          "relevant_tests": {
+            "chars": 1005,
+            "est_tokens": 251,
+            "sha256": "c3cf05eeb0470039b6d2ff6792720df87c94f399986134d7cf69ea167327463e"
+          },
+          "symbols": {
+            "chars": 596,
+            "est_tokens": 149,
+            "sha256": "68f9d6f650bbcc9969e524f108f5222282c39492d53c85fc33caca5d0aa15b4b"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "1d791fd5cb80",
+        "version": "1d791fd5cb80",
+        "candidate_known": true,
+        "base": "f914a1b49df1",
+        "sources": "pool.toml@28baab364e77 gotchas@08c8baf66189 memory@notes over cap by 159 chars: acceptance kept whole routed=shadow",
+        "policy_version": "28baab364e77",
+        "gotchas": "08c8baf66189",
+        "candidate_tokens": 2611,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 7840,
+        "routed_reduction_ratio": 0.8765652951699463,
+        "routed_hidden": 17,
+        "routed_ambiguous": 20,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "0145a6f41e02",
+          "cf05fbaaa294",
+          "5b20eb3f5471",
+          "01a721f90d7b",
+          "a5df6f9a2718",
+          "fa623dac123f",
+          "7dddc8eedf86",
+          "504365aa02ad",
+          "65c4d2b5db00",
+          "2ccea77faf96",
+          "d39ac091b005",
+          "df7350a0e379",
+          "4e7c92225364",
+          "5893a1c64463",
+          "5d6558009221",
+          "e7b4c83446b8",
+          "be33624d61ba",
+          "9937d0bf0065",
+          "5e34173be368",
+          "202ac798fcd3",
+          "07acc0c211d2",
+          "08df71fe3307",
+          "e11f27bc5383",
+          "d8d9fdef6f94",
+          "c18b29d51de9",
+          "4f3f7fe25e8e",
+          "e050ccc5d543",
+          "e422169995a6",
+          "ff52e317081f",
+          "95d929606c76",
+          "110082776e38",
+          "b7d430988fa9",
+          "30bfc143515d",
+          "37b0167bad22",
+          "b9eb730088eb",
+          "b49e8dbe7471",
+          "170c96acee9a",
+          "39d57ac9106b",
+          "ce5e9887ef77",
+          "9da84fe9a6ab",
+          "3f387006e667",
+          "9a89ad7954a3",
+          "d65245898507",
+          "d20c8d42d069",
+          "3037c6d26ebe",
+          "271ca802fd19",
+          "545faee2d445",
+          "dcb88ebf18a5",
+          "b754d0bf1207",
+          "69d4bdcfcb5b",
+          "55eac0d4ec3a",
+          "0e796a1e2e04",
+          "eca217cec99e",
+          "26d07b37f8ed",
+          "d0203e46d77f",
+          "8dd1b33b93e0",
+          "3dc94d32ddba",
+          "32fc0b04e3ee",
+          "db2fdc0105c0"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5838,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790838425.74177,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "c8a01a6a685933704553421d76446fd906bfe077",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790838425.7449,
+      "status": "done",
+      "result": {
+        "summary": "Gate: passed (`.claude/hooks/tests-green.sh .`).\n\nCommit: `f2f5901f950607d6946166c0796338d66623943e` \u2014 `T-1428 correct Codex cache token accounting`\n\nSummary: Codex cached input is counted once; cache reads use the default 0.1 pricing weight. Added acceptance tests.\n\nFiles changed: `orchestrator/pool.py`, `tests/test_pool.py`\n\nFailures-only test output: empty.",
+        "executed_by": "codex:terra",
+        "thread": "01a0f648-10cd-76f3-a07e-2277aa7b34bf",
+        "usage": {
+          "input_tokens": 277054,
+          "cached_input_tokens": 247296,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 2656,
+          "reasoning_output_tokens": 933,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790838429.209443,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "c8a01a6a685933704553421d76446fd906bfe077",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790838614.18891,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "c8a01a6a685933704553421d76446fd906bfe077",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790838614.1887748,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_run_log_carries_executor_and_complexity (test_executor.Executor.test_run_log_carries_executor_and_complexity)\nTraceback (most recent call last):\n    raise ValueError(\"invalid registry number\")\nValueError: invalid registry number\nFAILED (errors=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1428/.orchestrator/runs/tests/T-1428-20261001-091014.log\n"
+      }
+    },
+    {
+      "ts": 1790838616.226966,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_run_log_carries_executor_and_complexity (test_executor.Executor.test_run_log_carries_executor_and_complexity)\nTraceback (most recent call last):\n    raise ValueError(\"invalid registry number\")\nValueError: invalid registry number\nFAILED (errors=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1428/.orchestrator/runs/tests/T-1428-20261001-091014.log\n",
+        "rejected_ids": [
+          "(errors=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1790838616.340388,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_run_log_carries_executor_and_complexity (test_executor.Executor.test_run_log_carries_executor_and_complexity)\nTraceback (most recent call last):\n    raise ValueError(\"invalid registry number\")\nValueError: invalid registry number\nFAILED (errors=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1428/.orchestrator/runs/tests/T-1428-20261001-091014.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_executor.Executor.test_run_log_carries_executor_and_complexity"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_executor'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1790838616.345429,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "c8a01a6a685933704553421d76446fd906bfe077",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790838614.1887748,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1790838616.5563278,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "c8a01a6a685933704553421d76446fd906bfe077",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790838614.1887748,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1790838614.18891"
+      }
+    },
+    {
+      "ts": 1790838969.637824,
+      "codex_thread": "01a0f648-10cd-76f3-a07e-2277aa7b34bf",
+      "codex_thread_head": "4f1173e6d09b3ccf4a0d04057726c90a27dbe323"
+    },
+    {
+      "ts": 1790838972.691157,
+      "rounds": 1
+    },
+    {
+      "ts": 1790839163.02126,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "c8a01a6a685933704553421d76446fd906bfe077",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790838614.1887748,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1790838614.18891",
+        "first_green_at": 1790839163.016567,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790839598.107708,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1429 4f1173e6d09b3ccf4a0d04057726c90a27dbe323",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790837971.063521,
+        "dispatched_at": 1790838076.936911,
+        "dispatched_at_lease": 1790838976.936911,
+        "dispatched_at_done": 1790838087.915475,
+        "handoff": {
+          "baseline": "terra",
+          "selected": "terra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790838301.202189
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "c8a01a6a685933704553421d76446fd906bfe077",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790838614.1887748,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1790838614.18891",
+        "first_green_at": 1790839163.016567,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790839598.1055958
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790837971.063521,
+    "dispatched_at": 1790838076.936911,
+    "dispatched_at_lease": 1790838976.936911,
+    "dispatched_at_done": 1790838087.915475,
+    "handoff": {
+      "baseline": "terra",
+      "selected": "terra",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790838301.202189
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "terra",
+      "hypothetical": "terra",
+      "key": "c8a01a6a685933704553421d76446fd906bfe077",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790838614.1887748,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_hold_key": "1790838614.18891",
+    "first_green_at": 1790839163.016567,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790839598.1055958
+  },
+  "packet_meta": {
+    "chars": 4959,
+    "est_tokens": 1239,
+    "presented_tokens": 1239,
+    "sections": {
+      "_preamble": {
+        "chars": 163,
+        "est_tokens": 40,
+        "sha256": "5352a0d3f8da2a536eb7a497fa573a9614b495424cdc479917b945e85609176d"
+      },
+      "objective": {
+        "chars": 1677,
+        "est_tokens": 419,
+        "sha256": "24d2d52126599636e1ff9262852b9c147273173bce3d3dd5501531c8228fb497"
+      },
+      "acceptance": {
+        "chars": 740,
+        "est_tokens": 185,
+        "sha256": "9788713fb6d9e8639d3b6a921aeb1f142add3cbd0833849a3e51f252964bf463"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "f6aa23ce4bc1bc04673061ad871fbd31edb0b39a474a5128cc59df1c974e4e9c"
+      },
+      "write_scope": {
+        "chars": 59,
+        "est_tokens": 14,
+        "sha256": "e721a177605390915e19844b61a6b468ca269f3d84f43a01a28cbdf7532c3170"
+      },
+      "read_scope": {
+        "chars": 263,
+        "est_tokens": 65,
+        "sha256": "38a04c8c1cbaea69c32fc5a4e066d9f1b164f38468772729f75374d55b648243"
+      },
+      "constraints": {
+        "chars": 211,
+        "est_tokens": 52,
+        "sha256": "941224072da2221fb6a7cc15d725ce8ee1cbfbe5b7e8e2bbb889ed246691883f"
+      },
+      "relevant_tests": {
+        "chars": 1005,
+        "est_tokens": 251,
+        "sha256": "c3cf05eeb0470039b6d2ff6792720df87c94f399986134d7cf69ea167327463e"
+      },
+      "symbols": {
+        "chars": 596,
+        "est_tokens": 149,
+        "sha256": "68f9d6f650bbcc9969e524f108f5222282c39492d53c85fc33caca5d0aa15b4b"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "1d791fd5cb80",
+    "version": "1d791fd5cb80",
+    "candidate_known": true,
+    "base": "f914a1b49df1",
+    "sources": "pool.toml@28baab364e77 gotchas@08c8baf66189 memory@notes over cap by 159 chars: acceptance kept whole routed=shadow",
+    "policy_version": "28baab364e77",
+    "gotchas": "08c8baf66189",
+    "candidate_tokens": 2611,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 7840,
+    "routed_reduction_ratio": 0.8765652951699463,
+    "routed_hidden": 17,
+    "routed_ambiguous": 20,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "0145a6f41e02",
+      "cf05fbaaa294",
+      "5b20eb3f5471",
+      "01a721f90d7b",
+      "a5df6f9a2718",
+      "fa623dac123f",
+      "7dddc8eedf86",
+      "504365aa02ad",
+      "65c4d2b5db00",
+      "2ccea77faf96",
+      "d39ac091b005",
+      "df7350a0e379",
+      "4e7c92225364",
+      "5893a1c64463",
+      "5d6558009221",
+      "e7b4c83446b8",
+      "be33624d61ba",
+      "9937d0bf0065",
+      "5e34173be368",
+      "202ac798fcd3",
+      "07acc0c211d2",
+      "08df71fe3307",
+      "e11f27bc5383",
+      "d8d9fdef6f94",
+      "c18b29d51de9",
+      "4f3f7fe25e8e",
+      "e050ccc5d543",
+      "e422169995a6",
+      "ff52e317081f",
+      "95d929606c76",
+      "110082776e38",
+      "b7d430988fa9",
+      "30bfc143515d",
+      "37b0167bad22",
+      "b9eb730088eb",
+      "b49e8dbe7471",
+      "170c96acee9a",
+      "39d57ac9106b",
+      "ce5e9887ef77",
+      "9da84fe9a6ab",
+      "3f387006e667",
+      "9a89ad7954a3",
+      "d65245898507",
+      "d20c8d42d069",
+      "3037c6d26ebe",
+      "271ca802fd19",
+      "545faee2d445",
+      "dcb88ebf18a5",
+      "b754d0bf1207",
+      "69d4bdcfcb5b",
+      "55eac0d4ec3a",
+      "0e796a1e2e04",
+      "eca217cec99e",
+      "26d07b37f8ed",
+      "d0203e46d77f",
+      "8dd1b33b93e0",
+      "3dc94d32ddba",
+      "32fc0b04e3ee",
+      "db2fdc0105c0"
+    ],
+    "prefix_sha": "ca8679e33dc1",
+    "prefix_chars": 725,
+    "suffix_chars": 5838,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790838311.0751228,
+  "rounds": 1,
+  "executor": "terra",
+  "codex_thread_head": "4f1173e6d09b3ccf4a0d04057726c90a27dbe323",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_run_log_carries_executor_and_complexity (test_executor.Executor.test_run_log_carries_executor_and_complexity)\nTraceback (most recent call last):\n    raise ValueError(\"invalid registry number\")\nValueError: invalid registry number\nFAILED (errors=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1428/.orchestrator/runs/tests/T-1428-20261001-091014.log\n",
+    "flaky_runs": [
+      {
+        "ids": [
+          "test_executor.Executor.test_run_log_carries_executor_and_complexity"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_executor (unittest.loader._FailedTest.test_executor)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_executor\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_executor'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+      }
+    ]
+  },
+  "merged_into": "goal/T-1403",
+  "merged_via": "fix round T-1429 4f1173e6d09b3ccf4a0d04057726c90a27dbe323"
+}

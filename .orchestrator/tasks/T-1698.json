@@ -1,0 +1,682 @@
+{
+  "id": "T-1698",
+  "created_at": 1791330367.202066,
+  "parent": "T-1667",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: next_goal: a closed goal leads a decision Planner to file the next roadmap goal",
+  "spec": "When a goal is closed (result.goal_closed true, and with [ship].enabled also ship state shipped), file the next goal\nfrom the repo's roadmap so a repo keeps working without a human in the session.\n\n1. Roadmap format: .orchestrator/roadmap.md, checklist lines `- [ ] <goal text>` (unchecked = not filed yet) and\n   `- [x] <goal text> (T-xxxx)`. Lines outside the checklist are context.\n2. Config [planner].next_goal (default false). When true and a goal closes, add a decision point of a new kind\n   \"next_goal\" in orchestrator/planner_runs.py decision_points(); its packet carries the closed goal's title, result and\n   retrospective, the roadmap text and the open goals. At most one next_goal decision per closed goal (reuse the\n   records/claim machinery and its keys).\n3. The decision Planner prompt for next_goal (.orchestrator/prompts/planner-decision.md section or a new prompt file\n   next to it): pick the first unchecked roadmap item whose dependencies are met, create the goal task and its first atomic\n   tasks on the bus exactly as an interactive Planner would, tick the roadmap line with the goal id, commit. If no item\n   is ready it records why and stops. It never files more than one goal per decision.\n4. No roadmap file or no unchecked item -> no decision point, nothing launched.\nTests tests/test_next_goal.py: test_next_goal_disabled_by_default, test_next_goal_point_after_close, test_next_goal_waits_for_ship_when_enabled,\ntest_next_goal_once_per_closed_goal, test_no_point_without_unchecked_items, test_packet_contains_roadmap_and_retrospective.\n",
+  "inputs": [
+    "T-1680"
+  ],
+  "acceptance": [
+    "tests/test_next_goal.py: the six named tests exist and pass",
+    "[planner].next_goal defaults to false"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    ".orchestrator/prompts",
+    "tests/test_next_goal.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1698",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Scope omits the files that dispatch on decision kind: decision.py (route, line 150), planner_taxonomy.py (unknown kind becomes 'other'), planner_packet.py (kind to type map), plus _condition_resolved, _decision_task and build_ctx. A new 'next_goal' kind will fall through to defaults and may route to none, so tick() never launches it.",
+        "severity": "high",
+        "line": 168
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Enabling next_goal yields a point for every historical closed goal. Each launches a decision Planner that can file a goal, which breaks 'one goal per decision' in practice.",
+        "severity": "high",
+        "line": 207
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "decision_points() takes no args, and the spec doesn't say how it reads [planner].next_goal. The default lives in pool.py or pool.toml, both out of scope, so the default and the tests can diverge.",
+        "severity": "med",
+        "line": 168
+      },
+      {
+        "path": ".orchestrator/prompts/planner-decision.md",
+        "issue": "Filing isn't idempotent. The goal is created on the bus before the roadmap tick commit, so a crash between them lets a retry file the same item twice. The spec has no rollback for a wrongly filed goal.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Roadmap and retrospective are untrusted and share a 6000-char packet cap. The spec sets no per-section limit and no fencing, so a large roadmap can crowd out the retrospective or hide unchecked items, and roadmap text can carry instructions.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The ship-state gate is underspecified. It must read goal.pipeline.ship.state and suppress the point for held and pending. Nothing bounds the unattended chain of goals (no cap, no suppression while another goal is open).",
+        "severity": "med",
+        "line": 207
+      },
+      {
+        "path": "tests/test_next_goal.py",
+        "issue": "The six tests cover only decision_points() and the packet. They don't cover prompt rendering, the kind's routing, the 'no ready item, record why' path, or the pool.toml default.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add decision.py, planner_taxonomy.py, planner_packet.py and the pool.toml/pool.py default to scope. Say how next_goal routes (it should launch, not escalate or skip) and how _condition_resolved resolves it.",
+      "Restrict the point to the single most recently closed goal, or to goals closed after next_goal was enabled. Also suppress it while any other non-closed goal exists.",
+      "Define how decision_points() reads [planner].next_goal (a Pool cfg read at call time) and how tests patch it. With ship enabled, require pipeline.ship.state == 'shipped'.",
+      "Make filing idempotent. The prompt must check the open goals in the packet for the item text before creating, and tick the roadmap line in the same step as the bus create. State the rollback: git revert of the roadmap commit plus closing the filed goal.",
+      "Fence the roadmap and retrospective with _fenced() and give each a char budget so the 6000-char cap can't drop unchecked items.",
+      "Add tests: the next_goal prompt section renders, pool.toml has next_goal=false, and the 'no ready item' path records a reason and files nothing."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791330373.047807,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 2986,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791330373.067626,
+      "packet_meta": {
+        "chars": 2247,
+        "est_tokens": 561,
+        "presented_tokens": 561,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ccb44460d77ba0500b461f7f6c8b5ee57bad8f8367f48889e9dc6b7c144edcca"
+          },
+          "spec": {
+            "chars": 1577,
+            "est_tokens": 394,
+            "sha256": "f73b50c1ad841b8d03d0c7470f473cd6c4bab35f75c04b0bb5c8402bfc373491"
+          },
+          "acceptance": {
+            "chars": 116,
+            "est_tokens": 29,
+            "sha256": "4e2b80785f708087b80348ca54a2a899b090d63ae86022f0bc004ba06d77ff1c"
+          },
+          "scope": {
+            "chars": 90,
+            "est_tokens": 22,
+            "sha256": "30b88054e25911d9976c930507c446513e4f0c43bc6fcd197e9bc938e4280c1c"
+          },
+          "depends_on": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "bf372e9e9527575d1cb16419941c12672de7540a6b9fd3984565fef7aec19ed0"
+          },
+          "existing tests": {
+            "chars": 213,
+            "est_tokens": 53,
+            "sha256": "eade453af77fc22bd8dfb80339fc0d4e057330dd74827031805acf34d6d22a58"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "121db23b0964",
+        "version": "121db23b0964",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1680 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 2986,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791330374.615232,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1698",
+      "claimed_at": 1791330374.6149912
+    },
+    {
+      "ts": 1791330374.616406,
+      "account": "B"
+    },
+    {
+      "ts": 1791330381.281112,
+      "pid": 28119,
+      "account": "B"
+    },
+    {
+      "ts": 1791330426.9566379,
+      "packet_meta": {
+        "chars": 2247,
+        "est_tokens": 561,
+        "presented_tokens": 561,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ccb44460d77ba0500b461f7f6c8b5ee57bad8f8367f48889e9dc6b7c144edcca"
+          },
+          "spec": {
+            "chars": 1577,
+            "est_tokens": 394,
+            "sha256": "f73b50c1ad841b8d03d0c7470f473cd6c4bab35f75c04b0bb5c8402bfc373491"
+          },
+          "acceptance": {
+            "chars": 116,
+            "est_tokens": 29,
+            "sha256": "4e2b80785f708087b80348ca54a2a899b090d63ae86022f0bc004ba06d77ff1c"
+          },
+          "scope": {
+            "chars": 90,
+            "est_tokens": 22,
+            "sha256": "30b88054e25911d9976c930507c446513e4f0c43bc6fcd197e9bc938e4280c1c"
+          },
+          "depends_on": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "bf372e9e9527575d1cb16419941c12672de7540a6b9fd3984565fef7aec19ed0"
+          },
+          "existing tests": {
+            "chars": 213,
+            "est_tokens": 53,
+            "sha256": "eade453af77fc22bd8dfb80339fc0d4e057330dd74827031805acf34d6d22a58"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "121db23b0964",
+        "version": "121db23b0964",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1680 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 2986,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "bf7d32d0-7308-430f-a042-5fe7888b342c"
+      }
+    },
+    {
+      "ts": 1791330426.9846342,
+      "packet_meta": {
+        "chars": 2247,
+        "est_tokens": 561,
+        "presented_tokens": 561,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ccb44460d77ba0500b461f7f6c8b5ee57bad8f8367f48889e9dc6b7c144edcca"
+          },
+          "spec": {
+            "chars": 1577,
+            "est_tokens": 394,
+            "sha256": "f73b50c1ad841b8d03d0c7470f473cd6c4bab35f75c04b0bb5c8402bfc373491"
+          },
+          "acceptance": {
+            "chars": 116,
+            "est_tokens": 29,
+            "sha256": "4e2b80785f708087b80348ca54a2a899b090d63ae86022f0bc004ba06d77ff1c"
+          },
+          "scope": {
+            "chars": 90,
+            "est_tokens": 22,
+            "sha256": "30b88054e25911d9976c930507c446513e4f0c43bc6fcd197e9bc938e4280c1c"
+          },
+          "depends_on": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "bf372e9e9527575d1cb16419941c12672de7540a6b9fd3984565fef7aec19ed0"
+          },
+          "existing tests": {
+            "chars": 213,
+            "est_tokens": 53,
+            "sha256": "eade453af77fc22bd8dfb80339fc0d4e057330dd74827031805acf34d6d22a58"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "121db23b0964",
+        "version": "121db23b0964",
+        "candidate_known": false,
+        "base": "247fe58bae3d",
+        "sources": "task@T-1680 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 2986,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1722,
+        "tool_tokens_minimal": 1722,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "bf7d32d0-7308-430f-a042-5fe7888b342c",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791330427.748106,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Scope omits the files that dispatch on decision kind: decision.py (route, line 150), planner_taxonomy.py (unknown kind becomes 'other'), planner_packet.py (kind to type map), plus _condition_resolved, _decision_task and build_ctx. A new 'next_goal' kind will fall through to defaults and may route to none, so tick() never launches it.",
+            "severity": "high",
+            "line": 168
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Enabling next_goal yields a point for every historical closed goal. Each launches a decision Planner that can file a goal, which breaks 'one goal per decision' in practice.",
+            "severity": "high",
+            "line": 207
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "decision_points() takes no args, and the spec doesn't say how it reads [planner].next_goal. The default lives in pool.py or pool.toml, both out of scope, so the default and the tests can diverge.",
+            "severity": "med",
+            "line": 168
+          },
+          {
+            "path": ".orchestrator/prompts/planner-decision.md",
+            "issue": "Filing isn't idempotent. The goal is created on the bus before the roadmap tick commit, so a crash between them lets a retry file the same item twice. The spec has no rollback for a wrongly filed goal.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Roadmap and retrospective are untrusted and share a 6000-char packet cap. The spec sets no per-section limit and no fencing, so a large roadmap can crowd out the retrospective or hide unchecked items, and roadmap text can carry instructions.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The ship-state gate is underspecified. It must read goal.pipeline.ship.state and suppress the point for held and pending. Nothing bounds the unattended chain of goals (no cap, no suppression while another goal is open).",
+            "severity": "med",
+            "line": 207
+          },
+          {
+            "path": "tests/test_next_goal.py",
+            "issue": "The six tests cover only decision_points() and the packet. They don't cover prompt rendering, the kind's routing, the 'no ready item, record why' path, or the pool.toml default.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add decision.py, planner_taxonomy.py, planner_packet.py and the pool.toml/pool.py default to scope. Say how next_goal routes (it should launch, not escalate or skip) and how _condition_resolved resolves it.",
+          "Restrict the point to the single most recently closed goal, or to goals closed after next_goal was enabled. Also suppress it while any other non-closed goal exists.",
+          "Define how decision_points() reads [planner].next_goal (a Pool cfg read at call time) and how tests patch it. With ship enabled, require pipeline.ship.state == 'shipped'.",
+          "Make filing idempotent. The prompt must check the open goals in the packet for the item text before creating, and tick the roadmap line in the same step as the bus create. State the rollback: git revert of the roadmap commit plus closing the filed goal.",
+          "Fence the roadmap and retrospective with _fenced() and give each a char budget so the 6000-char cap can't drop unchecked items.",
+          "Add tests: the next_goal prompt section renders, pool.toml has next_goal=false, and the 'no ready item' path records a reason and files nothing."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791330427.749378,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Scope omits the files that dispatch on decision kind: decision.py (route, line 150), planner_taxonomy.py (unknown kind becomes 'other'), planner_packet.py (kind to type map), plus _condition_resolved, _decision_task and build_ctx. A new 'next_goal' kind will fall through to defaults and may route to none, so tick() never launches it.",
+          "severity": "high",
+          "line": 168
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Enabling next_goal yields a point for every historical closed goal. Each launches a decision Planner that can file a goal, which breaks 'one goal per decision' in practice.",
+          "severity": "high",
+          "line": 207
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "decision_points() takes no args, and the spec doesn't say how it reads [planner].next_goal. The default lives in pool.py or pool.toml, both out of scope, so the default and the tests can diverge.",
+          "severity": "med",
+          "line": 168
+        },
+        {
+          "path": ".orchestrator/prompts/planner-decision.md",
+          "issue": "Filing isn't idempotent. The goal is created on the bus before the roadmap tick commit, so a crash between them lets a retry file the same item twice. The spec has no rollback for a wrongly filed goal.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Roadmap and retrospective are untrusted and share a 6000-char packet cap. The spec sets no per-section limit and no fencing, so a large roadmap can crowd out the retrospective or hide unchecked items, and roadmap text can carry instructions.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The ship-state gate is underspecified. It must read goal.pipeline.ship.state and suppress the point for held and pending. Nothing bounds the unattended chain of goals (no cap, no suppression while another goal is open).",
+          "severity": "med",
+          "line": 207
+        },
+        {
+          "path": "tests/test_next_goal.py",
+          "issue": "The six tests cover only decision_points() and the packet. They don't cover prompt rendering, the kind's routing, the 'no ready item, record why' path, or the pool.toml default.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 2247,
+    "est_tokens": 561,
+    "presented_tokens": 561,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "ccb44460d77ba0500b461f7f6c8b5ee57bad8f8367f48889e9dc6b7c144edcca"
+      },
+      "spec": {
+        "chars": 1577,
+        "est_tokens": 394,
+        "sha256": "f73b50c1ad841b8d03d0c7470f473cd6c4bab35f75c04b0bb5c8402bfc373491"
+      },
+      "acceptance": {
+        "chars": 116,
+        "est_tokens": 29,
+        "sha256": "4e2b80785f708087b80348ca54a2a899b090d63ae86022f0bc004ba06d77ff1c"
+      },
+      "scope": {
+        "chars": 90,
+        "est_tokens": 22,
+        "sha256": "30b88054e25911d9976c930507c446513e4f0c43bc6fcd197e9bc938e4280c1c"
+      },
+      "depends_on": {
+        "chars": 154,
+        "est_tokens": 38,
+        "sha256": "bf372e9e9527575d1cb16419941c12672de7540a6b9fd3984565fef7aec19ed0"
+      },
+      "existing tests": {
+        "chars": 213,
+        "est_tokens": 53,
+        "sha256": "eade453af77fc22bd8dfb80339fc0d4e057330dd74827031805acf34d6d22a58"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "121db23b0964",
+    "version": "121db23b0964",
+    "candidate_known": false,
+    "base": "247fe58bae3d",
+    "sources": "task@T-1680 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 2986,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 357,
+    "instruction_tokens_modular": 357,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1722,
+    "tool_tokens_minimal": 1722,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "bf7d32d0-7308-430f-a042-5fe7888b342c",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791330374.6149912,
+  "account": "B",
+  "pid": 28119,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Scope omits the files that dispatch on decision kind: decision.py (route, line 150), planner_taxonomy.py (unknown kind becomes 'other'), planner_packet.py (kind to type map), plus _condition_resolved, _decision_task and build_ctx. A new 'next_goal' kind will fall through to defaults and may route to none, so tick() never launches it.",
+      "severity": "high",
+      "line": 168
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Enabling next_goal yields a point for every historical closed goal. Each launches a decision Planner that can file a goal, which breaks 'one goal per decision' in practice.",
+      "severity": "high",
+      "line": 207
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "decision_points() takes no args, and the spec doesn't say how it reads [planner].next_goal. The default lives in pool.py or pool.toml, both out of scope, so the default and the tests can diverge.",
+      "severity": "med",
+      "line": 168
+    },
+    {
+      "path": ".orchestrator/prompts/planner-decision.md",
+      "issue": "Filing isn't idempotent. The goal is created on the bus before the roadmap tick commit, so a crash between them lets a retry file the same item twice. The spec has no rollback for a wrongly filed goal.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Roadmap and retrospective are untrusted and share a 6000-char packet cap. The spec sets no per-section limit and no fencing, so a large roadmap can crowd out the retrospective or hide unchecked items, and roadmap text can carry instructions.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The ship-state gate is underspecified. It must read goal.pipeline.ship.state and suppress the point for held and pending. Nothing bounds the unattended chain of goals (no cap, no suppression while another goal is open).",
+      "severity": "med",
+      "line": 207
+    },
+    {
+      "path": "tests/test_next_goal.py",
+      "issue": "The six tests cover only decision_points() and the packet. They don't cover prompt rendering, the kind's routing, the 'no ready item, record why' path, or the pool.toml default.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

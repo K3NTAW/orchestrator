@@ -1,0 +1,170 @@
+{
+  "id": "T-0691",
+  "created_at": 1789998394.329514,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Q2 v2: orchestrator/planner_telemetry.py \u2014 per-invocation Planner rows (launch, usage, materiality, skips), per-goal and per-accepted-goal Fable/Opus aggregation, interactive transcript attribution by day overlap (P1)",
+  "spec": "Why: headless Planner usage is logged only as bus.log_run role planner_decision rows (planner_runs._record_decision_usage, lines 566-620) with no model, decision type or materiality; interactive Fable transcript tokens are pool-wide (Pool.tally_planner -> planner_usage.json, scorecard.planner_footer) with no per-goal share. The brief (P1) needs Planner tokens per material decision and Fable tokens per accepted goal. Spec review T-0677's five risks are folded in (constraints.fix_round_for, result_escalate field, day-overlap attribution, root resolution, plan.md location).\nWhat: new module orchestrator/planner_telemetry.py using schedlog.append/read (files runs/sched/planner_invocations.jsonl and runs/sched/planner_skips.jsonl). Rows never contain prompts, transcripts or chain-of-thought; free text fields capped at 300 chars. Every function takes root=None and resolves `root = Path(root) if root is not None else STATE` first; schedlog writes go under root/runs/sched via a context manager like decision_log._using_root (orchestrator/decision_log.py:57-84).\n- record_launch(*, launch_id, goal_id, event, decision_type, kind, payload_keys, model, tier, account, complexity, band, task_class, architectural, route, route_reason, mode, state_version, packet_chars, started_at, reescalation=False, root=None) -> row phase \"launch\".\n- record_usage(launch_id, *, input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0, usd=None, latency_s=None, outcome, session_id=None, root=None) -> row phase \"usage\"; total_tokens = input + output + cache_read // 10 (pool formula, Pool.tally_planner).\n- snapshot(goal_id, root=None) -> {\"tasks\": {task_id: {\"status\", \"depends_on\", \"hold_reason\", \"fix_round_for\" (from (task.get(\"constraints\") or {}).get(\"fix_round_for\")), \"result_escalate\" (bool((task.get(\"result\") or {}).get(\"escalate\"))), \"parent\", \"created_at\"}} over the goal and its children read from root/tasks/*.json, \"plan_hash\": sha256 of root/plan.md text or None}.\n- materiality(before, after) -> {\"material\": bool, \"new_tasks\": [ids in after not in before], \"dependencies_changed\": [ids whose depends_on differ], \"fix_strategy_for\": [ids that gained a child with fix_round_for == id], \"escalated\": bool (any task whose hold_reason newly contains 'escalat', or whose result_escalate turned True, or the goal itself newly held/failed), \"plan_changed\": plan_hash differs}; material when any list non-empty or plan_changed or escalated. record_materiality(launch_id, before, after, root=None) -> row phase \"materiality\".\n- record_skip(*, goal_id, event, reason, kind=None, payload_key=None, root=None) -> row in planner_skips.\n- read_invocations(root=None) -> list of merged dicts, one per launch_id, later phases overriding earlier fields; read_invocations_with_malformed(root=None) -> (rows, malformed_count).\n- per_goal(goal_id, root=None) -> {\"planner_tokens\", \"fable_tokens\", \"opus_tokens\", \"other_tokens\", \"calls\", \"fable_calls\", \"opus_calls\", \"escalations\" (rows with tier fable and route escalate), \"reescalations\", \"material_decisions\", \"tokens_per_material_decision\" (None when 0 material), \"skips\", \"usd\"}; tier buckets fable/opus/other.\n- accepted_goal_summary(root=None) -> over scorecard.accepted_goals(root) (root already resolved): {\"n_goals\", \"planner_tokens_per_accepted_goal\", \"fable_tokens_per_accepted_goal\", \"fable_calls_per_accepted_goal\", \"fable_share\", \"planner_tokens_per_material_decision\", \"planner_usd_per_accepted_goal\"}; None values when no goals.\n- interactive_by_goal(root=None, cfg=None, now=None, days=30) -> list of {\"goal_id\", \"days\": [iso dates], \"tokens\", \"model\", \"model_source\": \"assumed_models_planner\", \"method\": \"day_overlap_approximate\"}: cfg defaults to bus.pool_config(); call planner_runs._interactive_summary(root, cfg, cutoff=now - days*86400, now, headless=[]) and use its day_totals ([{day, account, input_tokens, output_tokens, cache_read_tokens, ...}]); tokens per day = pool formula; for each day split that day's tokens across the goals (role triage, no parent) open during that day, proportionally to the seconds each goal was open within the day (created_at .. its done event ts or now); a day with no open goal is reported under goal_id None. Documented as an approximation in the docstring and the method field.",
+  "inputs": [
+    "T-0690"
+  ],
+  "acceptance": [
+    "tests/test_planner_telemetry.py::test_launch_usage_materiality_merge_by_launch_id \u2014 three phases for one launch_id read back as one row with model, total_tokens (cache_read // 10 formula) and material fields",
+    "tests/test_planner_telemetry.py::test_materiality_detects_new_task_dependency_change_and_fix_strategy \u2014 snapshots before/after with a new child whose constraints.fix_round_for names a held task and a changed depends_on give material True, list both and name the held id under fix_strategy_for; identical snapshots give material False; a result flag escalate flips escalated",
+    "tests/test_planner_telemetry.py::test_per_goal_splits_fable_and_opus_tokens \u2014 two invocations (tier fable, tier opus) and one skip give fable_tokens, opus_tokens, calls 2, skips 1, tokens_per_material_decision computed only over material rows",
+    "tests/test_planner_telemetry.py::test_accepted_goal_summary_per_accepted_goal \u2014 two accepted goals with invocations under a sandbox root give fable_tokens_per_accepted_goal and fable_share; no accepted goals gives None values without raising",
+    "tests/test_planner_telemetry.py::test_interactive_by_goal_day_overlap_is_marked_approximate \u2014 with planner_runs._interactive_summary patched to return two day_totals rows, tokens split across two goals open on those days proportionally to open seconds, every row carries method day_overlap_approximate and model_source assumed_models_planner, and a malformed invocations line is counted by read_invocations_with_malformed"
+  ],
+  "scope": [
+    "orchestrator/planner_telemetry.py",
+    "tests/test_planner_telemetry.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0691",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "issue": "Spec directs reuse of decision_log._using_root's pattern (decision_log.py:64-74) for root-scoping schedlog writes: a bare try/finally reassignment of the module global schedlog.SCHED_DIR, with no lock. daemon.py genuinely runs concurrent background threads for dispatch (daemon.py:481 spawn_async -> threading.Thread(...).start(), used for executor.start/spawn.run_worker), so two threads calling record_launch/record_usage/record_materiality/record_skip (or racing against decision_log.record or another schedlog consumer) with different root values can interleave: thread A sets SCHED_DIR to its root, thread B overwrites it mid-write, and A's row lands in B's directory (or a test sandbox root leaks into production STATE, or vice versa). This exact hazard was already hit once in this codebase: orchestrator/sched_scorecard.py's _sched_rows (lines 29-36) does the identical global swap but wraps it in threading.Lock() (_READ_LOCK, line 16) specifically to prevent this race. The spec should point at sched_scorecard's locked pattern, or planner_telemetry.py should add its own lock around the schedlog.SCHED_DIR swap, not copy decision_log's unlocked one.",
+        "severity": "high",
+        "line": 64
+      },
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "issue": "snapshot()/materiality() treat plan_hash (sha256 of root/plan.md) as a per-goal signal, but plan.md is a single shared checkpoint file for the whole Planner session (STATE/plan.md, written by _retrospective and handover.py, confirmed by this worktree's own git log showing a new goal opened in the same plan.md while other goals were still closing). Any edit to a different, unrelated goal's section of plan.md changes the hash and will flip plan_changed (hence material=True) for every goal snapshotted around that time, and materiality's escalated check for 'the goal itself newly held/failed' has the same cross-goal contamination risk if it inspects shared plan.md content. None of the five acceptance tests exercise a multi-goal plan.md, so this ships unverified and will produce inflated/wrong material_decisions counts and tokens_per_material_decision for goals that had no actual plan change of their own.",
+        "severity": "high",
+        "line": 1253
+      },
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "issue": "The literal call given for interactive_by_goal, planner_runs._interactive_summary(root, cfg, cutoff=now - days*86400, now, headless=[]), is a SyntaxError as written (keyword argument cutoff= followed by positional now) against the real signature _interactive_summary(root, cfg, cutoff, now, headless) at planner_runs.py:794. Confirmed by reproducing the exact call shape in a throwaway interpreter. Trivial fix (drop the cutoff= keyword, pass positionally, or name all four), but as written an implementer copying it verbatim won't compile.",
+        "severity": "low",
+        "line": 794
+      }
+    ],
+    "suggested_spec_changes": [
+      "Have planner_telemetry.py guard its schedlog.SCHED_DIR root-swap with a module-level threading.Lock(), mirroring orchestrator/sched_scorecard.py's _sched_rows/_READ_LOCK, instead of copying decision_log._using_root verbatim.",
+      "Scope plan_changed to the goal's own section of plan.md (e.g. hash only the text between that goal's markers, or diff task-derived state only) rather than hashing the whole shared file, or explicitly document and accept the cross-goal false-positive and drop plan_changed from the material determination.",
+      "Fix the _interactive_summary call example to valid positional syntax: planner_runs._interactive_summary(root, cfg, now - days*86400, now, headless=[])."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998396.5456939,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0691",
+      "claimed_at": 1789998396.545324
+    },
+    {
+      "ts": 1789998396.547072,
+      "account": "B"
+    },
+    {
+      "ts": 1789998396.987787,
+      "pid": 7310,
+      "account": "B"
+    },
+    {
+      "ts": 1789998573.493372,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "issue": "Spec directs reuse of decision_log._using_root's pattern (decision_log.py:64-74) for root-scoping schedlog writes: a bare try/finally reassignment of the module global schedlog.SCHED_DIR, with no lock. daemon.py genuinely runs concurrent background threads for dispatch (daemon.py:481 spawn_async -> threading.Thread(...).start(), used for executor.start/spawn.run_worker), so two threads calling record_launch/record_usage/record_materiality/record_skip (or racing against decision_log.record or another schedlog consumer) with different root values can interleave: thread A sets SCHED_DIR to its root, thread B overwrites it mid-write, and A's row lands in B's directory (or a test sandbox root leaks into production STATE, or vice versa). This exact hazard was already hit once in this codebase: orchestrator/sched_scorecard.py's _sched_rows (lines 29-36) does the identical global swap but wraps it in threading.Lock() (_READ_LOCK, line 16) specifically to prevent this race. The spec should point at sched_scorecard's locked pattern, or planner_telemetry.py should add its own lock around the schedlog.SCHED_DIR swap, not copy decision_log's unlocked one.",
+            "severity": "high",
+            "line": 64
+          },
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "issue": "snapshot()/materiality() treat plan_hash (sha256 of root/plan.md) as a per-goal signal, but plan.md is a single shared checkpoint file for the whole Planner session (STATE/plan.md, written by _retrospective and handover.py, confirmed by this worktree's own git log showing a new goal opened in the same plan.md while other goals were still closing). Any edit to a different, unrelated goal's section of plan.md changes the hash and will flip plan_changed (hence material=True) for every goal snapshotted around that time, and materiality's escalated check for 'the goal itself newly held/failed' has the same cross-goal contamination risk if it inspects shared plan.md content. None of the five acceptance tests exercise a multi-goal plan.md, so this ships unverified and will produce inflated/wrong material_decisions counts and tokens_per_material_decision for goals that had no actual plan change of their own.",
+            "severity": "high",
+            "line": 1253
+          },
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "issue": "The literal call given for interactive_by_goal, planner_runs._interactive_summary(root, cfg, cutoff=now - days*86400, now, headless=[]), is a SyntaxError as written (keyword argument cutoff= followed by positional now) against the real signature _interactive_summary(root, cfg, cutoff, now, headless) at planner_runs.py:794. Confirmed by reproducing the exact call shape in a throwaway interpreter. Trivial fix (drop the cutoff= keyword, pass positionally, or name all four), but as written an implementer copying it verbatim won't compile.",
+            "severity": "low",
+            "line": 794
+          }
+        ],
+        "suggested_spec_changes": [
+          "Have planner_telemetry.py guard its schedlog.SCHED_DIR root-swap with a module-level threading.Lock(), mirroring orchestrator/sched_scorecard.py's _sched_rows/_READ_LOCK, instead of copying decision_log._using_root verbatim.",
+          "Scope plan_changed to the goal's own section of plan.md (e.g. hash only the text between that goal's markers, or diff task-derived state only) rather than hashing the whole shared file, or explicitly document and accept the cross-goal false-positive and drop plan_changed from the material determination.",
+          "Fix the _interactive_summary call example to valid positional syntax: planner_runs._interactive_summary(root, cfg, now - days*86400, now, headless=[])."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998573.494944,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "Spec directs reuse of decision_log._using_root's pattern (decision_log.py:64-74) for root-scoping schedlog writes: a bare try/finally reassignment of the module global schedlog.SCHED_DIR, with no lock. daemon.py genuinely runs concurrent background threads for dispatch (daemon.py:481 spawn_async -> threading.Thread(...).start(), used for executor.start/spawn.run_worker), so two threads calling record_launch/record_usage/record_materiality/record_skip (or racing against decision_log.record or another schedlog consumer) with different root values can interleave: thread A sets SCHED_DIR to its root, thread B overwrites it mid-write, and A's row lands in B's directory (or a test sandbox root leaks into production STATE, or vice versa). This exact hazard was already hit once in this codebase: orchestrator/sched_scorecard.py's _sched_rows (lines 29-36) does the identical global swap but wraps it in threading.Lock() (_READ_LOCK, line 16) specifically to prevent this race. The spec should point at sched_scorecard's locked pattern, or planner_telemetry.py should add its own lock around the schedlog.SCHED_DIR swap, not copy decision_log's unlocked one.",
+          "severity": "high",
+          "line": 64
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "snapshot()/materiality() treat plan_hash (sha256 of root/plan.md) as a per-goal signal, but plan.md is a single shared checkpoint file for the whole Planner session (STATE/plan.md, written by _retrospective and handover.py, confirmed by this worktree's own git log showing a new goal opened in the same plan.md while other goals were still closing). Any edit to a different, unrelated goal's section of plan.md changes the hash and will flip plan_changed (hence material=True) for every goal snapshotted around that time, and materiality's escalated check for 'the goal itself newly held/failed' has the same cross-goal contamination risk if it inspects shared plan.md content. None of the five acceptance tests exercise a multi-goal plan.md, so this ships unverified and will produce inflated/wrong material_decisions counts and tokens_per_material_decision for goals that had no actual plan change of their own.",
+          "severity": "high",
+          "line": 1253
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "The literal call given for interactive_by_goal, planner_runs._interactive_summary(root, cfg, cutoff=now - days*86400, now, headless=[]), is a SyntaxError as written (keyword argument cutoff= followed by positional now) against the real signature _interactive_summary(root, cfg, cutoff, now, headless) at planner_runs.py:794. Confirmed by reproducing the exact call shape in a throwaway interpreter. Trivial fix (drop the cutoff= keyword, pass positionally, or name all four), but as written an implementer copying it verbatim won't compile.",
+          "severity": "low",
+          "line": 794
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789998396.545324,
+  "account": "B",
+  "pid": 7310,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "Spec directs reuse of decision_log._using_root's pattern (decision_log.py:64-74) for root-scoping schedlog writes: a bare try/finally reassignment of the module global schedlog.SCHED_DIR, with no lock. daemon.py genuinely runs concurrent background threads for dispatch (daemon.py:481 spawn_async -> threading.Thread(...).start(), used for executor.start/spawn.run_worker), so two threads calling record_launch/record_usage/record_materiality/record_skip (or racing against decision_log.record or another schedlog consumer) with different root values can interleave: thread A sets SCHED_DIR to its root, thread B overwrites it mid-write, and A's row lands in B's directory (or a test sandbox root leaks into production STATE, or vice versa). This exact hazard was already hit once in this codebase: orchestrator/sched_scorecard.py's _sched_rows (lines 29-36) does the identical global swap but wraps it in threading.Lock() (_READ_LOCK, line 16) specifically to prevent this race. The spec should point at sched_scorecard's locked pattern, or planner_telemetry.py should add its own lock around the schedlog.SCHED_DIR swap, not copy decision_log's unlocked one.",
+      "severity": "high",
+      "line": 64
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "snapshot()/materiality() treat plan_hash (sha256 of root/plan.md) as a per-goal signal, but plan.md is a single shared checkpoint file for the whole Planner session (STATE/plan.md, written by _retrospective and handover.py, confirmed by this worktree's own git log showing a new goal opened in the same plan.md while other goals were still closing). Any edit to a different, unrelated goal's section of plan.md changes the hash and will flip plan_changed (hence material=True) for every goal snapshotted around that time, and materiality's escalated check for 'the goal itself newly held/failed' has the same cross-goal contamination risk if it inspects shared plan.md content. None of the five acceptance tests exercise a multi-goal plan.md, so this ships unverified and will produce inflated/wrong material_decisions counts and tokens_per_material_decision for goals that had no actual plan change of their own.",
+      "severity": "high",
+      "line": 1253
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "The literal call given for interactive_by_goal, planner_runs._interactive_summary(root, cfg, cutoff=now - days*86400, now, headless=[]), is a SyntaxError as written (keyword argument cutoff= followed by positional now) against the real signature _interactive_summary(root, cfg, cutoff, now, headless) at planner_runs.py:794. Confirmed by reproducing the exact call shape in a throwaway interpreter. Trivial fix (drop the cutoff= keyword, pass positionally, or name all four), but as written an implementer copying it verbatim won't compile.",
+      "severity": "low",
+      "line": 794
+    }
+  ]
+}

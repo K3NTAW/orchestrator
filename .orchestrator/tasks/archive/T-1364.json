@@ -1,0 +1,666 @@
+{
+  "id": "T-1364",
+  "created_at": 1790194603.413867,
+  "parent": "T-1334",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S2b v3: capacity treats claude:<tier> rows as Claude capacity (account cooling folded into row cooling, shared worker cap); README plug-and-play",
+  "spec": "Goal T-1334 (S1 T-1352 merged). Replaces T-1361 after spec review T-1362. Claude executor rows have id \"claude:<tier>\" (S2a T-1360 contract); running claude-row tasks carry executor \"claude:<tier>\", so daemon.running_claude_workers (daemon.py:470) already counts them. Semantics kept from today: fallback means every enabled execute row is cooling, never merely saturated (daemon.free_slots docstring daemon.py:481). The dispatch-time check (executor.start -> pool.pick) stays authoritative.\n\nRule R (one definition): a claude row is cooling when its own cooldown is active OR every Claude account is cooling; a codex row is cooling as today.\n1. capacity.snapshot (capacity.py:9): rows carry \"provider\"; for a claude row, cooling_s = max(row cooldown, min remaining account cooldown when every account cools, else 0). Every other reader of snapshot rows (eligible_executors_from_snapshot :54, \"fallback\" :45, _reason :75) then applies R unchanged. Readers use row.get(\"provider\", \"codex\").\n2. capacity.admit (:101): free[\"claude_rows\"] = snapshot[\"claude_workers_free\"]. Define eff(executor_id) = min(free[row], free[\"claude_rows\"]) for claude rows, free[row] otherwise, and use eff in the `available` filter (:127), choice_key (:132) and the imminent blocker (:141). Choosing a claude row decrements both counters. The legacy \"claude\" pseudo-executor exists only when fallback is True.\n3. _reason: a claude row that is otherwise eligible with free[\"claude_rows\"] == 0 -> \"account_capacity\".\n4. orchestrator/daemon.py: _codex_available (:454) applies R through the pool (claude row: not ex.cooling() and some pool account not cooling()). free_slots (:481): codex rows as today; claude rows contribute min(sum of their max_parallel - running over non-cooling claude rows, max_parallel_claude_workers - running_claude_workers - inflight_claude_dispatches). capacity_reason (:772) applies R when checking \"every enabled row cooling\".\n5. Out of scope, recorded: concurrency.py / speculation.py read per-row free and may overestimate claude capacity; executor.start holds on no headroom.\n6. README.md \"Executors and routing\" (README.md:278): Claude rows (id \"claude:<tier>\", tier alias in [models], model optional and must match, roles, band, max_parallel, daily_budget_tasks), headroom from [[claude_accounts]] and [limits].max_parallel_claude_workers, reviewer never runs the executing model, plug-and-play: [models] alias + claude:<alias> row for a new Claude model; a codex row for a new Codex model; enabled=false on every codex row to run without Codex.\nTests (unittest.TestCase methods): shared slot (two ready tasks, claude_workers_free 1 -> one admitted, one account_capacity); every account cooling -> claude row cooling, fallback True only if all codex rows also cool, reason cooldown; all codex cooling + healthy claude row -> fallback False; codex rows saturated but healthy -> fallback False (unchanged); codex-only rows without \"provider\" -> admit ids equal hard-coded values; free_slots caps claude rows by the shared counter; _codex_available with a claude row. No pool.toml edit, no new dependencies. Additive; git revert restores the old behaviour.",
+  "inputs": [
+    "T-1363"
+  ],
+  "acceptance": [
+    "tests/test_capacity.py::test_claude_rows_share_claude_worker_slots",
+    "tests/test_capacity.py::test_claude_row_cools_when_every_account_cools",
+    "tests/test_capacity.py::test_healthy_claude_row_prevents_fallback",
+    "tests/test_capacity.py::test_saturated_codex_rows_do_not_trigger_fallback",
+    "tests/test_capacity.py::test_codex_only_rows_without_provider_unchanged",
+    "tests/test_daemon.py::test_free_slots_caps_claude_rows_by_shared_workers",
+    "tests/test_daemon.py::test_codex_available_counts_claude_row_when_an_account_is_free",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_capacity.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1364",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "inflight_claude_dispatches counts every dispatched-but-unclaimed execute task, codex ones included. The spec now subtracts it from the claude-row cap in normal mode, not only in fallback mode. Two unclaimed codex dispatches would shrink the shared counter and defer a healthy claude row as account_capacity. The same counter feeds snapshot.claude_workers_free, so admit inherits the double count.",
+        "severity": "med",
+        "line": 486
+      },
+      {
+        "path": "orchestrator/capacity.py",
+        "issue": "Rule R does not define the case of zero Claude accounts. min() over an empty set raises ValueError. 'Every account cooling' over an empty set is vacuously true, so every claude row would cool permanently.",
+        "severity": "med",
+        "line": 9
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "free_slots says 'non-cooling claude rows' but does not say whether that includes rule R's account check. If every account cools but the row's own cooldown is 0, slots are still granted, executor.start holds the task, and the daemon retries every tick. daily_budget_tasks is also ignored. The shared cap subtracts running_claude_workers, which counts review workers too. That is intended but should be stated and tested.",
+        "severity": "med",
+        "line": 481
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "capacity_reason returns 'executor_capacity' when a claude row is blocked only by the shared counter and fallback is False. capacity._reason returns 'account_capacity' for the same state, so recorded deferral reasons differ between the two paths.",
+        "severity": "low",
+        "line": 772
+      },
+      {
+        "path": "orchestrator/capacity.py",
+        "issue": "No listed acceptance test covers the reserve_imminent blocker with eff (a claude row whose own free is 3 but shared free is 1). It also does not cover choice_key sorting by eff, or the explicit account_capacity reason from _reason. A regression there would pass every listed test.",
+        "severity": "low",
+        "line": 141
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "concurrency.py and speculation.py are left out of scope and may over-admit claude work. The spec does not say what happens next. executor.start then holds the tasks, which is a state mutation on every tick. It should say the hold is benign (no attempt burned, retried) or link a follow-up task.",
+        "severity": "low",
+        "line": 470
+      }
+    ],
+    "suggested_spec_changes": [
+      "Pass a claude-only inflight count to the claude-row cap, or document that codex inflight dispatches are deliberately included. Add a test with a codex task in flight and a healthy claude row.",
+      "Define rule R for zero accounts. Suggested: no accounts means not cooling, or cooling with an explicit test. Guard min() against an empty sequence.",
+      "State that free_slots and _codex_available apply the full rule R (row cooldown or all accounts cooling) to claude rows, and that a row at its daily_budget_tasks limit contributes 0. Add a test for the all-accounts-cooling case.",
+      "Make capacity_reason use 'account_capacity' when the only non-cooling rows are claude rows and the shared counter is exhausted, so it matches capacity._reason.",
+      "Add tests for the reserve_imminent blocker and choice_key using eff, and for _reason returning account_capacity. Say explicitly that the legacy 'claude' key is only decremented when fallback is True.",
+      "Record in the out-of-scope note that over-admission from concurrency.py and speculation.py ends in an executor.start hold with no attempt burned, and link the follow-up task."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790194605.246872,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5128,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790194605.252775,
+      "packet_meta": {
+        "chars": 4389,
+        "est_tokens": 1097,
+        "presented_tokens": 1097,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "f3a4636e813d84cba2b7d440c3de69f40db7881c0c5968c47229cf6a9a3df345"
+          },
+          "spec": {
+            "chars": 3171,
+            "est_tokens": 792,
+            "sha256": "a20384c5771d44038837c7ce8be6d1982f7354881aca40f991891ff46ba19d7c"
+          },
+          "acceptance": {
+            "chars": 590,
+            "est_tokens": 147,
+            "sha256": "3e8c2dfc161d12f11a70760766a853ee78bd3708ee4f7ecdd3142aa67e20da4b"
+          },
+          "scope": {
+            "chars": 121,
+            "est_tokens": 30,
+            "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 309,
+            "est_tokens": 77,
+            "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "dca065f94fc4",
+        "version": "dca065f94fc4",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1363 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5128,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790194609.8282938,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1364",
+      "claimed_at": 1790194609.827851
+    },
+    {
+      "ts": 1790194609.8294349,
+      "account": "A"
+    },
+    {
+      "ts": 1790194611.4005492,
+      "pid": 91679,
+      "account": "A"
+    },
+    {
+      "ts": 1790194662.226958,
+      "packet_meta": {
+        "chars": 4389,
+        "est_tokens": 1097,
+        "presented_tokens": 1097,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "f3a4636e813d84cba2b7d440c3de69f40db7881c0c5968c47229cf6a9a3df345"
+          },
+          "spec": {
+            "chars": 3171,
+            "est_tokens": 792,
+            "sha256": "a20384c5771d44038837c7ce8be6d1982f7354881aca40f991891ff46ba19d7c"
+          },
+          "acceptance": {
+            "chars": 590,
+            "est_tokens": 147,
+            "sha256": "3e8c2dfc161d12f11a70760766a853ee78bd3708ee4f7ecdd3142aa67e20da4b"
+          },
+          "scope": {
+            "chars": 121,
+            "est_tokens": 30,
+            "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 309,
+            "est_tokens": 77,
+            "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "dca065f94fc4",
+        "version": "dca065f94fc4",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1363 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5128,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "f6aca52f-52e9-4fcd-9e1e-8332738b499f"
+      }
+    },
+    {
+      "ts": 1790194662.2511868,
+      "packet_meta": {
+        "chars": 4389,
+        "est_tokens": 1097,
+        "presented_tokens": 1097,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "f3a4636e813d84cba2b7d440c3de69f40db7881c0c5968c47229cf6a9a3df345"
+          },
+          "spec": {
+            "chars": 3171,
+            "est_tokens": 792,
+            "sha256": "a20384c5771d44038837c7ce8be6d1982f7354881aca40f991891ff46ba19d7c"
+          },
+          "acceptance": {
+            "chars": 590,
+            "est_tokens": 147,
+            "sha256": "3e8c2dfc161d12f11a70760766a853ee78bd3708ee4f7ecdd3142aa67e20da4b"
+          },
+          "scope": {
+            "chars": 121,
+            "est_tokens": 30,
+            "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+          },
+          "depends_on": {
+            "chars": 100,
+            "est_tokens": 25,
+            "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+          },
+          "existing tests": {
+            "chars": 309,
+            "est_tokens": 77,
+            "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "dca065f94fc4",
+        "version": "dca065f94fc4",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1363 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5128,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "f6aca52f-52e9-4fcd-9e1e-8332738b499f",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790194662.814378,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "inflight_claude_dispatches counts every dispatched-but-unclaimed execute task, codex ones included. The spec now subtracts it from the claude-row cap in normal mode, not only in fallback mode. Two unclaimed codex dispatches would shrink the shared counter and defer a healthy claude row as account_capacity. The same counter feeds snapshot.claude_workers_free, so admit inherits the double count.",
+            "severity": "med",
+            "line": 486
+          },
+          {
+            "path": "orchestrator/capacity.py",
+            "issue": "Rule R does not define the case of zero Claude accounts. min() over an empty set raises ValueError. 'Every account cooling' over an empty set is vacuously true, so every claude row would cool permanently.",
+            "severity": "med",
+            "line": 9
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "free_slots says 'non-cooling claude rows' but does not say whether that includes rule R's account check. If every account cools but the row's own cooldown is 0, slots are still granted, executor.start holds the task, and the daemon retries every tick. daily_budget_tasks is also ignored. The shared cap subtracts running_claude_workers, which counts review workers too. That is intended but should be stated and tested.",
+            "severity": "med",
+            "line": 481
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "capacity_reason returns 'executor_capacity' when a claude row is blocked only by the shared counter and fallback is False. capacity._reason returns 'account_capacity' for the same state, so recorded deferral reasons differ between the two paths.",
+            "severity": "low",
+            "line": 772
+          },
+          {
+            "path": "orchestrator/capacity.py",
+            "issue": "No listed acceptance test covers the reserve_imminent blocker with eff (a claude row whose own free is 3 but shared free is 1). It also does not cover choice_key sorting by eff, or the explicit account_capacity reason from _reason. A regression there would pass every listed test.",
+            "severity": "low",
+            "line": 141
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "concurrency.py and speculation.py are left out of scope and may over-admit claude work. The spec does not say what happens next. executor.start then holds the tasks, which is a state mutation on every tick. It should say the hold is benign (no attempt burned, retried) or link a follow-up task.",
+            "severity": "low",
+            "line": 470
+          }
+        ],
+        "suggested_spec_changes": [
+          "Pass a claude-only inflight count to the claude-row cap, or document that codex inflight dispatches are deliberately included. Add a test with a codex task in flight and a healthy claude row.",
+          "Define rule R for zero accounts. Suggested: no accounts means not cooling, or cooling with an explicit test. Guard min() against an empty sequence.",
+          "State that free_slots and _codex_available apply the full rule R (row cooldown or all accounts cooling) to claude rows, and that a row at its daily_budget_tasks limit contributes 0. Add a test for the all-accounts-cooling case.",
+          "Make capacity_reason use 'account_capacity' when the only non-cooling rows are claude rows and the shared counter is exhausted, so it matches capacity._reason.",
+          "Add tests for the reserve_imminent blocker and choice_key using eff, and for _reason returning account_capacity. Say explicitly that the legacy 'claude' key is only decremented when fallback is True.",
+          "Record in the out-of-scope note that over-admission from concurrency.py and speculation.py ends in an executor.start hold with no attempt burned, and link the follow-up task."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790194662.815676,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "inflight_claude_dispatches counts every dispatched-but-unclaimed execute task, codex ones included. The spec now subtracts it from the claude-row cap in normal mode, not only in fallback mode. Two unclaimed codex dispatches would shrink the shared counter and defer a healthy claude row as account_capacity. The same counter feeds snapshot.claude_workers_free, so admit inherits the double count.",
+          "severity": "med",
+          "line": 486
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "Rule R does not define the case of zero Claude accounts. min() over an empty set raises ValueError. 'Every account cooling' over an empty set is vacuously true, so every claude row would cool permanently.",
+          "severity": "med",
+          "line": 9
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "free_slots says 'non-cooling claude rows' but does not say whether that includes rule R's account check. If every account cools but the row's own cooldown is 0, slots are still granted, executor.start holds the task, and the daemon retries every tick. daily_budget_tasks is also ignored. The shared cap subtracts running_claude_workers, which counts review workers too. That is intended but should be stated and tested.",
+          "severity": "med",
+          "line": 481
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "capacity_reason returns 'executor_capacity' when a claude row is blocked only by the shared counter and fallback is False. capacity._reason returns 'account_capacity' for the same state, so recorded deferral reasons differ between the two paths.",
+          "severity": "low",
+          "line": 772
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "No listed acceptance test covers the reserve_imminent blocker with eff (a claude row whose own free is 3 but shared free is 1). It also does not cover choice_key sorting by eff, or the explicit account_capacity reason from _reason. A regression there would pass every listed test.",
+          "severity": "low",
+          "line": 141
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "concurrency.py and speculation.py are left out of scope and may over-admit claude work. The spec does not say what happens next. executor.start then holds the tasks, which is a state mutation on every tick. It should say the hold is benign (no attempt burned, retried) or link a follow-up task.",
+          "severity": "low",
+          "line": 470
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 4389,
+    "est_tokens": 1097,
+    "presented_tokens": 1097,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "f3a4636e813d84cba2b7d440c3de69f40db7881c0c5968c47229cf6a9a3df345"
+      },
+      "spec": {
+        "chars": 3171,
+        "est_tokens": 792,
+        "sha256": "a20384c5771d44038837c7ce8be6d1982f7354881aca40f991891ff46ba19d7c"
+      },
+      "acceptance": {
+        "chars": 590,
+        "est_tokens": 147,
+        "sha256": "3e8c2dfc161d12f11a70760766a853ee78bd3708ee4f7ecdd3142aa67e20da4b"
+      },
+      "scope": {
+        "chars": 121,
+        "est_tokens": 30,
+        "sha256": "f846ff75b02ea47e22f5c3fe30d722e6816d1151294d516250f22c51303ed651"
+      },
+      "depends_on": {
+        "chars": 100,
+        "est_tokens": 25,
+        "sha256": "83df4de6bfc0ada12546ea2d207890d6e9531462424ddcefba57453232316fce"
+      },
+      "existing tests": {
+        "chars": 309,
+        "est_tokens": 77,
+        "sha256": "0595948db532e478562336b7bcebe8fcbbb803d611d9506e872745802024a157"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 13,
+        "est_tokens": 3,
+        "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+      }
+    },
+    "hash": "dca065f94fc4",
+    "version": "dca065f94fc4",
+    "candidate_known": false,
+    "base": "1571826d4a38",
+    "sources": "task@T-1363 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 5128,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "f6aca52f-52e9-4fcd-9e1e-8332738b499f",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790194609.827851,
+  "account": "A",
+  "pid": 91679,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "inflight_claude_dispatches counts every dispatched-but-unclaimed execute task, codex ones included. The spec now subtracts it from the claude-row cap in normal mode, not only in fallback mode. Two unclaimed codex dispatches would shrink the shared counter and defer a healthy claude row as account_capacity. The same counter feeds snapshot.claude_workers_free, so admit inherits the double count.",
+      "severity": "med",
+      "line": 486
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "Rule R does not define the case of zero Claude accounts. min() over an empty set raises ValueError. 'Every account cooling' over an empty set is vacuously true, so every claude row would cool permanently.",
+      "severity": "med",
+      "line": 9
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "free_slots says 'non-cooling claude rows' but does not say whether that includes rule R's account check. If every account cools but the row's own cooldown is 0, slots are still granted, executor.start holds the task, and the daemon retries every tick. daily_budget_tasks is also ignored. The shared cap subtracts running_claude_workers, which counts review workers too. That is intended but should be stated and tested.",
+      "severity": "med",
+      "line": 481
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "capacity_reason returns 'executor_capacity' when a claude row is blocked only by the shared counter and fallback is False. capacity._reason returns 'account_capacity' for the same state, so recorded deferral reasons differ between the two paths.",
+      "severity": "low",
+      "line": 772
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "No listed acceptance test covers the reserve_imminent blocker with eff (a claude row whose own free is 3 but shared free is 1). It also does not cover choice_key sorting by eff, or the explicit account_capacity reason from _reason. A regression there would pass every listed test.",
+      "severity": "low",
+      "line": 141
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "concurrency.py and speculation.py are left out of scope and may over-admit claude work. The spec does not say what happens next. executor.start then holds the tasks, which is a state mutation on every tick. It should say the hold is benign (no attempt burned, retried) or link a follow-up task.",
+      "severity": "low",
+      "line": 470
+    }
+  ]
+}

@@ -1,0 +1,145 @@
+{
+  "id": "T-0721",
+  "created_at": 1790000280.906838,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: Q5 v3: orchestrator/planner_scorecard.py + `scorecard --planner-routing` \u2014 Planner outcomes by model \u00d7 decision type \u00d7 band \u00d7 class \u00d7 architectural, non-inferiority evidence per class, economics (P7, P13, P16)",
+  "spec": "Why: no code joins Planner invocations to downstream engineering outcomes; premium_summary (planner_runs.py:843) counts launches and tokens only. The router (planner_router.py, T-0700) needs class_evidence and the brief (P7/P13/P16) a Planner scorecard with cold-start priors and a CLI. Spec review T-0683's risks are folded in: the producer is named and a dependency (planner_telemetry.py, T-0708), min_samples has an explicit source, the CRITERIA mapping is literal, the telemetry import is guarded, and this task is READ-SIDE: the scorecard stays empty in production until Wave B wires planner_runs to emit invocation rows (stated so reviewers do not expect a populated card after this merge).\nWhat: new module orchestrator/planner_scorecard.py plus cli.py flag `scorecard --planner-routing [--json]`.\n- Inputs: invocation rows via planner_telemetry.read_invocations_with_malformed(root) (rows merged by launch_id with fields launch_id, goal_id, kind, payload_keys, decision_type, model, tier, band, task_class, architectural, started_at, material, reescalation, total_tokens, usd, latency_s, outcome), bus tasks from root/tasks/*.json, spec_review and review tasks among them. Wrap `from . import planner_telemetry` in try/except ImportError so a missing module degrades to an empty card with card[\"error\"] = \"planner_telemetry unavailable\". Malformed lines counted in card[\"malformed\"].\n- min_samples: explicit parameter wins; else cfg planner.routing.min_samples when int (the [planner.routing] table lands with this goal's pool.toml task and may be absent); else cfg promotion.min_samples; else 20.\n- Attribution window: an invocation owns the goal's execute tasks whose lineage root (attribution.lineage(task)[\"root\"]) has created_at >= invocation started_at and < the next invocation's started_at for the same goal (or +inf); fix rounds belong to their root's owner. A kind held invocation additionally owns the fix-round task whose constraints.fix_round_for equals that invocation's held task id (payload_keys[0] split at ':').\n- group_key(row) -> f\"{model}|{decision_type}|{band}|{task_class}|{'arch' if architectural else 'plain'}\".\n- build(root=STATE, *, cfg=None, min_samples=None) -> {\"groups\": {key: metrics}, \"n\", \"malformed\", \"min_samples\", \"read_side_only\": True}; metrics per group: n, material_rate, downstream_accepted_rate (owned roots with merged_into), first_pass_rate (owned roots with pipeline.lineage_fix_rounds in (0, None) and no fix-round children), fix_round_rate, avg_fix_rounds, gate_red_rate (pipeline.gate_reds > 0), review_request_changes_rate (review tasks whose inputs[0] is an owned id, verdict from review_verdict or result.verdict == request_changes), spec_review_approval_rate (same for spec_review role, verdict approve), replanning_rate (a later invocation of the same goal with decision_type architectural_replan), reescalation_rate (rows reescalation True), human_intervention_rate (None unless planner_telemetry.interactive_by_goal returns a row for the goal with a day after started_at; wrap the call in try/except Exception -> None), tokens_mean, usd_mean, latency_mean, evidence \"sufficient\"|\"insufficient\" (n >= min_samples).\n- CRITERIA_MAP = {\"first_pass_rate\": (\"first_pass_delta\", \">=\", -0.02), \"avg_fix_rounds\": (\"fix_rounds_delta\", \"<=\", 0.05), \"gate_success\": (\"gate_success_delta\", \">=\", -0.02), \"review_request_changes_rate\": (\"review_findings_delta\", \"<=\", 0.10)}; thresholds read from promotion.CRITERIA by those keys, overridable via cfg[\"promotion\"]; REESCALATION_MAX = 0.2 is this module's own constant. gate_success = 1 - gate_red_rate.\n- class_evidence(model, decision_type, band, task_class, architectural, *, root=STATE, cfg=None, min_samples=None) -> {\"n\", \"noninferior\": True|False|None, \"deltas\": {metric: candidate - baseline}, \"failed\": [metric names], \"reescalation_rate\", \"baseline_model\"}: baseline group = same class with model == cfg [models].planner (fallback: rows with tier fable). None when either group has n < min_samples; False when any CRITERIA_MAP comparison fails or reescalation_rate > REESCALATION_MAX (failed lists \"reescalation\"); True otherwise. Tokens, usd, latency never enter the verdict (docstring + test).\n- economics(root=STATE) -> per model {\"planner_usd_per_accepted_goal\", \"planner_tokens_per_accepted_goal\", \"pipeline_usd_after_planning\" (mean over invocations of the sum of scorecard.by_task usd for owned tasks), \"expected_total_cost_after_planning\": {decision_type: mean(planner usd + pipeline usd)}}; accepted goals via scorecard.accepted_goals(root).\n- format(card) -> text table sorted by key with a first line 'read-side only: rows appear once planner_runs emits invocations' when n == 0; format_evidence(evidence) one line. cli.py: `sc.add_argument(\"--planner-routing\", action=\"store_true\")`, dispatch to build/format (json with --json), ap.error when combined with --planner or --parallelism (same style as the existing pair).",
+  "inputs": [
+    "T-0710"
+  ],
+  "acceptance": [
+    "tests/test_planner_scorecard.py::test_groups_by_model_type_band_class_arch \u2014 rows written with planner_telemetry.record_launch/record_usage/record_materiality under a sandbox root for two models and two decision types produce four group keys with n, material_rate and downstream_accepted_rate from owned tasks in the attribution window",
+    "tests/test_planner_scorecard.py::test_attribution_window_and_fix_rounds_follow_root \u2014 a root task created after invocation A and its fix round created after invocation B both count toward A; a held-kind invocation owns the fix round with constraints.fix_round_for",
+    "tests/test_planner_scorecard.py::test_class_evidence_noninferior_equivalent_worse_and_insufficient \u2014 opus equal to fable gives noninferior True; opus with first_pass_rate 0.3 lower gives False with failed naming first_pass_rate; n below min_samples gives None; a group with 1e9 tokens and 0 usd changes no verdict",
+    "tests/test_planner_scorecard.py::test_reescalation_penalises_class \u2014 reescalation_rate 0.5 on an otherwise equal class gives noninferior False with failed containing reescalation",
+    "tests/test_planner_scorecard.py::test_cli_flag_min_samples_source_and_malformed_tolerance \u2014 `scorecard --planner-routing --json` under a sandbox root prints a card with read_side_only True, groups and malformed 1 for a runs dir containing one malformed line; min_samples comes from [planner.routing] when present, else [promotion], else 20; a patched ImportError for planner_telemetry yields card error text instead of a crash"
+  ],
+  "scope": [
+    "orchestrator/planner_scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_planner_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0721",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_scorecard.py",
+        "issue": "CRITERIA_MAP maps review_request_changes_rate to (\"review_findings_delta\", \"<=\", 0.10), but promotion.py's actual CRITERIA[\"review_findings_delta\"] default is -0.10 (orchestrator/promotion.py:30), and the spec says thresholds are 'read from promotion.CRITERIA by those keys' at runtime, not the illustrative literal. With comparator <= and the real value -0.10, an identical candidate/baseline pair (delta=0) evaluates 0 <= -0.10 -> False -> flagged as a regression on every comparison, which directly contradicts acceptance test test_class_evidence_noninferior_equivalent_worse_and_insufficient ('opus equal to fable gives noninferior True'). The other three CRITERIA_MAP entries (first_pass_rate, avg_fix_rounds, gate_success) have comparator direction and literal that agree with promotion.py's own bad()-check sign; only this fourth entry is inverted. This is also a hidden coupling risk independent of the sign bug: reusing promotion.py's review_findings_delta key (tuned for a differently-defined metric in promotion.evaluate()) means an unrelated future edit to promotion.CRITERIA silently changes this module's noninferior gate.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_scorecard.py",
+        "issue": "first_pass_rate is specified as 'owned roots with pipeline.lineage_fix_rounds in (0, None) and no fix-round children' with no requirement that the root has actually resolved (merged_into set, reached first_green, or failed). Unlike downstream_accepted_rate (which conservatively counts an unresolved task as 'not yet accepted'), an in-flight execute task with no fix rounds yet defaults to counting as a first-pass success. Existing scorecard.efficiency() treats an undefined first_pass as None until pipeline.first_green_at is stamped (scorecard.py:1037) specifically to avoid this. Because class_evidence gates noninferior promotion partly on first_pass_delta (>= -0.02), a candidate model whose tasks are simply younger/still-running will look artificially better than a baseline with a longer-settled task mix, biasing exactly the promotion decision this module exists to inform.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "State the literal runtime threshold to use for review_request_changes_rate explicitly (e.g. keep the illustrative 0.10 as the module's own constant like REESCALATION_MAX, rather than reading promotion.CRITERIA[\"review_findings_delta\"] verbatim), or specify a sign transform (e.g. abs()/negate) so an equal candidate/baseline pair yields delta=0 and passes.",
+      "Restrict first_pass_rate/fix_round_rate numerator and denominator to owned roots that have reached a terminal state (merged_into set, status failed, or pipeline.first_green_at present); leave still-in-flight roots out of both counts rather than defaulting them to first-pass success."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790000283.3007061,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0721",
+      "claimed_at": 1790000283.300311
+    },
+    {
+      "ts": 1790000283.30176,
+      "account": "B"
+    },
+    {
+      "ts": 1790000283.713139,
+      "pid": 39170,
+      "account": "B"
+    },
+    {
+      "ts": 1790000520.811278,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_scorecard.py",
+            "issue": "CRITERIA_MAP maps review_request_changes_rate to (\"review_findings_delta\", \"<=\", 0.10), but promotion.py's actual CRITERIA[\"review_findings_delta\"] default is -0.10 (orchestrator/promotion.py:30), and the spec says thresholds are 'read from promotion.CRITERIA by those keys' at runtime, not the illustrative literal. With comparator <= and the real value -0.10, an identical candidate/baseline pair (delta=0) evaluates 0 <= -0.10 -> False -> flagged as a regression on every comparison, which directly contradicts acceptance test test_class_evidence_noninferior_equivalent_worse_and_insufficient ('opus equal to fable gives noninferior True'). The other three CRITERIA_MAP entries (first_pass_rate, avg_fix_rounds, gate_success) have comparator direction and literal that agree with promotion.py's own bad()-check sign; only this fourth entry is inverted. This is also a hidden coupling risk independent of the sign bug: reusing promotion.py's review_findings_delta key (tuned for a differently-defined metric in promotion.evaluate()) means an unrelated future edit to promotion.CRITERIA silently changes this module's noninferior gate.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_scorecard.py",
+            "issue": "first_pass_rate is specified as 'owned roots with pipeline.lineage_fix_rounds in (0, None) and no fix-round children' with no requirement that the root has actually resolved (merged_into set, reached first_green, or failed). Unlike downstream_accepted_rate (which conservatively counts an unresolved task as 'not yet accepted'), an in-flight execute task with no fix rounds yet defaults to counting as a first-pass success. Existing scorecard.efficiency() treats an undefined first_pass as None until pipeline.first_green_at is stamped (scorecard.py:1037) specifically to avoid this. Because class_evidence gates noninferior promotion partly on first_pass_delta (>= -0.02), a candidate model whose tasks are simply younger/still-running will look artificially better than a baseline with a longer-settled task mix, biasing exactly the promotion decision this module exists to inform.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "State the literal runtime threshold to use for review_request_changes_rate explicitly (e.g. keep the illustrative 0.10 as the module's own constant like REESCALATION_MAX, rather than reading promotion.CRITERIA[\"review_findings_delta\"] verbatim), or specify a sign transform (e.g. abs()/negate) so an equal candidate/baseline pair yields delta=0 and passes.",
+          "Restrict first_pass_rate/fix_round_rate numerator and denominator to owned roots that have reached a terminal state (merged_into set, status failed, or pipeline.first_green_at present); leave still-in-flight roots out of both counts rather than defaulting them to first-pass success."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790000520.812737,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_scorecard.py",
+          "issue": "CRITERIA_MAP maps review_request_changes_rate to (\"review_findings_delta\", \"<=\", 0.10), but promotion.py's actual CRITERIA[\"review_findings_delta\"] default is -0.10 (orchestrator/promotion.py:30), and the spec says thresholds are 'read from promotion.CRITERIA by those keys' at runtime, not the illustrative literal. With comparator <= and the real value -0.10, an identical candidate/baseline pair (delta=0) evaluates 0 <= -0.10 -> False -> flagged as a regression on every comparison, which directly contradicts acceptance test test_class_evidence_noninferior_equivalent_worse_and_insufficient ('opus equal to fable gives noninferior True'). The other three CRITERIA_MAP entries (first_pass_rate, avg_fix_rounds, gate_success) have comparator direction and literal that agree with promotion.py's own bad()-check sign; only this fourth entry is inverted. This is also a hidden coupling risk independent of the sign bug: reusing promotion.py's review_findings_delta key (tuned for a differently-defined metric in promotion.evaluate()) means an unrelated future edit to promotion.CRITERIA silently changes this module's noninferior gate.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_scorecard.py",
+          "issue": "first_pass_rate is specified as 'owned roots with pipeline.lineage_fix_rounds in (0, None) and no fix-round children' with no requirement that the root has actually resolved (merged_into set, reached first_green, or failed). Unlike downstream_accepted_rate (which conservatively counts an unresolved task as 'not yet accepted'), an in-flight execute task with no fix rounds yet defaults to counting as a first-pass success. Existing scorecard.efficiency() treats an undefined first_pass as None until pipeline.first_green_at is stamped (scorecard.py:1037) specifically to avoid this. Because class_evidence gates noninferior promotion partly on first_pass_delta (>= -0.02), a candidate model whose tasks are simply younger/still-running will look artificially better than a baseline with a longer-settled task mix, biasing exactly the promotion decision this module exists to inform.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790000283.300311,
+  "account": "B",
+  "pid": 39170,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_scorecard.py",
+      "issue": "CRITERIA_MAP maps review_request_changes_rate to (\"review_findings_delta\", \"<=\", 0.10), but promotion.py's actual CRITERIA[\"review_findings_delta\"] default is -0.10 (orchestrator/promotion.py:30), and the spec says thresholds are 'read from promotion.CRITERIA by those keys' at runtime, not the illustrative literal. With comparator <= and the real value -0.10, an identical candidate/baseline pair (delta=0) evaluates 0 <= -0.10 -> False -> flagged as a regression on every comparison, which directly contradicts acceptance test test_class_evidence_noninferior_equivalent_worse_and_insufficient ('opus equal to fable gives noninferior True'). The other three CRITERIA_MAP entries (first_pass_rate, avg_fix_rounds, gate_success) have comparator direction and literal that agree with promotion.py's own bad()-check sign; only this fourth entry is inverted. This is also a hidden coupling risk independent of the sign bug: reusing promotion.py's review_findings_delta key (tuned for a differently-defined metric in promotion.evaluate()) means an unrelated future edit to promotion.CRITERIA silently changes this module's noninferior gate.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_scorecard.py",
+      "issue": "first_pass_rate is specified as 'owned roots with pipeline.lineage_fix_rounds in (0, None) and no fix-round children' with no requirement that the root has actually resolved (merged_into set, reached first_green, or failed). Unlike downstream_accepted_rate (which conservatively counts an unresolved task as 'not yet accepted'), an in-flight execute task with no fix rounds yet defaults to counting as a first-pass success. Existing scorecard.efficiency() treats an undefined first_pass as None until pipeline.first_green_at is stamped (scorecard.py:1037) specifically to avoid this. Because class_evidence gates noninferior promotion partly on first_pass_delta (>= -0.02), a candidate model whose tasks are simply younger/still-running will look artificially better than a baseline with a longer-settled task mix, biasing exactly the promotion decision this module exists to inform.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

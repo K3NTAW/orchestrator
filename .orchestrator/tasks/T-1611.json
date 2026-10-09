@@ -1,0 +1,44 @@
+{
+  "id": "T-1611",
+  "created_at": 1791021278.923127,
+  "parent": "T-1590",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 3,
+  "title": "LS2b: the auto-handover section ends at an explicit marker and renders titles on one line, so an embedded heading cannot split it",
+  "spec": "Bug in LS2 (on goal/T-1590): handover.write() ends the old section at the next line starting with '## ' (orchestrator/handover.py ~line 301). But _render_section embeds task and goal titles verbatim (`### {goal['id']} {goal['title']}` in _goal_lines ~line 109, and _task_ref), and goal T-1391's title contains '\\n\\n## Evidence\\n...'. The section is then cut at that embedded heading; the rest of the old render is kept as 'tail' and the new render is written before it, so plan.md grows by one copy on every write.\n\nFix both sides:\n1. Rendering: every title rendered into the section (goal headings in _goal_lines, refs from _task_ref, anything else that interpolates a title) is collapsed to one line: whitespace runs including newlines become a single space. No rendered line inside the section may start with '## ' except the section heading itself.\n2. Boundary: _render_section ends the section with the line `<!-- end auto-handover -->`. write() takes the old section as running from the last '## Auto-handover ' heading through that marker line (inclusive) when the marker follows the heading; the tail is what follows the marker. When the marker is absent (a section written by older code), the old section runs to EOF (the pre-LS2 behaviour), so the first write after upgrade cleans up a legacy section. Remove the next-'## '-heading rule.\nKeep: last-heading rule, temp-file plus os.replace write, snapshot-hash short-circuit, section == old_section no-op.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_handover.py::test_write_with_multiline_goal_title_does_not_grow passes: a goal whose title contains '\\n\\n## Evidence\\nx' is rendered on one line; three write() calls with changing bus state leave exactly one Auto-handover heading, one end marker and no '## Evidence' line in plan.md",
+    "tests/test_handover.py::test_write_keeps_sections_after_marker passes: plan.md with '## A', a marker-terminated Auto-handover section, then '## B' keeps '## B' and its body byte-for-byte after write()",
+    "tests/test_handover.py::test_write_legacy_section_without_marker_runs_to_eof passes: a section without the marker is replaced through EOF",
+    "tests/test_handover.py::test_write_keeps_sections_after_handover and tests/test_handover.py::test_write_twice_stays_idempotent_with_tail still pass (update their fixtures to the marker form if needed)"
+  ],
+  "scope": [
+    "orchestrator/handover.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "task_class": "debugging",
+    "route": "straightforward",
+    "plan_label": "LS2b",
+    "goal_branch": "goal/T-1590"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791021299.225503,
+      "status": "superseded",
+      "hold_reason": "superseded: re-filed with a title length cap (T-1391 title is ~12k chars)"
+    }
+  ],
+  "hold_reason": "superseded: re-filed with a title length cap (T-1391 title is ~12k chars)"
+}

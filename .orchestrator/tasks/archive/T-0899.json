@@ -1,0 +1,182 @@
+{
+  "id": "T-0899",
+  "created_at": 1790110660.170571,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Active path 3: handoff-aware executor routing (start strong when expected route cost says so) within pool constraints (v2)",
+  "spec": "Today (T-0831) [handoff] mode \"active\" is treated as shadow: executor.start records a \"handoff\" decision with expected_route_cost per eligible executor but launches the baseline pick. Build the active branch. Facts: executor.start picks via pool.pick_executor + allocation (executor.py ~276-323); handoff_scorecard.expected_route_cost(task_class, executor, root, cfg) returns a number or {\"insufficient\": True}; promotion CRITERIA min_samples 20.\nDo:\n1. Active: after the baseline pick, when every eligible executor has sufficient samples for the task's class and the lowest expected_route_cost executor differs from the baseline by more than [handoff] min_gain (new key, default 0.15 = 15% cheaper expected cost-to-accept), launch that executor instead; record the decision row with selected = the chosen executor and reason \"expected_route_cost\" plus the gain; otherwise keep the baseline with reason \"insufficient_evidence\" or \"gain_below_threshold\". Hard pool constraints (eligibility, cooldowns, complexity ceilings such as Astra for \u22659, budgets) stay authoritative: the router only chooses among pool.eligible_executors.\n2. Cap: at most [handoff] max_active_share (default 0.5) of the day's execute launches may deviate from the baseline, so the baseline keeps producing comparison data; count per day in pool_state or the decision log.\n3. Outcome feedback: when a task started under an active handoff decision reaches merged or failed, decision_log.outcome(task, \"handoff\", ...) records rounds, accepted tokens and usd; handoff_scorecard.by_start already aggregates by first executor, add a column \"active_share\".\nTests: tests/test_executor.py::test_active_handoff_switches_executor_when_gain_exceeds_threshold, ::test_active_handoff_keeps_baseline_without_evidence, ::test_active_share_cap_enforced; tests/test_handoff_scorecard.py::test_active_outcome_rows_feed_by_start; docs/context-economy/08-handoffs.md Active section with the revert path ([handoff] mode shadow).\nDo not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-22 23:05) after spec review T-0851 (request_changes), binding on top of v1:\n- No daemon hook. executor.start stamps `pipeline.handoff` = {\"baseline\", \"selected\", \"switched\": bool, \"gain\", \"reason\", \"ts\"} on the bus task at dispatch (inside bus.locked()). handoff_scorecard.lineage_rows/by_start read that stamp from the task rows they already load: active_share = switched lineages / lineages with a stamp, and outcomes (rounds, accepted tokens, usd, merged/failed) come from the same task and run rows the module already aggregates. orchestrator/daemon.py leaves the scope; no decision_log.outcome call is required (the decision row is written once at dispatch with the final reason).\n- Decision reasons: \"expected_route_cost\" (switched), \"insufficient_evidence\", \"gain_below_threshold\", \"cap_reached\" (evidence and gain justify a switch but the day's active share is full), \"allocation_active\" (see precedence). Tests assert each reason is auditable from the decision row alone.\n- Day counter: computed under bus.locked() from task rows stamped today (pipeline.handoff.switched and ts within the local day) immediately before stamping; the count and the stamp happen in the same locked block, so concurrent dispatchers cannot overshoot max_active_share by more than one.\n- Precedence: baseline = the executor start() is about to launch after the allocation layer (the post-allocation pick). When [allocation] mode is active, handoff never overrides it: it records the decision with reason \"allocation_active\" and keeps the pick. When allocation is shadow or off, handoff may switch. Document this in 08-handoffs.md.\n- tests/test_handoff_scorecard.py::test_active_outcome_rows_feed_by_start is replaced by ::test_active_share_and_outcomes_from_task_stamps (two lineages, one switched; by_start shows active_share 0.5 and the switched lineage's outcome), and tests/test_executor.py gains ::test_handoff_yields_to_active_allocation.",
+  "inputs": [
+    "T-0858"
+  ],
+  "acceptance": [
+    "tests/test_executor.py::test_active_handoff_switches_executor_when_gain_exceeds_threshold passes",
+    "tests/test_executor.py::test_active_handoff_keeps_baseline_without_evidence passes",
+    "tests/test_executor.py::test_active_share_cap_enforced passes",
+    "docs/context-economy/08-handoffs.md has an Active section; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_handoff_scorecard.py::test_active_share_and_outcomes_from_task_stamps passes",
+    "tests/test_executor.py::test_handoff_yields_to_active_allocation passes"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/handoff_scorecard.py",
+    ".orchestrator/pool.toml",
+    "tests/test_executor.py",
+    "tests/test_handoff_scorecard.py",
+    "docs/context-economy/08-handoffs.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0899",
+  "codex_thread": null,
+  "result": {
+    "summary": "Core active-handoff logic (evidence sufficiency, gain threshold, allocation precedence, cap short-circuit, stamping) matches the spec and the listed tests pass, but two correctness issues remain: (1) the 'local day' cap bucket is actually a 'local month' bucket due to a slicing bug in executor.py, defeating the daily-reset intent of max_active_share; (2) by_start()'s new active_share column is a single global scalar duplicated across every per-group row rather than a true per-group aggregate, undermining the per-(executor,class) breakdown the column is meant to provide.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/executor.py",
+        "line": 353,
+        "issue": "Daily cap bucket uses time.localtime(now)[:2], which is (year, month) not (year, month, day). The cap window spans an entire calendar month instead of resetting daily as the spec requires ('ts within the local day'), so cap_reached can fire based on switches from weeks earlier in the same month, or fail to reset at midnight. Should slice [:3].",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/handoff_scorecard.py",
+        "line": 145,
+        "issue": "active_share is computed once globally over all stamped lineages, then the same scalar is written into every (first_executor, task_class) row in by_start(), instead of being computed per group. A group with zero switches will report a nonzero active_share borrowed from other groups. The single-group test fixture can't catch this.",
+        "severity": "med"
+      }
+    ],
+    "packet_version": "b16aca636e52",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790110660.171498,
+      "reviewed_sha": "7507a241eeff3392aebf333cb832901c9d82254b"
+    },
+    {
+      "ts": 1790110663.622766,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0899",
+      "claimed_at": 1790110663.576565
+    },
+    {
+      "ts": 1790110663.624512,
+      "account": "B"
+    },
+    {
+      "ts": 1790110664.714057,
+      "pid": 54828,
+      "account": "B"
+    },
+    {
+      "ts": 1790110831.43036,
+      "status": "done",
+      "result": {
+        "summary": "Core active-handoff logic (evidence sufficiency, gain threshold, allocation precedence, cap short-circuit, stamping) matches the spec and the listed tests pass, but two correctness issues remain: (1) the 'local day' cap bucket is actually a 'local month' bucket due to a slicing bug in executor.py, defeating the daily-reset intent of max_active_share; (2) by_start()'s new active_share column is a single global scalar duplicated across every per-group row rather than a true per-group aggregate, undermining the per-(executor,class) breakdown the column is meant to provide.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/executor.py",
+            "line": 353,
+            "issue": "Daily cap bucket uses time.localtime(now)[:2], which is (year, month) not (year, month, day). The cap window spans an entire calendar month instead of resetting daily as the spec requires ('ts within the local day'), so cap_reached can fire based on switches from weeks earlier in the same month, or fail to reset at midnight. Should slice [:3].",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/handoff_scorecard.py",
+            "line": 145,
+            "issue": "active_share is computed once globally over all stamped lineages, then the same scalar is written into every (first_executor, task_class) row in by_start(), instead of being computed per group. A group with zero switches will report a nonzero active_share borrowed from other groups. The single-group test fixture can't catch this.",
+            "severity": "med"
+          }
+        ],
+        "packet_version": "b16aca636e52",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790110831.431405,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790110831.4970088,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 1,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "7507a241eeff3392aebf333cb832901c9d82254b",
+        "packet_version": "b16aca636e52",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 1,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "7507a241eeff3392aebf333cb832901c9d82254b",
+      "packet_version": "b16aca636e52",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "7507a241eeff3392aebf333cb832901c9d82254b",
+  "claimed_at": 1790110663.576565,
+  "account": "B",
+  "pid": 54828,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 1,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "7507a241eeff3392aebf333cb832901c9d82254b",
+    "packet_version": "b16aca636e52",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 1,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "b16aca636e52",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

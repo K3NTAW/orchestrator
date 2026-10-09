@@ -1,0 +1,207 @@
+{
+  "id": "T-0176",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review (other model, opus, security checklist): C-O5 fix round 1 on task/T-0173 \u2014 delta c1155c4..94d5e32 (T-0173, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0173 delta: `git diff c1155c4 94d5e32` in worktree wt/T-0173 (Dockerfile, docker-compose.executor.yml, .dockerignore, docs/executor-host.md, .orchestrator/protected-paths.txt). Fix round for security review T-0171; confirm each item resolved: (1) protected-paths.txt names ~/orch-creds (no ${VAR}) plus the four container paths, runbook uses the same default and says how to protect another root; (2) compose joins an external network from ORCH_NET with a :? guard, ORCH_CREDS guarded, UID/GID defaulted, repos.toml and pool.toml mounted read-only from ./config, env_file required, no ports, no-new-privileges, cap_drop ALL, memory and pids limits; (3) runbook order: executor.env, ./work, ./config created and chowned before any compose run; network discovery; config edit + restart flow; target-repo pool.toml rule; (4) Dockerfile: FROM pinned by platform and digest with a bump comment, codex asset selected by dpkg architecture with checksum verification (or ARG CODEX_SHA256), installer scripts downloaded to files and hashed before execution, a comment stating what is verified vs only pinned; (5) .dockerignore excludes .git, .mcp*.json, pool_state.json, memory, tasks, scorecard, bench, *.lock, executor.env, config/ and uv sync --frozen still has what it needs. Do NOT run docker build (the Planner runs it as the external gate; its result is attached to the task before merge). Do run the objective secret grep over the diff and confirm it is clean. Apply the security checklist again to the changed lines. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0173"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five T-0171 groups confirmed resolved or named unresolved with evidence",
+    "Secret grep clean; security checklist applied to the changed lines"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    ".dockerignore",
+    "docs/executor-host.md",
+    ".orchestrator/protected-paths.txt"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0165",
+      "T-0173"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0176",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": ".dockerignore",
+        "line": 4,
+        "issue": "`.mcp*.json` excludes the four TRACKED role configs (.mcp.planner/review/scout/triage.json), not just the untracked local .mcp.json. In the image /opt/orchestrator has none, so install.py:156 (`orch_repo.glob('.mcp*.json')`) copies nothing into the cloned target repo, and goals.py:346 launches the Planner with `--mcp-config .mcp.planner.json --strict-mcp-config` against a file that does not exist. No preflight catches it, so every goal started in the container comes up with zero MCP servers \u2014 no bus, no orchestrator, no codex. Narrow the pattern to `/.mcp.json`.",
+        "severity": "high"
+      },
+      {
+        "path": ".dockerignore",
+        "line": 1,
+        "issue": "`work/` is not excluded, but the same change makes ./work (compose:16, runbook step 2) the executor's clone root inside the build context (build.context: .). Any rebuild after the first goal \u2014 the runbook's own `up -d --build` \u2014 ships every cloned target repo, its .orchestrator/runs/*.log, bus.sqlite and .claude state into a `COPY . /opt/orchestrator` layer of an image that also carries live credential mounts. Add `work/` (and add `work/` and `config/` to .gitignore:10 \u2014 neither is ignored today).",
+        "severity": "med"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 27,
+        "issue": "`export GID` is a no-op: GID is not a bash variable (zsh/ksh only), so it exports an unset name, compose's `${GID:-1000}` falls back to 1000 and the container user's gid is 1000 regardless of `id -g` on line 25 \u2014 the exact misalignment step 1 exists to prevent. Line 41 degrades to `chown -R \"$UID:\"` for the same reason. `export GID=$(id -g)` fixes GID, but `UID=$(id -u)` is rejected (`bash: UID: readonly variable`, verified), so the step needs a compose `.env` file or different var names.",
+        "severity": "med"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 181,
+        "issue": "\"From the host (or any container on the same docker network)\" is wrong for the host half: no ports are published and Docker's embedded DNS serves containers only, so `curl http://orchestrator-executor:8090/healthz` from the host fails to resolve. Contradicts the file's own line 176-178.",
+        "severity": "low"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 15,
+        "issue": "\"add `--platform linux/amd64` explicitly to `docker build`\" is a no-op given Dockerfile:12 pins `FROM --platform=linux/amd64` \u2014 the two options offered are the same option.",
+        "severity": "low"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 10,
+        "issue": "Prerequisites name no minimum Compose version, but compose:12-14 uses the `env_file` long syntax (`path:`/`required:`), which needs Compose v2.24+; older plugins fail with an unhelpful schema error.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789754343.245593,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0176",
+      "claimed_at": 1789754343.245085
+    },
+    {
+      "ts": 1789754343.31727,
+      "pid": 7522,
+      "account": "A"
+    },
+    {
+      "ts": 1789754683.453631,
+      "status": "done",
+      "result": {
+        "summary": "request_changes. T-0171 groups: (1) protected-paths RESOLVED \u2014 ~/orch-creds concrete, 4 container paths, guardrails.sh canon() is expanduser-only so the literal now matches; install.py:119-121 propagates the list to target repos so in-container agents inherit it. (2) compose RESOLVED \u2014 external net from ORCH_NET :?-guarded, ORCH_CREDS :?-guarded, UID/GID defaulted, repos.toml+pool.toml :ro from ./config (serve.py:43 and goals.py:269/install.py:113 read exactly those paths), env_file required, no ports, no-new-privileges, cap_drop ALL, mem 6g, pids 512. (3) runbook order RESOLVED \u2014 env/work/config created+chowned before any compose run, net discovery, restart flow, already-installed pool.toml rule matches goals.py:308-310; two residual doc defects below. (4) Dockerfile RESOLVED \u2014 FROM platform+digest pinned with bump comment, codex asset by dpkg arch with sha256 -c, installers hashed to the build log with a comment stating verified-vs-pinned, USER orch before entrypoint, entrypoint arg passthrough correct. (5) .dockerignore NOT resolved \u2014 .mcp*.json over-excludes four tracked role configs (breaks every goal), and ./work is not excluded. Secret grep over the diff: CLEAN (no keys/tokens/passwords; secrets only as env names or <paste here>). Checklist: auth uses hmac.compare_digest, /healthz unauthenticated by design, serve fails closed without ORCH_SERVICE_TOKEN.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": ".dockerignore",
+            "line": 4,
+            "issue": "`.mcp*.json` excludes the four TRACKED role configs (.mcp.planner/review/scout/triage.json), not just the untracked local .mcp.json. In the image /opt/orchestrator has none, so install.py:156 (`orch_repo.glob('.mcp*.json')`) copies nothing into the cloned target repo, and goals.py:346 launches the Planner with `--mcp-config .mcp.planner.json --strict-mcp-config` against a file that does not exist. No preflight catches it (_scaffold_commit only commits what exists), so every goal started in the container comes up with zero MCP servers \u2014 no bus, no orchestrator, no codex. Narrow the pattern to `/.mcp.json`.",
+            "severity": "high"
+          },
+          {
+            "path": ".dockerignore",
+            "line": 1,
+            "issue": "`work/` is not excluded, but the same change makes ./work (compose:16, runbook step 2) the executor's clone root inside the build context (build.context: .). Any rebuild after the first goal \u2014 the runbook's own `up -d --build` \u2014 ships every cloned target repo, its .orchestrator/runs/*.log, bus.sqlite and .claude state into the build context and bakes it into a `COPY . /opt/orchestrator` layer of an image that also carries live credential mounts. Add `work/` (and, for the same reason, add `work/` and `config/` to .gitignore:10 \u2014 neither is ignored today, so the operator's clones and config sit untracked in `git status`).",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 27,
+            "issue": "`export GID` is a no-op: GID is not a bash variable (zsh/ksh only), so it exports an unset name, compose's `${GID:-1000}` falls back to 1000 and the container user's gid is 1000 regardless of `id -g` on line 25 \u2014 the exact misalignment step 1 exists to prevent. Line 41 degrades to `chown -R \"$UID:\"` for the same reason. `export GID=$(id -g)` fixes GID, but the matching `UID=$(id -u)` is rejected (`bash: UID: readonly variable`, verified), so the step needs a compose `.env` file or different var names, not an added assignment.",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 181,
+            "issue": "\"From the host (or any container on the same docker network)\" is wrong for the host half: no ports are published and Docker's embedded DNS serves containers only, so `curl http://orchestrator-executor:8090/healthz` from the host fails to resolve. This also contradicts the file's own line 176-178. Say to run the smoke test from a container on ORCH_NET (e.g. `docker compose ... run --rm orchestrator-executor curl -f ...`).",
+            "severity": "low"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 15,
+            "issue": "\"add `--platform linux/amd64` explicitly to `docker build`\" is a no-op given Dockerfile:12 pins `FROM --platform=linux/amd64` \u2014 the two options offered are the same option. Drop the second clause or say the build always runs under emulation on arm64.",
+            "severity": "low"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 10,
+            "issue": "Prerequisites do not name a minimum Compose version, but compose:12-14 uses the `env_file` long syntax (`path:`/`required:`), which needs Compose v2.24+. On an older plugin the file fails to parse with a schema error that does not point at the cause.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789754696.88509,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": ".dockerignore",
+            "line": 4,
+            "issue": "`.mcp*.json` excludes the four TRACKED role configs (.mcp.planner/review/scout/triage.json), not just the untracked local .mcp.json. In the image /opt/orchestrator has none, so install.py:156 (`orch_repo.glob('.mcp*.json')`) copies nothing into the cloned target repo, and goals.py:346 launches the Planner with `--mcp-config .mcp.planner.json --strict-mcp-config` against a file that does not exist. No preflight catches it, so every goal started in the container comes up with zero MCP servers \u2014 no bus, no orchestrator, no codex. Narrow the pattern to `/.mcp.json`.",
+            "severity": "high"
+          },
+          {
+            "path": ".dockerignore",
+            "line": 1,
+            "issue": "`work/` is not excluded, but the same change makes ./work (compose:16, runbook step 2) the executor's clone root inside the build context (build.context: .). Any rebuild after the first goal \u2014 the runbook's own `up -d --build` \u2014 ships every cloned target repo, its .orchestrator/runs/*.log, bus.sqlite and .claude state into a `COPY . /opt/orchestrator` layer of an image that also carries live credential mounts. Add `work/` (and add `work/` and `config/` to .gitignore:10 \u2014 neither is ignored today).",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 27,
+            "issue": "`export GID` is a no-op: GID is not a bash variable (zsh/ksh only), so it exports an unset name, compose's `${GID:-1000}` falls back to 1000 and the container user's gid is 1000 regardless of `id -g` on line 25 \u2014 the exact misalignment step 1 exists to prevent. Line 41 degrades to `chown -R \"$UID:\"` for the same reason. `export GID=$(id -g)` fixes GID, but `UID=$(id -u)` is rejected (`bash: UID: readonly variable`, verified), so the step needs a compose `.env` file or different var names.",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 181,
+            "issue": "\"From the host (or any container on the same docker network)\" is wrong for the host half: no ports are published and Docker's embedded DNS serves containers only, so `curl http://orchestrator-executor:8090/healthz` from the host fails to resolve. Contradicts the file's own line 176-178.",
+            "severity": "low"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 15,
+            "issue": "\"add `--platform linux/amd64` explicitly to `docker build`\" is a no-op given Dockerfile:12 pins `FROM --platform=linux/amd64` \u2014 the two options offered are the same option.",
+            "severity": "low"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 10,
+            "issue": "Prerequisites name no minimum Compose version, but compose:12-14 uses the `env_file` long syntax (`path:`/`required:`), which needs Compose v2.24+; older plugins fail with an unhelpful schema error.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789754696.886508,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789754343.245085,
+  "pid": 7522,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

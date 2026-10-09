@@ -1,0 +1,169 @@
+{
+  "id": "T-0994",
+  "created_at": 1790153717.815354,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S1c worker_registry: durable runtime registry of running workers with structured events, reconciliation and read-only inspection CLI (P11, P12)",
+  "spec": "Create orchestrator/worker_registry.py. STATUSES = (\"starting\",\"running\",\"waiting\",\"steering\",\"cancelling\",\"cancelled\",\"done\",\"failed\",\"held\"). Files: .orchestrator/workers/<task>.json (one document: task, role, model, provider, account, pid, worktree, branch, started_at, last_event_at, stage, current_tool (only if the event stream reports it), tokens (input_uncached, cache_read, output so far when known), usd, elapsed_s (computed on read), parent, children (task ids created with constraints.fix_round_for or parent equal to this task while it runs), status, status_reason) and .orchestrator/workers/<task>.events.jsonl (append-only: ts, kind, data; kinds at least spawned, claimed, stage, tool, usage, exit, reconciled, held). Writes are atomic (temp file + rename) under the existing bus lock helper if one is exposed, else a registry-local fcntl lock. API: upsert(task_id, **fields), get(task_id), active(), event(task_id, kind, **data), finish(task_id, status, reason=None), reconcile(alive_fn=daemon.alive) marks entries whose pid is dead and status is running/starting as failed with reason process_dead and emits a reconciled event (no bus changes; daemon.reconcile_dead stays the authority for task status).\nWire producers with minimal edits: spawn.py where the claude -p Popen is created (around line 1046: spawned with pid, account, model, worktree, branch) and where the json result is parsed (around line 1084-1090: usage event + finish done/failed); executor.py where a codex exec thread starts and ends (provider codex, thread id as pid substitute in field thread, plus usage and finish); daemon.reconcile_dead calls worker_registry.reconcile at the end of its handling. Never store packet text, prompts, transcripts or secrets in the registry; only identifiers, numbers and event kinds. Never expose hidden reasoning: only observable runtime events.\nCLI: `orchestrator workers [--task T-dddd] [--all] [--json]`: table of active workers (task, role, model, provider, status, stage, elapsed, tokens, worktree) and with --task the full document plus the last 20 events; --all includes finished ones from the last 24 h. Docs: docs/hermes-hardening/03-worker-registry.md (document shape, event kinds, what is deliberately not recorded).\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_worker_registry.py::test_upsert_event_finish_roundtrip (document and event file shapes, atomic write, elapsed computed)",
+    "tests/test_worker_registry.py::test_reconcile_marks_dead_pids (alive_fn false marks failed process_dead and appends reconciled event; alive entries untouched)",
+    "tests/test_worker_registry.py::test_registry_never_stores_prompt_text (upsert with a packet or prompt kwarg raises ValueError)",
+    "tests/test_spawn.py::test_spawn_records_worker_registry_entry (patched Popen and json output produce spawned, usage and exit events)",
+    "tests/test_cli.py::test_workers_cli_lists_active (workers --json lists an active entry; --task shows events)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/worker_registry.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_worker_registry.py",
+    "tests/test_spawn.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/03-worker-registry.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790153739.941264,
+      "pipeline": {
+        "first_ready_at": 1790153739.940969
+      }
+    },
+    {
+      "ts": 1790153740.3447309,
+      "pipeline": {
+        "first_ready_at": 1790153739.940969,
+        "spec_review_at": 1790153740.344311,
+        "spec_review_at_lease": 1790154640.344311
+      }
+    },
+    {
+      "ts": 1790153740.357175,
+      "pipeline": {
+        "first_ready_at": 1790153739.940969,
+        "spec_review_at": 1790153740.344311,
+        "spec_review_at_lease": 1790154640.344311,
+        "spec_review_at_done": 1790153740.356811
+      }
+    },
+    {
+      "ts": 1790153976.365134,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "codex runs via a single blocking subprocess.run (line 159) and thread_id is only known after parsing stdout once the process exits (line 99). If the executor records the worker_registry 'spawned'/'running' entry only after thread_id is known (the natural reading of 'where a codex exec thread starts and ends'), a codex worker \u2014 the long-running provider this registry exists to make observable \u2014 will show no live entry for the entire duration of its run, defeating `orchestrator workers`'s purpose for exactly the case that needs it most. No acceptance test covers this (only test_spawn_records_worker_registry_entry, which is claude-only), so the gap could ship unnoticed.",
+          "severity": "high",
+          "line": 159
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "reconcile_dead(t, pool) runs once per already-dead task inside the tick() loop at daemon.py:1629-1637 (bus.read(status='running') can return multiple dead entries in one tick). Putting worker_registry.reconcile(alive_fn=...) 'at the end of its handling' means a full scan of every active registry entry re-runs once per dead task in the same tick \u2014 redundant, and worth doing once in tick() instead. Separately: worker_registry.py must not import daemon.py to get alive_fn (daemon.py will import worker_registry, so the reverse import is circular) \u2014 the call site in daemon.py should pass its own local alive function as an argument, not have worker_registry default to it.",
+          "severity": "med",
+          "line": 1634
+        },
+        {
+          "path": "orchestrator/worker_registry.py",
+          "issue": "the 'children' definition ('parent equal to this task') doesn't match how the `parent` field is actually used elsewhere (bus_mcp.bus_create_task's parent, daemon.py:212's parent=current.get('parent')): it generally carries the owning goal container id, propagated unchanged to children, not the id of the specific worker task that spawned a sub-task. Only the constraints.fix_round_for half of the definition matches an established convention (spawn.py:210-212, daemon.py:893). No acceptance test exercises 'children', so this half of the field will likely always be empty rather than doing anything wrong, but it's dead/misleading as specified.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790153979.821283,
+      "pipeline": {
+        "first_ready_at": 1790153739.940969,
+        "spec_review_at": 1790153740.344311,
+        "spec_review_at_lease": 1790154640.344311,
+        "spec_review_at_done": 1790153740.356811,
+        "spec_review_held_at": 1790153979.821175
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790153981.9771378,
+      "pipeline": {
+        "first_ready_at": 1790153739.940969,
+        "spec_review_at": 1790153740.344311,
+        "spec_review_at_lease": 1790154640.344311,
+        "spec_review_at_done": 1790153740.356811,
+        "spec_review_held_at": 1790153979.821175,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790153982.4618099,
+      "pipeline": {
+        "first_ready_at": 1790153739.940969,
+        "spec_review_at": 1790153740.344311,
+        "spec_review_at_lease": 1790154640.344311,
+        "spec_review_at_done": 1790153740.356811,
+        "spec_review_held_at": 1790153979.821175,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790153979.821283": true
+        }
+      }
+    },
+    {
+      "ts": 1790154095.7623308,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 13:20: spec review T-1000 request_changes folded into T-1020"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790153739.940969,
+    "spec_review_at": 1790153740.344311,
+    "spec_review_at_lease": 1790154640.344311,
+    "spec_review_at_done": 1790153740.356811,
+    "spec_review_held_at": 1790153979.821175,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790153979.821283": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "codex runs via a single blocking subprocess.run (line 159) and thread_id is only known after parsing stdout once the process exits (line 99). If the executor records the worker_registry 'spawned'/'running' entry only after thread_id is known (the natural reading of 'where a codex exec thread starts and ends'), a codex worker \u2014 the long-running provider this registry exists to make observable \u2014 will show no live entry for the entire duration of its run, defeating `orchestrator workers`'s purpose for exactly the case that needs it most. No acceptance test covers this (only test_spawn_records_worker_registry_entry, which is claude-only), so the gap could ship unnoticed.",
+      "severity": "high",
+      "line": 159
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "reconcile_dead(t, pool) runs once per already-dead task inside the tick() loop at daemon.py:1629-1637 (bus.read(status='running') can return multiple dead entries in one tick). Putting worker_registry.reconcile(alive_fn=...) 'at the end of its handling' means a full scan of every active registry entry re-runs once per dead task in the same tick \u2014 redundant, and worth doing once in tick() instead. Separately: worker_registry.py must not import daemon.py to get alive_fn (daemon.py will import worker_registry, so the reverse import is circular) \u2014 the call site in daemon.py should pass its own local alive function as an argument, not have worker_registry default to it.",
+      "severity": "med",
+      "line": 1634
+    },
+    {
+      "path": "orchestrator/worker_registry.py",
+      "issue": "the 'children' definition ('parent equal to this task') doesn't match how the `parent` field is actually used elsewhere (bus_mcp.bus_create_task's parent, daemon.py:212's parent=current.get('parent')): it generally carries the owning goal container id, propagated unchanged to children, not the id of the specific worker task that spawned a sub-task. Only the constraints.fix_round_for half of the definition matches an established convention (spawn.py:210-212, daemon.py:893). No acceptance test exercises 'children', so this half of the field will likely always be empty rather than doing anything wrong, but it's dead/misleading as specified.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 13:20: spec review T-1000 request_changes folded into T-1020"
+}

@@ -1,0 +1,166 @@
+{
+  "id": "T-0645",
+  "created_at": 1789979098.161686,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R10 v3: orchestrator/strategy.py \u2014 workflow-strategy ids from task lineage (real bus fields, public scorecard API), per-strategy outcome scorecard and shadow recommendation with evidence thresholds (AP P18)",
+  "spec": "Why: the orchestrator records which model worked (scorecard.executor_economics) but not which workflow worked per task kind; AP P18 / brief P12 want explicit strategy ids, per-strategy outcomes, a strategy scorecard, and an observe-only then off/shadow/active recommendation that never removes deterministic safety steps. v3 after spec reviews T-0618 and T-0633.\nWhat: new pure module orchestrator/strategy.py reading tasks/*.json, runs and runs/sched/waves.jsonl under root. Tests are unittest.TestCase methods in the named files (this repo runs unittest; no pytest fixtures).\n- Sources (bus schema): acceptance = truthy task['merged_into']; merged_at = pipeline.get('merged_at') else task.get('merged_at'); time_s = merged_at - task['created_at'] or None; task_class = attribution.task_class(task); band = attribution.band(task['complexity']); scout objective = (constraints or {}).get('objective'), the Planner convention for scout tasks (stated in the docstring: fires only for scouts created with it); waves_rows = schedlog.read('waves') (rows {'wave': [ids], ...}); review children = tasks with role review and inputs[0] == task id; reviewer role = review constraints.get('reviewer_role'); spec review children = role spec_review with inputs[0] == task id or constraints.spec_review_for == task id; fix rounds = execute tasks whose constraints.fix_round_for resolves (transitively) to the root, i.e. attribution.lineage(task)['root'] == root id; security review = pipeline.review_reason in ('diff_unavailable', 'security_paths_empty') or startswith('security_paths:') or startswith('semantic_') (the same predicate as daemon._open_reviews).\n- STRATEGIES = ('direct_execute', 'scout_execute', 'dependency_scout_execute', 'architecture_impact_scouts_then_decompose', 'execute_specialist_review', 'security_context_strong_execute_security_review', 'parallel_wave'); derive(task, tasks, waves_rows=None) -> {'strategy': composite joined by '+' in STRATEGIES order, 'steps': observed among ['scout', 'spec_review', 'execute', 'review', 'security_review', 'fix_round'] in that order, 'components': matched STRATEGIES}: goal scouts = role scout, same parent, created_at before the task; any scout with objective dependency-map -> dependency_scout_execute; >= 2 scouts with objectives in (architecture, migration-impact, API-consumers) -> architecture_impact_scouts_then_decompose; any scout otherwise -> scout_execute; review children with roles acceptance and adversarial -> execute_specialist_review; security predicate -> security_context_strong_execute_security_review; task id in a waves row wave with >= 2 members -> parallel_wave; nothing -> direct_execute.\n- observations(root=STATE) -> one row per execute lineage root: accepted roots come from the public scorecard.efficiency(root)['tasks'] dict (keyed by root id; provides usd, tokens, fix_rounds, first_pass, goal_id) and failed roots from tasks with role execute, status failed, no constraints.fix_round_for and no merged_into (usd/tokens summed from runs rows whose task is in the lineage, may be None); each row {'task', 'goal', 'repo': root.parent.name, 'strategy', 'steps', 'task_class', 'band', 'complexity', 'models': sorted executor plus review tiers, 'tokens', 'usd', 'time_s', 'first_pass', 'fix_rounds', 'gate_reds': sum of pipeline.gate_reds over the lineage tasks, 'review_request_changes': count of review children over the lineage whose result.verdict == 'request_changes', 'accepted'}. No private scorecard helpers are imported.\n- scorecard(root=STATE, by=('task_class', 'band')) -> {(strategy, class, band): {'n', 'accepted_rate', 'first_pass_rate', 'median_usd', 'median_time_s', 'avg_fix_rounds'}}; format(card).\n- recommend(task_class, band, *, repo=None, root=STATE, cfg=None) -> {'mode', 'strategy'|None, 'n', 'evidence', 'reason', 'required': ['security_review_if_security_paths', 'tests_green', 'spec_review_from_6']}: cfg [strategy] mode off|shadow|active (default shadow), min_samples 10; observations filtered to the same repo (when given), task_class and band; n < min_samples -> None with reason insufficient_evidence; rank by accepted_rate, then first_pass_rate, then lower median_usd; off -> mode off, strategy None. Active still only recommends; 'required' always non-empty.",
+  "inputs": [
+    "T-0637"
+  ],
+  "acceptance": [
+    "tests/test_strategy.py::test_derive_attributes_strategy_steps_and_components \u2014 a task with a goal scout of objective dependency-map, a spec review child, reviews with roles acceptance and adversarial, review_reason diff_unavailable, one fix round and membership in a two-task wave derives dependency_scout_execute+execute_specialist_review+security_context_strong_execute_security_review+parallel_wave, steps ['scout','spec_review','execute','review','security_review','fix_round'] and components listing those four",
+    "tests/test_strategy.py::test_observations_use_real_bus_fields_and_lineage_sums \u2014 a merged lineage with merged_into, created_at, pipeline.merged_at, a fix round with gate_reds 1 and one request_changes review yields accepted True, the right time_s, gate_reds 1 and review_request_changes 1; task_class and band come from attribution helpers",
+    "tests/test_strategy.py::test_observations_aggregate_outcomes_per_strategy \u2014 three merged lineages of two strategies yield scorecard rows with n, accepted_rate, first_pass_rate, median_usd",
+    "tests/test_strategy.py::test_cold_start_and_insufficient_evidence_return_no_strategy \u2014 empty root and n below min_samples both yield strategy None with reason insufficient_evidence and a non-empty required list",
+    "tests/test_strategy.py::test_shadow_recommendation_prefers_evidence_without_changing_policy \u2014 with 12 observations per strategy the better accepted_rate wins in shadow mode; mode off yields strategy None",
+    "tests/test_strategy.py::test_repository_and_task_class_are_separated \u2014 observations from another repo or another task class never count toward a recommendation for this one"
+  ],
+  "scope": [
+    "orchestrator/strategy.py",
+    "tests/test_strategy.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0645",
+  "codex_thread": null,
+  "result": {
+    "summary": "Ran tests/test_strategy.py directly: all 6 tests pass. Traced derive()/observations()/scorecard()/recommend() against every clause in the spec (bus field sourcing, security_review predicate matches daemon._open_reviews exactly, STRATEGIES ordering/join, lineage/fix_round resolution via _root_id, repo/task_class/band filtering, off/shadow ranking by accepted_rate->first_pass_rate->median_usd). The _root_id helper's local fix_round_for walk (rather than trusting attribution.lineage's bus.get, which reads the global STATE tasks dir and would misresolve chains for other roots/temp test dirs) is a deliberate and correct fix for cross-root lineage resolution, not a bug. No confirmed defects against the acceptance criteria.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/strategy.py",
+        "line": 211,
+        "issue": "module-level function named `format` shadows the builtin; harmless here but low-value naming choice",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "1f999ee20f93",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789979098.162928,
+      "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+    },
+    {
+      "ts": 1789979101.485044,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0645",
+      "claimed_at": 1789979101.484587
+    },
+    {
+      "ts": 1789979101.486567,
+      "account": "B"
+    },
+    {
+      "ts": 1789979102.0642078,
+      "pid": 76705,
+      "account": "B"
+    },
+    {
+      "ts": 1789979271.020098,
+      "status": "done",
+      "result": {
+        "summary": "Ran tests/test_strategy.py directly: all 6 tests pass. Traced derive()/observations()/scorecard()/recommend() against every clause in the spec (bus field sourcing, security_review predicate matches daemon._open_reviews exactly, STRATEGIES ordering/join, lineage/fix_round resolution via _root_id, repo/task_class/band filtering, off/shadow ranking by accepted_rate->first_pass_rate->median_usd). The _root_id helper's local fix_round_for walk (rather than trusting attribution.lineage's bus.get, which reads the global STATE tasks dir and would misresolve chains for other roots/temp test dirs) is a deliberate and correct fix for cross-root lineage resolution, not a bug. No confirmed defects against the acceptance criteria.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/strategy.py",
+            "line": 211,
+            "issue": "module-level function named `format` shadows the builtin; harmless here but low-value naming choice",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "1f999ee20f93",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789979271.021951,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789979271.073262,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+        "packet_version": "1f999ee20f93",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+      "packet_version": "1f999ee20f93",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+  "claimed_at": 1789979101.484587,
+  "account": "B",
+  "pid": 76705,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+    "packet_version": "1f999ee20f93",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "1f999ee20f93",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,177 @@
+{
+  "id": "T-0945",
+  "created_at": 1790118296.541424,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S5: active skill routing for trusted builtin skills: selected compact skills are presented in the worker packet (Level 2), static exposure is switched off for Claude workers, recovery reads are measured; gated by [skills] mode and a safety refusal (v3)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P8 step 7, P10, P12 (skills part), P30 recovery (P37 stage 5). Depends on T-0913 (skill_router.select, [skills] mode, skill_selection rows, skills_selected in packet meta) and T-0894 (skills_used detection). Facts (Planner grep): Claude workers are launched by spawn.run_claude as `claude -p <prompt> --model ... --allowedTools ... [--disallowedTools ...]` with CLAUDE_CONFIG_DIR per account (spawn.py ~781-795); the CLI offers `--disable-slash-commands` (\"Disable all skills\") and `--plugin-dir`; worktrees carry the repo's committed .claude/skills symlinks, which is today's static exposure; skills with scripts are invoked through `bash skills/<role>/<name>/scripts/...`, which the allowlists already permit (Bash(bash skills/*)); Codex executors get implement-spec through AGENTS.md; skills_registry.render(id, 2) gives the compact body.\nDo:\n1. Presentation: when [skills] mode == \"active\", the worker packet gains a section \"## skills\" carrying, for each selected skill, a header line \"### <id> (v<version>)\" and its Level 2 rendering; the section sits after the role instructions and before the task contract sections; for Codex executors the same section goes into the execute packet (implement-spec always selected for executors, so Codex sees the compact body in the packet as well as via AGENTS.md). Ambiguous candidates are listed as one Level 0 line each under \"### available on request\" so a worker can Read skills/<id>/SKILL.md when it needs one.\n2. Exposure: in active mode Claude workers are launched with `--disable-slash-commands` so the static .claude/skills descriptions no longer load; nothing in .claude/skills, the repo or the worktree changes. In shadow and off the launch is byte-identical to today (test asserts the argv).\n3. Telemetry: skill_tokens_presented_l2 in packet meta and run context; the skill_selection decision row's selected = presented ids, mode = active; skills_used detection (S1b) extended: a Read of skills/<role>/<name>/SKILL.md by the worker, or a bash invocation of that skill's script, counts as a use; a use of a skill that was not presented counts as a skill_recovery (S3 metric).\n4. Safety refusal: active is refused (falls back to shadow with one notify line) when skill_scorecard shows fewer than 30 shadow selection rows for the role over the last 7 days, or a skill_recovery_rate above [skills] max_recovery (new key, default 0.10) for that role. Planner role is never switched (the interactive Planner keeps its own skills).\n5. docs/skill-intelligence/06-active-routing.md (\u226460 lines): mechanism, the refusal rules, how to read the recovery rate, revert path ([skills] mode shadow restores static exposure on the next spawn).\nTests (unittest): tests/test_spawn.py::test_active_skills_section_carries_level2_of_selected_only, ::test_active_launch_adds_disable_slash_commands_and_shadow_does_not, ::test_active_refused_without_shadow_evidence_or_with_high_recovery, ::test_skill_use_detected_from_read_of_skill_file_and_script_invocation; tests/test_skill_scorecard.py::test_presented_tokens_and_recovery_from_active_rows. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 06:25) after spec review T-0930 (request_changes), binding on top of v1:\n- Placement: the \"## skills\" section is the FIRST section of the packet body built by spawn._packet_body / review_packet (before objective), so it needs no prompt-template change; prompts/*.md stay out of scope. The packet header (packet_run_meta) records the section like any other (chars, tokens, hash).\n- Budget: the skills section counts against the 4800-char packet budget and is protected like acceptance (never trimmed by the generic loop); it has its own cap: presented Level 2 text \u2264 2400 chars; when exceeded, the lowest-ranked non-mandatory selected skill is demoted to Level 1, then dropped, until it fits, and the demotion is recorded in the skill_selection row (\"demoted\": ids).\n- Remove the stage-3 notify strings (\"skill routing active is shadow-only until Stage 5\") and their latch in spawn._skill_routing and executor._route_skills; active now means the behaviour in this spec, and the only remaining notify is the safety refusal message.\n- Evidence for the refusal rule: add role to every skill_selection decision row (both call sites); skill_scorecard.selection_rows(root, role, since_s) counts shadow/active rows for that role from the decision log over the window; the refusal uses that function (fewer than 30 rows in 7 days) plus skill_scorecard's recovery rate for the role.\n- Drop the Planner exemption sentence: no Planner launch site calls skill_router today (planner_shadow.py builds its own packets), so the rule is simply that only roles routed through spawn.run_worker and the Codex dispatch path are affected.\n- Tests: tests/test_spawn.py::test_skills_section_is_first_packet_section_and_capped (a selected set whose Level 2 exceeds 2400 chars demotes the lowest non-mandatory skill to Level 1 and records it), tests/test_skill_scorecard.py::test_selection_rows_by_role_and_window.\n\nSPEC v3 (2026-09-23 07:10) after spec review T-0937 (round 2; points folded in, further review waived by the Planner, verdict set to approve):\n- Selection runs exactly once per worker dispatch, BEFORE the packet body is built: spawn.dispatch/run_worker and the Codex dispatch path call skill_router.select first and pass the result into packet()/review_packet() (new keyword `skills=`), and the same result feeds the decision row and the packet meta; no second select call after the body exists.\n- All four skill_selection decision_log.record call sites (spawn._skill_exposure, spawn._skill_routing, executor._route_skills, executor's stage-1 static branch) carry `role` as a top-level row field (in addition to anything nested).\n- Scope of active presentation: execute and review roles only (execute packet and review_packet). For scout, spec_review and challenge the router still runs and logs, but the decision row records mode \"shadow\" and presented = [] so selected == presented holds by construction for every row; scout_packet, spec_review_packet and the challenge render are untouched.\n- The refusal rule's recovery rate is time-windowed: skill_scorecard.recovery_rate(root, role, since_s) derives it from decision_log outcome rows (skill_recovery outcomes / selection rows) within the same since_s window as selection_rows; build()'s all-time by_role value is not used for the refusal.\n- New tests are methods on the existing SkillScorecardTests class in tests/test_skill_scorecard.py (test_selection_rows_by_role_and_window, test_presented_tokens_and_recovery_from_active_rows, test_recovery_rate_windowed); tests/test_spawn.py::test_selection_runs_once_before_packet_build asserts a single select call per dispatch with the section present in the packet.",
+  "inputs": [
+    "T-0939"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_active_skills_section_carries_level2_of_selected_only passes",
+    "tests/test_spawn.py::test_active_launch_adds_disable_slash_commands_and_shadow_does_not passes",
+    "tests/test_spawn.py::test_active_refused_without_shadow_evidence_or_with_high_recovery passes",
+    "tests/test_spawn.py::test_skill_use_detected_from_read_of_skill_file_and_script_invocation passes",
+    "tests/test_skill_scorecard.py::test_presented_tokens_and_recovery_from_active_rows passes",
+    "docs/skill-intelligence/06-active-routing.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_skills_section_is_first_packet_section_and_capped passes",
+    "tests/test_skill_scorecard.py::test_selection_rows_by_role_and_window passes",
+    "tests/test_skill_scorecard.py::test_recovery_rate_windowed passes",
+    "tests/test_spawn.py::test_selection_runs_once_before_packet_build passes"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/bus.py",
+    ".orchestrator/pool.toml",
+    "tests/test_spawn.py",
+    "tests/test_skill_scorecard.py",
+    "docs/skill-intelligence/06-active-routing.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0945",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/decision_log.py",
+        "line": 107,
+        "issue": "decision_log.record() has no `role` parameter, so none of the four skill_selection call sites can put role at the row's top level as SPEC v3 requires ('All four skill_selection decision_log.record call sites carry role as a top-level row field'). spawn._skill_exposure nests it only in deterministic (spawn.py ~29-33); spawn._skill_routing and executor._route_skills nest it in extra (spawn.py ~311-315, executor.py ~113-119); executor.py's stage-1 static branch (~line 149) nests it in deterministic too. The row dict built in record() (decision_log.py:133-147) has no top-level 'role' key, so row['role'] is always None in production. skill_scorecard._selection_rows currently masks this with a 3-way OR fallback (row.get('role') or deterministic.role or extra.role), so today's refusal gate still counts correctly, but this is a real deviation from the binding spec that the acceptance tests don't catch (they mock decision_log.read_all with hand-built rows that already have role at top level, never exercising the real call sites). Any future consumer trusting the documented top-level contract will silently get None.",
+        "severity": "med"
+      }
+    ],
+    "packet_version": "ad2089fa9ddc",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790118296.5424042,
+      "reviewed_sha": "003310ecf1b7fe5d04f0001b87933a69a7cc3159"
+    },
+    {
+      "ts": 1790118299.978794,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0945",
+      "claimed_at": 1790118299.97854
+    },
+    {
+      "ts": 1790118299.980055,
+      "account": "B"
+    },
+    {
+      "ts": 1790118300.9509928,
+      "pid": 11797,
+      "account": "B"
+    },
+    {
+      "ts": 1790118601.111852,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/decision_log.py",
+            "line": 107,
+            "issue": "decision_log.record() has no `role` parameter, so none of the four skill_selection call sites can put role at the row's top level as SPEC v3 requires ('All four skill_selection decision_log.record call sites carry role as a top-level row field'). spawn._skill_exposure nests it only in deterministic (spawn.py ~29-33); spawn._skill_routing and executor._route_skills nest it in extra (spawn.py ~311-315, executor.py ~113-119); executor.py's stage-1 static branch (~line 149) nests it in deterministic too. The row dict built in record() (decision_log.py:133-147) has no top-level 'role' key, so row['role'] is always None in production. skill_scorecard._selection_rows currently masks this with a 3-way OR fallback (row.get('role') or deterministic.role or extra.role), so today's refusal gate still counts correctly, but this is a real deviation from the binding spec that the acceptance tests don't catch (they mock decision_log.read_all with hand-built rows that already have role at top level, never exercising the real call sites). Any future consumer trusting the documented top-level contract will silently get None.",
+            "severity": "med"
+          }
+        ],
+        "packet_version": "ad2089fa9ddc",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790118601.11302,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790118601.1755672,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 1,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "003310ecf1b7fe5d04f0001b87933a69a7cc3159",
+        "packet_version": "ad2089fa9ddc",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 1,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "003310ecf1b7fe5d04f0001b87933a69a7cc3159",
+      "packet_version": "ad2089fa9ddc",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "003310ecf1b7fe5d04f0001b87933a69a7cc3159",
+  "claimed_at": 1790118299.97854,
+  "account": "B",
+  "pid": 11797,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 1,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "003310ecf1b7fe5d04f0001b87933a69a7cc3159",
+    "packet_version": "ad2089fa9ddc",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 1,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "ad2089fa9ddc",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

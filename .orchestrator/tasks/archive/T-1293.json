@@ -1,0 +1,671 @@
+{
+  "id": "T-1293",
+  "created_at": 1790178417.420486,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S2d2 cache-aware tool and skill disclosure in shadow: stable Level-0 tool catalog view and stable skill catalog block, measured on the existing tool_disclosure and skill_selection rows (P9, P10)",
+  "spec": "orchestrator/tool_catalog.py exposes a pure function cache_view(role, keep, previous_row) returning {stable_catalog_chars (the Level-0 catalog: names and one-line purposes of every known tool for the role, identical across tasks), dynamic_chars (the selected Level-2 schemas), changed_since_previous (True, False, or None when previous_row is None)}; orchestrator/bus.py (scope), where tool_disclosure rows are written (near line 285), calls it and stores the three fields on the row; previous_row is the last tool_disclosure row of the same role among the most recent 200 decision_log rows (bounded read, no module state). Active presentation ([tool_disclosure].cache_mode active): the stable catalog text precedes the dynamic schemas in the tool disclosure text built for the packet. Skills: orchestrator/skill_router.py exposes catalog_block(role, registry) (sorted ids and triggers of every active skill for the role, identical across tasks); orchestrator/spawn.py (scope), where _prepare_skills builds the presented skills section, prepends that block ONLY when [skills].cache_mode is active, and always records catalog_chars and selected_chars on the existing skill_selection row. Both sections get cache_mode = \"shadow\" with dated comments and revert instructions, missing key means off, validated in pool (S2d1 adds the validation helper; reuse it), inert when the section's mode is off. Docs: sections 2 and 3 of docs/hermes-hardening/10-cache-aware-disclosure.md with a reproducible command (`orchestrator scorecard --economy --disclosure-cache`, scope orchestrator/cli.py) printing row counts, date range, mean stable vs dynamic chars and the share of runs whose dynamic list changed since the previous task of the role; when no rows exist the doc says so.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [
+    "T-1283"
+  ],
+  "acceptance": [
+    "tests/test_tool_catalog.py::test_cache_view_stable_across_tasks_and_changed_flag_none_first (identical stable text for two tasks of a role; changed flag None without a previous row, True/False with one)",
+    "tests/test_bus.py::test_tool_disclosure_row_carries_cache_view_fields",
+    "tests/test_skill_router.py::test_catalog_block_sorted_and_stable",
+    "tests/test_spawn.py::test_skill_catalog_block_only_in_active_cache_mode_and_chars_recorded",
+    "tests/test_cli.py::test_scorecard_disclosure_cache_summary",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/tool_catalog.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_tool_catalog.py",
+    "tests/test_bus.py",
+    "tests/test_skill_router.py",
+    "tests/test_spawn.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/10-cache-aware-disclosure.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1293",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/bus.py",
+        "issue": "The bus.py row near line 285 is written only in log_run, and only when provider or account is codex. It records placeholder tokens (tokens_disclosed 0, candidates CODEX_TOOLS). Claude roles get their tool_disclosure row from spawn._shadow_tool_disclosure (spawn.py ~485), and hidden-tool escalation writes a third row at spawn.py ~1492. If cache_view is wired only in bus.py, the summary covers Codex rows only, and the codex catalog is not the per-role Claude catalog. If it is wired in both places, the row-writing logic is duplicated.",
+        "severity": "high",
+        "line": 285
+      },
+      {
+        "path": "orchestrator/bus.py",
+        "issue": "log_run fires once per run event and per attempt, so a retried task writes several tool_disclosure rows. changed_since_previous then compares a task with itself, and the changed-share is inflated by retries. The spec does not say to compare only against a previous row for a different task. Escalation rows (reason hidden_tool_requested, no kept list) also share the kind and would corrupt previous_row selection.",
+        "severity": "high",
+        "line": 285
+      },
+      {
+        "path": "orchestrator/bus.py",
+        "issue": "'Most recent 200 decision_log rows' has no bounded reader. decision_log.read_all reads the whole file (optionally filtered by since_ts). Without a specified tail-read helper, the implementer will either read everything, which violates the bounded-read requirement, or add a new API to decision_log.py, which is outside scope. The spec must name the helper and add decision_log.py to scope, or restrict the read to the current-day file. The spec also does not say what happens when the row is missing a kept list or is an older row without the new fields.",
+        "severity": "med",
+        "line": 285
+      },
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "issue": "The Level-0 catalog and Level-2 schemas are not defined. tool_catalog currently has level0(ids), disclosed(role), tokens(ids) and minimal_set. It is unclear whether Level-2 schema text exists or where the 'tool disclosure text built for the packet' is assembled. The active presentation ordering (stable catalog before dynamic schemas) has no named insertion point and no acceptance test, so it can only be verified indirectly. Stability of 'identical across tasks' also depends on mcp measurements (_mcp_measurements), which may vary.",
+        "severity": "high",
+        "line": 76
+      },
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "issue": "changed_since_previous is not defined. Compare the kept id list, ordered or as a set? The previous row's kept list lives under deterministic.kept, but the spec passes the whole row and does not say which field is read. Two implementers would get different results.",
+        "severity": "med",
+        "line": 96
+      }
+    ],
+    "suggested_spec_changes": [
+      "Name every tool_disclosure writer to change: bus.log_run (codex), spawn._shadow_tool_disclosure (Claude roles) and the escalation row at spawn.py ~1492. Say which get the cache_view fields (recommended: only spawn._shadow_tool_disclosure plus the codex row, and not the escalation row), and have both call one shared helper.",
+      "Define previous_row as the last tool_disclosure row of the same role for a different subject (task id), excluding escalation rows and rows without deterministic.kept. Define changed_since_previous as an inequality of the sorted kept id lists.",
+      "Specify the bounded read: add a tail-read helper to decision_log.py (and add it to scope) that reads only the last 200 rows, or state that the read is over the current-day file only. Tests must cover previous_row being None, and a previous row that lacks the new fields.",
+      "Define Level-0 and Level-2 text in tool_catalog (exact functions or fields that produce stable_catalog_chars and dynamic_chars), and name the insertion point where the tool disclosure text is assembled for the packet. Add an acceptance test that, under active cache_mode, the stable catalog precedes the dynamic schemas and, under shadow or off, the text is byte-identical to today.",
+      "State explicitly that cache_mode active has no effect unless the section's own mode is active, for both [tool_disclosure] and [skills], and that off or missing keeps today's text byte-identical. Add tests for both.",
+      "Specify how the S2d1 validator is reused (add a section parameter to context_router.cache_mode and add context_router.py to scope, or add a wrapper) and what an invalid value does on the packet path (fall back to off and notify, not a silent fallback and not a crash).",
+      "List which skill_selection writers must carry catalog_chars and selected_chars (spawn.py _prepare_skills consumers at 32/106, executor.py 31/513) and confirm that rows written by harness_depth.py are unchanged. Add that skill_scorecard and promotion readers ignore the new fields.",
+      "cli.py: state the exact flag semantics (--disclosure-cache is valid only with --economy, is added to the mutual-exclusion sum and the allowed-options map), the exact empty-case output string, and the output field names. The doc must quote the same string. Define doc sections 2 (tool disclosure) and 3 (skills) and add 'no rows' wording to each.",
+      "Require that a cache_view exception in bus.log_run does not drop the tool_disclosure row: write the row with the three fields set to null and emit a notify. Add a test for it.",
+      "Add tests/test_pool.py (or a config test in an in-scope file) for the missing-key and shipped-value cases for both new cache_mode keys, and note the revert path in the pool.toml comments (set cache_mode = \"off\")."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 9060,
+      "trimmed": {
+        "risks": 6
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790178420.091852,
+      "packet_meta": {
+        "chars": 4637,
+        "est_tokens": 1159,
+        "presented_tokens": 1159,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ac9627c5bd3c2734be40061854e57d28e61be869fbdf1d5b9284dae5e5ff36e0"
+          },
+          "spec": {
+            "chars": 2710,
+            "est_tokens": 677,
+            "sha256": "e48ed10aff61e7de57bba0b3f3ee58910e16c86b56982d82efd3cc153b398fff"
+          },
+          "acceptance": {
+            "chars": 551,
+            "est_tokens": 137,
+            "sha256": "03e970848a659ecd41f62f03a66f8e9f09c64551706b1e93ee54d87e40d84e4f"
+          },
+          "scope": {
+            "chars": 338,
+            "est_tokens": 84,
+            "sha256": "978e7bbdeb0381a58635000e8d2cd9d968b87975429c0b04aa5628ee725bdfcd"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 795,
+            "est_tokens": 198,
+            "sha256": "b22594d4dc16c3fa7db8dea8ff6b42b3c8e561a85e3a4b2850c164db1e833e90"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "29f8f2be7ebf",
+        "version": "29f8f2be7ebf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1283 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790178424.356381,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1293",
+      "claimed_at": 1790178424.351577
+    },
+    {
+      "ts": 1790178424.3711941,
+      "account": "A"
+    },
+    {
+      "ts": 1790178426.6726458,
+      "pid": 52798,
+      "account": "A"
+    },
+    {
+      "ts": 1790178479.5740001,
+      "packet_meta": {
+        "chars": 4637,
+        "est_tokens": 1159,
+        "presented_tokens": 1159,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ac9627c5bd3c2734be40061854e57d28e61be869fbdf1d5b9284dae5e5ff36e0"
+          },
+          "spec": {
+            "chars": 2710,
+            "est_tokens": 677,
+            "sha256": "e48ed10aff61e7de57bba0b3f3ee58910e16c86b56982d82efd3cc153b398fff"
+          },
+          "acceptance": {
+            "chars": 551,
+            "est_tokens": 137,
+            "sha256": "03e970848a659ecd41f62f03a66f8e9f09c64551706b1e93ee54d87e40d84e4f"
+          },
+          "scope": {
+            "chars": 338,
+            "est_tokens": 84,
+            "sha256": "978e7bbdeb0381a58635000e8d2cd9d968b87975429c0b04aa5628ee725bdfcd"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 795,
+            "est_tokens": 198,
+            "sha256": "b22594d4dc16c3fa7db8dea8ff6b42b3c8e561a85e3a4b2850c164db1e833e90"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "29f8f2be7ebf",
+        "version": "29f8f2be7ebf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1283 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d959b299-c5be-4da7-88c7-1eb41138c81d"
+      }
+    },
+    {
+      "ts": 1790178479.601044,
+      "packet_meta": {
+        "chars": 4637,
+        "est_tokens": 1159,
+        "presented_tokens": 1159,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ac9627c5bd3c2734be40061854e57d28e61be869fbdf1d5b9284dae5e5ff36e0"
+          },
+          "spec": {
+            "chars": 2710,
+            "est_tokens": 677,
+            "sha256": "e48ed10aff61e7de57bba0b3f3ee58910e16c86b56982d82efd3cc153b398fff"
+          },
+          "acceptance": {
+            "chars": 551,
+            "est_tokens": 137,
+            "sha256": "03e970848a659ecd41f62f03a66f8e9f09c64551706b1e93ee54d87e40d84e4f"
+          },
+          "scope": {
+            "chars": 338,
+            "est_tokens": 84,
+            "sha256": "978e7bbdeb0381a58635000e8d2cd9d968b87975429c0b04aa5628ee725bdfcd"
+          },
+          "depends_on": {
+            "chars": 144,
+            "est_tokens": 36,
+            "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+          },
+          "existing tests": {
+            "chars": 795,
+            "est_tokens": 198,
+            "sha256": "b22594d4dc16c3fa7db8dea8ff6b42b3c8e561a85e3a4b2850c164db1e833e90"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "29f8f2be7ebf",
+        "version": "29f8f2be7ebf",
+        "candidate_known": false,
+        "base": "3a364e634c4f",
+        "sources": "task@T-1283 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d959b299-c5be-4da7-88c7-1eb41138c81d",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790178479.622268,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/bus.py",
+            "issue": "The bus.py row near line 285 is written only in log_run, and only when provider or account is codex. It records placeholder tokens (tokens_disclosed 0, candidates CODEX_TOOLS). Claude roles get their tool_disclosure row from spawn._shadow_tool_disclosure (spawn.py ~485), and hidden-tool escalation writes a third row at spawn.py ~1492. If cache_view is wired only in bus.py, the summary covers Codex rows only, and the codex catalog is not the per-role Claude catalog. If it is wired in both places, the row-writing logic is duplicated.",
+            "severity": "high",
+            "line": 285
+          },
+          {
+            "path": "orchestrator/bus.py",
+            "issue": "log_run fires once per run event and per attempt, so a retried task writes several tool_disclosure rows. changed_since_previous then compares a task with itself, and the changed-share is inflated by retries. The spec does not say to compare only against a previous row for a different task. Escalation rows (reason hidden_tool_requested, no kept list) also share the kind and would corrupt previous_row selection.",
+            "severity": "high",
+            "line": 285
+          },
+          {
+            "path": "orchestrator/bus.py",
+            "issue": "'Most recent 200 decision_log rows' has no bounded reader. decision_log.read_all reads the whole file (optionally filtered by since_ts). Without a specified tail-read helper, the implementer will either read everything, which violates the bounded-read requirement, or add a new API to decision_log.py, which is outside scope. The spec must name the helper and add decision_log.py to scope, or restrict the read to the current-day file. The spec also does not say what happens when the row is missing a kept list or is an older row without the new fields.",
+            "severity": "med",
+            "line": 285
+          },
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "issue": "The Level-0 catalog and Level-2 schemas are not defined. tool_catalog currently has level0(ids), disclosed(role), tokens(ids) and minimal_set. It is unclear whether Level-2 schema text exists or where the 'tool disclosure text built for the packet' is assembled. The active presentation ordering (stable catalog before dynamic schemas) has no named insertion point and no acceptance test, so it can only be verified indirectly. Stability of 'identical across tasks' also depends on mcp measurements (_mcp_measurements), which may vary.",
+            "severity": "high",
+            "line": 76
+          },
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "issue": "changed_since_previous is not defined. Compare the kept id list, ordered or as a set? The previous row's kept list lives under deterministic.kept, but the spec passes the whole row and does not say which field is read. Two implementers would get different results.",
+            "severity": "med",
+            "line": 96
+          }
+        ],
+        "suggested_spec_changes": [
+          "Name every tool_disclosure writer to change: bus.log_run (codex), spawn._shadow_tool_disclosure (Claude roles) and the escalation row at spawn.py ~1492. Say which get the cache_view fields (recommended: only spawn._shadow_tool_disclosure plus the codex row, and not the escalation row), and have both call one shared helper.",
+          "Define previous_row as the last tool_disclosure row of the same role for a different subject (task id), excluding escalation rows and rows without deterministic.kept. Define changed_since_previous as an inequality of the sorted kept id lists.",
+          "Specify the bounded read: add a tail-read helper to decision_log.py (and add it to scope) that reads only the last 200 rows, or state that the read is over the current-day file only. Tests must cover previous_row being None, and a previous row that lacks the new fields.",
+          "Define Level-0 and Level-2 text in tool_catalog (exact functions or fields that produce stable_catalog_chars and dynamic_chars), and name the insertion point where the tool disclosure text is assembled for the packet. Add an acceptance test that, under active cache_mode, the stable catalog precedes the dynamic schemas and, under shadow or off, the text is byte-identical to today.",
+          "State explicitly that cache_mode active has no effect unless the section's own mode is active, for both [tool_disclosure] and [skills], and that off or missing keeps today's text byte-identical. Add tests for both.",
+          "Specify how the S2d1 validator is reused (add a section parameter to context_router.cache_mode and add context_router.py to scope, or add a wrapper) and what an invalid value does on the packet path (fall back to off and notify, not a silent fallback and not a crash).",
+          "List which skill_selection writers must carry catalog_chars and selected_chars (spawn.py _prepare_skills consumers at 32/106, executor.py 31/513) and confirm that rows written by harness_depth.py are unchanged. Add that skill_scorecard and promotion readers ignore the new fields.",
+          "cli.py: state the exact flag semantics (--disclosure-cache is valid only with --economy, is added to the mutual-exclusion sum and the allowed-options map), the exact empty-case output string, and the output field names. The doc must quote the same string. Define doc sections 2 (tool disclosure) and 3 (skills) and add 'no rows' wording to each.",
+          "Require that a cache_view exception in bus.log_run does not drop the tool_disclosure row: write the row with the three fields set to null and emit a notify. Add a test for it.",
+          "Add tests/test_pool.py (or a config test in an in-scope file) for the missing-key and shipped-value cases for both new cache_mode keys, and note the revert path in the pool.toml comments (set cache_mode = \"off\")."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 9060,
+          "trimmed": {
+            "risks": 6
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790178479.6265862,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/bus.py",
+          "issue": "The bus.py row near line 285 is written only in log_run, and only when provider or account is codex. It records placeholder tokens (tokens_disclosed 0, candidates CODEX_TOOLS). Claude roles get their tool_disclosure row from spawn._shadow_tool_disclosure (spawn.py ~485), and hidden-tool escalation writes a third row at spawn.py ~1492. If cache_view is wired only in bus.py, the summary covers Codex rows only, and the codex catalog is not the per-role Claude catalog. If it is wired in both places, the row-writing logic is duplicated.",
+          "severity": "high",
+          "line": 285
+        },
+        {
+          "path": "orchestrator/bus.py",
+          "issue": "log_run fires once per run event and per attempt, so a retried task writes several tool_disclosure rows. changed_since_previous then compares a task with itself, and the changed-share is inflated by retries. The spec does not say to compare only against a previous row for a different task. Escalation rows (reason hidden_tool_requested, no kept list) also share the kind and would corrupt previous_row selection.",
+          "severity": "high",
+          "line": 285
+        },
+        {
+          "path": "orchestrator/bus.py",
+          "issue": "'Most recent 200 decision_log rows' has no bounded reader. decision_log.read_all reads the whole file (optionally filtered by since_ts). Without a specified tail-read helper, the implementer will either read everything, which violates the bounded-read requirement, or add a new API to decision_log.py, which is outside scope. The spec must name the helper and add decision_log.py to scope, or restrict the read to the current-day file. The spec also does not say what happens when the row is missing a kept list or is an older row without the new fields.",
+          "severity": "med",
+          "line": 285
+        },
+        {
+          "path": "orchestrator/tool_catalog.py",
+          "issue": "The Level-0 catalog and Level-2 schemas are not defined. tool_catalog currently has level0(ids), disclosed(role), tokens(ids) and minimal_set. It is unclear whether Level-2 schema text exists or where the 'tool disclosure text built for the packet' is assembled. The active presentation ordering (stable catalog before dynamic schemas) has no named insertion point and no acceptance test, so it can only be verified indirectly. Stability of 'identical across tasks' also depends on mcp measurements (_mcp_measurements), which may vary.",
+          "severity": "high",
+          "line": 76
+        },
+        {
+          "path": "orchestrator/tool_catalog.py",
+          "issue": "changed_since_previous is not defined. Compare the kept id list, ordered or as a set? The previous row's kept list lives under deterministic.kept, but the spec passes the whole row and does not say which field is read. Two implementers would get different results.",
+          "severity": "med",
+          "line": 96
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Only tool_disclosure active presentation is gated by [tool_disclosure].cache_mode. Nothing states that cache_mode active is inert when [tool_disclosure].mode is not active. context_router does this explicitly ('active cache mode changes presentation only while the effective mode is also active'). Without that rule the active flag could change worker-visible text while the section is in shadow. The same applies to [skills].cache_mode versus [skills].mode. This breaks the shadow-first rule.",
+          "severity": "high",
+          "line": 40
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "The 'S2d1 validation helper' is context_router.cache_mode(cfg), which reads only [context_router] and raises on unknown values. Reusing it for [tool_disclosure] and [skills] needs a generalisation (a section parameter), and context_router.py is outside scope. The spec must state whether to add a parameter (needs scope) or a wrapper. It also does not say what an invalid value does on the packet path: raise, or fall back to off (silent fallback) with a notify, as spawn._context_mode does with invalid_config.",
+          "severity": "med",
+          "line": 358
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "_prepare_skills also runs from executor.py (lines 28, 500) for codex_execute, and harness_depth.py:103 writes its own skill_selection row. The spec says to record catalog_chars and selected_chars on 'the existing skill_selection row', but there are at least three writers (spawn.py:32, 106, executor.py:31/513). The spec does not say which ones must carry the fields, so the acceptance test could pass while the others silently omit them. Because skill_scorecard filters on 'stage1 static' rows, the extra fields must not break existing row consumers or the promotion evidence checks.",
+          "severity": "med",
+          "line": 32
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "The scorecard flag dispatch has a mutual-exclusion count (cli.py ~362, a sum over flags) and a per-mode allowed-options map (~377). --disclosure-cache must be added to both, and its interaction with --economy defined (it is a modifier of --economy, like --cache-shadow of --context). Otherwise it is rejected, or silently ignored when combined. The spec also does not fix the output wording for the empty case, so the doc and the test cannot be checked against each other. Doc section numbers: 10-cache-aware-disclosure.md currently has only section 1, and 'sections 2 and 3' must be defined (2 = tool disclosure, 3 = skills, presumably).",
+          "severity": "med",
+          "line": 362
+        },
+        {
+          "path": "tests/test_bus.py",
+          "issue": "Acceptance test test_tool_disclosure_row_carries_cache_view_fields would exercise the codex-only path in log_run, which swallows all exceptions (bare except Exception: pass). If cache_view raises, the row is silently not written and the failure is hidden, which is an unguarded silent fallback. The spec should require that cache_view failures do not drop the row (record null fields) or are at least notified.",
+          "severity": "med",
+          "line": 296
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "Rollback: the spec asks for dated comments and revert instructions, but the config file itself is not in the acceptance tests. Also, [tool_disclosure] and [skills] both currently have no cache_mode key, so the 'missing key means off' path and the shipped 'shadow' value both need a test in tests/test_pool.py, which is not in scope. Add it, or state that test_pool.py is covered by the base suite.",
+          "severity": "low",
+          "line": 361
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 4637,
+    "est_tokens": 1159,
+    "presented_tokens": 1159,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "ac9627c5bd3c2734be40061854e57d28e61be869fbdf1d5b9284dae5e5ff36e0"
+      },
+      "spec": {
+        "chars": 2710,
+        "est_tokens": 677,
+        "sha256": "e48ed10aff61e7de57bba0b3f3ee58910e16c86b56982d82efd3cc153b398fff"
+      },
+      "acceptance": {
+        "chars": 551,
+        "est_tokens": 137,
+        "sha256": "03e970848a659ecd41f62f03a66f8e9f09c64551706b1e93ee54d87e40d84e4f"
+      },
+      "scope": {
+        "chars": 338,
+        "est_tokens": 84,
+        "sha256": "978e7bbdeb0381a58635000e8d2cd9d968b87975429c0b04aa5628ee725bdfcd"
+      },
+      "depends_on": {
+        "chars": 144,
+        "est_tokens": 36,
+        "sha256": "1e39947c0536e21dfe8481424987b0429dc1fa7942b380cda5d1cc0ee09d5fb9"
+      },
+      "existing tests": {
+        "chars": 795,
+        "est_tokens": 198,
+        "sha256": "b22594d4dc16c3fa7db8dea8ff6b42b3c8e561a85e3a4b2850c164db1e833e90"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "29f8f2be7ebf",
+    "version": "29f8f2be7ebf",
+    "candidate_known": false,
+    "base": "3a364e634c4f",
+    "sources": "task@T-1283 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "d959b299-c5be-4da7-88c7-1eb41138c81d",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790178424.351577,
+  "account": "A",
+  "pid": 52798,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/bus.py",
+      "issue": "The bus.py row near line 285 is written only in log_run, and only when provider or account is codex. It records placeholder tokens (tokens_disclosed 0, candidates CODEX_TOOLS). Claude roles get their tool_disclosure row from spawn._shadow_tool_disclosure (spawn.py ~485), and hidden-tool escalation writes a third row at spawn.py ~1492. If cache_view is wired only in bus.py, the summary covers Codex rows only, and the codex catalog is not the per-role Claude catalog. If it is wired in both places, the row-writing logic is duplicated.",
+      "severity": "high",
+      "line": 285
+    },
+    {
+      "path": "orchestrator/bus.py",
+      "issue": "log_run fires once per run event and per attempt, so a retried task writes several tool_disclosure rows. changed_since_previous then compares a task with itself, and the changed-share is inflated by retries. The spec does not say to compare only against a previous row for a different task. Escalation rows (reason hidden_tool_requested, no kept list) also share the kind and would corrupt previous_row selection.",
+      "severity": "high",
+      "line": 285
+    },
+    {
+      "path": "orchestrator/bus.py",
+      "issue": "'Most recent 200 decision_log rows' has no bounded reader. decision_log.read_all reads the whole file (optionally filtered by since_ts). Without a specified tail-read helper, the implementer will either read everything, which violates the bounded-read requirement, or add a new API to decision_log.py, which is outside scope. The spec must name the helper and add decision_log.py to scope, or restrict the read to the current-day file. The spec also does not say what happens when the row is missing a kept list or is an older row without the new fields.",
+      "severity": "med",
+      "line": 285
+    },
+    {
+      "path": "orchestrator/tool_catalog.py",
+      "issue": "The Level-0 catalog and Level-2 schemas are not defined. tool_catalog currently has level0(ids), disclosed(role), tokens(ids) and minimal_set. It is unclear whether Level-2 schema text exists or where the 'tool disclosure text built for the packet' is assembled. The active presentation ordering (stable catalog before dynamic schemas) has no named insertion point and no acceptance test, so it can only be verified indirectly. Stability of 'identical across tasks' also depends on mcp measurements (_mcp_measurements), which may vary.",
+      "severity": "high",
+      "line": 76
+    },
+    {
+      "path": "orchestrator/tool_catalog.py",
+      "issue": "changed_since_previous is not defined. Compare the kept id list, ordered or as a set? The previous row's kept list lives under deterministic.kept, but the spec passes the whole row and does not say which field is read. Two implementers would get different results.",
+      "severity": "med",
+      "line": 96
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Only tool_disclosure active presentation is gated by [tool_disclosure].cache_mode. Nothing states that cache_mode active is inert when [tool_disclosure].mode is not active. context_router does this explicitly ('active cache mode changes presentation only while the effective mode is also active'). Without that rule the active flag could change worker-visible text while the section is in shadow. The same applies to [skills].cache_mode versus [skills].mode. This breaks the shadow-first rule.",
+      "severity": "high",
+      "line": 40
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "The 'S2d1 validation helper' is context_router.cache_mode(cfg), which reads only [context_router] and raises on unknown values. Reusing it for [tool_disclosure] and [skills] needs a generalisation (a section parameter), and context_router.py is outside scope. The spec must state whether to add a parameter (needs scope) or a wrapper. It also does not say what an invalid value does on the packet path: raise, or fall back to off (silent fallback) with a notify, as spawn._context_mode does with invalid_config.",
+      "severity": "med",
+      "line": 358
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "_prepare_skills also runs from executor.py (lines 28, 500) for codex_execute, and harness_depth.py:103 writes its own skill_selection row. The spec says to record catalog_chars and selected_chars on 'the existing skill_selection row', but there are at least three writers (spawn.py:32, 106, executor.py:31/513). The spec does not say which ones must carry the fields, so the acceptance test could pass while the others silently omit them. Because skill_scorecard filters on 'stage1 static' rows, the extra fields must not break existing row consumers or the promotion evidence checks.",
+      "severity": "med",
+      "line": 32
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "The scorecard flag dispatch has a mutual-exclusion count (cli.py ~362, a sum over flags) and a per-mode allowed-options map (~377). --disclosure-cache must be added to both, and its interaction with --economy defined (it is a modifier of --economy, like --cache-shadow of --context). Otherwise it is rejected, or silently ignored when combined. The spec also does not fix the output wording for the empty case, so the doc and the test cannot be checked against each other. Doc section numbers: 10-cache-aware-disclosure.md currently has only section 1, and 'sections 2 and 3' must be defined (2 = tool disclosure, 3 = skills, presumably).",
+      "severity": "med",
+      "line": 362
+    },
+    {
+      "path": "tests/test_bus.py",
+      "issue": "Acceptance test test_tool_disclosure_row_carries_cache_view_fields would exercise the codex-only path in log_run, which swallows all exceptions (bare except Exception: pass). If cache_view raises, the row is silently not written and the failure is hidden, which is an unguarded silent fallback. The spec should require that cache_view failures do not drop the row (record null fields) or are at least notified.",
+      "severity": "med",
+      "line": 296
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "Rollback: the spec asks for dated comments and revert instructions, but the config file itself is not in the acceptance tests. Also, [tool_disclosure] and [skills] both currently have no cache_mode key, so the 'missing key means off' path and the shipped 'shadow' value both need a test in tests/test_pool.py, which is not in scope. Add it, or state that test_pool.py is covered by the base suite.",
+      "severity": "low",
+      "line": 361
+    }
+  ]
+}

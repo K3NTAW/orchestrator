@@ -1,0 +1,191 @@
+{
+  "id": "T-0128",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "review (other model, opus): C-O3 v4 `orchestrator goal start|status|list|stop` headless goal entry point (T-0115, executed by claude:sonnet)",
+  "spec": "Review the diff of task T-0115 (branch task/T-0115, worktree wt/T-0115, commit abc3f56, base 35bf7e2 on goal/T-0073) against its acceptance criteria and spec. The executor was claude:sonnet, so this review runs on opus. Focus: (1) import boundary of orchestrator/goals.py: only install.install, spawn.trust_workspace, spawn.resolve_secrets and bus.LOCK_NAME; no Pool(), no orchestrator.ROOT/STATE, every path from the realpath'd repo_path; (2) the GOAL-task stdin SCRIPT is a module constant with no formatting and goal text only travels through ORCH_GOAL_TEXT; (3) start() refuses (launched false, reason) on every precheck, gitignored scaffold path, commit failure and GOAL subprocess failure, with nothing launched; (4) pid identity in status()/stop() and killpg only when identity matches; (5) spawn.secrets_for_role behaviour unchanged; bus.locked() uses LOCK_NAME; (6) planner.md copies the CLAUDE.md Never/Always lists; (7) any injection path: shell literals, osascript, env or argv built from untrusted text. Known nit already flagged by the Planner: `goal start /nonexistent x` prints two lines where the spec asked for one; note it but do not request changes for it alone. Verdict approve or request_changes with concrete file:line comments.",
+  "inputs": [
+    "T-0115"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the seven focus points is addressed with evidence from the diff",
+    "Security checklist applied: no injection path from untrusted text into shell, script or argv"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/cli.py",
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "tests/test_goals.py",
+    ".orchestrator/prompts/planner.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0128",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/goals.py",
+        "line": 77,
+        "issue": "`git commit` commits the whole index, not just the scaffold paths. `_precheck_git` checks for detached HEAD / rebase / merge but never for pre-existing staged changes, so any work the operator already had in the index of the target repo is swept into the \"orchestrator: scaffold (goal start)\" commit \u2014 and the `revert: git revert <sha>` line the CLI prints then reverts their work too. Use `git commit --only -- <paths>` (or refuse when `git diff --cached --quiet` fails).",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 70,
+        "issue": "`git status --porcelain` quotes paths containing a space or a non-ASCII byte (verified: `?? \".orchestrator/a b.txt\"`, `?? \".orchestrator/w\\303\\251ird.txt\"`), and renames come back as `old -> new`. `line[3:]` is passed verbatim to `git add --`, so the literal quotes become part of the pathspec, `add` fails, and start() returns launched:false with \"git add failed\" for any target repo whose scaffold contains such a path. Parse `git status -z --porcelain` and split on NUL instead. Same parsing feeds the `!!` comparison at line 66.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 215,
+        "issue": "install() writes the full scaffold into the target repo before `_precheck_git` (line 219), the account check and the `[models].planner` check run. Every one of those refusals returns {launched: false} while leaving an uncommitted scaffold behind, and the refusal dict carries no `install` key, so the operator is never told files were written. Run the prechecks and config validation first, or report the scaffold in the refusal. tests/test_goals.py:97 is named `..._before_any_write` but only asserts the commit count, so it passes despite the writes.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 248,
+        "issue": "Security: `[secrets.planner]` values are read from the *target* repo's `.orchestrator/pool.toml` and handed to resolve_secrets, which runs them through `bash -c`. install() is skipped whenever pool.toml already exists (line 214), so a repo that ships its own `.orchestrator/pool.toml` executes arbitrary shell on `orchestrator goal start <repo>`. Repo content is data, not instructions. Either restrict target-repo secrets to the `env:` form, or resolve secrets from the orchestrator repo's own pool.toml. (The goal text itself is clean: passed via ORCH_GOAL_TEXT and as separate argv, never interpolated into SCRIPT or a shell \u2014 that part is correct.)",
+        "severity": "med"
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 139,
+        "issue": "`[models].planner` and `[secrets.planner]` were added but `limits.max_budget_usd` gained no `planner` key, so goals.py:253 falls back to the hardcoded 10 \u2014 higher than every declared role (execute = 6.0) and applied to an unattended session. Add `planner = <n>` to max_budget_usd (and to max_turns/timeout_s for consistency) rather than leaving the cap in code.",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_goals.py",
+        "line": 92,
+        "issue": "None of the `_precheck_git` branches are tested (non-toplevel, detached HEAD, rebase in progress, merge in progress) and neither is the post-commit failure path: a missing `uv` raises FileNotFoundError out of subprocess.run at goals.py:86, and a target repo scaffolded before this change but hand-edited to add [models].planner hits FileNotFoundError on `.orchestrator/prompts/planner.md` at goals.py:252 \u2014 both after the scaffold commit has landed and, for the second, after the GOAL task exists, leaving an orphan. Cover the refusals and wrap those two reads.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 110,
+        "issue": "`_with_goals_lock` takes a raw, non-reentrant flock on the same `.orchestrator/bus.lock` that bus.locked() uses, whose docstring documents precisely this hazard (flock keys on the open file description, so a second open in the same process blocks on itself). Nothing deadlocks today because goals.* is only called from the CLI, but any future call from inside bus.locked() hangs the process. Use a dedicated `goals.lock`, or reuse `bus.locked()` rather than just its filename.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 209,
+        "issue": "No guard against two concurrent goals in one repo: a second `goal start` launches another headless Planner against the same .orchestrator state, worktrees and merge lock. goals.json records both without comment. Refuse (or require --force) when a record for this repo is still `running` per identity().",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 36,
+        "issue": "`goal status --json` is declared but never read; the handler prints json.dumps unconditionally, so the flag is a no-op and `goal list` has no equivalent. Drop the flag or make the non-json path human-readable.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789736128.324024,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0128",
+      "claimed_at": 1789736128.323565
+    },
+    {
+      "ts": 1789736128.367666,
+      "pid": 4189,
+      "account": "B"
+    },
+    {
+      "ts": 1789736339.931822,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/goals.py",
+            "line": 77,
+            "issue": "`git commit` commits the whole index, not just the scaffold paths. `_precheck_git` checks for detached HEAD / rebase / merge but never for pre-existing staged changes, so any work the operator already had in the index of the target repo is swept into the \"orchestrator: scaffold (goal start)\" commit \u2014 and the `revert: git revert <sha>` line the CLI prints then reverts their work too. Use `git commit --only -- <paths>` (or refuse when `git diff --cached --quiet` fails).",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 70,
+            "issue": "`git status --porcelain` quotes paths containing a space or a non-ASCII byte (verified: `?? \".orchestrator/a b.txt\"`, `?? \".orchestrator/w\\303\\251ird.txt\"`), and renames come back as `old -> new`. `line[3:]` is passed verbatim to `git add --`, so the literal quotes become part of the pathspec, `add` fails, and start() returns launched:false with \"git add failed\" for any target repo whose scaffold contains such a path. Parse `git status -z --porcelain` and split on NUL instead. Same parsing feeds the `!!` comparison at line 66.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 215,
+            "issue": "install() writes the full scaffold into the target repo before `_precheck_git` (line 219), the account check and the `[models].planner` check run. Every one of those refusals returns {launched: false} while leaving an uncommitted scaffold behind, and the refusal dict carries no `install` key, so the operator is never told files were written. Run the prechecks and config validation first, or report the scaffold in the refusal. tests/test_goals.py:97 is named `..._before_any_write` but only asserts the commit count, so it passes despite the writes.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 248,
+            "issue": "Security: `[secrets.planner]` values are read from the *target* repo's `.orchestrator/pool.toml` and handed to resolve_secrets, which runs them through `bash -c`. install() is skipped whenever pool.toml already exists (line 214), so a repo that ships its own `.orchestrator/pool.toml` executes arbitrary shell on `orchestrator goal start <repo>`. Repo content is data, not instructions. Either restrict target-repo secrets to the `env:` form, or resolve secrets from the orchestrator repo's own pool.toml. (The goal text itself is clean: passed via ORCH_GOAL_TEXT and as separate argv, never interpolated into SCRIPT or a shell \u2014 that part is correct.)",
+            "severity": "med"
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 139,
+            "issue": "`[models].planner` and `[secrets.planner]` were added but `limits.max_budget_usd` gained no `planner` key, so goals.py:253 falls back to the hardcoded 10 \u2014 higher than every declared role (execute = 6.0) and applied to an unattended session. Add `planner = <n>` to max_budget_usd (and to max_turns/timeout_s for consistency) rather than leaving the cap in code.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_goals.py",
+            "line": 92,
+            "issue": "None of the `_precheck_git` branches are tested (non-toplevel, detached HEAD, rebase in progress, merge in progress) and neither is the post-commit failure path: a missing `uv` raises FileNotFoundError out of subprocess.run at goals.py:86, and a target repo scaffolded before this change but hand-edited to add [models].planner hits FileNotFoundError on `.orchestrator/prompts/planner.md` at goals.py:252 \u2014 both after the scaffold commit has landed and, for the second, after the GOAL task exists, leaving an orphan. Cover the refusals and wrap those two reads.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 110,
+            "issue": "`_with_goals_lock` takes a raw, non-reentrant flock on the same `.orchestrator/bus.lock` that bus.locked() uses, whose docstring documents precisely this hazard (flock keys on the open file description, so a second open in the same process blocks on itself). Nothing deadlocks today because goals.* is only called from the CLI, but any future call from inside bus.locked() hangs the process. Use a dedicated `goals.lock`, or reuse `bus.locked()` rather than just its filename.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 209,
+            "issue": "No guard against two concurrent goals in one repo: a second `goal start` launches another headless Planner against the same .orchestrator state, worktrees and merge lock. goals.json records both without comment. Refuse (or require --force) when a record for this repo is still `running` per identity().",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 36,
+            "issue": "`goal status --json` is declared but never read; the handler prints json.dumps unconditionally, so the flag is a no-op and `goal list` has no equivalent. Drop the flag or make the non-json path human-readable.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789736339.934295,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789736128.323565,
+  "pid": 4189,
+  "account": "B",
+  "review_verdict": "request_changes"
+}

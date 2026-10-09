@@ -1,0 +1,196 @@
+{
+  "id": "T-0687",
+  "created_at": 1789998172.199608,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Q12: orchestrator/jev_planner.py \u2014 Jev as a shadow routing signal for Planner tier choice: typed batched questions over redacted structured state, fail open, never bypasses hard escalation (P12)",
+  "spec": "Why: the brief (P12) allows Jev to provide probabilistic decision characteristics to the Planner router, shadow first, as a signal and never as authority. jev_points.py (T-0586) already shows the pattern: typed options, redacted evidence, mode per point, fail open. Nothing asks Jev about Planner routing.\nWhat: new module orchestrator/jev_planner.py; jev.ask injected as ask_fn so tests never hit the network.\n- QUESTIONS = OrderedDict of five typed yes/no questions keyed routine_localized, architectural_reasoning, requirements_ambiguous, long_horizon, fable_improves_outcome, each with a one-sentence text.\n- state(classification, ctx, goal) -> bounded redacted dict: decision_type, band, task_class, architectural, risk_class, signals (cap 10), goal_title (jev.redact, cap 200), spec_excerpt (jev.redact of the first 300 chars of goal spec), scope_count, scout_count, failing_test_count, spec_review_request_changes, auto_fix_rounds_used, signature_repeated. Never file contents, never diffs, never review comment bodies; total json <= 4000 chars (truncate spec_excerpt first).\n- should_ask(router_mode, jev_mode, hard_reasons, availability, route) -> (bool, reason): False with reasons jev_off (jev_mode off), hard_decision (hard_reasons non-empty), single_tier (fewer than two available tiers in availability), deterministic (route.name != \"escalate\"), cannot_affect (router_mode == \"off\"); True otherwise (shadow and active both ask; in shadow the router records but does not apply \u2014 the router's responsibility, documented here).\n- ask(classification, ctx, goal, *, cfg, router_mode, hard_reasons, availability, route, ask_fn=jev.ask, cache=None, root=None) -> {\"asked\": bool, \"reason\", \"mode\": jev_mode, \"signals\": {key: p or None}, \"soft_adjust\": float, \"confidence\": float|None, \"cached\": bool}. One ask_fn call carrying all five questions (batched). soft_adjust = clamp(0.2 * (p_architectural + p_ambiguous + p_long_horizon + p_fable_improves)/4 - 0.2 * p_routine, -0.2, 0.2); any missing/malformed/None answer -> soft_adjust 0.0 with reason jev_unavailable or jev_malformed. cache: dict keyed (goal_id, state_version from ctx.get(\"state_version\"), decision_type) -> result, hit sets cached True and skips ask_fn. Every call (asked or skipped) appends a row via schedlog.append(\"planner_jev\", {...state summary fields, asked, reason, signals, soft_adjust, mode}) without the question text bodies.\n- Timeouts: ask_fn returning None (jev.ask's fail-open contract) -> asked True, reason jev_unavailable, soft_adjust 0.0.\n- summary(root=None) -> {\"n\", \"asked\", \"skip_reasons\": Counter dict, \"mean_soft_adjust\"} tolerant of malformed lines.",
+  "inputs": [
+    "T-0685"
+  ],
+  "acceptance": [
+    "tests/test_jev_planner.py::test_off_and_hard_and_single_tier_never_ask \u2014 jev_mode off, hard_reasons ['security'], one available tier and a routine route each give asked False with the documented reason and no ask_fn call",
+    "tests/test_jev_planner.py::test_batched_single_call_and_soft_adjust_bounds \u2014 one ask_fn call carries five questions; answers p=1.0 for architectural/ambiguous/long_horizon/fable and 0 routine give soft_adjust 0.2; all routine gives -0.2; never outside [-0.2, 0.2]",
+    "tests/test_jev_planner.py::test_malformed_and_timeout_fail_open \u2014 ask_fn returning None and ask_fn returning {'answers': 'garbage'} both yield soft_adjust 0.0 with reasons jev_unavailable / jev_malformed, and a row is still recorded",
+    "tests/test_jev_planner.py::test_state_is_redacted_and_bounded \u2014 a goal spec with a token-like secret and 20k chars yields state with spec_excerpt <= 300 chars, redacted by jev.redact, no key named diff/contents/comments, json <= 4000 chars",
+    "tests/test_jev_planner.py::test_cache_hit_skips_network_and_summary_counts \u2014 second ask with the same (goal, state_version, decision_type) returns cached True with zero extra ask_fn calls; summary counts asked and skip reasons over rows including one malformed line"
+  ],
+  "scope": [
+    "orchestrator/jev_planner.py",
+    "tests/test_jev_planner.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0687",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/jev_planner.py",
+        "issue": "state(classification, ctx, goal) must derive decision_type/band/architectural/risk_class/signals from `classification`, but nothing in the spec or codebase defines that object's shape. decision.Route (orchestrator/decision.py:26) only carries name/reason/evidence/cheaper_steps/tier, and build_ctx's ctx (orchestrator/planner_runs.py:1002) carries task_class but no band/architectural/risk_class. No acceptance test pins these fields' contents (test_state_is_redacted_and_bounded only checks spec_excerpt/redaction/size), so an executor can invent any structure and every test still passes, deferring the real mismatch to the future wiring task.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/jev_planner.py",
+        "issue": "The cache key is (goal_id, state_version from ctx.get('state_version'), decision_type), but build_ctx (orchestrator/planner_runs.py:1002-1020) never sets ctx['state_version'] -- it's tracked separately via state_version(goal_id) at launch time (orchestrator/planner_runs.py:939). Without an explicit instruction to inject it, every real call keys on None and the cache degenerates to a single bucket per (goal_id, decision_type).",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/jev_planner.py",
+        "issue": "state()'s 'signals (cap 10)' has no named source collection (not ctx, not goal, not classification per the other bullets), so it's unclear what upstream list/dict gets truncated and redacted -- risk of an executor passing through an under-redacted structure since no test exercises this field.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "tests/test_jev_planner.py",
+        "issue": "Acceptance only specifies that a cache hit skips ask_fn and returns cached True; it doesn't say whether a schedlog row is still appended on a hit. If it isn't, summary()'s 'asked' count will undercount real shadow activity; if it is, the row's 'cached' flag needs to be asserted somewhere.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Name the exact producer and field contract for `classification` (or drop it and derive decision_type/band/architectural/risk_class straight from `route` and `ctx`, which are already grounded in decision.py/build_ctx)",
+      "State explicitly that callers must set ctx['state_version'] (e.g. via planner_runs.state_version(goal_id)) before calling ask(), since build_ctx does not populate it today",
+      "Name the source collection for the capped 'signals' list in state() so its redaction/bounding is testable",
+      "Clarify whether schedlog.append fires on a cache hit and add an assertion for it in test_cache_hit_skips_network_and_summary_counts"
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998175.017094,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0687",
+      "claimed_at": 1789998175.016762
+    },
+    {
+      "ts": 1789998175.01828,
+      "account": "B"
+    },
+    {
+      "ts": 1789998175.4441721,
+      "pid": 92683,
+      "account": "B"
+    },
+    {
+      "ts": 1789998317.274702,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/jev_planner.py",
+            "issue": "state(classification, ctx, goal) must derive decision_type/band/architectural/risk_class/signals from `classification`, but nothing in the spec or codebase defines that object's shape. decision.Route (orchestrator/decision.py:26) only carries name/reason/evidence/cheaper_steps/tier, and build_ctx's ctx (orchestrator/planner_runs.py:1002) carries task_class but no band/architectural/risk_class. No acceptance test pins these fields' contents (test_state_is_redacted_and_bounded only checks spec_excerpt/redaction/size), so an executor can invent any structure and every test still passes, deferring the real mismatch to the future wiring task.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/jev_planner.py",
+            "issue": "The cache key is (goal_id, state_version from ctx.get('state_version'), decision_type), but build_ctx (orchestrator/planner_runs.py:1002-1020) never sets ctx['state_version'] -- it's tracked separately via state_version(goal_id) at launch time (orchestrator/planner_runs.py:939). Without an explicit instruction to inject it, every real call keys on None and the cache degenerates to a single bucket per (goal_id, decision_type).",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/jev_planner.py",
+            "issue": "state()'s 'signals (cap 10)' has no named source collection (not ctx, not goal, not classification per the other bullets), so it's unclear what upstream list/dict gets truncated and redacted -- risk of an executor passing through an under-redacted structure since no test exercises this field.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "tests/test_jev_planner.py",
+            "issue": "Acceptance only specifies that a cache hit skips ask_fn and returns cached True; it doesn't say whether a schedlog row is still appended on a hit. If it isn't, summary()'s 'asked' count will undercount real shadow activity; if it is, the row's 'cached' flag needs to be asserted somewhere.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Name the exact producer and field contract for `classification` (or drop it and derive decision_type/band/architectural/risk_class straight from `route` and `ctx`, which are already grounded in decision.py/build_ctx)",
+          "State explicitly that callers must set ctx['state_version'] (e.g. via planner_runs.state_version(goal_id)) before calling ask(), since build_ctx does not populate it today",
+          "Name the source collection for the capped 'signals' list in state() so its redaction/bounding is testable",
+          "Clarify whether schedlog.append fires on a cache hit and add an assertion for it in test_cache_hit_skips_network_and_summary_counts"
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998317.275734,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "state(classification, ctx, goal) must derive decision_type/band/architectural/risk_class/signals from `classification`, but nothing in the spec or codebase defines that object's shape. decision.Route (orchestrator/decision.py:26) only carries name/reason/evidence/cheaper_steps/tier, and build_ctx's ctx (orchestrator/planner_runs.py:1002) carries task_class but no band/architectural/risk_class. No acceptance test pins these fields' contents (test_state_is_redacted_and_bounded only checks spec_excerpt/redaction/size), so an executor can invent any structure and every test still passes, deferring the real mismatch to the future wiring task.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "The cache key is (goal_id, state_version from ctx.get('state_version'), decision_type), but build_ctx (orchestrator/planner_runs.py:1002-1020) never sets ctx['state_version'] -- it's tracked separately via state_version(goal_id) at launch time (orchestrator/planner_runs.py:939). Without an explicit instruction to inject it, every real call keys on None and the cache degenerates to a single bucket per (goal_id, decision_type).",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/jev_planner.py",
+          "issue": "state()'s 'signals (cap 10)' has no named source collection (not ctx, not goal, not classification per the other bullets), so it's unclear what upstream list/dict gets truncated and redacted -- risk of an executor passing through an under-redacted structure since no test exercises this field.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "tests/test_jev_planner.py",
+          "issue": "Acceptance only specifies that a cache hit skips ask_fn and returns cached True; it doesn't say whether a schedlog row is still appended on a hit. If it isn't, summary()'s 'asked' count will undercount real shadow activity; if it is, the row's 'cached' flag needs to be asserted somewhere.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789998175.016762,
+  "account": "B",
+  "pid": 92683,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "state(classification, ctx, goal) must derive decision_type/band/architectural/risk_class/signals from `classification`, but nothing in the spec or codebase defines that object's shape. decision.Route (orchestrator/decision.py:26) only carries name/reason/evidence/cheaper_steps/tier, and build_ctx's ctx (orchestrator/planner_runs.py:1002) carries task_class but no band/architectural/risk_class. No acceptance test pins these fields' contents (test_state_is_redacted_and_bounded only checks spec_excerpt/redaction/size), so an executor can invent any structure and every test still passes, deferring the real mismatch to the future wiring task.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "The cache key is (goal_id, state_version from ctx.get('state_version'), decision_type), but build_ctx (orchestrator/planner_runs.py:1002-1020) never sets ctx['state_version'] -- it's tracked separately via state_version(goal_id) at launch time (orchestrator/planner_runs.py:939). Without an explicit instruction to inject it, every real call keys on None and the cache degenerates to a single bucket per (goal_id, decision_type).",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/jev_planner.py",
+      "issue": "state()'s 'signals (cap 10)' has no named source collection (not ctx, not goal, not classification per the other bullets), so it's unclear what upstream list/dict gets truncated and redacted -- risk of an executor passing through an under-redacted structure since no test exercises this field.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "tests/test_jev_planner.py",
+      "issue": "Acceptance only specifies that a cache hit skips ask_fn and returns cached True; it doesn't say whether a schedlog row is still appended on a hit. If it isn't, summary()'s 'asked' count will undercount real shadow activity; if it is, the row's 'cached' flag needs to be asserted somewhere.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

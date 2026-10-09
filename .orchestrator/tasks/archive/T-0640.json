@@ -1,0 +1,177 @@
+{
+  "id": "T-0640",
+  "created_at": 1789978055.978047,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R8 v3: orchestrator/jev_sched.py \u2014 Jev as a shadow scheduling signal for soft-interference pairs only: batched, locked cache, [scheduler].jev_* keys matching promotion.FEATURES, fail-open, never overriding deterministic constraints; promotion evidence from decision rows (AP P15)",
+  "spec": "Why: waves are deterministic (interference.select_wave) and soft pairs are deferred or admitted by rule; AP P15 / brief P10 allow Jev to answer only ambiguous questions in shadow first, without O(n^2) calls. v3 after spec reviews T-0616 and T-0632.\nWhat: new module orchestrator/jev_sched.py using jev.ask (orchestrator/jev.py:184; returns {answers:{key:{noul, confidence}}, usage} or None) and decision_log.record(kind='jev_sched'); plus promotion.collect('jev_sched') evidence. Tests are unittest.TestCase methods in the named files (this repo runs unittest; no pytest fixtures).\n- PAIR_QUESTIONS = {'semantic_interference': {'type': 'noul', 'instructions': 'Probability that these two tasks change the same behaviour or interface and would conflict if run concurrently'}, 'stale_assumption_risk': {'type': 'noul', 'instructions': 'Probability that finishing one task first invalidates assumptions the other relies on'}} (jev.ask dict shape, as jev_route.QUESTIONS). ambiguous_pairs(pairwise_rows) -> only rows with level soft whose reasons contain no 'dependency:' kind; hard and none are never asked.\n- cfg: flat keys on the existing [scheduler] table, matching promotion.FEATURES['jev_sched'] (table scheduler, key jev_mode): jev_mode off|shadow|active (default shadow; unknown -> shadow), jev_max_pairs 8, jev_cache_ttl_s 3600, jev_cache_max_entries 200; read via (pool_config().get('scheduler') or {}). No pool.toml edit; defaults in code.\n- Privacy: per-pair state = {a, b, titles, scope (the tasks' scope path lists; paths are metadata and allowed), spec excerpts spec[:400] passed through jev.redact, interference reasons}; never file contents, diffs or worktree reads (the module performs no file or git reads).\n- One jev.ask per annotate() call with at most jev_max_pairs pairs, questions keyed '<a>|<b>:<question>'. Per-pair confidence = None if either sub-question confidence is None, else the mean of the two (mirrors jev_route.classify).\n- Cache: STATE/runs/jev/sched_cache.json keyed sha1(sorted pair ids + scope tuples + goal_head); read/write with the same fcntl-locked sidecar (.lock) plus tempfile.mkstemp + os.replace discipline as jev_route._cache_read/_cache_write; TTL and max-entries pruning; a different goal_head or scope misses.\n- annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask) -> {'mode', 'asked', 'cache': hit|miss|None, 'signals': {'a|b': {semantic_interference, stale_assumption_risk, confidence}}, 'would_defer': [ids Jev rates semantic_interference >= 0.7 for a pair with both members in the wave; the later one in wave order], 'applied': [], 'wave', 'deferred', 'error': None|reason}. off -> input unchanged, asked 0, no ask call. shadow -> computes would_defer, changes nothing. active -> moves would_defer ids from wave to deferred with reason 'jev:<a>|<b>'; only removes from the wave (never adds, never touches hard-deferred or dependency pairs, never exceeds capacity); any failure (ask None, malformed, value outside [0,1]) -> error set, wave and deferred unchanged (fail open).\n- Every annotate call with asked > 0 or mode active records decision_log.record(kind='jev_sched', subject=<goal id of the first candidate or first task id>, candidates=pair keys, hard_constraints=['dependency', 'hard_conflicts', 'capacity'], deterministic={'wave', 'deferred'}, jev=signals, selected=applied, rejected=would_defer, reason, confidence=mean pair confidence, n=asked, mode).\n- promotion.py: collect('jev_sched', root) reads decision_log rows of kind jev_sched via decision_log.read_all and returns {'n': rows, 'jev_disagreement_rate': share of rows whose would_defer (rejected) is non-empty, 'applied': rows with non-empty selected}; other features unchanged. Add one test in tests/test_promotion.py.",
+  "inputs": [
+    "T-0636"
+  ],
+  "acceptance": [
+    "tests/test_jev_sched.py::test_off_mode_never_calls_jev_and_returns_wave_unchanged \u2014 jev_mode off: ask not called, asked 0, wave and deferred identical",
+    "tests/test_jev_sched.py::test_shadow_mode_records_would_defer_without_changing_wave \u2014 a soft pair rated 0.9 lands in would_defer, applied empty, wave unchanged, a jev_sched decision row is written and the pair confidence is the mean of both sub-question confidences",
+    "tests/test_jev_sched.py::test_active_mode_defers_soft_pair_but_never_hard_or_dependency \u2014 active: the soft-pair task moves to deferred with reason jev:<a>|<b>; a hard pair and a soft pair carrying a dependency reason are never asked and never changed",
+    "tests/test_jev_sched.py::test_fail_open_and_single_batched_call_without_n_squared \u2014 ask returning None yields error set and the deterministic wave; with 12 soft pairs ask is called once with at most jev_max_pairs pairs and no hard or none pair appears in the questions",
+    "tests/test_jev_sched.py::test_cache_locking_invalidation_and_privacy \u2014 the same pairs and goal_head hit the cache (ask called once across two calls) and a .lock sidecar exists; a new goal_head misses; the state passed to ask holds only titles, scope paths, redacted spec excerpts and reasons (a marker planted in a scope file's contents never appears) and jev.redact was applied",
+    "tests/test_promotion.py::test_collect_jev_sched_reads_decision_rows \u2014 two jev_sched decision rows, one with a non-empty rejected list, yield n 2 and jev_disagreement_rate 0.5"
+  ],
+  "scope": [
+    "orchestrator/jev_sched.py",
+    "orchestrator/promotion.py",
+    "tests/test_jev_sched.py",
+    "tests/test_promotion.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0640",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/jev_sched.py",
+        "line": 211,
+        "issue": "ask() and _cache_write() share one try/except in annotate(). If ask() succeeds and signals are decoded but the subsequent _cache_write() raises (disk full, permission error, transient os.replace failure), the except clause wipes the already-valid signals back to {} and sets error, discarding a genuine Jev answer (and, in active mode, a real deferral) due to an unrelated cache-persistence fault rather than a bad answer. Fail-open direction is still safe (wave/deferred unchanged), so this is a minor robustness gap, not a correctness break against the acceptance criteria.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "445b2f0267f1",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789978055.979383,
+      "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+    },
+    {
+      "ts": 1789978348.7657669,
+      "pipeline": {
+        "respawned_at": 1789978348.662519
+      }
+    },
+    {
+      "ts": 1789978352.2279649,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0640",
+      "claimed_at": 1789978352.2275672
+    },
+    {
+      "ts": 1789978352.2330382,
+      "account": "B"
+    },
+    {
+      "ts": 1789978352.834979,
+      "pid": 96702,
+      "account": "B"
+    },
+    {
+      "ts": 1789978486.5254881,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/jev_sched.py",
+            "line": 211,
+            "issue": "ask() and _cache_write() share one try/except in annotate(). If ask() succeeds and signals are decoded but the subsequent _cache_write() raises (disk full, permission error, transient os.replace failure), the except clause wipes the already-valid signals back to {} and sets error, discarding a genuine Jev answer (and, in active mode, a real deferral) due to an unrelated cache-persistence fault rather than a bad answer. Fail-open direction is still safe (wave/deferred unchanged), so this is a minor robustness gap, not a correctness break against the acceptance criteria.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "445b2f0267f1",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789978486.52701,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789978486.5970602,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+        "packet_version": "445b2f0267f1",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+      "packet_version": "445b2f0267f1",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+  "pipeline": {
+    "respawned_at": 1789978348.662519
+  },
+  "claimed_at": 1789978352.2275672,
+  "account": "B",
+  "pid": 96702,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+    "packet_version": "445b2f0267f1",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "445b2f0267f1",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

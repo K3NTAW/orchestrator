@@ -1,0 +1,152 @@
+{
+  "id": "T-0883",
+  "created_at": 1790108871.655663,
+  "parent": "T-0861",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S7: external skill discovery, quarantine and static security inspection (metadata first, no execution): `orchestrator skills discover|inspect|import`, provenance preserved, quarantined skills invisible to routing (v2)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P3, P4, P31, P32, P33, P34 (P37 stage 7). Depends on T-0863 (skills_registry with states discovered/quarantined/testing and state.json history, provenance field, content hash). Nothing here executes external content; discovery retrieves static text only.\nDo:\n1. orchestrator/skill_discovery.py (new). Sources: (a) a local path (another repository checkout) scanned for SKILL.md files under skills/, .claude/skills/, .codex/skills/; (b) a GitHub repository given as owner/repo[@ref] read through the GitHub contents API with `gh api` (static file retrieval only; no clone, no checkout, no script execution; a hard cap of 50 files and 200 KB per skill; unreachable or rate-limited \u2192 recorded error, never an exception into the CLI). Each candidate becomes a registry record with provenance \"external\" (or \"repository\" for a local path inside a trusted repo listed in pool.toml `[skills] trusted_repos`), trust \"untrusted\", state \"discovered\", and the P32 provenance block: source_repo, source_path, source_commit (the ref's sha), retrieved_at, license (from a LICENSE file when present, else None), content_hash, modifications [] (filled by compaction later). The skill body is stored under STATE/skills/quarantine/<id>/ (never under skills/ or .claude/skills), so it cannot be loaded by any worker.\n2. `orchestrator skills discover <path|owner/repo[@ref]>` lists the candidates and stores them as discovered; `orchestrator skills quarantine <id>` moves discovered \u2192 quarantined (P2 transition with reason); import of a builtin path is refused (already registered).\n3. Static inspection (P4): `skill_discovery.inspect(id)` runs deterministic checks over the quarantined text and any scripts/ files: shell commands and script files (any executable or fenced shell block), network access (curl, wget, http(s) URLs, raw sockets, pip/npm install, package managers), file writes outside the task worktree (absolute paths, ~, /etc, .git), credential access (env var names containing KEY/TOKEN/SECRET/PASSWORD, keychain, 1password, .env), MCP dependencies (mcp__ tool ids, server names), destructive operations (rm -rf, git push --force, reset --hard, DROP, truncate), prompt-injection and hidden instructions (phrases like \"ignore previous\", \"you are now\", \"system prompt\", HTML comments, zero-width or bidi characters, base64 blobs), unexpected external endpoints (domains not in an allowlist from pool.toml `[skills] allowed_domains`). Output: a findings list with severity (info/warn/block) and line references; a \"block\" finding forbids the quarantined \u2192 testing transition (registry.transition refuses with the finding ids until a human override reason starting \"override:\" is given, recorded in history). Model review is NOT called here (Stage 9/10 may add a Jev or sonnet judgement for warn-level findings).\n4. Invisibility guarantee: skills_registry.candidates and skill_router (when merged) only consider state active (and shadow for shadow logging); discovered/quarantined/testing skills never appear; test it with a quarantined copy of trace-callers under a new id.\n5. Update detection (P33, minimal): `orchestrator skills check-upstream <id>` re-fetches the source at the recorded ref's branch head, compares content_hash, and when different creates a new candidate version record in state discovered with a diff summary (lines added/removed); the local version is never replaced.\n6. docs/skill-intelligence/07-external.md (\u226470 lines): the flow discover \u2192 quarantine \u2192 inspect \u2192 (Stage 5/10) testing \u2192 shadow \u2192 active, the static checks table, what is refused, the P34 invariants sentence (skills are capability modules, not policy authorities), revert path (delete the quarantine folder and the state entries).\nTests (unittest, `import _harness` first, no network: patch the gh api call with a fake returning fixture files): tests/test_skill_discovery.py::test_local_path_discovery_records_provenance_and_stores_in_quarantine_dir, ::test_github_discovery_uses_static_contents_api_and_caps, ::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions, ::test_block_finding_prevents_testing_transition_without_override, ::test_quarantined_skill_never_in_candidates, ::test_check_upstream_creates_candidate_version_not_replace. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 00:55) after spec review T-0881 (request_changes), binding on top of v1:\n- skills_registry.py owns the record shape: SkillRecord gains an optional `provenance_info` dict with keys source_repo, source_path, source_commit, retrieved_at, license, modifications (None for builtins); skill_discovery.py fills it and skills_registry persists/reads it like any other field. For discovered and quarantined records the derived fields roles, task_classes, tools, est_tokens_l0/l1/l2, security_class and output_contract default to empty lists / 0 / \"unknown\" / \"\" and are NOT computed with the builtin P6 parsing helpers; only description (frontmatter or first heading), content_hash and provenance_info are filled at discovery. est_tokens_l2 is set to body chars // 4 as a plain size measure.\n- Inspection persistence: skill_discovery.inspect(id) writes STATE/skills/quarantine/<id>/findings.json = {\"inspected_at\", \"content_hash\", \"findings\": [{\"id\", \"severity\", \"check\", \"line\", \"excerpt\"}], \"max_severity\"}. skills_registry.transition() reads that file when the transition is quarantined \u2192 testing: refused with the block finding ids when max_severity == \"block\" and the given reason does not start with \"override:\"; when it does, the override and the finding ids are appended to the history entry. A missing findings.json also refuses the transition (reason \"not inspected\"). The check lives in transition() right after the ALLOWED_TRANSITIONS validation.\n- Trusted-repository provenance is deterministic: for a local path, run `git -C <path> remote get-url origin`, normalise to owner/repo (strip .git, https/ssh forms), and compare with pool.toml `[skills] trusted_repos` entries (owner/repo strings); a match gives provenance \"repository\", anything else (no remote, no match) gives \"external\". Test both branches with a temporary git repo whose origin is set to a fixture URL.\n- Add tests/test_skill_discovery.py::test_discovered_records_have_empty_derived_fields_and_provenance_info and ::test_transition_refuses_uninspected_quarantined_skill.",
+  "inputs": [
+    "T-0882"
+  ],
+  "acceptance": [
+    "tests/test_skill_discovery.py::test_local_path_discovery_records_provenance_and_stores_in_quarantine_dir passes",
+    "tests/test_skill_discovery.py::test_github_discovery_uses_static_contents_api_and_caps passes",
+    "tests/test_skill_discovery.py::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions passes",
+    "tests/test_skill_discovery.py::test_block_finding_prevents_testing_transition_without_override passes",
+    "tests/test_skill_discovery.py::test_quarantined_skill_never_in_candidates passes",
+    "tests/test_skill_discovery.py::test_check_upstream_creates_candidate_version_not_replace passes",
+    "docs/skill-intelligence/07-external.md exists; `uv run orchestrator skills discover skills` (local path) runs and refuses builtins; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_skill_discovery.py::test_discovered_records_have_empty_derived_fields_and_provenance_info passes",
+    "tests/test_skill_discovery.py::test_transition_refuses_uninspected_quarantined_skill passes"
+  ],
+  "scope": [
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_skill_discovery.py",
+    "docs/skill-intelligence/07-external.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0883",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/skills_registry.py",
+        "issue": "sync()'s 'source removed' cleanup loop (lines 268-280) walks old_records from registry.json and force-transitions any id absent from the current REPO/skills/*/*/SKILL.md scan to state=disabled, reason='source removed', writing that into the shared state.json/history. Spec v2 has skill_discovery.py persist discovered/quarantined/testing records into this same registry.json/state.json via skills_registry's SkillRecord. Those external records live under STATE/skills/quarantine/<id>/, never under REPO/skills, so the very next `orchestrator skills sync` (an existing, already-wired CLI command, cli.py:235) will silently disable every discovered/quarantined/testing skill with a fabricated 'source removed' reason, corrupting the P32-P34 lifecycle and defeating P33 check-upstream the first time anyone runs sync for an unrelated reason.",
+        "severity": "high",
+        "line": 268
+      },
+      {
+        "path": "orchestrator/skill_discovery.py",
+        "issue": "No idempotency rule is specified for re-running `orchestrator skills discover <path|owner/repo>` against an unchanged source. check-upstream explicitly versions by content_hash diff, but discover's own re-run behavior is undefined, risking duplicate discovered records (double counting) each time the same source is scanned rather than a no-op or in-place update.",
+        "severity": "med",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Guard skills_registry.sync()'s cleanup loop to only mark records disabled/'source removed' when record.get('provenance') == 'builtin' (or move discovery persistence to a distinct file skills/discovered.json separate from the builtin sync/registry.json so sync() never enumerates or reconciles external records).",
+      "Specify discover's dedup key (e.g. keyed by source_repo+source_path, or source_repo+source_commit) so re-running discover on an unchanged source updates/no-ops the existing discovered record instead of minting a new id every invocation."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790108874.036381,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0883",
+      "claimed_at": 1790108874.036171
+    },
+    {
+      "ts": 1790108874.037597,
+      "account": "B"
+    },
+    {
+      "ts": 1790108875.071546,
+      "pid": 54879,
+      "account": "B"
+    },
+    {
+      "ts": 1790108998.6305401,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/skills_registry.py",
+            "issue": "sync()'s 'source removed' cleanup loop (lines 268-280) walks old_records from registry.json and force-transitions any id absent from the current REPO/skills/*/*/SKILL.md scan to state=disabled, reason='source removed', writing that into the shared state.json/history. Spec v2 has skill_discovery.py persist discovered/quarantined/testing records into this same registry.json/state.json via skills_registry's SkillRecord. Those external records live under STATE/skills/quarantine/<id>/, never under REPO/skills, so the very next `orchestrator skills sync` (an existing, already-wired CLI command, cli.py:235) will silently disable every discovered/quarantined/testing skill with a fabricated 'source removed' reason, corrupting the P32-P34 lifecycle and defeating P33 check-upstream the first time anyone runs sync for an unrelated reason.",
+            "severity": "high",
+            "line": 268
+          },
+          {
+            "path": "orchestrator/skill_discovery.py",
+            "issue": "No idempotency rule is specified for re-running `orchestrator skills discover <path|owner/repo>` against an unchanged source. check-upstream explicitly versions by content_hash diff, but discover's own re-run behavior is undefined, risking duplicate discovered records (double counting) each time the same source is scanned rather than a no-op or in-place update.",
+            "severity": "med",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Guard skills_registry.sync()'s cleanup loop to only mark records disabled/'source removed' when record.get('provenance') == 'builtin' (or move discovery persistence to a distinct file skills/discovered.json separate from the builtin sync/registry.json so sync() never enumerates or reconciles external records).",
+          "Specify discover's dedup key (e.g. keyed by source_repo+source_path, or source_repo+source_commit) so re-running discover on an unchanged source updates/no-ops the existing discovered record instead of minting a new id every invocation."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790108998.632931,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/skills_registry.py",
+          "issue": "sync()'s 'source removed' cleanup loop (lines 268-280) walks old_records from registry.json and force-transitions any id absent from the current REPO/skills/*/*/SKILL.md scan to state=disabled, reason='source removed', writing that into the shared state.json/history. Spec v2 has skill_discovery.py persist discovered/quarantined/testing records into this same registry.json/state.json via skills_registry's SkillRecord. Those external records live under STATE/skills/quarantine/<id>/, never under REPO/skills, so the very next `orchestrator skills sync` (an existing, already-wired CLI command, cli.py:235) will silently disable every discovered/quarantined/testing skill with a fabricated 'source removed' reason, corrupting the P32-P34 lifecycle and defeating P33 check-upstream the first time anyone runs sync for an unrelated reason.",
+          "severity": "high",
+          "line": 268
+        },
+        {
+          "path": "orchestrator/skill_discovery.py",
+          "issue": "No idempotency rule is specified for re-running `orchestrator skills discover <path|owner/repo>` against an unchanged source. check-upstream explicitly versions by content_hash diff, but discover's own re-run behavior is undefined, risking duplicate discovered records (double counting) each time the same source is scanned rather than a no-op or in-place update.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790108874.036171,
+  "account": "B",
+  "pid": 54879,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/skills_registry.py",
+      "issue": "sync()'s 'source removed' cleanup loop (lines 268-280) walks old_records from registry.json and force-transitions any id absent from the current REPO/skills/*/*/SKILL.md scan to state=disabled, reason='source removed', writing that into the shared state.json/history. Spec v2 has skill_discovery.py persist discovered/quarantined/testing records into this same registry.json/state.json via skills_registry's SkillRecord. Those external records live under STATE/skills/quarantine/<id>/, never under REPO/skills, so the very next `orchestrator skills sync` (an existing, already-wired CLI command, cli.py:235) will silently disable every discovered/quarantined/testing skill with a fabricated 'source removed' reason, corrupting the P32-P34 lifecycle and defeating P33 check-upstream the first time anyone runs sync for an unrelated reason.",
+      "severity": "high",
+      "line": 268
+    },
+    {
+      "path": "orchestrator/skill_discovery.py",
+      "issue": "No idempotency rule is specified for re-running `orchestrator skills discover <path|owner/repo>` against an unchanged source. check-upstream explicitly versions by content_hash diff, but discover's own re-run behavior is undefined, risking duplicate discovered records (double counting) each time the same source is scanned rather than a no-op or in-place update.",
+      "severity": "med",
+      "line": 0
+    }
+  ]
+}

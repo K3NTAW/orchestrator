@@ -1,0 +1,102 @@
+{
+  "id": "T-0135",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-O9 fix round 1: reconcile_dead resolves a base without goal/<parent>, orphaned results always get a review, requeue clears dispatched_at, tick() survives reconcile errors",
+  "spec": "Fix round for T-0130 (branch task/T-0130, commit f3d1f10). Work in this task's worktree, cut from task/T-0130. Review T-0132 (opus) requested changes; items below come from it. Do not widen scope.\n\n1 MED daemon.py reconcile_dead base resolution (\u2248line 77-86): `task/<id>@{upstream}` never resolves because spawn.ensure_worktree creates branches without --track. When goal/<parent> does not exist (parentless task, or the first execute task of a goal), use `git merge-base HEAD origin/main` in the worktree, and if origin/main is absent too, `git merge-base HEAD main`; only when none resolves fall back to requeue. Test: an execute task with no goal/<parent> branch whose worktree has one commit ahead of main \u2192 regated with the commit sha.\n\n2 MED daemon.py gate() (\u2248line 283): a result with `orphaned: true` must never merge directly, whatever the complexity. In gate(), when `(t.get(\"result\") or {}).get(\"orphaned\")` is truthy, always create the review task (with tier=review_tier(t)) instead of merge.merge, and put \"orphaned executor: verify the acceptance criteria are fully met, the worker may have died mid-task\" at the start of the review task's spec. Test: complexity 2 execute task with an orphaned done result \u2192 after gate, a review task exists with inputs=[id] and no merge happened.\n\n3 MED daemon.py requeue path: every place reconcile_dead (and the old one-liner it replaced) sets status back to \"queued\" must also clear the pipeline stamp so dispatch() retries: `bus.update(id, status=\"queued\", pid=None, reason=..., pipeline={k: v for k, v in pipeline.items() if k != \"dispatched_at\"})`. Test: reconcile_dead returns \"requeued\" and a following tick() with a fake executor (see how existing dispatch tests stub executor.start / spawn_async) dispatches the task again (dispatched_at re-stamped, executor.start called once). Rename or extend test_reconcile_dead_requeues_when_no_commits_ahead accordingly.\n\n4 LOW daemon.py tick(): wrap the reconcile_dead call per task in try/except Exception as e: print(f\"[daemon] reconcile {id} failed: {e}\", file=sys.stderr) and continue, so a vanished worktree or task file cannot abort the stage loop. Test: a running task with a dead pid whose worktree path does not exist and whose git call is patched to raise \u2192 tick() still runs dispatch/gate/merge (assert via a stub stage or that the other tasks progress).\n\n5 LOW tests/test_daemon.py: the new tests must use the real task ids for branch names (task/<tid>) and cover the no-parent case from item 1; keep the existing four cases green.\n\n6 LOW daemon.py dirty check: keep `--porcelain` counting untracked files as dirty and add a one-line comment saying so and why (held is the safe direction). No behaviour change.\n\nNo new dependency. Finish with: summary, files changed, failures-only test output. Commit on the task branch when green (git add the two files, git commit) \u2014 the previous round's worker forgot to commit, do not.",
+  "inputs": [
+    "T-0130",
+    "T-0132"
+  ],
+  "acceptance": [
+    "Without goal/<parent>, reconcile_dead uses merge-base against origin/main or main and regates a clean worktree with commits ahead (test)",
+    "gate() never merges a result carrying orphaned true directly; it creates a review task at review_tier(t) whose spec starts with the orphaned warning (test at complexity 2)",
+    "Every requeue path drops pipeline.dispatched_at and the next tick dispatches the task again (test with stubbed executor.start)",
+    "tick() wraps reconcile_dead per task; an exception there does not prevent dispatch/gate/merge_reviewed from running (test)",
+    "New tests use task/<real id> branch names and cover the no-parent case; existing tests green; dirty-check comment added",
+    "uv run python -m unittest discover -q tests green; no new dependency; only daemon.py and tests/test_daemon.py change; work is committed on task/<this id>"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-0130"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_daemon.py",
+    "fix_round_for": "T-0130",
+    "worktree_base": "task/T-0130"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0135",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0135`.\n\n## Summary\n\nFixed all 5 items from T-0132's review:\n\n1. **`reconcile_dead` base resolution** \u2014 replaced the never-resolving `task/<id>@{upstream}` rev-parse with `merge-base HEAD origin/main`, falling back to `merge-base HEAD main` when no `goal/<parent>` branch exists.\n2. **`gate()` orphaned guard** \u2014 a `result.orphaned=true` task now always routes to a review task at `review_tier(t)` (never a direct merge), with the orphaned-executor warning prepended to the review spec.\n3. **Requeue clears `dispatched_at`** \u2014 new `_requeue()` helper drops the `dispatched_at` pipeline stamp on every requeue path so `dispatch()` retries the task instead of leaving it stuck behind a stale stamp.\n4. **`tick()` isolation** \u2014 each `reconcile_dead` call is now wrapped in try/except so one bad task (vanished worktree, raising git call) can't abort the rest of the tick.\n5. **Dirty-check comment** \u2014 added the one-line rationale on the `--porcelain` untracked-files behavior (no logic change).\n\n**Files changed:** `orchestrator/daemon.py`, `tests/test_daemon.py`\n\n**Test output:** `uv run --project . python -m unittest discover -q tests` \u2192 `Ran 124 tests ... OK` (no failures). `.claude/hooks/tests-green.sh` exit 0.\n\nOnly the two scoped files changed; no new dependencies. Commit `e712553` on `task/T-0135`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789737286.087619,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789737286.090577,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0135",
+      "claimed_at": 1789737286.090425
+    },
+    {
+      "ts": 1789737286.097718,
+      "pid": 46783,
+      "account": "A"
+    },
+    {
+      "ts": 1789737594.684031,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0135`.\n\n## Summary\n\nFixed all 5 items from T-0132's review:\n\n1. **`reconcile_dead` base resolution** \u2014 replaced the never-resolving `task/<id>@{upstream}` rev-parse with `merge-base HEAD origin/main`, falling back to `merge-base HEAD main` when no `goal/<parent>` branch exists.\n2. **`gate()` orphaned guard** \u2014 a `result.orphaned=true` task now always routes to a review task at `review_tier(t)` (never a direct merge), with the orphaned-executor warning prepended to the review spec.\n3. **Requeue clears `dispatched_at`** \u2014 new `_requeue()` helper drops the `dispatched_at` pipeline stamp on every requeue path so `dispatch()` retries the task instead of leaving it stuck behind a stale stamp.\n4. **`tick()` isolation** \u2014 each `reconcile_dead` call is now wrapped in try/except so one bad task (vanished worktree, raising git call) can't abort the rest of the tick.\n5. **Dirty-check comment** \u2014 added the one-line rationale on the `--porcelain` untracked-files behavior (no logic change).\n\n**Files changed:** `orchestrator/daemon.py`, `tests/test_daemon.py`\n\n**Test output:** `uv run --project . python -m unittest discover -q tests` \u2192 `Ran 124 tests ... OK` (no failures). `.claude/hooks/tests-green.sh` exit 0.\n\nOnly the two scoped files changed; no new dependencies. Commit `e712553` on `task/T-0135`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789737617.238146,
+      "pipeline": {
+        "gated_at": 1789737617.238046
+      }
+    },
+    {
+      "ts": 1789738918.7953742,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "acc08940ba188879085daa3f012fe4695e8e07e8"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789737286.090425,
+  "pid": 46783,
+  "account": "A",
+  "pipeline": {
+    "gated_at": 1789737617.238046
+  },
+  "merged_into": "goal/T-0073",
+  "sha": "acc08940ba188879085daa3f012fe4695e8e07e8"
+}

@@ -1,0 +1,95 @@
+{
+  "id": "T-0399",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H5b fix round 2: the re-spawn age check reads the task's own events instead of a global bus.events page (which goes blind after 10,000 events), and _requeue clears respawned_at inside clear_stage's single update (review T-0394)",
+  "spec": "STEP 0: the worktree must contain ec54196, 3164bed and f7df4d7 (T-0363, T-0393) in git log; never drop or amend them.\nReview T-0394 on T-0393, both findings to address:\n1. (high) orchestrator/daemon.py:572 the re-spawn check calls bus.events(limit=10000, task_ids=[task id]), a global cursor page (seq greater than 0, limit 10000) filtered afterwards, so once the bus holds more than 10,000 events any newer review or spec_review has zero matching rows, created_at falls back to now, and the unclaimed-task recovery never fires. Use the task record's own events list (task[\"events\"], which bus.get returns and which carries claimed/status/requeue entries with ts) to find the creation time (first event ts, or the task file's first event) and the most recent \"process died; requeued\" event; never page the global event log for a per-task question. Test: tests/test_daemon.py::test_respawn_age_uses_task_events_not_global_page (seed the bus with more than 10,000 events, then a fresh unclaimed spec_review older than respawn_after_s is still re-spawned).\n2. (low) orchestrator/daemon.py:341 _requeue performs two locked update round trips (clear_stage's update, then a second update to pop respawned_at). Fold the respawned_at clear into clear_stage's single pipeline update (one event per requeue). Test: assert in the existing requeue test that one update event is appended, or add test_requeue_appends_one_event.\nKeep the T-0363 and T-0393 tests green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0396"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f7df4d7, 3164bed and ec54196 below your commit",
+    "tests/test_daemon.py::test_respawn_age_uses_task_events_not_global_page passes and grep shows no bus.events call in the re-spawn path",
+    "tests/test_daemon.py::test_requeue_appends_one_event passes (or the existing requeue test asserts a single update event)",
+    "tests/test_daemon.py::test_dispatch_respawns_requeued_review_once, ::test_dispatch_respawns_unclaimed_spec_review_after_delay, ::test_respawn_ignores_unrelated_pipeline_keys still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0399",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 551,
+        "issue": "The new review-respawn capacity check counts running Claude workers only via `assigned_to` startswith 'claude:'. The existing `free_slots()` helper (daemon.py:454-475) deliberately checks both `assigned_to` OR `executor` startswith 'claude:', citing gotchas.md T-0070 as the reason: a Claude-fallback execute task can carry the 'claude:' marker on `executor` without it being reflected the same way on `assigned_to`. This new block duplicates the capacity-counting logic instead of reusing free_slots(), and omits that check, so review/spec_review respawns can push concurrent Claude worker usage above limits.max_parallel_claude_workers under fallback conditions -- reintroducing the exact bug class T-0070 fixed.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789908575.3260028,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0399",
+      "claimed_at": 1789908575.3255181
+    },
+    {
+      "ts": 1789908575.327459,
+      "account": "B"
+    },
+    {
+      "ts": 1789908575.3889542,
+      "pid": 66911,
+      "account": "B"
+    },
+    {
+      "ts": 1789908765.799975,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 551,
+            "issue": "The new review-respawn capacity check counts running Claude workers only via `assigned_to` startswith 'claude:'. The existing `free_slots()` helper (daemon.py:454-475) deliberately checks both `assigned_to` OR `executor` startswith 'claude:', citing gotchas.md T-0070 as the reason: a Claude-fallback execute task can carry the 'claude:' marker on `executor` without it being reflected the same way on `assigned_to`. This new block duplicates the capacity-counting logic instead of reusing free_slots(), and omits that check, so review/spec_review respawns can push concurrent Claude worker usage above limits.max_parallel_claude_workers under fallback conditions -- reintroducing the exact bug class T-0070 fixed.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789908765.801992,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789908575.3255181,
+  "account": "B",
+  "pid": 66911,
+  "review_verdict": "request_changes"
+}

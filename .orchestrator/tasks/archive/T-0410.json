@@ -1,0 +1,123 @@
+{
+  "id": "T-0410",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H7: normalized failure signatures stop unchanged repeats, failure kinds (code, invalid spec, flaky, environment, conflict, quota, permissions) are classified and routed, and codex_reply resumes only when the worktree is compatible",
+  "spec": "Build on goal/T-0353 after H5b (the previous daemon.py change). Handover section 8. Evidence (scout T-0355): daemon.auto_fix_hold_key dedupes on the held_at timestamp, not a content signature, so an unchanged failure can get another round until the lineage cap; only gate_red vs review request_changes are distinguished (merge.py separately flags conflict, tests_red, diff_unavailable); executor.codex_reply checks the thread exists and executor availability only, never that the worktree still matches the thread's last commit.\n1. daemon.failure_signature(task) -> str: sha12 over sorted failing test ids (from resume_hint.failures, timestamps and durations stripped), sorted (path, normalized issue text without line numbers and digits) of rejecting review comments, and the failure kind. Stored on each fix round as constraints.failure_signature. auto_fix_round: when the new hold's signature equals any earlier signature in the lineage, do not create a round; escalate with reason \"unchanged failure repeated\" (hold key as today). A changed signature is never suppressed.\n2. daemon.failure_kind(task, worktree) -> one of code_defect, invalid_spec, flaky, environment, conflict, quota, permissions, unknown, from deterministic markers: merge status conflict -> conflict; ModuleNotFoundError, \"No module named\", ENOENT on tools, missing venv -> environment; EACCES/permission denied/sandbox -> permissions; cooling or usage-limit reasons -> quota; a gate_red whose failing ids all pass on one immediate rerun of only those ids -> flaky (record both runs in resume_hint); review comments that say the spec is contradictory or impossible (markers \"spec\", \"acceptance cannot\") -> invalid_spec; else code_defect. Routing: code_defect -> routine fix round (as today); flaky -> one rerun, then escalate with kind; environment, permissions, invalid_spec -> escalate with kind, no round; conflict -> escalate with the T-0258 rebase-task hint; quota -> hold without round or notification spam. The kind is written to pipeline.failure_kind and included in the fix-round packet and the escalation notify text.\n3. executor.codex_reply: before resuming a thread, check the worktree HEAD equals the commit recorded when the thread last ended (store it on the task as codex_thread_head when a thread finishes) or is its descendant, and the tree is clean; otherwise start a fresh thread with a compact repair packet (spawn.packet plus the delta) and record resume_incompatible: reason on the task. Never resume with a stale thread id after the worktree moved.\n4. pool.toml [daemon]: auto_fix_rounds stays; add flaky_rerun_max = 1 and document the kinds.\nTests: tests/test_daemon.py::test_unchanged_failure_signature_escalates_instead_of_new_round, ::test_changed_signature_gets_a_round, ::test_failure_kind_environment_escalates_without_round, ::test_flaky_rerun_then_escalate, ::test_quota_hold_creates_no_round; tests/test_executor.py::test_codex_reply_fresh_thread_when_worktree_moved, ::test_codex_reply_resumes_when_compatible. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0364"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_unchanged_failure_signature_escalates_instead_of_new_round, ::test_changed_signature_gets_a_round, ::test_failure_kind_environment_escalates_without_round, ::test_flaky_rerun_then_escalate and ::test_quota_hold_creates_no_round pass",
+    "tests/test_executor.py::test_codex_reply_fresh_thread_when_worktree_moved and ::test_codex_reply_resumes_when_compatible pass",
+    "every fix round created by auto_fix_round carries constraints.failure_signature and the held task carries pipeline.failure_kind",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "orchestrator/merge.py",
+    ".orchestrator/pool.toml",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0410",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_daemon.py",
+        "line": 0,
+        "issue": "None of the five required tests exist in the repo and the diff adds no test files: test_unchanged_failure_signature_escalates_instead_of_new_round, test_changed_signature_gets_a_round, test_failure_kind_environment_escalates_without_round, test_flaky_rerun_then_escalate, test_quota_hold_creates_no_round. Acceptance criterion 1 cannot pass.",
+        "severity": "high"
+      },
+      {
+        "path": "tests/test_executor.py",
+        "line": 0,
+        "issue": "Neither test_codex_reply_fresh_thread_when_worktree_moved nor test_codex_reply_resumes_when_compatible exists, and the diff doesn't add them, so acceptance criterion 2 cannot pass despite _resume_compatible being implemented.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 141,
+        "issue": "The flaky-rerun subprocess.run(['pytest','-q',*ids], cwd=worktree, capture_output=True, text=True) call has no timeout, unlike every other subprocess dispatch in this module which goes through _run(..., timeout, ...). A hanging test blocks the whole daemon tick indefinitely, violating the module's documented invariant that timeouts are always enforced by the spawner.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789910849.420616,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0410",
+      "claimed_at": 1789910849.420168
+    },
+    {
+      "ts": 1789910849.4221199,
+      "account": "B"
+    },
+    {
+      "ts": 1789910849.462687,
+      "pid": 42785,
+      "account": "B"
+    },
+    {
+      "ts": 1789910967.853035,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_daemon.py",
+            "line": 0,
+            "issue": "None of the five required tests exist in the repo and the diff adds no test files: test_unchanged_failure_signature_escalates_instead_of_new_round, test_changed_signature_gets_a_round, test_failure_kind_environment_escalates_without_round, test_flaky_rerun_then_escalate, test_quota_hold_creates_no_round. Acceptance criterion 1 cannot pass.",
+            "severity": "high"
+          },
+          {
+            "path": "tests/test_executor.py",
+            "line": 0,
+            "issue": "Neither test_codex_reply_fresh_thread_when_worktree_moved nor test_codex_reply_resumes_when_compatible exists, and the diff doesn't add them, so acceptance criterion 2 cannot pass despite _resume_compatible being implemented.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 141,
+            "issue": "The flaky-rerun subprocess.run(['pytest','-q',*ids], cwd=worktree, capture_output=True, text=True) call has no timeout, unlike every other subprocess dispatch in this module which goes through _run(..., timeout, ...). A hanging test blocks the whole daemon tick indefinitely, violating the module's documented invariant that timeouts are always enforced by the spawner.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789910967.854708,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789910849.420168,
+  "account": "B",
+  "pid": 42785,
+  "review_verdict": "request_changes"
+}

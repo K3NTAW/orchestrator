@@ -1,0 +1,89 @@
+{
+  "id": "T-0050",
+  "parent": "T-0043",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "C-C: daemon advances tasks \u2014 dispatch on ready, gate, review, merge, dependents; pipeline stamps; locked writes",
+  "spec": "Why: every pipeline hop waits for the Planner today (scout T-0045: daemon.tick only requeues dead pids). Depends on C-B (depends_on, ready()) and C-D (spec_review verdict) merged into goal/T-0043.\n\nWhat (3 files: orchestrator/daemon.py, orchestrator/bus.py (lock helper only), tests/test_daemon.py; worktree off goal/T-0043):\n1. bus.py: `with bus.locked():` context manager using fcntl.flock on STATE/bus.lock; wrap _save() and update() bodies in it (cheap; same pattern as merge.lock). Pool.save is out of scope; the daemon builds a fresh Pool() per tick to reduce staleness.\n2. daemon.py, new stages in tick(pool), each guarded by a `pipeline` dict on the task json with stage timestamps, written via bus.update inside the lock so a stage runs once:\n   - dispatch: for execute tasks with status queued, `bus.ready(t)` True, and (complexity < 5 or t.get(\"spec_review_verdict\") == \"approve\"): render .orchestrator/prompts/execute.md and call executor.start(t[\"id\"], prompt); stamp pipeline.dispatched_at. If complexity \u2265 5 and no spec_review task exists for it yet, create one (bus.create_task role spec_review, inputs=[id], parent=t[\"parent\"], acceptance/scope copied) and spawn it via spawn.run_worker in a thread; stamp pipeline.spec_review_at. On request_changes: bus.update(status held, hold_reason \"spec_review request_changes\"), notify.\n   - gate+review: for execute tasks done with merged_into unset and pipeline.gated_at unset: run TESTS_GREEN (merge.TESTS_GREEN) on t[\"worktree\"]; red \u2192 status held, hold_reason \"gate_red\", notify; green \u2192 if complexity \u2264 3 call merge.merge(id) directly, else create a review task (role review, inputs=[id], complexity = t complexity, parent, acceptance/scope copied) and spawn it; stamp gated_at.\n   - merge: for review tasks done whose inputs[0] execute task has review_verdict approve and merged_into unset: merge.merge(inputs[0]); on merged, stamp merged_at and notify; on conflict/tests_red the merge already sets status failed \u2014 notify. review_verdict request_changes \u2192 hold the execute task with hold_reason \"review request_changes\", notify (the Planner writes the fix-round spec).\n   - dependents: nothing extra; dispatch picks up ready tasks next tick.\n   Never re-spawn a task with a live pid; keep the existing dead-pid requeue. Keep tick() total work bounded (one dispatch per executor slot per tick).\n3. `orchestrator daemon --once` runs a single tick (for tests and for the Planner). tests/test_daemon.py: with executor.start, spawn.run_worker, merge.merge and subprocess.run monkeypatched to record calls: (a) B depends_on A: tick dispatches A only; after A merged_into set, next tick dispatches B; (b) complexity 6 task is not dispatched until spec_review_verdict approve; a spec_review task is created once; (c) done execute task at complexity 2 with a fake green gate \u2192 merge called; at complexity 5 \u2192 review task created and spawned once across two ticks; (d) red gate \u2192 held with hold_reason gate_red and no review created; (e) review approve \u2192 merge called; request_changes \u2192 execute task held.\n\nRun `uv run python -m unittest discover -q tests`. Commit: \"daemon: dependency-driven dispatch, gate, review, merge with pipeline stamps; bus write lock\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest discover -q tests exits 0 with the five daemon scenarios",
+    "a task with unmet depends_on is never dispatched; a complexity >=5 task waits for spec_review_verdict approve",
+    "each stage runs at most once per task across repeated ticks (pipeline stamps)",
+    "red gate or request_changes leaves the task held with a hold_reason and calls notify",
+    "bus._save/update run under an flock on .orchestrator/bus.lock",
+    "git diff --stat limited to orchestrator/daemon.py, orchestrator/bus.py, orchestrator/cli.py (only the --once flag), tests/test_daemon.py"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    "orchestrator/cli.py",
+    "tests/test_daemon.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0050",
+  "codex_thread": null,
+  "result": {
+    "summary": "Done.\n\n## Summary\n\nThe daemon now drives the pipeline instead of only requeuing dead pids. `tick()` runs four stages, each claiming a `pipeline.<stage>_at` stamp on the task json under the bus lock *before* acting, so a stage fires at most once no matter how often ticks run:\n\n- **dispatch** \u2014 queued `execute` tasks with `bus.ready(t)` true and (complexity < 5 or `spec_review_verdict == \"approve\"`) go to `executor.start` with a rendered `execute.md` prompt. Complexity \u2265 5 without a verdict gets one `spec_review` task created and spawned; `request_changes` holds the task with `hold_reason \"spec_review request_changes\"` and notifies. Dispatch count per tick is capped at the executor pool's idle parallelism (`free_slots`).\n- **gate** \u2014 done `execute` tasks with `merged_into` unset run `merge.TESTS_GREEN` on their worktree. Red \u2192 held with `hold_reason \"gate_red\"` plus a `resume_hint`, notify, no review. Green \u2192 `merge.merge()` directly at complexity \u2264 3, otherwise a `review` task created and spawned.\n- **merge** \u2014 done `review` tasks whose `inputs[0]` has `review_verdict approve` and no `merged_into` trigger `merge.merge()`; `request_changes` holds the execute task for the Planner to re-spec.\n\n`bus.locked()` is a reentrant `fcntl.flock` on `.orchestrator/bus.lock` (same pattern as `merge.lock`), wrapping `_save()` and `update()`. Reentrancy matters: flock keys on the open file description, so `update()` \u2192 `_save()` opening the lock a second time would block on itself without the per-thread depth counter.\n\nOne thing to flag: the branch was based on `41df1ae` (spec_review / C-D) and did **not** contain C-B's `depends_on`/`ready()`. I rebased `task/T-0050` onto `goal/T-0043` first so both dependencies are present \u2014 clean, one duplicate commit auto-skipped. Also, no `decisions.md` entry: that path is outside the task's scope list, so it's left for the Planner's retrospective.\n\n## Files changed\n\n```\norchestrator/bus.py    |  53 ++++++--    locked() + _save/update under flock\norchestrator/cli.py    |   6 +--        daemon --once\norchestrator/daemon.py | 132 ++++++++++++  dispatch/gate/merge stages\ntests/test_daemon.py   | 142 ++++++++++++  new\n```\n\nCommit `93a1b64` on `task/T-0050`.\n\n## Tests\n\n`uv run python -m unittest discover -q tests` \u2192 **76 tests, OK, exit 0**. No failures to report. The only stderr output is expected `[notify]` lines from the held/merged scenarios and unrelated pre-existing `ResourceWarning: unclosed database` noise from `bus.db()`.\n\n`orchestrator daemon --once` verified against an empty `ORCH_ROOT`: exits 0.",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789672884.125461,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789672884.1292522,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0050",
+      "claimed_at": 1789672884.129167
+    },
+    {
+      "ts": 1789672884.1349492,
+      "pid": 96664,
+      "account": "B"
+    },
+    {
+      "ts": 1789673185.2048,
+      "status": "done",
+      "result": {
+        "summary": "Done.\n\n## Summary\n\nThe daemon now drives the pipeline instead of only requeuing dead pids. `tick()` runs four stages, each claiming a `pipeline.<stage>_at` stamp on the task json under the bus lock *before* acting, so a stage fires at most once no matter how often ticks run:\n\n- **dispatch** \u2014 queued `execute` tasks with `bus.ready(t)` true and (complexity < 5 or `spec_review_verdict == \"approve\"`) go to `executor.start` with a rendered `execute.md` prompt. Complexity \u2265 5 without a verdict gets one `spec_review` task created and spawned; `request_changes` holds the task with `hold_reason \"spec_review request_changes\"` and notifies. Dispatch count per tick is capped at the executor pool's idle parallelism (`free_slots`).\n- **gate** \u2014 done `execute` tasks with `merged_into` unset run `merge.TESTS_GREEN` on their worktree. Red \u2192 held with `hold_reason \"gate_red\"` plus a `resume_hint`, notify, no review. Green \u2192 `merge.merge()` directly at complexity \u2264 3, otherwise a `review` task created and spawned.\n- **merge** \u2014 done `review` tasks whose `inputs[0]` has `review_verdict approve` and no `merged_into` trigger `merge.merge()`; `request_changes` holds the execute task for the Planner to re-spec.\n\n`bus.locked()` is a reentrant `fcntl.flock` on `.orchestrator/bus.lock` (same pattern as `merge.lock`), wrapping `_save()` and `update()`. Reentrancy matters: flock keys on the open file description, so `update()` \u2192 `_save()` opening the lock a second time would block on itself without the per-thread depth counter.\n\nOne thing to flag: the branch was based on `41df1ae` (spec_review / C-D) and did **not** contain C-B's `depends_on`/`ready()`. I rebased `task/T-0050` onto `goal/T-0043` first so both dependencies are present \u2014 clean, one duplicate commit auto-skipped. Also, no `decisions.md` entry: that path is outside the task's scope list, so it's left for the Planner's retrospective.\n\n## Files changed\n\n```\norchestrator/bus.py    |  53 ++++++--    locked() + _save/update under flock\norchestrator/cli.py    |   6 +--        daemon --once\norchestrator/daemon.py | 132 ++++++++++++  dispatch/gate/merge stages\ntests/test_daemon.py   | 142 ++++++++++++  new\n```\n\nCommit `93a1b64` on `task/T-0050`.\n\n## Tests\n\n`uv run python -m unittest discover -q tests` \u2192 **76 tests, OK, exit 0**. No failures to report. The only stderr output is expected `[notify]` lines from the held/merged scenarios and unrelated pre-existing `ResourceWarning: unclosed database` noise from `bus.db()`.\n\n`orchestrator daemon --once` verified against an empty `ORCH_ROOT`: exits 0.",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789674126.8214011,
+      "pipeline": {
+        "gated_at": 1789674126.821279
+      }
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789672884.129167,
+  "pid": 96664,
+  "account": "B",
+  "pipeline": {
+    "gated_at": 1789674126.821279
+  }
+}

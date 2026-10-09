@@ -1,0 +1,102 @@
+{
+  "id": "T-0453",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P0a: attribution on every run row \u2014 bus.log_run enriches each row with bucket (planner, scout, execute, fix_round, spec_review, review, challenge, jev, memory, other), fix-round lineage, executor and model, complexity band and task class; normalized token fields actually written for Claude and Codex rows; Codex usd estimated from tokens with usd_source; Jev usage rows carry task, goal and bucket",
+  "spec": "Phase I P0 (brief .orchestrator/phase-i-program.md, section P0). Base goal/T-0445 (= Phase H head 0d7bf09). Scout facts: bus.log_run (bus.py:269-284) appends one JSON line per call to runs/<date>.jsonl; Claude rows come from spawn.run_claude (spawn.py:409-439) with task, role, tier, account, duration_s, outcome, usd, turns, provider, executor, complexity, packet_meta and raw usage; Codex rows from executor._run (executor.py:107-140) carry tokens but never usd; planner rows from planner_runs (planner_runs.py:570-609); Jev usage goes only to runs/jev/<date>.jsonl (jev.py:7-20) and gate.jsonl (jev_gate.py:16). VERIFIED: bus.normalize_usage (bus.py:221-244) builds input_uncached_tokens, cache_read_tokens, total_tokens, yet no row on disk carries them: find why the callers (executor._tokens executor.py:88-94, 139-140; spawn.py:435-440) do not land them and fix it at the source.\n\n1. New module orchestrator/attribution.py (imports bus and stdlib only): bucket_of(role, task) -> one of planner, scout, execute, fix_round, spec_review, review, challenge, jev, memory, other (role planner_decision or planner -> planner; role execute with constraints.fix_round_for or constraints.auto_round -> fix_round, else execute; scout/triage -> scout; spec_review, review, challenge by role; jev, memory by role; anything else -> other); lineage(task) -> {\"root\": <the execute task the fix-round chain repairs, following constraints.fix_round_for to the end>, \"round_index\": <int, 0 for the root>}; band(complexity) -> the same bands scorecard._band uses (move or share the mapping so both agree); model_of(executor_id, tier, pool_cfg) -> the pool.toml executor row model for Codex ids or the [models] entry for a Claude tier, else None.\n2. bus.log_run: after the existing field handling, when a task id is present it loads the task and adds bucket, lineage_root, round_index, band, task_class (scorecard.task_class logic moved into attribution.task_class, scorecard keeps a thin alias so its tests stay green), executor, model; without a task id it adds bucket from role alone (other when unknown). Use a deferred import of attribution inside log_run (bus is imported by attribution). Existing fields are never renamed or removed: additive only, so every scorecard test that pins row shapes still passes.\n3. Normalized tokens on every row with usage: input_uncached_tokens, cache_read_tokens, cache_write_tokens, output_tokens, total_tokens via bus.normalize_usage(provider, usage) for both providers; keep the raw usage dict too. Add a regression test that reads a written row back from a temp runs dir and asserts the five fields.\n4. usd on Codex rows: derive from tokens with the helper H4 added for the reservation ledger (grep usd_of in the repo; reuse it, do not duplicate) and record usd_source = \"token_estimate\"; Claude rows keep the reported usd and get usd_source = \"reported\"; rows without usage get usd absent and usd_source absent.\n5. Jev usage rows (jev.py writer of runs/jev/<date>.jsonl): add task, goal_id (from the task when known), role = \"jev\", bucket = \"jev\", and the normalized token fields when the API response carries usage, so scorecard can join them by task; gate.jsonl unchanged.\nTests: tests/test_attribution.py: test_bucket_of_every_role, test_fix_round_bucket_and_lineage_root_follow_chain, test_band_matches_scorecard, test_model_of_codex_and_claude; tests/test_bus.py: test_log_run_enriches_bucket_lineage_band_class, test_log_run_without_task_uses_other_bucket, test_log_run_writes_normalized_tokens_for_claude_and_codex, test_codex_usd_estimated_with_source, test_claude_usd_reported_with_source; tests/test_jev.py: test_jev_usage_row_carries_task_goal_bucket. Keep every existing test green (tests/test_scorecard.py pins row shapes; fields are additive). .claude/hooks/tests-green.sh exits 0; git add -A; commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0449"
+  ],
+  "acceptance": [
+    "tests/test_attribution.py::test_bucket_of_every_role, test_fix_round_bucket_and_lineage_root_follow_chain, test_band_matches_scorecard, test_model_of_codex_and_claude pass",
+    "tests/test_bus.py::test_log_run_enriches_bucket_lineage_band_class, test_log_run_without_task_uses_other_bucket, test_log_run_writes_normalized_tokens_for_claude_and_codex, test_codex_usd_estimated_with_source, test_claude_usd_reported_with_source pass",
+    "tests/test_jev.py::test_jev_usage_row_carries_task_goal_bucket passes",
+    "every run row written by spawn.run_claude, executor._run and planner_runs carries bucket, band, executor, model and the five normalized token fields when usage exists; Codex rows carry usd with usd_source token_estimate; no existing field renamed or removed",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/attribution.py",
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/jev.py",
+    "orchestrator/scorecard.py",
+    "tests/test_attribution.py",
+    "tests/test_bus.py",
+    "tests/test_jev.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0453",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/bus.py",
+        "line": 296,
+        "issue": "log_run calls bus.get(task_id) twice per invocation: once at line 290 (for goal_id) and again at line 299, discarding the first result into a fresh task={}. Redundant disk read + JSON parse on the hottest logging path in the system. Not a correctness bug (all target tests pass), just wasted I/O \u2014 reuse the first fetch instead.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789919294.14317,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0453",
+      "claimed_at": 1789919294.142847
+    },
+    {
+      "ts": 1789919294.1441228,
+      "account": "B"
+    },
+    {
+      "ts": 1789919294.178764,
+      "pid": 86128,
+      "account": "B"
+    },
+    {
+      "ts": 1789919526.691883,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/bus.py",
+            "line": 296,
+            "issue": "log_run calls bus.get(task_id) twice per invocation: once at line 290 (for goal_id) and again at line 299, discarding the first result into a fresh task={}. Redundant disk read + JSON parse on the hottest logging path in the system. Not a correctness bug (all target tests pass), just wasted I/O \u2014 reuse the first fetch instead.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789919526.693622,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789919294.142847,
+  "account": "B",
+  "pid": 86128,
+  "review_verdict": "approve"
+}

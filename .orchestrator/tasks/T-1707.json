@@ -1,0 +1,1718 @@
+{
+  "id": "T-1707",
+  "created_at": 1791376115.1789398,
+  "parent": "T-1705",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "daemon: an orphaned review or spec review (running, no worker, past its lease) is marked failed so the retry path respawns it",
+  "spec": "Evidence (ai-apprentice, 2026-10-07): spec reviews T-0302 and T-0303 were created at ~01:00 with status running,\nclaimed_by None, empty pipeline, and no run row in .orchestrator/runs/2026-10-07.jsonl: the spawn_async worker never started\n(likely the claude CLI update window). orchestrator/daemon.py:986-1001 sees them as live children, so the execute tasks\nT-0298/T-0299 stayed spec_review_pending for 8 h. The watchdog reported \"queue stalled\" but nothing recovered. The Planner\nmarked both failed by hand; the retry path (daemon.py:1002) then respawned them within one tick.\n\nFix in orchestrator/daemon.py: each tick, a review or spec_review task with status running whose start time (created_at or\nclaim time) is older than its constraints.timeout_s plus a 300 s margin, and that has no live worker (no matching pid in the\nspawn bookkeeping the daemon already keeps, or none recorded), is set status=failed with hold_reason \"orphaned: no worker\".\nNotify once. Never touch a task whose worker is alive. respawn_max still caps retries (daemon.py:990).\nTests (tests/test_daemon.py): test_orphaned_spec_review_marked_failed_and_respawned, test_live_spec_review_not_reaped,\ntest_orphaned_review_marked_failed.\nRun: PYTHONPATH=tests uv run python -m unittest tests.test_daemon. Commit on the task branch.",
+  "inputs": [],
+  "acceptance": [
+    "the three named tests pass",
+    "tests.test_daemon passes"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 3600,
+    "task_class": "debugging",
+    "route": "straightforward"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1707",
+  "codex_thread": null,
+  "result": {
+    "summary": "I added the orphan reaper and its three tests and committed them, but the full `tests.test_daemon` run did not pass cleanly. 255 of 256 tests passed. The failure was `test_dispatch_does_not_block`, which times the whole `tick()` against a 0.5 s limit (it took 0.65 s). The three new tests passed.\n\nI reran that test on its own 7 times: it passed 6 times and failed once, so it looks like a timing flake under load. My change does add one more task read per tick, so that may have added a little to the time; the daemon's full gate will show whether it holds up. I didn't run the same test on the base commit to compare.\n\n**What changed in `orchestrator/daemon.py`**\n- New `reap_orphaned_reviews()`, called at the start of `dispatch()` on every tick. It finds review and spec review tasks that are still `running` and older than their `timeout_s` (900 s if none is set) plus 300 s. Age is counted from the claim time, or from creation if the task was never claimed.\n- A task only counts as orphaned if no worker is alive. It checks the pid on the task and the pid in the worker registry, and checks again under the bus lock before writing.\n- An orphaned task is set to `status=failed` with `hold_reason=\"orphaned: no worker\"`, and one notification is sent. Because the task is no longer `running`, later ticks don't notify about it again.\n- For spec reviews, the existing retry path then creates a new spec review in the same `dispatch()` pass, and `respawn_max` still limits the retries. For normal reviews, the task is only marked failed.\n\n**New tests in `tests/test_daemon.py`**\n- `test_orphaned_spec_review_marked_failed_and_respawned`: the orphan is marked failed, a second spec review appears with reason `spec_review_retry`, and a later tick doesn't notify again.\n- `test_live_spec_review_not_reaped`: with a live pid the task stays `running` and no new review is created.\n- `test_orphaned_review_marked_failed`: an old orphaned review is marked failed, while a recent running review and the execute task it reviews are left alone.\n\nThe commit is on `task/T-1707` and the working tree is clean.\n\nFailures-only output from the full run:\n```\nFAIL: test_dispatch_does_not_block (tests.test_daemon.Daemon.test_dispatch_does_not_block)\n  File \"tests/test_daemon.py\", line 3286, in test_dispatch_does_not_block\n    self.assertLess(time.time() - t0, 0.5)\nAssertionError: 0.6520428657531738 not less than 0.5\nRan 256 tests in 83.504s\nFAILED (failures=1)\n```",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791376930.7845628,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439
+      }
+    },
+    {
+      "ts": 1791376930.792894,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733
+      }
+    },
+    {
+      "ts": 1791376930.8051982,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733
+      }
+    },
+    {
+      "ts": 1791376955.602907,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5822,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791376955.635678,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135
+      }
+    },
+    {
+      "ts": 1791379414.900765,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        }
+      }
+    },
+    {
+      "ts": 1791379429.1011782,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1791379429.179508,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791379487.189018,
+      "executor": "claude:opus"
+    },
+    {
+      "ts": 1791379500.511702,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5822,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791379502.935054,
+      "packet_meta": {
+        "chars": 4943,
+        "est_tokens": 1235,
+        "presented_tokens": 1235,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "40405233a73dc0937814cc5533b90320cab622c07d6ec0127472bf247ee72a5f"
+          },
+          "objective": {
+            "chars": 1455,
+            "est_tokens": 363,
+            "sha256": "2cc7a70a499eb3a7c3b531a13cfc98581aa48b644f8cbbd50f74c4a820e71ecb"
+          },
+          "acceptance": {
+            "chars": 70,
+            "est_tokens": 17,
+            "sha256": "a86abaffcf64072ac81819c8a064de103fd820391ba42350bfab1f78489411b7"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "defcb0551fe7797a4d74416befc950cd4fac21d9ea8b17be6935685095ec6236"
+          },
+          "write_scope": {
+            "chars": 63,
+            "est_tokens": 15,
+            "sha256": "2dfd6a9d8b8161bddea00e17f98c126e319d725c06dff05dd4578aa8edf383c2"
+          },
+          "read_scope": {
+            "chars": 1010,
+            "est_tokens": 252,
+            "sha256": "327f56f93eab8e12f3aa672e0120febb4659dc19999ff2ba0191880b05fb2da4"
+          },
+          "constraints": {
+            "chars": 124,
+            "est_tokens": 31,
+            "sha256": "a8b9a3284919acc8625703d1480906f5f16a68a3e03ee72d62588a0068271e5d"
+          },
+          "relevant_tests": {
+            "chars": 1091,
+            "est_tokens": 272,
+            "sha256": "c4afeb3b425389f827943d9fde42c704aaaf766dfddd30134ceb8e5732412241"
+          },
+          "symbols": {
+            "chars": 722,
+            "est_tokens": 180,
+            "sha256": "4fa8d4cdadf193a81ce4cce01cc5e193800ac7e136fd960259c6c39f32b9e49a"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "abe94e6efee4",
+        "version": "abe94e6efee4",
+        "candidate_known": true,
+        "base": "8f73d1ad2366",
+        "sources": "pool.toml@9b054766d6c6 gotchas@f82265e9dc5e memory@notes over cap by 143 chars: acceptance kept whole routed=shadow",
+        "policy_version": "9b054766d6c6",
+        "gotchas": "f82265e9dc5e",
+        "candidate_tokens": 2784,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 10999,
+        "routed_reduction_ratio": 0.5732228476130915,
+        "routed_hidden": 13,
+        "routed_ambiguous": 35,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "e4e8168207ae",
+          "4d8762080fa4",
+          "08f80c940bf3",
+          "805cc01d42bd",
+          "10357d124edf",
+          "aab184a04f06",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "241cf717cdc5",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "e2c7a2ad69c6",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "c2130307b6d5",
+          "33a8f274c385",
+          "91d96c0e81e2",
+          "8d88844e9eff",
+          "85d8dfb23235",
+          "8a93747b3379",
+          "36bafd15263f",
+          "0065088470bf",
+          "238b8794747e",
+          "516e889eac04",
+          "9f19d48b4233",
+          "795fd254ef29",
+          "3393e5a53ef5",
+          "6ce096416768",
+          "9fa1aa47fe41",
+          "51ea2e9b0141",
+          "820141fbd2c5",
+          "f1852aed4d8b",
+          "77d26857f31d",
+          "bf2a78fd2725",
+          "113e5a36c3c7",
+          "b376d7285eb9",
+          "645af7c508ac",
+          "1e0e2280350f",
+          "93aa237d703b",
+          "64bee24f02e2",
+          "5aaf82782fdc",
+          "fd04716a9df4",
+          "b651b180552c",
+          "1a53d1a168a9",
+          "1559e2ef76ee",
+          "bfefbe66a26b",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e",
+          "12208bb79454",
+          "9e12df8d5fe6",
+          "0d21246e336c",
+          "0f9fe0dbe36b",
+          "0fcd075d9f57",
+          "192cb646518a",
+          "2253f4faf0bb",
+          "22b2302404e0",
+          "29db5f0858be",
+          "2aa63a32b250",
+          "3696161a12af",
+          "3ac114258426",
+          "3b83b1575d27",
+          "41ea824d754d",
+          "4538002a89d3",
+          "48d16c32f5b4",
+          "4990f12bb6a3",
+          "4ab5723e00a6",
+          "4e30aec76b90",
+          "5888a09023ea",
+          "59421ac3d3ad",
+          "60df36df1d76",
+          "60e7e552b36f",
+          "618c012bb31d",
+          "661d6d3f1208",
+          "676669172956",
+          "7375941e7497",
+          "760c0f6a0dd6",
+          "866170569f1c",
+          "898dd828d74d",
+          "8d17e3d9ae01",
+          "8e0bde14605c",
+          "968fc87a7ee9",
+          "972a8659f5d7",
+          "9d078ea9fe66",
+          "a29512e1deb6",
+          "a3655b1f148f",
+          "a49ec4164237",
+          "a4a913893f6f",
+          "ae5dcce8b626",
+          "b00adf2547d2",
+          "b71cf6552bdf",
+          "bd73a30933f8",
+          "cbe573e85fbf",
+          "ce857161558f",
+          "cfcb57064eb5",
+          "d58fe3037604",
+          "dd3f00d0400a",
+          "df17b3c9f63a",
+          "df7350a0e379",
+          "e15e9cdae860",
+          "e1c7874b8fc0",
+          "e557eca2eb13",
+          "e634118e720b",
+          "ee2b1125d52d",
+          "f6dad1fda24b",
+          "fbbd221f5655",
+          "fed711c7573f"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5822,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 472,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791379510.988019,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1707",
+      "claimed_at": 1791379510.986602
+    },
+    {
+      "ts": 1791379510.996144,
+      "account": "A"
+    },
+    {
+      "ts": 1791379620.7702882,
+      "pid": 40350,
+      "account": "A"
+    },
+    {
+      "ts": 1791380406.7279491,
+      "packet_meta": {
+        "chars": 4943,
+        "est_tokens": 1235,
+        "presented_tokens": 1235,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "40405233a73dc0937814cc5533b90320cab622c07d6ec0127472bf247ee72a5f"
+          },
+          "objective": {
+            "chars": 1455,
+            "est_tokens": 363,
+            "sha256": "2cc7a70a499eb3a7c3b531a13cfc98581aa48b644f8cbbd50f74c4a820e71ecb"
+          },
+          "acceptance": {
+            "chars": 70,
+            "est_tokens": 17,
+            "sha256": "a86abaffcf64072ac81819c8a064de103fd820391ba42350bfab1f78489411b7"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "defcb0551fe7797a4d74416befc950cd4fac21d9ea8b17be6935685095ec6236"
+          },
+          "write_scope": {
+            "chars": 63,
+            "est_tokens": 15,
+            "sha256": "2dfd6a9d8b8161bddea00e17f98c126e319d725c06dff05dd4578aa8edf383c2"
+          },
+          "read_scope": {
+            "chars": 1010,
+            "est_tokens": 252,
+            "sha256": "327f56f93eab8e12f3aa672e0120febb4659dc19999ff2ba0191880b05fb2da4"
+          },
+          "constraints": {
+            "chars": 124,
+            "est_tokens": 31,
+            "sha256": "a8b9a3284919acc8625703d1480906f5f16a68a3e03ee72d62588a0068271e5d"
+          },
+          "relevant_tests": {
+            "chars": 1091,
+            "est_tokens": 272,
+            "sha256": "c4afeb3b425389f827943d9fde42c704aaaf766dfddd30134ceb8e5732412241"
+          },
+          "symbols": {
+            "chars": 722,
+            "est_tokens": 180,
+            "sha256": "4fa8d4cdadf193a81ce4cce01cc5e193800ac7e136fd960259c6c39f32b9e49a"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "abe94e6efee4",
+        "version": "abe94e6efee4",
+        "candidate_known": true,
+        "base": "8f73d1ad2366",
+        "sources": "pool.toml@9b054766d6c6 gotchas@f82265e9dc5e memory@notes over cap by 143 chars: acceptance kept whole routed=shadow",
+        "policy_version": "9b054766d6c6",
+        "gotchas": "f82265e9dc5e",
+        "candidate_tokens": 2784,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 10999,
+        "routed_reduction_ratio": 0.5732228476130915,
+        "routed_hidden": 13,
+        "routed_ambiguous": 35,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "e4e8168207ae",
+          "4d8762080fa4",
+          "08f80c940bf3",
+          "805cc01d42bd",
+          "10357d124edf",
+          "aab184a04f06",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "241cf717cdc5",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "e2c7a2ad69c6",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "c2130307b6d5",
+          "33a8f274c385",
+          "91d96c0e81e2",
+          "8d88844e9eff",
+          "85d8dfb23235",
+          "8a93747b3379",
+          "36bafd15263f",
+          "0065088470bf",
+          "238b8794747e",
+          "516e889eac04",
+          "9f19d48b4233",
+          "795fd254ef29",
+          "3393e5a53ef5",
+          "6ce096416768",
+          "9fa1aa47fe41",
+          "51ea2e9b0141",
+          "820141fbd2c5",
+          "f1852aed4d8b",
+          "77d26857f31d",
+          "bf2a78fd2725",
+          "113e5a36c3c7",
+          "b376d7285eb9",
+          "645af7c508ac",
+          "1e0e2280350f",
+          "93aa237d703b",
+          "64bee24f02e2",
+          "5aaf82782fdc",
+          "fd04716a9df4",
+          "b651b180552c",
+          "1a53d1a168a9",
+          "1559e2ef76ee",
+          "bfefbe66a26b",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e",
+          "12208bb79454",
+          "9e12df8d5fe6",
+          "0d21246e336c",
+          "0f9fe0dbe36b",
+          "0fcd075d9f57",
+          "192cb646518a",
+          "2253f4faf0bb",
+          "22b2302404e0",
+          "29db5f0858be",
+          "2aa63a32b250",
+          "3696161a12af",
+          "3ac114258426",
+          "3b83b1575d27",
+          "41ea824d754d",
+          "4538002a89d3",
+          "48d16c32f5b4",
+          "4990f12bb6a3",
+          "4ab5723e00a6",
+          "4e30aec76b90",
+          "5888a09023ea",
+          "59421ac3d3ad",
+          "60df36df1d76",
+          "60e7e552b36f",
+          "618c012bb31d",
+          "661d6d3f1208",
+          "676669172956",
+          "7375941e7497",
+          "760c0f6a0dd6",
+          "866170569f1c",
+          "898dd828d74d",
+          "8d17e3d9ae01",
+          "8e0bde14605c",
+          "968fc87a7ee9",
+          "972a8659f5d7",
+          "9d078ea9fe66",
+          "a29512e1deb6",
+          "a3655b1f148f",
+          "a49ec4164237",
+          "a4a913893f6f",
+          "ae5dcce8b626",
+          "b00adf2547d2",
+          "b71cf6552bdf",
+          "bd73a30933f8",
+          "cbe573e85fbf",
+          "ce857161558f",
+          "cfcb57064eb5",
+          "d58fe3037604",
+          "dd3f00d0400a",
+          "df17b3c9f63a",
+          "df7350a0e379",
+          "e15e9cdae860",
+          "e1c7874b8fc0",
+          "e557eca2eb13",
+          "e634118e720b",
+          "ee2b1125d52d",
+          "f6dad1fda24b",
+          "fbbd221f5655",
+          "fed711c7573f"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5822,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 472,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "9bc28b63-d07c-44d8-89f5-9d8033323165"
+      }
+    },
+    {
+      "ts": 1791380406.979999,
+      "packet_meta": {
+        "chars": 4943,
+        "est_tokens": 1235,
+        "presented_tokens": 1235,
+        "sections": {
+          "_preamble": {
+            "chars": 163,
+            "est_tokens": 40,
+            "sha256": "40405233a73dc0937814cc5533b90320cab622c07d6ec0127472bf247ee72a5f"
+          },
+          "objective": {
+            "chars": 1455,
+            "est_tokens": 363,
+            "sha256": "2cc7a70a499eb3a7c3b531a13cfc98581aa48b644f8cbbd50f74c4a820e71ecb"
+          },
+          "acceptance": {
+            "chars": 70,
+            "est_tokens": 17,
+            "sha256": "a86abaffcf64072ac81819c8a064de103fd820391ba42350bfab1f78489411b7"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "defcb0551fe7797a4d74416befc950cd4fac21d9ea8b17be6935685095ec6236"
+          },
+          "write_scope": {
+            "chars": 63,
+            "est_tokens": 15,
+            "sha256": "2dfd6a9d8b8161bddea00e17f98c126e319d725c06dff05dd4578aa8edf383c2"
+          },
+          "read_scope": {
+            "chars": 1010,
+            "est_tokens": 252,
+            "sha256": "327f56f93eab8e12f3aa672e0120febb4659dc19999ff2ba0191880b05fb2da4"
+          },
+          "constraints": {
+            "chars": 124,
+            "est_tokens": 31,
+            "sha256": "a8b9a3284919acc8625703d1480906f5f16a68a3e03ee72d62588a0068271e5d"
+          },
+          "relevant_tests": {
+            "chars": 1091,
+            "est_tokens": 272,
+            "sha256": "c4afeb3b425389f827943d9fde42c704aaaf766dfddd30134ceb8e5732412241"
+          },
+          "symbols": {
+            "chars": 722,
+            "est_tokens": 180,
+            "sha256": "4fa8d4cdadf193a81ce4cce01cc5e193800ac7e136fd960259c6c39f32b9e49a"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "abe94e6efee4",
+        "version": "abe94e6efee4",
+        "candidate_known": true,
+        "base": "8f73d1ad2366",
+        "sources": "pool.toml@9b054766d6c6 gotchas@f82265e9dc5e memory@notes over cap by 143 chars: acceptance kept whole routed=shadow",
+        "policy_version": "9b054766d6c6",
+        "gotchas": "f82265e9dc5e",
+        "candidate_tokens": 2784,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 10999,
+        "routed_reduction_ratio": 0.5732228476130915,
+        "routed_hidden": 13,
+        "routed_ambiguous": 35,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "e4e8168207ae",
+          "4d8762080fa4",
+          "08f80c940bf3",
+          "805cc01d42bd",
+          "10357d124edf",
+          "aab184a04f06",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "241cf717cdc5",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "e2c7a2ad69c6",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "c2130307b6d5",
+          "33a8f274c385",
+          "91d96c0e81e2",
+          "8d88844e9eff",
+          "85d8dfb23235",
+          "8a93747b3379",
+          "36bafd15263f",
+          "0065088470bf",
+          "238b8794747e",
+          "516e889eac04",
+          "9f19d48b4233",
+          "795fd254ef29",
+          "3393e5a53ef5",
+          "6ce096416768",
+          "9fa1aa47fe41",
+          "51ea2e9b0141",
+          "820141fbd2c5",
+          "f1852aed4d8b",
+          "77d26857f31d",
+          "bf2a78fd2725",
+          "113e5a36c3c7",
+          "b376d7285eb9",
+          "645af7c508ac",
+          "1e0e2280350f",
+          "93aa237d703b",
+          "64bee24f02e2",
+          "5aaf82782fdc",
+          "fd04716a9df4",
+          "b651b180552c",
+          "1a53d1a168a9",
+          "1559e2ef76ee",
+          "bfefbe66a26b",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e",
+          "12208bb79454",
+          "9e12df8d5fe6",
+          "0d21246e336c",
+          "0f9fe0dbe36b",
+          "0fcd075d9f57",
+          "192cb646518a",
+          "2253f4faf0bb",
+          "22b2302404e0",
+          "29db5f0858be",
+          "2aa63a32b250",
+          "3696161a12af",
+          "3ac114258426",
+          "3b83b1575d27",
+          "41ea824d754d",
+          "4538002a89d3",
+          "48d16c32f5b4",
+          "4990f12bb6a3",
+          "4ab5723e00a6",
+          "4e30aec76b90",
+          "5888a09023ea",
+          "59421ac3d3ad",
+          "60df36df1d76",
+          "60e7e552b36f",
+          "618c012bb31d",
+          "661d6d3f1208",
+          "676669172956",
+          "7375941e7497",
+          "760c0f6a0dd6",
+          "866170569f1c",
+          "898dd828d74d",
+          "8d17e3d9ae01",
+          "8e0bde14605c",
+          "968fc87a7ee9",
+          "972a8659f5d7",
+          "9d078ea9fe66",
+          "a29512e1deb6",
+          "a3655b1f148f",
+          "a49ec4164237",
+          "a4a913893f6f",
+          "ae5dcce8b626",
+          "b00adf2547d2",
+          "b71cf6552bdf",
+          "bd73a30933f8",
+          "cbe573e85fbf",
+          "ce857161558f",
+          "cfcb57064eb5",
+          "d58fe3037604",
+          "dd3f00d0400a",
+          "df17b3c9f63a",
+          "df7350a0e379",
+          "e15e9cdae860",
+          "e1c7874b8fc0",
+          "e557eca2eb13",
+          "e634118e720b",
+          "ee2b1125d52d",
+          "f6dad1fda24b",
+          "fbbd221f5655",
+          "fed711c7573f"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 5822,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 472,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "9bc28b63-d07c-44d8-89f5-9d8033323165",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791380436.674508,
+      "status": "done",
+      "result": {
+        "summary": "I added the orphan reaper and its three tests and committed them, but the full `tests.test_daemon` run did not pass cleanly. 255 of 256 tests passed. The failure was `test_dispatch_does_not_block`, which times the whole `tick()` against a 0.5 s limit (it took 0.65 s). The three new tests passed.\n\nI reran that test on its own 7 times: it passed 6 times and failed once, so it looks like a timing flake under load. My change does add one more task read per tick, so that may have added a little to the time; the daemon's full gate will show whether it holds up. I didn't run the same test on the base commit to compare.\n\n**What changed in `orchestrator/daemon.py`**\n- New `reap_orphaned_reviews()`, called at the start of `dispatch()` on every tick. It finds review and spec review tasks that are still `running` and older than their `timeout_s` (900 s if none is set) plus 300 s. Age is counted from the claim time, or from creation if the task was never claimed.\n- A task only counts as orphaned if no worker is alive. It checks the pid on the task and the pid in the worker registry, and checks again under the bus lock before writing.\n- An orphaned task is set to `status=failed` with `hold_reason=\"orphaned: no worker\"`, and one notification is sent. Because the task is no longer `running`, later ticks don't notify about it again.\n- For spec reviews, the existing retry path then creates a new spec review in the same `dispatch()` pass, and `respawn_max` still limits the retries. For normal reviews, the task is only marked failed.\n\n**New tests in `tests/test_daemon.py`**\n- `test_orphaned_spec_review_marked_failed_and_respawned`: the orphan is marked failed, a second spec review appears with reason `spec_review_retry`, and a later tick doesn't notify again.\n- `test_live_spec_review_not_reaped`: with a live pid the task stays `running` and no new review is created.\n- `test_orphaned_review_marked_failed`: an old orphaned review is marked failed, while a recent running review and the execute task it reviews are left alone.\n\nThe commit is on `task/T-1707` and the working tree is clean.\n\nFailures-only output from the full run:\n```\nFAIL: test_dispatch_does_not_block (tests.test_daemon.Daemon.test_dispatch_does_not_block)\n  File \"tests/test_daemon.py\", line 3286, in test_dispatch_does_not_block\n    self.assertLess(time.time() - t0, 0.5)\nAssertionError: 0.6520428657531738 not less than 0.5\nRan 256 tests in 83.504s\nFAILED (failures=1)\n```",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791380475.080245,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791382997.9706829,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791382997.969881,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_dispatch_does_not_block (test_daemon.Daemon.test_dispatch_does_not_block)\nTraceback (most recent call last):\nAssertionError: 1.2426307201385498 not less than 0.5\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1707/.orchestrator/runs/tests/T-1707-20261007-162317.log\n"
+      }
+    },
+    {
+      "ts": 1791383013.937441,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_dispatch_does_not_block (test_daemon.Daemon.test_dispatch_does_not_block)\nTraceback (most recent call last):\nAssertionError: 1.2426307201385498 not less than 0.5\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1707/.orchestrator/runs/tests/T-1707-20261007-162317.log\n",
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1791383014.3786922,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_dispatch_does_not_block (test_daemon.Daemon.test_dispatch_does_not_block)\nTraceback (most recent call last):\nAssertionError: 1.2426307201385498 not less than 0.5\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1707/.orchestrator/runs/tests/T-1707-20261007-162317.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_daemon.Daemon.test_dispatch_does_not_block"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_daemon'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1791383014.383945,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791382997.969881,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1791383022.593493,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791382997.969881,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791382997.9706829"
+      }
+    },
+    {
+      "ts": 1791383046.064119,
+      "status": "done",
+      "hold_reason": null,
+      "resume_hint": null,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791382997.9706829"
+      }
+    },
+    {
+      "ts": 1791385518.849292,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791382997.9706829"
+      }
+    },
+    {
+      "ts": 1791389991.7850308,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 2,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791382997.9706829",
+        "gated_at": 1791389991.765118
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_dispatch_does_not_block (test_daemon.Daemon.test_dispatch_does_not_block)\nTraceback (most recent call last):\nAssertionError: 0.6792371273040771 not less than 0.5\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1707/.orchestrator/runs/tests/T-1707-20261007-181951.log\n"
+      }
+    },
+    {
+      "ts": 1791394214.2674408,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 2,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791382997.9706829",
+        "gated_at": 1791389991.765118,
+        "first_green_at": 1791394214.18118,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1791398178.609151,
+      "status": "done",
+      "merged_into": "goal/T-1705",
+      "merged_via": "fix round T-1710 d7e45bb5a5321aa33b69e2620a3dea6b25ee6511",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1791376930.7844439,
+        "dispatched_at": 1791376930.792733,
+        "dispatched_at_lease": 1791377830.792733,
+        "dispatched_at_done": 1791376955.632135,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791379414.898853
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 2,
+        "gate_reds": 2,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1791382997.9706829",
+        "gated_at": 1791389991.765118,
+        "first_green_at": 1791394214.18118,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1791398178.577421
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791376930.7844439,
+    "dispatched_at": 1791376930.792733,
+    "dispatched_at_lease": 1791377830.792733,
+    "dispatched_at_done": 1791376955.632135,
+    "handoff": {
+      "baseline": "claude:opus",
+      "selected": "claude:opus",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791379414.898853
+    },
+    "jev_route": {
+      "baseline": "opus",
+      "hypothetical": "claude:opus",
+      "key": "d85eccfb990259a1addb9b8a954f01aae6e5585e",
+      "adjustment": {
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "skills_used": [],
+    "gate_attempts": 2,
+    "gate_reds": 2,
+    "failure_kind": "code_defect",
+    "auto_fix_hold_key": "1791382997.9706829",
+    "gated_at": 1791389991.765118,
+    "first_green_at": 1791394214.18118,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1791398178.577421
+  },
+  "packet_meta": {
+    "chars": 4943,
+    "est_tokens": 1235,
+    "presented_tokens": 1235,
+    "sections": {
+      "_preamble": {
+        "chars": 163,
+        "est_tokens": 40,
+        "sha256": "40405233a73dc0937814cc5533b90320cab622c07d6ec0127472bf247ee72a5f"
+      },
+      "objective": {
+        "chars": 1455,
+        "est_tokens": 363,
+        "sha256": "2cc7a70a499eb3a7c3b531a13cfc98581aa48b644f8cbbd50f74c4a820e71ecb"
+      },
+      "acceptance": {
+        "chars": 70,
+        "est_tokens": 17,
+        "sha256": "a86abaffcf64072ac81819c8a064de103fd820391ba42350bfab1f78489411b7"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "defcb0551fe7797a4d74416befc950cd4fac21d9ea8b17be6935685095ec6236"
+      },
+      "write_scope": {
+        "chars": 63,
+        "est_tokens": 15,
+        "sha256": "2dfd6a9d8b8161bddea00e17f98c126e319d725c06dff05dd4578aa8edf383c2"
+      },
+      "read_scope": {
+        "chars": 1010,
+        "est_tokens": 252,
+        "sha256": "327f56f93eab8e12f3aa672e0120febb4659dc19999ff2ba0191880b05fb2da4"
+      },
+      "constraints": {
+        "chars": 124,
+        "est_tokens": 31,
+        "sha256": "a8b9a3284919acc8625703d1480906f5f16a68a3e03ee72d62588a0068271e5d"
+      },
+      "relevant_tests": {
+        "chars": 1091,
+        "est_tokens": 272,
+        "sha256": "c4afeb3b425389f827943d9fde42c704aaaf766dfddd30134ceb8e5732412241"
+      },
+      "symbols": {
+        "chars": 722,
+        "est_tokens": 180,
+        "sha256": "4fa8d4cdadf193a81ce4cce01cc5e193800ac7e136fd960259c6c39f32b9e49a"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "abe94e6efee4",
+    "version": "abe94e6efee4",
+    "candidate_known": true,
+    "base": "8f73d1ad2366",
+    "sources": "pool.toml@9b054766d6c6 gotchas@f82265e9dc5e memory@notes over cap by 143 chars: acceptance kept whole routed=shadow",
+    "policy_version": "9b054766d6c6",
+    "gotchas": "f82265e9dc5e",
+    "candidate_tokens": 2784,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 10999,
+    "routed_reduction_ratio": 0.5732228476130915,
+    "routed_hidden": 13,
+    "routed_ambiguous": 35,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "e4e8168207ae",
+      "4d8762080fa4",
+      "08f80c940bf3",
+      "805cc01d42bd",
+      "10357d124edf",
+      "aab184a04f06",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "718b545b1eca",
+      "5b872ee10528",
+      "622de2bd3ec8",
+      "667ed6b21b31",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "b676757c3fa9",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "241cf717cdc5",
+      "a595cbbe1665",
+      "d500754708e5",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "d0b9e72fe363",
+      "00db509188f0",
+      "041199286363",
+      "acfaa314d8bc",
+      "e2c7a2ad69c6",
+      "4e7c92225364",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "c2130307b6d5",
+      "33a8f274c385",
+      "91d96c0e81e2",
+      "8d88844e9eff",
+      "85d8dfb23235",
+      "8a93747b3379",
+      "36bafd15263f",
+      "0065088470bf",
+      "238b8794747e",
+      "516e889eac04",
+      "9f19d48b4233",
+      "795fd254ef29",
+      "3393e5a53ef5",
+      "6ce096416768",
+      "9fa1aa47fe41",
+      "51ea2e9b0141",
+      "820141fbd2c5",
+      "f1852aed4d8b",
+      "77d26857f31d",
+      "bf2a78fd2725",
+      "113e5a36c3c7",
+      "b376d7285eb9",
+      "645af7c508ac",
+      "1e0e2280350f",
+      "93aa237d703b",
+      "64bee24f02e2",
+      "5aaf82782fdc",
+      "fd04716a9df4",
+      "b651b180552c",
+      "1a53d1a168a9",
+      "1559e2ef76ee",
+      "bfefbe66a26b",
+      "e146114ba8ec",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "e175a2554b06",
+      "575022ff3493",
+      "cc3f3bcac15a",
+      "ae61acc3156e",
+      "a48883e9da6e",
+      "a98276b73bf8",
+      "985ffb7f01b9",
+      "2993e8419e50",
+      "c6139725224e",
+      "12208bb79454",
+      "9e12df8d5fe6",
+      "0d21246e336c",
+      "0f9fe0dbe36b",
+      "0fcd075d9f57",
+      "192cb646518a",
+      "2253f4faf0bb",
+      "22b2302404e0",
+      "29db5f0858be",
+      "2aa63a32b250",
+      "3696161a12af",
+      "3ac114258426",
+      "3b83b1575d27",
+      "41ea824d754d",
+      "4538002a89d3",
+      "48d16c32f5b4",
+      "4990f12bb6a3",
+      "4ab5723e00a6",
+      "4e30aec76b90",
+      "5888a09023ea",
+      "59421ac3d3ad",
+      "60df36df1d76",
+      "60e7e552b36f",
+      "618c012bb31d",
+      "661d6d3f1208",
+      "676669172956",
+      "7375941e7497",
+      "760c0f6a0dd6",
+      "866170569f1c",
+      "898dd828d74d",
+      "8d17e3d9ae01",
+      "8e0bde14605c",
+      "968fc87a7ee9",
+      "972a8659f5d7",
+      "9d078ea9fe66",
+      "a29512e1deb6",
+      "a3655b1f148f",
+      "a49ec4164237",
+      "a4a913893f6f",
+      "ae5dcce8b626",
+      "b00adf2547d2",
+      "b71cf6552bdf",
+      "bd73a30933f8",
+      "cbe573e85fbf",
+      "ce857161558f",
+      "cfcb57064eb5",
+      "d58fe3037604",
+      "dd3f00d0400a",
+      "df17b3c9f63a",
+      "df7350a0e379",
+      "e15e9cdae860",
+      "e1c7874b8fc0",
+      "e557eca2eb13",
+      "e634118e720b",
+      "ee2b1125d52d",
+      "f6dad1fda24b",
+      "fbbd221f5655",
+      "fed711c7573f"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 5822,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 472,
+    "instruction_tokens_modular": 411,
+    "role": "execute",
+    "tool_tokens_disclosed": 5995,
+    "tool_tokens_minimal": 5995,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_selected_l0": 25,
+    "skill_tokens_selected_l2": 62,
+    "skill_routing_mode": "shadow",
+    "session_id": "9bc28b63-d07c-44d8-89f5-9d8033323165",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:opus",
+  "claimed_at": 1791379510.986602,
+  "account": "A",
+  "pid": 40350,
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_dispatch_does_not_block (test_daemon.Daemon.test_dispatch_does_not_block)\nTraceback (most recent call last):\nAssertionError: 0.6792371273040771 not less than 0.5\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-1707/.orchestrator/runs/tests/T-1707-20261007-181951.log\n"
+  },
+  "merged_into": "goal/T-1705",
+  "merged_via": "fix round T-1710 d7e45bb5a5321aa33b69e2620a3dea6b25ee6511"
+}

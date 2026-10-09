@@ -1,0 +1,216 @@
+{
+  "id": "T-1335",
+  "created_at": 1790191094.822979,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S1: Pool resolves any executor field to provider/model; review rule compares models, not \"claude:<tier>\" prefixes",
+  "spec": "Why: goal T-1334 makes [[executors]] provider-agnostic (a provider=\"claude\" row, e.g. id \"opus55\" model \"claude-opus-5-5\", must route like a Codex row). S1 lays the lookup and the self-review rule; S2 (depends on S1) wires dispatch.\n\nWhat:\n1. orchestrator/pool.py: add Pool.executor_identity(field) -> {\"provider\": str, \"model\": str|None}. field is a task's executor value: an [[executors]] row id -> that row's provider/model; \"claude:<tier>\" (legacy fallback, spawn.py:1564) -> provider \"claude\", model cfg[\"models\"].get(tier); None/unknown -> {\"provider\": None, \"model\": None}. Add Pool.is_claude_executor(field) -> bool (provider == \"claude\").\n2. orchestrator/pool.py eligible_executors (pool.py:522): a provider=\"claude\" row is eligible only when self.pick(\"execute\") returns an account (Claude headroom lives on accounts, not on the row). Codex rows unchanged. Executor.cooling() untouched.\n3. orchestrator/daemon.py review_tier (daemon.py:1070) and _security_review_tier (daemon.py:1136): choose the reviewer by model. Reviewer tier = the default (\"sonnet\" for review_tier, SECURITY_REVIEW_TIER for security) unless cfg[\"models\"][that tier] equals the executing model from executor_identity(t[\"executor\"]); then _other_tier(). Codex-executed tasks keep today's result. Legacy \"claude:sonnet\"/\"claude:opus\" keep today's results.\n4. orchestrator/daemon.py _review_plan (daemon.py:1241): replace (t.get(\"executor\") or \"\").startswith(\"claude:\") with Pool().is_claude_executor(...) (or a pool already in scope).\nNo pool.toml edit (the Planner owns .orchestrator/pool.toml). No new dependencies.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py::ExecutorIdentity::test_row_id_legacy_tier_and_unknown resolves a provider=claude row id, a codex row id, \"claude:opus\" and None to the expected provider/model",
+    "tests/test_pool.py::ExecutorIdentity::test_claude_row_needs_account_headroom: a provider=claude row is excluded from eligible_executors when every account is cooling and included when one has headroom",
+    "tests/test_daemon.py::ReviewModelRule::test_reviewer_never_matches_executing_model: a claude row whose model equals cfg models.sonnet gets review_tier opus and _security_review_tier opus; a claude row on the opus model gets sonnet; a codex row gets sonnet; legacy claude:sonnet gets opus",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/spawn.py",
+      "orchestrator/executor.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/attribution.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Pool.executor_identity(field) -> {'provider': 'codex'|'claude'|None, 'model': str|None}; Pool.is_claude_executor(field) -> bool. S2 calls both; S2 sets a claude-row task's executor field to the row id."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790191130.930874,
+      "pipeline": {
+        "first_ready_at": 1790191130.93084
+      }
+    },
+    {
+      "ts": 1790191131.033664,
+      "pipeline": {
+        "first_ready_at": 1790191130.93084,
+        "spec_review_at": 1790191131.033608,
+        "spec_review_at_lease": 1790192031.033608
+      }
+    },
+    {
+      "ts": 1790191131.04146,
+      "pipeline": {
+        "first_ready_at": 1790191130.93084,
+        "spec_review_at": 1790191131.033608,
+        "spec_review_at_lease": 1790192031.033608,
+        "spec_review_at_done": 1790191131.041306
+      }
+    },
+    {
+      "ts": 1790191184.531148,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Making provider=claude rows eligible changes pick_executor() results, which is shared with existing callers. codex_available() returns `ex.provider == \"codex\"` for the winner (pool.py:598-599). If a claude row outranks an eligible Codex row on weight or scorecard cost, codex_available() turns False. That is a Codex-cooling/fallback signal, and it would fire in S1 before S2 wires dispatch. It also breaks the 'Codex rows unchanged' claim. The spec does not mention codex_available, _codex_available in daemon.py, or the on_exhausted fallback_claude path.",
+          "severity": "high",
+          "line": 522
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Only line 1241 is converted to is_claude_executor. running_claude_workers (daemon.py:472-473) still counts Claude workers with startswith('claude:') on assigned_to/executor. A running task whose executor is a claude row id such as 'opus55' is not counted, so Claude concurrency caps are undercounted. spawn.py:1508 has the same prefix test on assigned_to, and it is outside scope. The spec does not say whether these are deferred to S2 or a known gap.",
+          "severity": "med",
+          "line": 472
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The model-equality rule has no guard for None. executor_identity returns model None for an unknown executor or a claude row with no model. cfg['models'].get(tier) also returns None when the tier is unmapped. None == None would then read as 'same model' and flip the reviewer for Codex or unknown executors. cfg['models'] also holds non-tier keys such as success_floor (pool.py:547), so a tier lookup must not return a non-model value. Comparison is on full model ids, so the aliases in models.* and the row model strings must be the same strings.",
+          "severity": "med",
+          "line": 1070
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "review_tier() and _security_review_tier() are module-level functions with no pool in scope. The spec says to use 'Pool() (or a pool already in scope)', but Pool() loads state from disk and may sync and save on every call. review_tier can run per review slot per gate. An unguarded Pool() construction also fails silently on a bad or missing pool.toml. The spec should name how cfg and executors are read: a shared/cached pool, or a lightweight read that reuses the existing daemon pool. It should also say what happens if the lookup raises. Failing closed to the other tier is safer than falling back to the default.",
+          "severity": "med",
+          "line": 1136
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_review_plan line 1241: for a claude-row executor with two reviews, number 1 reuses review_tier(t) rather than _other_tier(existing[0]['tier']). Both reviews then land on the same model, so a two-review task gets no model diversity. The spec does not say whether this is intended or a no-op for legacy claude: executors.",
+          "severity": "low",
+          "line": 1241
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "The acceptance test needs cfg models.sonnet/opus and executor rows set up, but the spec does not say how tests inject them (patched Pool, temp pool.toml, or a patched SECURITY_REVIEW_TIER global). SECURITY_REVIEW_TIER is a module global mutated at daemon.py:278. Without isolation, tests can leak state into other tests sharing the _harness root. The spec should require patching the globals and restoring them. It should also cover the security-tier case where SECURITY_REVIEW_TIER is 'opus'.",
+          "severity": "low",
+          "line": 61
+        },
+        {
+          "path": "tests/test_pool.py",
+          "issue": "The account-headroom criterion is verifiable only if 'every account cooling' is built without touching shared harness pool state. Pool.pick() checks a.affinity for 'execute', so the test must use accounts whose affinity includes it. No rollback or default is specified for pick() returning None mid-eligibility, and the rule reads headroom without reserving it. Two rows can therefore both look eligible for one free slot.",
+          "severity": "low",
+          "line": 522
+        }
+      ]
+    },
+    {
+      "ts": 1790191207.214794,
+      "pipeline": {
+        "first_ready_at": 1790191130.93084,
+        "spec_review_at": 1790191131.033608,
+        "spec_review_at_lease": 1790192031.033608,
+        "spec_review_at_done": 1790191131.041306,
+        "spec_review_held_at": 1790191207.2147431
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790191208.334066,
+      "pipeline": {
+        "first_ready_at": 1790191130.93084,
+        "spec_review_at": 1790191131.033608,
+        "spec_review_at_lease": 1790192031.033608,
+        "spec_review_at_done": 1790191131.041306,
+        "spec_review_held_at": 1790191207.2147431,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790191208.446037,
+      "pipeline": {
+        "first_ready_at": 1790191130.93084,
+        "spec_review_at": 1790191131.033608,
+        "spec_review_at_lease": 1790192031.033608,
+        "spec_review_at_done": 1790191131.041306,
+        "spec_review_held_at": 1790191207.2147431,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790191207.214794": true
+        }
+      }
+    },
+    {
+      "ts": 1790191221.494742,
+      "status": "superseded",
+      "hold_reason": "respec T-1338 after spec review T-1337 request_changes"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790191130.93084,
+    "spec_review_at": 1790191131.033608,
+    "spec_review_at_lease": 1790192031.033608,
+    "spec_review_at_done": 1790191131.041306,
+    "spec_review_held_at": 1790191207.2147431,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790191207.214794": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Making provider=claude rows eligible changes pick_executor() results, which is shared with existing callers. codex_available() returns `ex.provider == \"codex\"` for the winner (pool.py:598-599). If a claude row outranks an eligible Codex row on weight or scorecard cost, codex_available() turns False. That is a Codex-cooling/fallback signal, and it would fire in S1 before S2 wires dispatch. It also breaks the 'Codex rows unchanged' claim. The spec does not mention codex_available, _codex_available in daemon.py, or the on_exhausted fallback_claude path.",
+      "severity": "high",
+      "line": 522
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Only line 1241 is converted to is_claude_executor. running_claude_workers (daemon.py:472-473) still counts Claude workers with startswith('claude:') on assigned_to/executor. A running task whose executor is a claude row id such as 'opus55' is not counted, so Claude concurrency caps are undercounted. spawn.py:1508 has the same prefix test on assigned_to, and it is outside scope. The spec does not say whether these are deferred to S2 or a known gap.",
+      "severity": "med",
+      "line": 472
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The model-equality rule has no guard for None. executor_identity returns model None for an unknown executor or a claude row with no model. cfg['models'].get(tier) also returns None when the tier is unmapped. None == None would then read as 'same model' and flip the reviewer for Codex or unknown executors. cfg['models'] also holds non-tier keys such as success_floor (pool.py:547), so a tier lookup must not return a non-model value. Comparison is on full model ids, so the aliases in models.* and the row model strings must be the same strings.",
+      "severity": "med",
+      "line": 1070
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "review_tier() and _security_review_tier() are module-level functions with no pool in scope. The spec says to use 'Pool() (or a pool already in scope)', but Pool() loads state from disk and may sync and save on every call. review_tier can run per review slot per gate. An unguarded Pool() construction also fails silently on a bad or missing pool.toml. The spec should name how cfg and executors are read: a shared/cached pool, or a lightweight read that reuses the existing daemon pool. It should also say what happens if the lookup raises. Failing closed to the other tier is safer than falling back to the default.",
+      "severity": "med",
+      "line": 1136
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_review_plan line 1241: for a claude-row executor with two reviews, number 1 reuses review_tier(t) rather than _other_tier(existing[0]['tier']). Both reviews then land on the same model, so a two-review task gets no model diversity. The spec does not say whether this is intended or a no-op for legacy claude: executors.",
+      "severity": "low",
+      "line": 1241
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "The acceptance test needs cfg models.sonnet/opus and executor rows set up, but the spec does not say how tests inject them (patched Pool, temp pool.toml, or a patched SECURITY_REVIEW_TIER global). SECURITY_REVIEW_TIER is a module global mutated at daemon.py:278. Without isolation, tests can leak state into other tests sharing the _harness root. The spec should require patching the globals and restoring them. It should also cover the security-tier case where SECURITY_REVIEW_TIER is 'opus'.",
+      "severity": "low",
+      "line": 61
+    },
+    {
+      "path": "tests/test_pool.py",
+      "issue": "The account-headroom criterion is verifiable only if 'every account cooling' is built without touching shared harness pool state. Pool.pick() checks a.affinity for 'execute', so the test must use accounts whose affinity includes it. No rollback or default is specified for pick() returning None mid-eligibility, and the rule reads headroom without reserving it. Two rows can therefore both look eligible for one free slot.",
+      "severity": "low",
+      "line": 522
+    }
+  ],
+  "hold_reason": "respec T-1338 after spec review T-1337 request_changes"
+}

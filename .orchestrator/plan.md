@@ -1,94 +1,59 @@
-# plan.md — Planner checkpoint (updated 2026-09-23 late; GOAL T-1334 code complete on goal/T-1334 at c7e5eca, goal gate tests-green OK 1511; PR 27 open https://github.com/K3NTAW/orchestrator/pull/27, awaiting the human's review)
+# plan.md: Planner checkpoint, current state only (2026-10-09)
+History: .orchestrator/plan-log.md (append-only; do not read by default, grep it). Keep this file under 10k chars. The daemon's auto-handover section must stay LAST: handover.write erases everything after it.
 
-Previous goal T-0991 (Hermes program) is complete: PR 25 and PR 26 merged into main (737c7a5), retrospective in decisions.md. Its full plan is in git history (`git log -- .orchestrator/plan.md`, last version at 1571826).
+## Now
+- 2026-10-09 10:05 GOAL T-1745 closable_goal decision: closed on the bus (done, goal_closed, pr_url null). T-1746 merged into goal/T-1745 (6a11de8), review T-1747 done, T-1748 superseded; the daemon's routine_close skipped it because all_children_merged was False (review/superseded rows counted). No PR opened by hand: [ship].enabled is on, ship.candidates() lists T-1745, so ship gates the merged tree, pushes goal/T-1745, opens the PR and merges it. Verify next session: pipeline.ship on T-1745 is shipped with a pr_url, or a hold reason. Revert: bus.update('T-1745', status='queued', result=None).
+- 2026-10-09 T-1334, T-1391, T-1654, T-1658 closed on the bus with their PR urls (27, 33, 41, 43), no new PRs; T-1667 shipped as PR 44.
+- 2026-10-06 GOAL T-1667 (human 'do those'): ship v2, next_goal from roadmap.md, watchdog + claude CLI resolver; shipped as PR 44 (1c72a58). PRs 42/43 merged 2026-10-06. luna daemon restarted with Homebrew bin on PATH (restart_daemons.sh); ai-apprentice daemon autonomous=true.
+- 2026-10-06 POLICY (human): merges to main need no approval when checks pass and a rollback exists; use the subscription until provider limits (pool.toml caps lifted, backup in scratchpad); context handover automatic (T-1659, PR 43). TheSearch: round 2 jingles (6 directions + 2 logos in scratchpad/thesearch-audio/round2) wait for the human's pick; then rewrite pack sections 2-5 and 8 for 16-20 s. Details in plan-log.md.
+- Deskmere (luna-inbox): own headless Planner for goal T-0593 (account B); PRs 21/22 merged, staging redeployed. ai-apprentice: product plan sent, waiting for the human's three decisions (position/vertical, Teach in beta + frame policy, entity/name/EU hosting). Details in plan-log.md.
+- Session 0022eb95 continues in place. Account A. Executors: Opus 5.5 only since 2026-10-03 (human); Codex rows and claude:sonnet disabled in orchestrator, luna-inbox, k3ntaw-portfolio pool.toml. Reviews still sonnet.
+- T-1403 wave 3 PAUSED by the human 2026-10-03. Merged: T-1637, T-1641, T-1645. Open: T-1650 B5b v2 (depends_on T-1640, held after spec review T-1649). Next: if T-1650 never becomes ready, supersede T-1640 (needs the pause lifted). PushNotification only after T-1650 merges.
 
-## GOAL T-1334 (user 2026-09-23): provider-agnostic executor pool
-User: "I want models to be interchangeable so we have a good plug and play structure if I ever remove the codex account or new models come out." First model: Opus 5.5 (claude-opus-5-5) as a first-class executor row.
+## Open human decisions and human-applied edits
+- Needs the human (T-1745 follow-ups, not filed; say 'file them' to make a goal): (a) daemon._apply_gate_result and the missing-tests hold accept a late gate result for a task that is no longer gateable (status superseded/failed), resurrecting a superseded fix round as held gate_red with empty failures; it should drop the result like the merged_into case. (b) tests/test_gate_timeout.py test_timeout_retries_once gives a 1 s timeout and flakes under full-suite load (the only red in T-1746's first gate); widen the timeout or isolate the timing.
+- Needs the human: local main is ahead of origin/main by planner-only commits (bus closes for T-1334, T-1391, T-1654, T-1658, T-1705, memory entries, the ship re-enable); guardrails block the Planner from pushing main. Push it, or say the Planner may open a plan PR instead.
+- PR 38 (goal/T-1403 -> main, https://github.com/K3NTAW/orchestrator/pull/38): MERGEABLE/CLEAN, waiting for the human. After merge: pull main, restart both daemons (this repo and ORCH_ROOT=/Users/k3ntaw/code/luna-inbox), record.sh draft T-1403, delete branch task/T-1580 and wt/T-1580 (human approved the deletion). E7's change edits .claude/hooks/scope-guard.sh (protected path): point it out in the PR.
+- T-1590 human edits applied 2026-10-03 (settings.json SessionStart compact hook; launcher autocompact 350000).
 
-Goal branch: goal/T-1334, cut from origin/main 737c7a5.
+## GOAL T-1590: merged as PR 39 (b4678a6, 2026-10-03); details and the unfiled LS3/LS4 ideas in plan-log.md.
 
-### Classification
-Complexity 7: cross-cutting (pool routing, executor dispatch, worker spawn, review rule); every orchestrator/*.py is a [review] security_paths glob, so each task gets exactly one security review on security_review_tier. Route: high-risk/architectural: this plan, spec review (complexity >= 6), deterministic gate, one security review per task, human PR. Zero scouts: Planner grep (provenance repo) answered the questions below.
+## GOAL T-1403 (human 2026-09-30): full-Claude orchestrator
+PR 38 open (see human decisions). Landed items, open wave 3 T-1640/T-1650, parked B8/B2b and the Codex fix-round workarounds moved to plan-log.md (2026-10-09 09:55).
 
-### Findings (grep, 2026-09-23)
-- [[executors]] rows carry `provider`, but only Codex runs: executor.start sends any non-codex pick to `_exhausted()` (executor.py:487), which runs a fallback tier by complexity (pool.fallback_tier: sonnet <=5, opus 6-8, hold >=9), not the routed model.
-- spawn.run_worker resolves the model as `cfg["models"][t["tier"]]` (spawn.py:1538) and stamps executor `claude:<tier>` (spawn.py:1564).
-- The self-review rule keys off string prefixes: daemon.review_tier (daemon.py:1070), _security_review_tier (daemon.py:1136), _review_plan (daemon.py:1241).
-- Claude capacity lives on [[claude_accounts]] (pool.pick), not on executor rows; running Claude workers are counted by `assigned_to` `claude:<acct>` (daemon.running_claude_workers), which a row-routed run keeps.
-- Fix rounds: resume_plan already returns fresh for non-codex parents (executor.py:279).
-- Scorecard, allocation, handoff and jev routing already work on executor ids, so a Claude row gets scored like any other row.
+## Backlog
+Carried items from the T-1334 plan live in plan-log.md, section Backlog.
 
-### Named uncertainties
-None open. Design choice: a Claude row's task has executor == tier == row id (e.g. `opus55`), like Codex rows; legacy fallback keeps `claude:<tier>`. Everything that needs provider or model asks `Pool.executor_identity(field)`.
-
-### Tasks
-| id | title | complexity | depends_on | scope |
-|---|---|---|---|---|
-| T-1352 | S1 v6 (lands green commit 3925705 from T-1347; parseable acceptance ids). Design as T-1347 v5: executor_identity (cfg-only) / is_claude_executor, claude rows need account headroom (pick once, lazily), codex_available stays Codex-only, review rule compares models with None guard, legacy branches exact as today, fail closed with stderr line; daemon imports executor_identity + config as pool_config; _open_reviews (daemon.py:1212) takes cfg | 6 | - | pool.py, daemon.py, tests/test_pool.py, tests/test_daemon.py |
-| T-1360 | S2a v2: claude rows have id claude:<tier> (validated at load, model defaults to the [models] alias); executor.start routes them through _exhausted(tier=row tier): same account pick, reservation handoff, review_rule; no spawn.py change | 5 | T-1352 (merged) | pool.py, executor.py, tests/test_pool.py, tests/test_executor.py |
-| T-1367 | S3 docs: README "Adding or removing models" (Codex row, claude:<alias> row, headroom, running without Codex, review rule) | 2 | T-1360 | README.md |
-| T-1373 | S4 v2: claude:opus row (max_parallel 2) + [models].opus = claude-opus-5-5; tests/_harness.py drops live claude rows from the test copy; shipped-row test | 2 | - | .orchestrator/pool.toml, tests/_harness.py, tests/test_pool.py |
-
-Merged into goal/T-1334: T-1352, T-1360, T-1367, T-1373 (all security-reviewed where on security paths). T-1370 -> T-1373: gate red (harness copies live pool.toml); fix rounds T-1371/T-1372 could not widen Codex write scope (gotchas.md).
-
-Superseded 2026-09-23 (none executed):
-- T-1335 -> T-1338: spec review T-1337 (codex_available would read a winning claude row as Codex cooling; None == None model match; Pool() per review call; test isolation).
-- T-1338 -> T-1341: spec review T-1340 (pick() once per pass; codex-only equivalence test; legacy startswith vs exact pinned; exception scope + log; cfg read once; per-scenario tests with named patch target; capacity.eligible_executors_from_snapshot hazard moved into S2).
-- T-1341 -> T-1344: spec review T-1342 (Planner errors: named a nonexistent daemon.pool_module import and _review_plan instead of _open_reviews; default-cfg read outside the fail-closed try; circular baseline test).
-- Lesson: name exact imports, patch targets and enclosing functions from a grep of the current file before writing a spec; three request_changes rounds here were spec-precision, not design.
-- T-1344 -> T-1347: spec review T-1345. Accepted: _open_reviews loads cfg once; executor_rows(cfg) shared with Pool (legacy synthesized row); None executor skips config; per-scenario test ids; S2 re-picks the account at dispatch. Rejected with reasons in the spec: model-id alias matching, a guard test against enabling a claude row early (S1+S2 ship in one goal PR), a pool.toml byte test.
-- T-1347 -> T-1352: Codex implemented S1 green (tests-green OK 1504 at 3925705, Planner-verified), but the daemon gate held gate_red: acceptance ids written as tests/x.py::Class::test, and acceptance.py:8 reads only tests/x.py::test_name, so it looked for def ExecutorIdentity(. Auto fix round T-1350 superseded (nothing to fix). T-1352 cherry-picks 3925705 under parseable ids.
-- T-1352 merged into goal/T-1334 after its security review (2026-09-23).
-- T-1353 -> T-1356 + T-1357: spec review T-1355 returned unparseable output (raw cut at 2000 chars); Planner read it: budget reservation missing on the claude branch, admit needs one shared Claude slot counter, fallback/_codex_available need one definition, run_worker must resolve the row model before cfg["models"][tier], handed_off only after thread.start. Split by behaviour (dispatch vs capacity), disjoint files, both depend only on merged S1.
-- T-1356/T-1357 -> T-1360/T-1361: spec reviews T-1358/T-1359 (row-id reservation keying, tier leak, missing review_rule, unreleased reservation, snapshot vs pick divergence, shared counter placement, running count missing claude rows). Design change: Claude rows are id claude:<tier>, the executor value the fallback path already writes, so dispatch reuses _exhausted() and every downstream reader already works.
-- T-1336 -> T-1339 -> T-1343 -> T-1346 -> T-1348 -> T-1353: depends_on moves only; T-1353 also fixes the same acceptance-id format (bus.update refuses depends_on), plus capacity.py (capacity.py:54, used at daemon.py:806).
-
-Interface contract: `pool.executor_identity(field, cfg) -> {"provider": "codex"|"claude"|None, "model": str|None}` (cfg-only), `Pool.executor_identity(field)`, `Pool.is_claude_executor(field) -> bool`, `daemon.review_tier(t, cfg=None)`, `daemon._security_review_tier(t, cfg=None)`.
-
-### Follow-ups (after this goal)
-- S2b parked 2026-09-23 (T-1357 -> T-1361 -> T-1363 -> T-1365, reviews T-1359/T-1362/T-1364/T-1366): scheduler-level accounting for claude:<tier> rows: count them against max_parallel_claude_workers (including unclaimed Claude-row dispatches, excluding Codex ones), fold all-accounts-cooling into row cooling without mis-triggering the legacy fallback, day-budget rollover in free_slots, one shared Rule R source. Meanwhile S1 eligibility (account headroom) and the row max_parallel bound routed Claude executes; keep the claude:opus row at max_parallel 2.
-- A routed claude dispatch with no account headroom is held "no account with headroom" and the daemon only auto-retries budget holds (daemon.py retry_held): such tasks strand until a manual clear. Same for today's fallback path.
-- concurrency.py / speculation.py read per-row free and may overestimate claude capacity.
-- A spec review whose output does not parse is marked failed and never retried; the reviewed task sits queued (T-1355).
-
-### After merge (Planner, config only)
-Add to .orchestrator/pool.toml:
-```
-[[executors]]
-id = "claude:opus"      # tier alias; model comes from [models].opus = claude-opus-5-5
-provider = "claude"
-roles = ["execute"]
-complexity_min = 1
-complexity_max = 10
-max_parallel = 2
-daily_budget_tasks = 20
-quota_group = "claude"
-weight = 1.0
-enabled = true
-```
-Then decisions.md entry with revert path (enabled = false), retrospective, PR goal/T-1334 -> main.
-
-### Side request 2026-09-23: new product luna-inbox (separate target repo, own Planner)
-User asked to build the Jev + GPT-6 Luna email product (uploaded spec) at full five-platform GA scope, native clients (Planner's call on the user's delegation), Xcode + Supabase MCP, Android SDK tools, private repo. Planner hooks block writes outside .orchestrator/, so the setup is a user-run script: scratchpad luna-inbox/setup.sh (+ roadmap.md, product-spec.md). Repo named luna-inbox, not luna-mail: guardrails.sh denies gh/curl commands that mention "mail". Flutter + Dart MCP skipped (native). After the script runs, the product is planned by a Planner in ~/code/luna-inbox, not here.
-
-### Config on local main (2026-09-23)
-- 72038bf: pool.toml rebuilt from origin/main 737c7a5 + 18 live overrides, restoring the sections 147cbb2 dropped (user approved). Local main is 7 commits ahead of origin/main and unpushed; after PR 27 merges, pulling main conflicts only on the identical [models].opus line.
-
-### Earlier (superseded by 72038bf and PR 27)
-- 2026-09-23 [models].opus claude-opus-5 -> claude-opus-5-5 (Planner default tier, fallback executor 6-8, cross-tier review). decisions.md entry written by hand (record.sh blocked by planner-mode hook). Awaiting the user's commit approval.
-
-## Auto-handover 2026-09-23T23:27:09+02:00 — daemon tick
+## Auto-handover 2026-10-09T13:17:25+02:00 — daemon tick
 
 [planner].handover_context_tokens is the configured handover threshold.
-Open goals: none
+### T-1403 GOAL: full-Claude orchestrator: Opus 5.5 and Sonnet 5.5 executors, Codex kept but off; reliable efficient Claude workers; subagents; wide parallel across three…
+- queued: T-1650 B5b v2 (respec of T-1640): fix rounds for failed execute tasks (conversion to held, crash reasons, keys, scan limits) plus fix-round note hardening (depends_on=['T-1640'])
+- held: T-1506 B2b: daemon dispatch on the shared predicates: free_slots sums codex slots and capped Claude slots from claude_row_free, eligible() reports skip reasons throug… (hold_reason=spec_review request_changes, resume_hint_keys=[]), T-1509 Claude fix rounds resume the executor's session on the same account: a fix round of a Claude-executed task resumes its recorded session with the fix delta, fal… (hold_reason=spec_review request_changes, resume_hint_keys=[]), T-1640 B5b: fix rounds for failed execute tasks (conversion to held, crash reasons, keys, scan limits) plus fix-round note hardening (hold_reason=spec_review request_changes, resume_hint_keys=[])
+- failed: T-1448 spec review: next_wave decision point: when every filed execute task of an open goal is merged or superseded and its plan still lists unfiled labels, launch a … (reason=review returned no parseable verdict, resume_hint_keys=['raw']), T-1536 spec review: B4b v3 (fix round of T-1491): git-state derivation WITHOUT auto-commit: every derived write (done and both holds) goes through one status-checked,… (reason=review returned no parseable verdict, resume_hint_keys=['raw']), T-1541 spec review: B2b v4 (fix round of T-1506): per-row slot accounting with the bound row pinned at dispatch, a daemon clock seam, per-row in-flight tallies and li… (reason=review returned no parseable verdict, resume_hint_keys=['raw']), T-1543 spec review: B2b v4 (fix round of T-1506): per-row slot accounting with the bound row pinned at dispatch, a daemon clock seam, per-row in-flight tallies and li… (reason=review returned no parseable verdict, resume_hint_keys=['raw']), T-1573 review: B6 v3 fix round 1: answer security review T-1568: real acceptance tests for the empty-merge guard and landed() (the four stubs), verdict pre-walk cover… (reason=review infra: the packet diff was truncated at 8000 chars and the expand hint had no revision range, so the reviewer read no code; re-run as a fresh review, resume_hint_keys=[]), T-1574 review: B6 v3 fix round 1: answer security review T-1568: real acceptance tests for the empty-merge guard and landed() (the four stubs), verdict pre-walk cover… (reason=review infra: diff unreachable from the packet (fix round committed on task/T-1564, no task/T-1569 ref); branch task/T-1569 now points at badfb2e; re-run, resume_hint_keys=[]), T-1579 review: B9 fix round 1: answer security review T-1577: tests for every re-gate guard condition, synthetic_commit read from the result, merge_gate recorded on e… (reason=review infra: diff unreachable from the packet (fix round committed on task/T-1552 as 78f8c88; the review worktree was cut from goal/T-1403 and no task/T-1578 ref existed); branch task/T-1578 now points at 78f8c88; re-run, resume_hint_keys=[]), T-1580 fix round 1: Skip the merge re-gate when the target has not moved since the daemon gate: gate() records the target and head it gated, merge() reuses that green… (reason=?, resume_hint_keys=[]), … and 2 more
+- done (not merged): T-1415 review: gate.run_bounded enforces a wall-clock deadline (a sleeping Mac must not stretch the gate), T-1416 review: New orchestrator/machine.py: machine-wide leases and account usage ledger shared by every repo, T-1419 review: bus.reindex(): add an index row for every task JSON that has none; daemon calls it at start, T-1422 review: bench.DEFAULT_HINTS covers claude-opus-5-5 and claude-sonnet-5-5 so the scorecard has priors for the Claude rows, T-1423 review: Shipped pool defaults gain Claude rows: claude:sonnet (1-5) and claude:opus (6-10), models.sonnet claude-sonnet-5-5; codex rows untouched, T-1424 review: fix round 1 for T-1406: restore rerun candidate extraction so argument-like ids stay audited as rejected, T-1425 review: fix round 1 for T-1407: treat PermissionError from os.killpg like ProcessLookupError (security review T-1415; folds T-1414), T-1426 review: Execute and fix-delta prompts commit-first (cherry-pick 11ec80b) with the prompt-pinning tests updated to the new contract, … and 68 more
+- merged: T-1406 failure_kind: a gate_red hold is never quota; strip test ids before quota-marker matching (sha=?), T-1407 gate.run_bounded enforces a wall-clock deadline (a sleeping Mac must not stretch the gate) (sha=?), T-1408 New orchestrator/machine.py: machine-wide leases and account usage ledger shared by every repo (sha=dc3d84aa), T-1409 bus.reindex(): add an index row for every task JSON that has none; daemon calls it at start (sha=9ba21a2e), T-1411 Regression test: Claude-executed security-path work is reviewed on the other Claude tier (sha=0601ccfa), T-1412 bench.DEFAULT_HINTS covers claude-opus-5-5 and claude-sonnet-5-5 so the scorecard has priors for the Claude rows (sha=5d7ff44f), T-1417 Shipped pool defaults gain Claude rows: claude:sonnet (1-5) and claude:opus (6-10), models.sonnet claude-sonnet-5-5; codex rows untouched (sha=5be91c01), T-1418 fix round 1 for T-1406: restore rerun candidate extraction so argument-like ids stay audited as rejected (sha=54839673), … and 42 more
+- other (superseded): T-1405 Claude-only pool config: codex rows off, claude:sonnet row (1-5), claude:opus 6-10, models.sonnet claude-sonnet-5-5, T-1410 Execute and fix-delta prompts: commit first, focused tests in the foreground, never background, full gate is the daemon's, T-1413 fix round 1: New orchestrator/machine.py: machine-wide leases and account usage ledger shared by every repo, T-1414 gate._run treats PermissionError from os.killpg like ProcessLookupError (macOS EPERM on a zombie-only process group), T-1434 Remove the Codex gates: fallback mode only with an enabled codex row, requeue not hold without one, free_slots caps Claude rows by max_parallel_claude_workers,…, T-1435 Execute result derived from git state in spawn.run_worker: commits+clean -> done; dirty in scope -> one commit-now resume then auto-commit; out-of-scope dirt o…, T-1441 Acceptance gate: every acceptance path that looks like a test file (any language) must exist and be in the task diff, T-1443 next_wave decision point: when every filed execute task of an open goal is merged or superseded and its plan still lists unfiled labels, launch a headless Plan…, … and 55 more
+### T-1703 GOAL: follow-ups from the final T-1667 verification (next_goal close detection, CLI shutdown, stale post-merge gate)
+- other (superseded): T-1704 T-1667 verification follow-ups V1-V4 (next_goal after model close, enabled_at reset, CLI shutdown joins ship, stale post-merge gate)
+### T-1749 GOAL: [gate].max_parallel holds across every gate path (no two full gates at once)
+- done (not merged): T-1750 Two full gates ran at once in luna-inbox despite [gate].max_parallel = 1 (default): one on the gated_at lease path, one background run, T-1751 review: Two full gates ran at once in luna-inbox despite [gate].max_parallel = 1 (default): one on the gated_at lease path, one background run
 
-Worktrees: wt/T-0002, wt/T-0006, wt/T-0007, wt/T-0008, wt/T-0009, wt/T-0010, wt/T-0012, wt/T-0013, wt/T-0014, wt/T-0016, wt/T-0018, wt/T-0021, wt/T-0022, wt/T-0023, wt/T-0026, … and 603 more
+Worktrees: wt/T-0299, wt/T-0707, wt/T-0823, wt/T-0857, wt/T-0921, wt/T-1392, wt/T-1394, wt/T-1396, wt/T-1397, wt/T-1398, wt/T-1399, wt/T-1400, wt/T-1402, wt/T-1405, wt/T-1410, … and 151 more
 
 Last events:
-- 2026-09-23T23:21:45+02:00 T-1373 update {"pipeline": {"first_ready_at": 1790197943.7972648, "dispatched_at": 1790197943.
-- 2026-09-23T23:24:05+02:00 T-1373 update {"status": "done", "merged_into": "goal/T-1334", "sha": "c7e5eca84b4b04da081c60a
-- 2026-09-23T23:24:06+02:00 T-1334 update {"pipeline": {"last_merge": {"status": "merged", "target": "goal/T-1334", "sha":
-- 2026-09-23T23:24:06+02:00 T-1373 update {"pipeline": {"first_ready_at": 1790197943.7972648, "dispatched_at": 1790197943.
-- 2026-09-23T23:24:27+02:00 T-1373 update {"pipeline": {"first_ready_at": 1790197943.7972648, "dispatched_at": 1790197943.
+- 2026-10-09T13:04:15+02:00 T-1751 update {"status": "done", "result": {"summary": "Every gate start path now takes a slot
+- 2026-10-09T13:04:15+02:00 T-1751 update {"review_verdict": "approve"}
+- 2026-10-09T13:04:15+02:00 T-1751 update {"review_facts": {"verdict": "approve", "findings_count": 3, "findings_by_severi
+- 2026-10-09T13:04:15+02:00 T-1750 update {"review_verdict": "approve"}
+- 2026-10-09T13:05:12+02:00 T-1750 update {"pipeline": {"first_ready_at": 1791541291.243548, "handoff": {"baseline": "clau
 
 Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
+
+<!-- end auto-handover -->
+
+2026-10-09: no learnings — goal: T-1661
+
+2026-10-09: no learnings — goal: T-1742
+
+2026-10-09: no learnings — goal: T-1749

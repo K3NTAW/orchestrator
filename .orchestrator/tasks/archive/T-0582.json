@@ -1,0 +1,178 @@
+{
+  "id": "T-0582",
+  "created_at": 1789971388.341064,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "R2 v2: orchestrator/capacity.py \u2014 read-only capacity snapshot (pure utilization math, day rollover by date comparison) and deterministic admission with critical-path reservation against present demand (AP P6)",
+  "spec": "Why: daemon.free_slots (orchestrator/daemon.py:449-465) reduces capacity to one integer, so waves ignore per-task executor eligibility and premium capacity can be spent on low-impact work while a critical-path task waits (AP P6; brief P3). v2 after spec review T-0566: Account.utilization (pool.py:85-94) mutates on window/day rollover and Executor.day_tasks is only rolled by roll_day() at dispatch, so a snapshot must read both without side effects.\nWhat: new pure module orchestrator/capacity.py; never mutates the pool; no daemon edits.\n- snapshot(pool, running_claude=0, inflight_claude=0, now=None) -> {\"executors\": {id: {\"free\": max_parallel - running, \"cooling_s\", \"enabled\", \"roles\", \"complexity\": [min, max], \"day_tasks_left\": (daily_budget_tasks - effective_day_tasks) or None, \"weight\"}}, \"claude_workers_free\": limits.max_parallel_claude_workers - running_claude - inflight_claude, \"accounts\": {id: {\"utilization\", \"cooling_s\"}}, \"fallback\": all enabled execute executors cooling, \"ts\"}. effective_day_tasks = ex.day_tasks when ex.day equals today's date (same comparison roll_day uses, computed from now) else 0. utilization = a pure re-implementation of Account.utilization's ratio: window tokens count only when now - window_started is inside the window, day tokens only when acct.day equals today; otherwise 0; the Account object is never called for utilization and never written.\n- eligible_executors_from_snapshot(task, snapshot) -> executor ids with role execute, enabled, cooling_s == 0, complexity in range, free > 0, day_tasks_left None or > 0.\n- admit(ranked_ids, tasks, snapshot, priorities, durations=None, cfg=None) -> {\"admit\": [ids in rank order], \"deferred\": {id: reason}, \"assignments\": {id: executor_id}, \"reasons\": {id: text}}. Greedy in rank order: the eligible executor with most free, then lowest weight; decrement a local copy of free. Reservation (present demand only): if candidate X is eligible only on executors that a higher-ranked, still-unassigned candidate Y also needs, and admitting X would leave Y with zero capacity this tick, defer X with reason reserved_for_critical:<Y>. Never defer when no higher-ranked candidate competes. Reasons: executor_capacity, cooldown, account_capacity, budget, reserved_for_critical:<id>, no_eligible_executor. Fallback mode: capacity is claude_workers_free and a task is eligible when pool.fallback_tier(complexity) is not None.\n- priorities: {task_id: critical_path.explain dict}; ranked_ids already ordered by the caller.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_capacity.py::test_snapshot_is_read_only_across_day_and_window_rollover \u2014 an executor whose day is yesterday reports day_tasks_left equal to its full budget, an account whose window started before the cap window reports utilization 0, and no attribute of the pool, accounts or executors changes across the call",
+    "tests/test_capacity.py::test_executor_full_defers_with_executor_capacity_reason \u2014 every eligible executor at max_parallel yields deferred reason executor_capacity",
+    "tests/test_capacity.py::test_quota_cooling_executor_is_not_eligible \u2014 a cooling executor is excluded and a task only it could run is deferred with reason cooldown",
+    "tests/test_capacity.py::test_account_fallback_uses_claude_worker_headroom \u2014 fallback snapshot admits at most claude_workers_free tasks and defers the rest with account_capacity",
+    "tests/test_capacity.py::test_critical_path_contention_reserves_for_higher_priority \u2014 a low-priority task whose only eligible executor is the last free slot the higher-ranked task needs is deferred with reserved_for_critical naming that task",
+    "tests/test_capacity.py::test_idle_capacity_admits_everything_and_no_unnecessary_reservation \u2014 with spare capacity every ready task is admitted and no reserved_for_critical reason appears when no higher-ranked task competes"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "tests/test_capacity.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/daemon.py",
+      "orchestrator/critical_path.py",
+      "orchestrator/interference.py",
+      "tests/test_pool.py",
+      "tests/_harness.py",
+      ".orchestrator/pool.toml"
+    ],
+    "interface_contract": "snapshot(pool, running_claude=0, inflight_claude=0, now=None) -> dict as specified, read-only; eligible_executors_from_snapshot(task, snapshot) -> ids; admit(ranked_ids, tasks, snapshot, priorities, durations=None, cfg=None) -> {admit, deferred, assignments, reasons}; reason vocabulary executor_capacity|cooldown|account_capacity|budget|reserved_for_critical:<id>|no_eligible_executor; module must not import daemon"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R2 v3 after spec review T-0588 request_changes (0 = unlimited daily budget, exact utilization formula, reachable two-phase reservation against imminent demand, unused params dropped)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789971516.028977,
+      "pipeline": {
+        "first_ready_at": 1789971516.02893
+      }
+    },
+    {
+      "ts": 1789971516.059585,
+      "pipeline": {
+        "first_ready_at": 1789971516.02893,
+        "spec_review_at": 1789971516.059535,
+        "spec_review_at_lease": 1789972416.059535
+      }
+    },
+    {
+      "ts": 1789971516.064616,
+      "pipeline": {
+        "first_ready_at": 1789971516.02893,
+        "spec_review_at": 1789971516.059535,
+        "spec_review_at_lease": 1789972416.059535,
+        "spec_review_at_done": 1789971516.064516
+      }
+    },
+    {
+      "ts": 1789971762.000215,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "day_tasks_left formula `(daily_budget_tasks - effective_day_tasks) or None` misuses Python truthiness as a None-sentinel. pool.py's convention (Executor.daily_budget_tasks default 0, guarded by `if ex.daily_budget_tasks and ...` at pool.py:533) is that 0 means unlimited. When daily_budget_tasks==0 and effective_day_tasks>0, the subtraction yields a negative non-zero number, which `or None` does NOT catch (only literal 0 is falsy) \u2014 so an unlimited-budget executor that has already run any task today gets a negative day_tasks_left instead of None, and eligible_executors_from_snapshot's 'day_tasks_left None or > 0' check then wrongly excludes it as budget-exhausted.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "The utilization description ('day tokens only when acct.day equals today; otherwise 0') doesn't match what Account.utilization (pool.py:85-94) actually returns: the ratio is `(window_tokens + planner_window_tokens) / cap` \u2014 day_tokens/planner_day_tokens are reset on day rollover as a side effect but never enter the returned ratio at all. Since the spec's own stated goal is a 'pure re-implementation of Account.utilization's ratio' with exact parity (Account is 'never called for utilization'), an implementer following the day-tokens wording literally will produce a snapshot utilization that diverges from the live value whenever an account has nonzero day_tokens, and no acceptance test (test_snapshot_is_read_only only checks reset/no-mutation behavior, not the numeric formula against a nonzero-day_tokens fixture) would catch it.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "admit()'s reservation rule ('if candidate X is eligible only on executors that a higher-ranked, still-unassigned candidate Y also needs... defer X') is unreachable as described under 'greedy in rank order' with immediate per-candidate decrement: since the loop processes highest-priority-first, any higher-ranked Y is always resolved (admitted or deferred) before X is even considered, so Y can never still be 'unassigned' due to something X does later \u2014 Y's fate is already sealed by the time X's turn comes. Either this needs an unstated two-phase/lookahead pass (compute per-executor reservations for ranked candidates before the assignment pass runs), or the acceptance test test_critical_path_contention_reserves_for_higher_priority cannot be satisfied by the single-pass algorithm as literally written, leaving the executor to invent an unspecified mechanism.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789971828.27879,
+      "pipeline": {
+        "first_ready_at": 1789971516.02893,
+        "spec_review_at": 1789971516.059535,
+        "spec_review_at_lease": 1789972416.059535,
+        "spec_review_at_done": 1789971516.064516,
+        "spec_review_held_at": 1789971828.278742
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789971829.491959,
+      "pipeline": {
+        "first_ready_at": 1789971516.02893,
+        "spec_review_at": 1789971516.059535,
+        "spec_review_at_lease": 1789972416.059535,
+        "spec_review_at_done": 1789971516.064516,
+        "spec_review_held_at": 1789971828.278742,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789971829.5207412,
+      "pipeline": {
+        "first_ready_at": 1789971516.02893,
+        "spec_review_at": 1789971516.059535,
+        "spec_review_at_lease": 1789972416.059535,
+        "spec_review_at_done": 1789971516.064516,
+        "spec_review_held_at": 1789971828.278742,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971828.27879": true
+        }
+      }
+    },
+    {
+      "ts": 1789972331.257986,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R2 v3 after spec review T-0588 request_changes (0 = unlimited daily budget, exact utilization formula, reachable two-phase reservation against imminent demand, unused params dropped)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789971516.02893,
+    "spec_review_at": 1789971516.059535,
+    "spec_review_at_lease": 1789972416.059535,
+    "spec_review_at_done": 1789971516.064516,
+    "spec_review_held_at": 1789971828.278742,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789971828.27879": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "day_tasks_left formula `(daily_budget_tasks - effective_day_tasks) or None` misuses Python truthiness as a None-sentinel. pool.py's convention (Executor.daily_budget_tasks default 0, guarded by `if ex.daily_budget_tasks and ...` at pool.py:533) is that 0 means unlimited. When daily_budget_tasks==0 and effective_day_tasks>0, the subtraction yields a negative non-zero number, which `or None` does NOT catch (only literal 0 is falsy) \u2014 so an unlimited-budget executor that has already run any task today gets a negative day_tasks_left instead of None, and eligible_executors_from_snapshot's 'day_tasks_left None or > 0' check then wrongly excludes it as budget-exhausted.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "The utilization description ('day tokens only when acct.day equals today; otherwise 0') doesn't match what Account.utilization (pool.py:85-94) actually returns: the ratio is `(window_tokens + planner_window_tokens) / cap` \u2014 day_tokens/planner_day_tokens are reset on day rollover as a side effect but never enter the returned ratio at all. Since the spec's own stated goal is a 'pure re-implementation of Account.utilization's ratio' with exact parity (Account is 'never called for utilization'), an implementer following the day-tokens wording literally will produce a snapshot utilization that diverges from the live value whenever an account has nonzero day_tokens, and no acceptance test (test_snapshot_is_read_only only checks reset/no-mutation behavior, not the numeric formula against a nonzero-day_tokens fixture) would catch it.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "admit()'s reservation rule ('if candidate X is eligible only on executors that a higher-ranked, still-unassigned candidate Y also needs... defer X') is unreachable as described under 'greedy in rank order' with immediate per-candidate decrement: since the loop processes highest-priority-first, any higher-ranked Y is always resolved (admitted or deferred) before X is even considered, so Y can never still be 'unassigned' due to something X does later \u2014 Y's fate is already sealed by the time X's turn comes. Either this needs an unstated two-phase/lookahead pass (compute per-executor reservations for ranked candidates before the assignment pass runs), or the acceptance test test_critical_path_contention_reserves_for_higher_priority cannot be satisfied by the single-pass algorithm as literally written, leaving the executor to invent an unspecified mechanism.",
+      "severity": "med",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

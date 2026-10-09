@@ -1,0 +1,177 @@
+{
+  "id": "T-0608",
+  "created_at": 1789973111.461251,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R5: orchestrator/sched_scorecard.py \u2014 scheduling scorecard: predicted vs actual interference, stale outcomes, duration error, queue time and heuristic validation (AP P14)",
+  "spec": "Why: waves.jsonl records predicted interference and priorities (daemon.dispatch wave_row: ready, running, baseline_order, wave, deferred, predicted [{a,b,level,reasons}], priority {tid: critical_path.explain}, applied), stale.jsonl records stale checks, dispatch.jsonl records skip reasons, and merge.merge fails tasks with reason rebase_conflict \u2014 but nothing joins predictions to outcomes, so the heuristics are unvalidated (AP P14; brief P9).\nWhat: new pure module orchestrator/sched_scorecard.py reading via schedlog.read_with_malformed and the tasks dir under root; no daemon edits.\n- pair_outcomes(root) -> rows per predicted pair {a, b, level, predicted_reasons, both_ran_concurrently (both dispatched before either gated), actual_conflict (either task later reason rebase_conflict / hold merge conflict / stale row action rebase_conflict), stale_event (stale row risk high for either), fix_round (any fix-round child via constraints.fix_round_for), serialized (pair appeared in deferred with hard:/soft: reason)}.\n- task_outcomes(root) -> per execute task {queue_wait_s (dispatched_at - first_ready_at or created), predicted_duration_s (from the latest waves row priority[tid].est_duration_s), actual_duration_s (duration.actual_s), error (duration.prediction_error), critical_path_s (priority), accepted (merged_into set), fix_rounds, total_tokens/usd from runs rows for the task lineage when present}.\n- build(root=STATE) -> card {\"hard_conflict_precision\": conflicts among concurrently-run hard-predicted pairs / such pairs or None, \"soft_conflict_usefulness\": conflict rate of concurrently-run soft pairs vs none-level pairs, \"unnecessary_serialization\": serialized pairs whose tasks' changed files (task.changed_files or scope literals) were disjoint / serialized pairs, \"conflict_rate\", \"stale_work_rate\", \"duration_mape\" and n, \"median_queue_wait_s\", \"goal_latency_s\" per goal from tasks (min created to max merged), \"accepted_cost_usd\" sum, \"n_waves\", \"n_pairs\", \"malformed\"}; None for undefined metrics, never a fabricated 0.\n- format(card) -> text table; every metric line shows n.\nDepends on R1 duration.actual_s/prediction_error (import orchestrator.duration).",
+  "inputs": [
+    "T-0572"
+  ],
+  "acceptance": [
+    "tests/test_sched_scorecard.py::test_predicted_hard_pair_that_conflicted_counts_toward_precision \u2014 a waves row predicting hard for (A,B), both dispatched concurrently, B later failed rebase_conflict: hard_conflict_precision 1.0 with n 1",
+    "tests/test_sched_scorecard.py::test_stale_outcomes_are_attributed_to_pairs_and_rate \u2014 stale rows with risk high for a predicted pair set stale_event True and stale_work_rate reflects it",
+    "tests/test_sched_scorecard.py::test_duration_prediction_error_uses_priority_estimate_and_actual \u2014 predicted 1200 s, actual 600 s yields per-task error ratio 2.0 and duration_mape over tasks with both values",
+    "tests/test_sched_scorecard.py::test_malformed_telemetry_is_tolerated_and_counted \u2014 broken lines in waves.jsonl and stale.jsonl are skipped, card.malformed counts them, undefined metrics are None not 0",
+    "tests/test_sched_scorecard.py::test_unnecessary_serialization_detects_disjoint_deferred_pairs \u2014 a soft-deferred pair whose changed files were disjoint counts as unnecessary serialization 1.0"
+  ],
+  "scope": [
+    "orchestrator/sched_scorecard.py",
+    "tests/test_sched_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0608",
+  "codex_thread": null,
+  "result": {
+    "summary": "Core logic (pair matching, concurrency window, conflict/stale attribution, duration MAPE via critical_path.explain's est_duration_s/critical_path_s keys, malformed-row tolerance) is consistent with schedlog/duration/daemon field names and all five acceptance tests trace through correctly. The one real defect is unnecessary_serialization silently fabricating 'disjoint' when either task has no literal file info, which undermines the exact heuristic-validation goal stated in the spec's Why section. Also flagged a minor dead-code nit reading a nonexistent 'decisions' stream.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/sched_scorecard.py",
+        "line": 257,
+        "issue": "unnecessary_serialization treats a pair as disjoint (unnecessary) whenever _literal_files() returns an empty set for either task. tasks.get(row['a'], {}) falls back to {} if the task file is missing, and _literal_files strips out glob/dir entries and returns {} when a task's scope is glob-only or changed_files is empty. set().isdisjoint(anything) is vacuously True, so a serialized pair where one side has no literal file info gets counted as 'unnecessary' even though the comparison is actually undefined. This directly contradicts the spec's own principle ('None for undefined metrics, never a fabricated 0') and will systematically inflate unnecessary_serialization for tasks whose scope is glob-based (a common case for broad specs) or that haven't produced changed_files yet (which is exactly the population of not-yet-executed, still-deferred tasks this metric targets). Fix: skip/exclude a pair from the unnecessary-serialization numerator and denominator (or treat as unknown) when either task's literal-file set is empty, rather than counting empty-vs-anything as disjoint.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/sched_scorecard.py",
+        "line": 249,
+        "issue": "telemetry reads a 'decisions' schedlog stream via _sched_rows(root, 'decisions'), but daemon.py only ever calls schedlog.append for 'waves', 'dispatch', and 'stale' \u2014 there is no 'decisions.jsonl' writer anywhere in the codebase. This is harmless (missing file returns (0,0)) but is dead/misleading code implying a telemetry source that doesn't exist.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "58b869b54c23",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789973111.462168,
+      "reviewed_sha": "8f1b03544dba1df6c3e9dcea1b40561ee807de98"
+    },
+    {
+      "ts": 1789973113.889627,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0608",
+      "claimed_at": 1789973113.889288
+    },
+    {
+      "ts": 1789973113.890605,
+      "account": "B"
+    },
+    {
+      "ts": 1789973114.358301,
+      "pid": 75668,
+      "account": "B"
+    },
+    {
+      "ts": 1789973289.995775,
+      "status": "done",
+      "result": {
+        "summary": "Core logic (pair matching, concurrency window, conflict/stale attribution, duration MAPE via critical_path.explain's est_duration_s/critical_path_s keys, malformed-row tolerance) is consistent with schedlog/duration/daemon field names and all five acceptance tests trace through correctly. The one real defect is unnecessary_serialization silently fabricating 'disjoint' when either task has no literal file info, which undermines the exact heuristic-validation goal stated in the spec's Why section. Also flagged a minor dead-code nit reading a nonexistent 'decisions' stream.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/sched_scorecard.py",
+            "line": 257,
+            "issue": "unnecessary_serialization treats a pair as disjoint (unnecessary) whenever _literal_files() returns an empty set for either task. tasks.get(row['a'], {}) falls back to {} if the task file is missing, and _literal_files strips out glob/dir entries and returns {} when a task's scope is glob-only or changed_files is empty. set().isdisjoint(anything) is vacuously True, so a serialized pair where one side has no literal file info gets counted as 'unnecessary' even though the comparison is actually undefined. This directly contradicts the spec's own principle ('None for undefined metrics, never a fabricated 0') and will systematically inflate unnecessary_serialization for tasks whose scope is glob-based (a common case for broad specs) or that haven't produced changed_files yet (which is exactly the population of not-yet-executed, still-deferred tasks this metric targets). Fix: skip/exclude a pair from the unnecessary-serialization numerator and denominator (or treat as unknown) when either task's literal-file set is empty, rather than counting empty-vs-anything as disjoint.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/sched_scorecard.py",
+            "line": 249,
+            "issue": "telemetry reads a 'decisions' schedlog stream via _sched_rows(root, 'decisions'), but daemon.py only ever calls schedlog.append for 'waves', 'dispatch', and 'stale' \u2014 there is no 'decisions.jsonl' writer anywhere in the codebase. This is harmless (missing file returns (0,0)) but is dead/misleading code implying a telemetry source that doesn't exist.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "58b869b54c23",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789973289.9973261,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789973290.0737169,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 1,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "8f1b03544dba1df6c3e9dcea1b40561ee807de98",
+        "packet_version": "58b869b54c23",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 1,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "8f1b03544dba1df6c3e9dcea1b40561ee807de98",
+      "packet_version": "58b869b54c23",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "8f1b03544dba1df6c3e9dcea1b40561ee807de98",
+  "claimed_at": 1789973113.889288,
+  "account": "B",
+  "pid": 75668,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 1,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "8f1b03544dba1df6c3e9dcea1b40561ee807de98",
+    "packet_version": "58b869b54c23",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 1,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "58b869b54c23",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

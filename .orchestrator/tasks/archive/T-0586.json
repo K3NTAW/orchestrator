@@ -1,0 +1,440 @@
+{
+  "id": "T-0586",
+  "created_at": 1789971483.259414,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 5,
+  "title": "R14c: orchestrator/jev_points.py \u2014 experimental Jev decision points (scout necessity, context escalation, review escalation, planner relaunch), shadow by default, escalate-only in active, fail-open (Phase I P7)",
+  "spec": "Why: Phase I P7 names four experimental Jev decision points introduced independently: scout necessity, context escalation, review escalation (never overriding the mandatory security review) and Planner relaunch. Today planner_runs.jev_triage (orchestrator/planner_runs.py:432-460) records one generic shadow choice for scouts_done/held/closable decision kinds and decision.py has no Jev use; nothing covers the four named points (audit T-0573).\nWhat: new pure module orchestrator/jev_points.py using jev.ask (fail-open, returns None on any failure) and decision_log.record(kind=\"routing\" is wrong here: use kind \"scout\" for scout necessity, \"review_plan\" for review escalation, \"strategy\" for context escalation and planner relaunch, with extra={\"point\": name}).\n- POINTS = (\"scout_necessity\", \"context_escalation\", \"review_escalation\", \"planner_relaunch\"); each has its own mode under [jev.points] <point> = off|shadow|active (default shadow; unknown -> shadow) and a typed question set (noul probabilities) with a bounded, redacted state: task title, spec[:600] via jev.redact, acceptance count, scope list, complexity, task_class, memory titles, deterministic evidence supplied by the caller (e.g. scout_evidence.reuse_check result, packet size, review plan). Never file contents.\n- ask(point, task, evidence, *, cfg=None, ask_fn=jev.ask) -> {\"point\", \"mode\", \"signals\", \"confidence\", \"suggestion\", \"applied\": bool, \"error\"}: suggestion per point: scout_necessity -> \"launch\"|\"skip\"; context_escalation -> \"expand\"|\"keep\"; review_escalation -> \"add_review\"|\"keep\"; planner_relaunch -> \"relaunch\"|\"wait\". off -> no call, suggestion None. shadow -> call and record, applied False. active -> applied True only for escalating suggestions (launch a scout that deterministic reuse says is unnecessary is NOT escalation and stays a suggestion; expand context, add a review, relaunch are escalations); de-escalations (skip scout, keep smaller context, fewer reviews) are never applied; review_escalation can never reduce reviews or replace the security review (documented and tested); any failure -> suggestion None, error set, applied False.\n- Every call records a decision_log row with candidates (the two options), hard_constraints ([\"security_review_deterministic\", \"required_reviews_floor\"] for review_escalation), deterministic evidence, jev signals, selected, reason, confidence, mode.\n- summary(root=STATE) -> per point {n, agreement with deterministic evidence where comparable, mean_confidence} from decision rows, for later evaluation.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_points.py::test_default_shadow_records_suggestion_without_applying \u2014 empty config: scout_necessity calls ask once, returns suggestion skip with applied False and writes a decision row with extra.point",
+    "tests/test_jev_points.py::test_off_mode_makes_no_call \u2014 mode off for a point: ask_fn not called, suggestion None",
+    "tests/test_jev_points.py::test_active_applies_only_escalations \u2014 active review_escalation with add_review applies True; active scout_necessity with skip applies False; active context_escalation with keep applies False",
+    "tests/test_jev_points.py::test_review_escalation_never_reduces_or_replaces_security_review \u2014 a suggestion of fewer reviews is coerced to keep, hard_constraints list security_review_deterministic, and the deterministic review count in the returned evidence is unchanged",
+    "tests/test_jev_points.py::test_fail_open_and_privacy \u2014 ask_fn returning None yields error set, suggestion None, applied False; the state passed to ask_fn is redacted and contains no file contents"
+  ],
+  "scope": [
+    "orchestrator/jev_points.py",
+    "tests/test_jev_points.py"
+  ],
+  "depends_on": [
+    "T-0570"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "straightforward",
+    "read_scope": [
+      "orchestrator/jev.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/planner_runs.py",
+      "orchestrator/decision.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/daemon.py",
+      "tests/test_jev_route.py",
+      "tests/test_planner_runs.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "POINTS tuple; ask(point, task, evidence, *, cfg=None, ask_fn=jev.ask) -> {point, mode, signals, confidence, suggestion, applied, error}; summary(root=STATE); config [jev.points].<point> off|shadow|active default shadow; decision rows via decision_log.record with extra.point; must not import daemon"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0586",
+  "codex_thread": "01a0c2e2-336d-7162-90e7-407ba88d829e",
+  "result": {
+    "summary": "Gate: `.claude/hooks/tests-green.sh .` passed \u2014 875 tests.\n\nCommit: `5ed9dd2c960761b23c719e4877ffe51a05be8bee`\n\nFiles changed:\n- `orchestrator/jev_points.py`\n- `tests/test_jev_points.py`\n\nFailures-only output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c2e2-336d-7162-90e7-407ba88d829e",
+    "usage": {
+      "input_tokens": 611503,
+      "cached_input_tokens": 585216,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6184,
+      "reasoning_output_tokens": 935
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789975983.312242,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868
+      }
+    },
+    {
+      "ts": 1789975983.315278,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806
+      }
+    },
+    {
+      "ts": 1789975984.035591,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949
+      }
+    },
+    {
+      "ts": 1789975999.077902,
+      "packet_meta": {
+        "chars": 2461,
+        "est_tokens": 615,
+        "hash": "556e1fb13b0b",
+        "version": "556e1fb13b0b",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@ef740c717cf2 gotchas@0959bb338e59 memory@notes",
+        "policy_version": "ef740c717cf2",
+        "gotchas": "0959bb338e59"
+      }
+    },
+    {
+      "ts": 1789975999.0790322,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0586",
+      "claimed_at": 1789975999.07892
+    },
+    {
+      "ts": 1789975999.080107,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789976238.91955,
+      "codex_thread": "01a0c2e2-336d-7162-90e7-407ba88d829e",
+      "codex_thread_head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+    },
+    {
+      "ts": 1789976238.924642,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        }
+      }
+    },
+    {
+      "ts": 1789976238.9271119,
+      "status": "done",
+      "result": {
+        "summary": "Gate: `.claude/hooks/tests-green.sh .` passed \u2014 875 tests.\n\nCommit: `5ed9dd2c960761b23c719e4877ffe51a05be8bee`\n\nFiles changed:\n- `orchestrator/jev_points.py`\n- `tests/test_jev_points.py`\n\nFailures-only output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c2e2-336d-7162-90e7-407ba88d829e",
+        "usage": {
+          "input_tokens": 611503,
+          "cached_input_tokens": 585216,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6184,
+          "reasoning_output_tokens": 935
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789976243.354464,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789976338.94754,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789976338.947412,
+        "gated_at_lease": 1789977238.947412,
+        "first_green_at": 1789976338.94678,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789976339.016771,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789976338.947412,
+        "gated_at_lease": 1789977238.947412,
+        "first_green_at": 1789976338.94678,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0586",
+          "goal_head": "0ecc2393f5109bfabbec1bc74ce212594e420b43",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976339.016505,
+          "head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+        }
+      }
+    },
+    {
+      "ts": 1789976339.229581,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789976338.947412,
+        "gated_at_lease": 1789977238.947412,
+        "first_green_at": 1789976338.94678,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0586",
+          "goal_head": "0ecc2393f5109bfabbec1bc74ce212594e420b43",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976339.016505,
+          "head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+        },
+        "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+      }
+    },
+    {
+      "ts": 1789976339.2348711,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789976338.947412,
+        "gated_at_lease": 1789977238.947412,
+        "first_green_at": 1789976338.94678,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0586",
+          "goal_head": "0ecc2393f5109bfabbec1bc74ce212594e420b43",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976339.016505,
+          "head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+        },
+        "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+        "gated_at_done": 1789976339.2347798
+      }
+    },
+    {
+      "ts": 1789976547.325751,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789976984.881094,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789976338.947412,
+        "gated_at_lease": 1789977238.947412,
+        "first_green_at": 1789976338.94678,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0586",
+          "goal_head": "0ecc2393f5109bfabbec1bc74ce212594e420b43",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976339.016505,
+          "head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+        },
+        "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+        "gated_at_done": 1789976339.2347798,
+        "merged_at": 1789976984.8809102,
+        "merged_at_lease": 1789977884.8809102
+      }
+    },
+    {
+      "ts": 1789977106.747948,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "52d3f097b341f3234b1e29a787ecfb8318f17b28"
+    },
+    {
+      "ts": 1789977107.233438,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789976338.947412,
+        "gated_at_lease": 1789977238.947412,
+        "first_green_at": 1789976338.94678,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0586",
+          "goal_head": "0ecc2393f5109bfabbec1bc74ce212594e420b43",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976339.016505,
+          "head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+        },
+        "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+        "gated_at_done": 1789976339.2347798,
+        "merged_at": 1789976984.8809102,
+        "merged_at_lease": 1789977884.8809102,
+        "accepted_at": 1789977107.233069
+      }
+    },
+    {
+      "ts": 1789977107.360384,
+      "pipeline": {
+        "first_ready_at": 1789975983.311868,
+        "dispatched_at": 1789975983.314806,
+        "dispatched_at_lease": 1789976883.314806,
+        "dispatched_at_done": 1789975984.033949,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789976338.947412,
+        "gated_at_lease": 1789977238.947412,
+        "first_green_at": 1789976338.94678,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0586",
+          "goal_head": "0ecc2393f5109bfabbec1bc74ce212594e420b43",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789976339.016505,
+          "head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+        },
+        "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+        "gated_at_done": 1789976339.2347798,
+        "merged_at": 1789976984.8809102,
+        "merged_at_lease": 1789977884.8809102,
+        "accepted_at": 1789977107.233069,
+        "merged_at_done": 1789977107.360225
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789975983.311868,
+    "dispatched_at": 1789975983.314806,
+    "dispatched_at_lease": 1789976883.314806,
+    "dispatched_at_done": 1789975984.033949,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "23c6286c4a9ef44e4c35f6b1ab88c330808a583e"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789976338.947412,
+    "gated_at_lease": 1789977238.947412,
+    "first_green_at": 1789976338.94678,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0586",
+      "goal_head": "0ecc2393f5109bfabbec1bc74ce212594e420b43",
+      "moved_count": 2,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789976339.016505,
+      "head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee"
+    },
+    "reviewed_sha": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+    "gated_at_done": 1789976339.2347798,
+    "merged_at": 1789976984.8809102,
+    "merged_at_lease": 1789977884.8809102,
+    "accepted_at": 1789977107.233069,
+    "merged_at_done": 1789977107.360225
+  },
+  "packet_meta": {
+    "chars": 2461,
+    "est_tokens": 615,
+    "hash": "556e1fb13b0b",
+    "version": "556e1fb13b0b",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@ef740c717cf2 gotchas@0959bb338e59 memory@notes",
+    "policy_version": "ef740c717cf2",
+    "gotchas": "0959bb338e59"
+  },
+  "claimed_at": 1789975999.07892,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "5ed9dd2c960761b23c719e4877ffe51a05be8bee",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0561",
+  "sha": "52d3f097b341f3234b1e29a787ecfb8318f17b28"
+}

@@ -1,0 +1,157 @@
+{
+  "id": "T-1270",
+  "created_at": 1790176012.536714,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S2f2 steering_policy in shadow: deterministic triggers (dependency merged, stuck, out-of-scope, repeated gate failure, security concern) produce decision_log rows kind steering; promotion feature steering_policy (P14)",
+  "spec": "Create orchestrator/steering_policy.py. evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg) -> {\"action\": \"continue\"|\"steer\"|\"cancel\", \"trigger\": name|None, \"reasons\": [...], \"message\": text|None}. Triggers, deterministic, in this order: security_concern (a merged sibling changed a security path the task reads: from stale_evidence stale_paths matching [review] security_paths); dependency_changed (stale_evidence risk medium or high on the task's read scope); stuck (no registry event for [steering].stuck_after_s, default 900, while status running); out_of_scope (registry tool events touching paths outside write_scope and read_scope more than [steering].out_of_scope_events, default 3); repeated_failure (two gate reds with the same failure signature on this lineage). Action: steer for dependency_changed, out_of_scope, repeated_failure; cancel for security_concern when the task is not on the critical path, else steer; continue otherwise. The message names the trigger, lists the changed paths or the repeated failure, and never restates the spec. daemon tick: for every running execute task compute evaluate and record decision_log rows kind steering (add to KINDS) with candidates continue/steer/cancel, hard constraints, deterministic evidence, selected, mode; [steering].mode = \"shadow\" (dated comment; off|shadow|active). Active: call worker_control.steer or cancel with the message; shadow: rows only; never more than one steering per task per [steering].min_interval_s (default 1800). promotion FEATURES entry steering_policy with criteria: at least 20 shadow rows with a steer or cancel candidate and, once active, fewer fix rounds per task than the shadow baseline with no rise in token cost. Docs: docs/hermes-hardening/12-steering-policy.md.\nSpec review T-1262 folded in: (1) Inputs defined: gate_history = the list of daemon.failure_signature values of every gate-red round in the task's lineage (the fix_round_for chain up to the root), repeated_failure fires when the last two are equal; out_of_scope uses the worktree's `git status --porcelain` paths (not registry tool payloads): a path is outside scope when it matches no write_scope or read_scope entry by fnmatch (glob entries) or path prefix (directory entries); the count threshold applies to distinct paths. (2) evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, critical, now): critical is computed by the daemon as 'task is first in critical_path.rank over running plus ready tasks'; cancel is chosen only when critical is False AND the worktree has no commits beyond its base; any exception or missing input inside evaluate yields continue (fail closed) with reason evaluation_error. (3) daemon.tick wraps worker_control.steer/cancel in try/except: a failure writes a steering row with outcome error and does not consume the interval. (4) Interval and dedupe from persisted state: the last steering decision_log row for the task (bounded read of the last 500 rows) defines min_interval_s; a shadow row is written only when (trigger, evidence hash) differs from the task's last row, so ticks do not flood rows. (5) [steering] section is new: defaults live in code (mode shadow, stuck_after_s 900, out_of_scope_events 3, min_interval_s 1800); steering_policy.mode(cfg) validates and falls back to off on unknown values with invalid_config on the row; tests/test_pool.py gets a validation case (scope). (6) decision_log: steering rows carry trigger, severity, critical, action, evidence_hash, message_chars (never the message text) and the standard candidates/hard_constraints/deterministic/reason/selected/mode fields; tests/test_decision_log.py (scope) updates any KINDS count assertions. (7) promotion.collect gains a steering_policy branch: n, steer and cancel counts, mean fix rounds of steered versus non-steered tasks over the window (from constraints.fix_round_for on the bus). (8) security_paths empty in [review] means fail closed: every orchestrator/*.py counts as a security path, mirroring the daemon. (9) Tests: shadow asserts steer and cancel are never called (unittest.mock); active calls once and respects min_interval_s; the error path writes an error row.\nSpec review T-1268 folded in (final, overrides earlier wording): (1) Final signature: evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, critical, now) -> dict; the daemon and the tests use exactly this. (2) gate_history = [t['constraints']['failure_signature'] for every task in the fix_round_for chain (root included) whose pipeline.gate_reds > 0], newest last; failures.failure_signature is never recomputed. (3) out_of_scope: one `git status --porcelain -z` per running task per tick with a 5 s timeout (timeout, missing worktree or non-zero exit -> the trigger is skipped with reason git_unavailable); rename entries take the new path; paths under __pycache__, *.pyc, .orchestrator/, .venv/, node_modules/ and the worktree's .git are ignored. The no-commits guard is `git rev-list --count <merge-base with goal/<parent>>..HEAD` == 0 with the same timeout rule. (4) stale_evidence is the dict stale.evidence() returns on this branch (keys stale_paths, risk, risk_reasons, signals, moved_count, graph); cite it in the docstring and build fixtures from that shape; a missing key yields continue with reason missing_input. (5) Interval and dedupe: the interval clock counts only steering rows with mode active and outcome not error; shadow rows never start it; dedupe on (trigger, evidence_hash) applies only while the interval is running; after it expires a new row (and in active mode a new steer) is allowed even with unchanged evidence. (6) Active safety: skip tasks whose registry status is steering or cancelling, or whose pipeline.steer_epoch is newer than the registry epoch (steer in flight); a worker that exits between evaluate and the action is caught and logged as outcome worker_gone; critical uses the same critical_path.rank input the scheduler's wave order uses (pass the daemon's ranked list in). Cancel is SHADOW-ONLY in this task: in active mode the policy may steer but never cancels (a cancel candidate is logged and downgraded to steer), until a later promotion decision enables it. (7) decision_log gains a validator for kind steering (required keys: trigger, severity, critical, action, evidence_hash, message_chars plus the standard fields; a key named message is rejected); the omission test asserts message_chars is present and the message string is absent from the serialized row; every KINDS count assertion in the suite is updated.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_steering_policy.py::test_triggers_in_order_and_actions (each trigger from fixtures yields the documented action and message)",
+    "tests/test_steering_policy.py::test_min_interval_and_critical_path_rule",
+    "tests/test_daemon.py::test_tick_records_steering_rows_in_shadow_without_calling_worker_control",
+    "tests/test_promotion.py::test_steering_policy_feature_registered",
+    "tests/test_daemon.py::test_active_steering_calls_once_respects_interval_and_logs_errors",
+    "tests/test_pool.py::test_steering_section_defaults_and_invalid_mode_falls_back",
+    "tests/test_decision_log.py::test_steering_rows_omit_message_text",
+    "tests/test_steering_policy.py::test_git_status_rules_timeout_and_ignored_paths",
+    "tests/test_daemon.py::test_active_mode_never_cancels_and_skips_in_flight_steers",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/steering_policy.py",
+    "orchestrator/daemon.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_steering_policy.py",
+    "tests/test_daemon.py",
+    "tests/test_promotion.py",
+    "docs/hermes-hardening/12-steering-policy.md",
+    "tests/test_pool.py",
+    "tests/test_decision_log.py"
+  ],
+  "depends_on": [
+    "T-1252"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "reason": "dispatch error: 'routed-findings'",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790176012.538332,
+      "spec_review_verdict": "approve",
+      "reason": "Planner: spec reviews T-1262 and T-1268 folded in; two rounds reviewed, Planner approves (waiver)"
+    },
+    {
+      "ts": 1790176039.1177652,
+      "pipeline": {
+        "first_ready_at": 1790176039.117697
+      }
+    },
+    {
+      "ts": 1790176039.118948,
+      "pipeline": {
+        "first_ready_at": 1790176039.117697,
+        "dispatched_at": 1790176039.118901,
+        "dispatched_at_lease": 1790176939.118901
+      }
+    },
+    {
+      "ts": 1790176043.6552262,
+      "pipeline": {
+        "first_ready_at": 1790176039.117697,
+        "dispatched_at": 1790176039.118901,
+        "dispatched_at_lease": 1790176939.118901,
+        "dispatched_at_done": 1790176043.6550741
+      }
+    },
+    {
+      "ts": 1790176119.2756329,
+      "pipeline": {
+        "first_ready_at": 1790176039.117697,
+        "dispatched_at": 1790176039.118901,
+        "dispatched_at_lease": 1790176939.118901,
+        "dispatched_at_done": 1790176043.6550741,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176119.275132
+        }
+      }
+    },
+    {
+      "ts": 1790176126.7029371,
+      "pipeline": {
+        "first_ready_at": 1790176039.117697,
+        "dispatched_at": 1790176039.118901,
+        "dispatched_at_lease": 1790176939.118901,
+        "dispatched_at_done": 1790176043.6550741,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176119.275132
+        },
+        "dispatch_error": "'routed-findings'"
+      }
+    },
+    {
+      "ts": 1790176126.704179,
+      "status": "failed",
+      "result": {
+        "reason": "dispatch error: 'routed-findings'",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790176220.0187352,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner: dispatch KeyError routed-findings on main code; re-filed as T-1274 without depends_on (T-1252 already merged)"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner: dispatch KeyError routed-findings on main code; re-filed as T-1274 without depends_on (T-1252 already merged)",
+  "pipeline": {
+    "first_ready_at": 1790176039.117697,
+    "dispatched_at": 1790176039.118901,
+    "dispatched_at_lease": 1790176939.118901,
+    "dispatched_at_done": 1790176043.6550741,
+    "handoff": {
+      "baseline": "astra",
+      "selected": "astra",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790176119.275132
+    },
+    "dispatch_error": "'routed-findings'"
+  },
+  "hold_reason": null
+}

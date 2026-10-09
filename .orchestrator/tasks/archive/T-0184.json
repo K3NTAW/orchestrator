@@ -1,0 +1,181 @@
+{
+  "id": "T-0184",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "review (other model, opus, security checklist): C-O5 fix round 3 on task/T-0183 \u2014 delta 156e120..88c0798 (T-0183, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0183 delta: `git diff 156e120 88c0798` in worktree wt/T-0183 (Dockerfile, docs/executor-host.md, .orchestrator/protected-paths.txt; compose unchanged). Fix round for review T-0181; confirm: (1) baked git identity via `git config --system` plus documented GIT_AUTHOR_*/GIT_COMMITTER_* overrides in the executor.env template; (2) /opt/orchestrator copied root-owned, uv sync as root, only .venv chowned to orch; protected-paths.txt lists /opt/orchestrator/.claude, /opt/orchestrator/orchestrator and the container protected-paths.txt in the file's format; the recorded evidence says orch cannot write under /opt/orchestrator/orchestrator while `uv run orchestrator --help` works (trust the evidence, do not build); (3) executor.env template includes GH_WRITE_TOKEN with its purpose, all values placeholders; (4) optional UV_INSTALL_SHA256 / CLAUDE_INSTALL_SHA256 ARGs enforced with sha256sum -c when set, COPY below the installer layers; (5) ~/.config, ~/.local, ~/.cache pre-created for orch. Note the executor's evidence listed Python instead of gh among the four versions: check the Dockerfile still installs gh and the runbook's smoke test still prints `gh --version`. Re-check that nothing from T-0173/T-0178 regressed (concrete protected creds path, external network, read-only config mounts, hardening options, no ports, /.mcp.json-only ignore, multi-arch codex selection) and re-apply the security checklist to the changed lines; run the objective secret grep over the diff. This is the fourth review of the executor image: approve unless a defect would break the container in production or weaken the credential story; smaller points as notes. Verdict approve or request_changes with file:line comments.",
+  "inputs": [
+    "T-0183"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five T-0181 items confirmed resolved or named unresolved with evidence",
+    "gh presence confirmed; T-0173/T-0178 guarantees intact; secret grep clean"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    "docs/executor-host.md",
+    ".orchestrator/protected-paths.txt"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "covers": [
+      "T-0165",
+      "T-0173",
+      "T-0178",
+      "T-0183"
+    ]
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0184",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "Dockerfile",
+        "line": 129,
+        "issue": "The item-2 guarantee stops at the source tree: `chown -R orch:orch /opt/orchestrator/.venv` hands orch a writable tree that is also executed code, and protected-paths.txt:46-48 does not list /opt/orchestrator/.venv. An agent running as orch can drop sitecustomize.py or edit starlette/uvicorn under .venv/lib/python3.12/site-packages and own the serve process and every `uv run` child, routing around the root-owned orchestrator/ and .claude/ the comment at :123 advertises. Not a credential-story regression (an agent running as orch already has OS-level reach over the mounted creds; the hook is the only control either way), but the comment overstates what is enforced. Add /opt/orchestrator/.venv to protected-paths.txt, or narrow the comment.",
+        "severity": "med"
+      },
+      {
+        "path": "docs/executor-host.md",
+        "line": 183,
+        "issue": "Step 7 runs `gh auth login` in a `run --rm` container. ~/.config/gh is mounted so hosts.yml persists, but the credential helper `gh auth setup-git` writes lands in ~/.gitconfig, which is not mounted and dies with the --rm container (and again on every `up -d` recreate). Step 5's example git_url (:147) is a bare https URL, so for a private target repo `git clone git_url` (serve.py:184) has no credential source and returns 502 'clone failed', and the Planner's push of goal/<parent> has none either -- GH_WRITE_TOKEN only reaches the github MCP server, not git. serve.py's CREDENTIAL_RE (:33) suggests a token-in-URL git_url is the intended form; the runbook never says so. Document it (or a system-level credential helper) next to the git_url example.",
+        "severity": "med"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 47,
+        "issue": "gh is installed but never verified: the build only runs `claude --version` (:117), and step 9's smoke test (docs:200-216) checks healthz and POST /goals, no versions. That is exactly why the executor's own build evidence reported Python instead of gh among 'four versions' -- there is no in-repo command that would have caught a missing gh. Append `&& gh --version && codex --version && uv --version` to a final build layer, or add a one-line `docker run --rm <image> sh -c 'uv --version && claude --version && codex --version && gh --version'` to the runbook.",
+        "severity": "low"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 135,
+        "issue": "The entrypoint (and install.py:_rewrite_mcp's `uv run --project /opt/orchestrator`, goals.py:114) runs `uv run` with no --frozen/--no-sync against a now root-owned project dir. `uv sync --frozen` at :129 installs from uv.lock without checking it against pyproject.toml, so a drifted lock builds green and then the first runtime `uv run` tries to re-lock and hits EACCES on /opt/orchestrator/uv.lock -- a failure mode the previous --chown=orch build could not have. Latent only: `uv lock --check` is clean today and the recorded evidence shows `uv run orchestrator --help` working. Add --frozen to the entrypoint and the MCP args.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789756109.209356,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0184",
+      "claimed_at": 1789756109.2090728
+    },
+    {
+      "ts": 1789756109.237773,
+      "pid": 76795,
+      "account": "A"
+    },
+    {
+      "ts": 1789756422.463518,
+      "status": "done",
+      "result": {
+        "summary": "approve. Five T-0181 items all RESOLVED with evidence. (1) git identity: Dockerfile:51-52 `git config --system user.name/email` as root (/etc/gitconfig, read by orch; /etc is protected-paths:24 so no agent can rewrite it); runbook docs:98-108 documents GIT_AUTHOR_*/GIT_COMMITTER_* overrides, and env vars do win over --system. goals.py:104 `git commit --only` now has an ident. (2) read-only install: Dockerfile:125 `COPY . /opt/orchestrator` with no --chown (root:root), uv sync as root at :129, only .venv chowned; protected-paths.txt:46-48 adds the three container paths in the file's format, under their own comment header so install.py:_rewrite_protected_paths (install.py:41-56, keyed on GUARDRAIL_HEADER) leaves them alone and propagates them to every target. Verified root-ownership is safe at runtime: every write path is ORCH_ROOT/repo_path-derived, never PACKAGE_REPO \u2014 orchestrator/__init__.py ROOT=ORCH_ROOT, goals.py sets ORCH_ROOT=repo_path for the Planner (goals.py:335) and install.py:_rewrite_mcp:68 sets it per MCP server; serve/goals only READ PACKAGE_REPO (serve.py:43, goals.py:269). The editable install (.venv/_editable_impl_orchestrator.pth) means the code actually imported is the root-owned tree, so the guarantee is real, not cosmetic. (3) GH_WRITE_TOKEN in the template docs:84 with purpose and fine-grained-token guidance, all values <paste here>. (4) UV_INSTALL_SHA256/CLAUDE_INSTALL_SHA256 ARGs (:29-30) enforced with `sha256sum -c -` when set, logged otherwise, fails closed on mismatch; COPY at :125 now sits below every installer layer. (5) Dockerfile:66 `install -d -o orch -g orch /home/orch/.config /home/orch/.local /home/orch/.cache` before any mount. gh CONFIRMED installed (Dockerfile:40-47, keyring + signed-by apt source, arch from dpkg) \u2014 but never version-checked anywhere, which is why the executor's evidence listed Python instead (comment 3). T-0173/T-0178 guarantees INTACT: concrete ~/orch-creds + 4 container cred paths (protected-paths:38-42), external ORCH_NET with :? guard (compose:38-39), config mounts :ro (compose:14-15), no-new-privileges + cap_drop ALL + mem 6g + pids 512, no ports, env_file required, /.mcp.json anchored in .dockerignore so the 4 role configs still ship, per-arch codex tarball with enforced sha256 and a hard failure on other arches, no --platform pin. Secret grep over `git diff 156e120 88c0708` CLEAN: only variable names, <paste here> placeholders and prose. Checklist on changed lines: no new trust boundary, no new route, fail-closed on every checksum branch, no secret in code/log/comment. Four notes below, none of them a production breaker on this delta: the venv write vector and the git-credential gap are pre-existing/cumulative, filed so the next round can pick them up.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "Dockerfile",
+            "line": 129,
+            "issue": "The item-2 guarantee stops at the source tree: `chown -R orch:orch /opt/orchestrator/.venv` hands orch a writable tree that is also executed code, and protected-paths.txt:46-48 does not list /opt/orchestrator/.venv. An agent running as orch can drop sitecustomize.py or edit starlette/uvicorn under .venv/lib/python3.12/site-packages and own the serve process and every `uv run` child, routing around the root-owned orchestrator/ and .claude/ the comment at :123 advertises. Not a credential-story regression (an agent running as orch already has OS-level reach over the mounted creds; the hook is the only control either way), but the comment overstates what is enforced. Add /opt/orchestrator/.venv to protected-paths.txt, or narrow the comment.",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 183,
+            "issue": "Step 7 runs `gh auth login` in a `run --rm` container. ~/.config/gh is mounted so hosts.yml persists, but the credential helper `gh auth setup-git` writes lands in ~/.gitconfig, which is not mounted and dies with the --rm container (and again on every `up -d` recreate). Step 5's example git_url (:147) is a bare https URL, so for a private target repo `git clone git_url` (serve.py:184) has no credential source and returns 502 'clone failed', and the Planner's push of goal/<parent> has none either -- GH_WRITE_TOKEN only reaches the github MCP server, not git. serve.py's CREDENTIAL_RE (:33) suggests a token-in-URL git_url is the intended form; the runbook never says so. Document it (or a system-level credential helper) next to the git_url example.",
+            "severity": "med"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 47,
+            "issue": "gh is installed but never verified: the build only runs `claude --version` (:117), and step 9's smoke test (docs:200-216) checks healthz and POST /goals, no versions. That is exactly why the executor's own build evidence reported Python instead of gh among 'four versions' -- there is no in-repo command that would have caught a missing gh. Append `&& gh --version && codex --version && uv --version` to a final build layer, or add a one-line `docker run --rm <image> sh -c 'uv --version && claude --version && codex --version && gh --version'` to the runbook.",
+            "severity": "low"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 135,
+            "issue": "The entrypoint (and install.py:_rewrite_mcp's `uv run --project /opt/orchestrator`, goals.py:114) runs `uv run` with no --frozen/--no-sync against a now root-owned project dir. `uv sync --frozen` at :129 installs from uv.lock without checking it against pyproject.toml, so a drifted lock builds green and then the first runtime `uv run` tries to re-lock and hits EACCES on /opt/orchestrator/uv.lock -- a failure mode the previous --chown=orch build could not have. Latent only: `uv lock --check` is clean today and the recorded evidence shows `uv run orchestrator --help` working. Add --frozen to the entrypoint and the MCP args.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789756435.0646772,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "Dockerfile",
+            "line": 129,
+            "issue": "The item-2 guarantee stops at the source tree: `chown -R orch:orch /opt/orchestrator/.venv` hands orch a writable tree that is also executed code, and protected-paths.txt:46-48 does not list /opt/orchestrator/.venv. An agent running as orch can drop sitecustomize.py or edit starlette/uvicorn under .venv/lib/python3.12/site-packages and own the serve process and every `uv run` child, routing around the root-owned orchestrator/ and .claude/ the comment at :123 advertises. Not a credential-story regression (an agent running as orch already has OS-level reach over the mounted creds; the hook is the only control either way), but the comment overstates what is enforced. Add /opt/orchestrator/.venv to protected-paths.txt, or narrow the comment.",
+            "severity": "med"
+          },
+          {
+            "path": "docs/executor-host.md",
+            "line": 183,
+            "issue": "Step 7 runs `gh auth login` in a `run --rm` container. ~/.config/gh is mounted so hosts.yml persists, but the credential helper `gh auth setup-git` writes lands in ~/.gitconfig, which is not mounted and dies with the --rm container (and again on every `up -d` recreate). Step 5's example git_url (:147) is a bare https URL, so for a private target repo `git clone git_url` (serve.py:184) has no credential source and returns 502 'clone failed', and the Planner's push of goal/<parent> has none either -- GH_WRITE_TOKEN only reaches the github MCP server, not git. serve.py's CREDENTIAL_RE (:33) suggests a token-in-URL git_url is the intended form; the runbook never says so. Document it (or a system-level credential helper) next to the git_url example.",
+            "severity": "med"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 47,
+            "issue": "gh is installed but never verified: the build only runs `claude --version` (:117), and step 9's smoke test (docs:200-216) checks healthz and POST /goals, no versions. That is exactly why the executor's own build evidence reported Python instead of gh among 'four versions' -- there is no in-repo command that would have caught a missing gh. Append `&& gh --version && codex --version && uv --version` to a final build layer, or add a one-line `docker run --rm <image> sh -c 'uv --version && claude --version && codex --version && gh --version'` to the runbook.",
+            "severity": "low"
+          },
+          {
+            "path": "Dockerfile",
+            "line": 135,
+            "issue": "The entrypoint (and install.py:_rewrite_mcp's `uv run --project /opt/orchestrator`, goals.py:114) runs `uv run` with no --frozen/--no-sync against a now root-owned project dir. `uv sync --frozen` at :129 installs from uv.lock without checking it against pyproject.toml, so a drifted lock builds green and then the first runtime `uv run` tries to re-lock and hits EACCES on /opt/orchestrator/uv.lock -- a failure mode the previous --chown=orch build could not have. Latent only: `uv lock --check` is clean today and the recorded evidence shows `uv run orchestrator --help` working. Add --frozen to the entrypoint and the MCP args.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789756435.066323,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789756450.1158059,
+      "pipeline": {
+        "merged_at": 1789756450.115732
+      }
+    }
+  ],
+  "claimed_at": 1789756109.2090728,
+  "pid": 76795,
+  "account": "A",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789756450.115732
+  }
+}

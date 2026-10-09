@@ -1,0 +1,1673 @@
+{
+  "id": "T-1564",
+  "created_at": 1790949057.1021981,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 6,
+  "title": "B6 v3 (fix round of T-1551): empty-merge guard: a fix-round merge stamps an ancestor merged only when its commits landed; an empty fix round is held, never merged",
+  "spec": "Goal T-1403, wave 2, plan label B6-v3. Respec of B6 v2 T-1559 (spec review T-1561 request_changes 2026-10-02 13:00, no highs; answers W1-W7 below) filed as a FIX ROUND of T-1551 (constraints.fix_round_for) so that its merge stamps T-1551 merged and B9 T-1552 / B5 T-1554, which depend on T-1551, become ready without re-filing; T-1551 has no branch, so spawn.base_for falls through to goal/T-1403. Depends on E6v2 T-1548 (merged). This text is the whole contract. Evidence (U6 resolved 2026-10-01 from luna-inbox): fix round T-0560 (re-gate of T-0555, itself a fix round of T-0554) merged into goal/T-0551 with changed_files [] (its branch carried no commit beyond the target), and daemon.report_merge stamped T-0555 and T-0554 'merged_via fix round T-0560 ...' although T-0554's commits f933e6a and ba1f5c9 never reached goal/T-0551. Same class as the 2026-09-24 gotcha (T-0174/T-0191).\n\nFacts (goal/T-1403 after E6v2; locate by symbol, never by line number):\n- report_merge(task_id, r) (daemon.py, near the review-merge path): on status merged, walks constraints.fix_round_for from the fix task to the lineage root and sets status done, merged_into, merged_via on every ancestor without checking anything. It already runs a git call through the ROOT reference daemon.py imports for spawn (grep report_merge for the name it uses; landed() uses that same name, so a test that patches it patches both).\n- Three callers of report_merge(id, merge.merge(id)): (A) the gate path `if n_reviews == 0: report_merge(...)` then complete(t['id'], 'gated_at'), no hold on a non-merged result; (B) the reviews path: `result = report_merge(...)`, complete('merged_at'), and `if result.get('status') != 'merged': ... bus.update(t['id'], status='held', hold_reason=f\"merge {result.get('status')}\")`, which overwrites any hold merge.merge wrote; (C) the review-children path `if expected == 0: report_merge(tid, merge.merge(tid)); complete(tid, stage)`, no hold.\n- merge.merge() (merge.py): rebases wt onto target, runs the gate, fast-forwards target to HEAD of the task branch, records changed_files = diff previous_sha..sha, returns {'status': 'merged', 'target', 'sha'}. Early returns: the rebase-conflict return writes status 'failed', reason 'rebase_conflict' and returns {'status': 'conflict', ...}; the GATE_TIMEOUT return writes status 'held' plus hold_reason and returns its own status. The gate_timeout early return is the shape to copy for the new hold (W1).\n- daemon.already_merged(t) proves a task landed with `git merge-base --is-ancestor task/<id> target` (after excluding an unchanged target head and branches with no commits beyond trunk) and stamps merged_via 'ancestor'.\n- gitutil._git_in(worktree, *args) is subprocess.run(['git', *args], cwd=worktree, capture_output=True, text=True): no timeout, raises OSError when cwd is missing. daemon.py imports gitutil.\n- auto_fix_round skips holds 'gate_timeout', 'cancelled' and 'render_error...' before filing a round; other fix_round_for chain readers: auto_fix_round's lineage walk and the chain check in the dispatch path (grep fix_parent_id).\n- bus._held (bus.py top, threading.local with .depth) records lock depth; tests read it through the bus module (W6).\n- spawn.base_for cuts a fix round from task/<fix_round_for>, so normally the fix branch contains the ancestor commits; the walk is wrong only when the fix branch was cut elsewhere, the ancestor branch moved after the cut, or the fix round carried nothing.\n\nChange:\n1. daemon.landed(ancestor_id, target, *, git=None) -> bool. git defaults to gitutil._git_in and is called as git(<root>, *args) with the same ROOT reference report_merge already uses (W6); every call is wrapped so OSError and subprocess.TimeoutExpired return False. Steps: (a) `git show-ref --verify --quiet refs/heads/task/<ancestor_id>`: returncode 1 means the branch is missing -> return True ONLY when bus.get(ancestor_id) already records merged_into (an earlier merge cleaned the branch); a missing ref without merged_into -> False; any other non-zero code -> False. (b) `git merge-base --is-ancestor task/<id> <target>` returncode 0 -> True. (c) `git cherry <target> task/<id>`: returncode 0 and every non-empty output line starts with '-' -> True (every commit has a patch-identical equivalent on the target, which covers rebased branches); EMPTY output with returncode 0 -> True (no commit beyond the merge-base: nothing to land; W7, tested explicitly); any '+' line or a non-zero code -> False.\n2. report_merge: on status merged, FIRST compute verdicts = {ancestor_id: landed(ancestor_id, r['target'])} for the whole fix_round_for chain outside any lock (git I/O never runs under bus.locked()), then under bus.locked() apply: walking from the fix task upward, re-read each ancestor inside the lock (W5); when its merged_into is now set (already_merged raced in between) treat it as landed, leave it untouched and record 'skipped'; otherwise stamp it done/merged_into/merged_via exactly as today while verdicts[id] is True; at the first False stop the walk and write exactly these fields on that ancestor: status 'held', hold_reason 'unlanded_after_fix_round: <fix id>', resume_hint {'fix_round': fix id, 'target': r['target'], 'target_sha': r['sha'], 'prior_status': its status from the in-lock re-read, 'prior_hold_reason': its hold_reason from the in-lock re-read, 'prior_resume_hint': its previous resume_hint or None (W4)}; merged_into, merged_via and accepted_at of that ancestor and of everything above it are untouched (the lineage root's accepted_at stays unset). The fix task itself is done and merged as today (its own commits landed). Record pipeline.ancestor_stamps = {ancestor id: 'merged' | 'unlanded' | 'skipped'} on the fix task and notify '<fix id> merged but ancestor <id> commits are not on <target>; held'. auto_fix_round adds hold_reason prefix 'unlanded_after_fix_round' to its skip list next to cancelled/render_error/gate_timeout (a Planner re-lands it; no automatic round), and the dispatch-path chain check treats such a held ancestor like any held task (state in a comment that a done fix child with a held ancestor is expected there).\n3. merge.merge(): directly after the rebase succeeds and BEFORE gate.run_gate and before the fast-forward, when the task is a fix round (constraints.fix_round_for) and `git rev-list --count <target>..HEAD` in the worktree is 0 (no commit beyond the target; this catches a branch that was behind the target and got fast-forwarded by the rebase, the T-0560 shape; the 'HEAD before == HEAD after' test is NOT used), write the hold the same way the GATE_TIMEOUT early return writes its status (W1: same lock discipline, same early-return shape, status held + hold_reason): bus.update(task_id, status='held', hold_reason='empty_merge: fix round added no commit') and return {'status': 'empty_merge', 'target': target, 'sha': <target head>} without running the gate or moving the target. A non-fix task with no commit beyond the target keeps today's behaviour.\n4. Callers: caller (B) keeps a hold merge.merge already wrote: it re-reads the task after report_merge and writes hold_reason f\"merge {status}\" only when the fresh status is not already 'held'. This covers empty_merge AND gate_timeout (W2): a gate_timeout result now keeps the hold merge.merge wrote instead of becoming 'merge gate_timeout'; update any existing test that expected 'merge gate_timeout' to expect merge.merge's own hold. A rebase conflict (result status 'conflict', task failed, not held) still ends with hold_reason 'merge conflict' as today. Callers (A) and (C) do not hold and need no change beyond report_merge's own behaviour.\n5. Self-stamping of T-1551 (W3): this task's own merge is normally executed by the running daemon on main's code (old unconditional walk), so T-1551 gets stamped merged. If instead T-1551 ends held 'unlanded_after_fix_round: <this id>' (daemon restarted on the new code first), the Planner stamps it by hand: bus.update(T-1551, status='done', merged_into='goal/T-1403', merged_via='fix round <this id> (manual)'). That fallback step is written in plan.md's NEXT STEP by the Planner, not left to the executor.\n\nTests (SPEC RULE): the existing report_merge tests in tests/test_daemon.py use fake targets like 'goal/G' with sha 'abc12345' and no real branches: patch daemon.landed to return True in those tests so they keep their old assertions; the acceptance tests use a real scratch_repo (tests/_harness.py scratch_repo) and inject git through landed's git= seam or patch the ROOT reference report_merge uses to the scratch repo, stating which; the lock-depth assertion reads bus._held.depth through the bus module inside an injected git= seam; tests/test_merge.py tests that merge an empty branch must not be fix rounds (grep 'fix_round_for'). Run tests/test_daemon.py and tests/test_merge.py.\n\nOut of scope: spawn.py (B7), bus.py, planner_runs.py, gitutil.py. Rollback: git revert of the merge; ancestors held 'unlanded_after_fix_round' or 'empty_merge' after a revert are cleared with `orchestrator retry <id>`.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [
+    "T-1559",
+    "T-1561"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_fix_round_merge_stamps_only_landed_ancestors: passes: in a real scratch repo, report_merge for a fix round whose fix_round_for ancestor branch is an ancestor of the target stamps it merged_via 'fix round ...'; when the ancestor branch holds a commit not reachable from the target and not patch-identical to anything on it, that ancestor gets status held, hold_reason 'unlanded_after_fix_round: <fix id>' and resume_hint with fix_round, target, target_sha, prior_status, prior_hold_reason and prior_resume_hint (the ancestor's previous resume_hint, None when it had none), its merged_into stays unset, the walk stops below it, the fix task itself is done and merged, pipeline.ancestor_stamps records 'unlanded', a notify names both ids, no git call happens while bus.locked is held (asserted through a landed git= seam that checks bus._held.depth == 0), an ancestor whose merged_into was set between the verdict and the lock is left untouched and recorded 'skipped', and auto_fix_round files no round for the held ancestor",
+    "tests/test_daemon.py::test_landed_uses_ancestry_cherry_then_merged_into: passes: daemon.landed is True for an ancestor branch, True for a branch whose commits were rebased onto the target (git cherry shows only '-' lines), True when git cherry returns code 0 with empty output, False for a branch with an unlanded commit ('+' line), True for a missing branch only when the ancestor task records merged_into and False for a missing branch without it, and False when the injected git raises OSError or returns a non-zero code on the ancestry and cherry checks",
+    "tests/test_merge.py::test_fix_round_with_no_new_commit_is_empty_merge: passes: merge.merge on a fix-round task whose branch is strictly behind the target (the rebase fast-forwards it; HEAD moves) returns status 'empty_merge' without calling gate.run_gate (patched and asserted not called), leaves the target ref unchanged and holds the task 'empty_merge: fix round added no commit' with status 'held'; a non-fix task with the same branch still merges as today",
+    "tests/test_daemon.py::test_reviews_merge_caller_keeps_existing_hold: passes: on the reviews path with merge.merge patched to hold the task 'empty_merge: fix round added no commit' and return status 'empty_merge', the task's hold_reason is still 'empty_merge: fix round added no commit' after the tick (not 'merge empty_merge'); with merge.merge patched to hold the task the way its gate_timeout early return does, that hold_reason survives too; while a merge that returns status 'conflict' after writing the task failed (not held) still ends with hold_reason 'merge conflict' as today",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [
+    "T-1548"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "full",
+    "goal_branch": "goal/T-1403",
+    "plan_label": "B6-v3",
+    "respec_for": "T-1559",
+    "fix_round_for": "T-1551"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1564",
+  "codex_thread": "01a0fce6-1884-71f2-870c-ca20564cb92c",
+  "result": {
+    "summary": "Summary: Implemented empty fix-round merge guards, landed-ancestor verification, safe ancestor stamping, and hold preservation. Committed as `2acca78`.\n\nFiles changed:\n\n- `orchestrator/daemon.py`\n- `orchestrator/merge.py`\n- `tests/test_daemon.py`\n- `tests/test_merge.py`\n\nTests:\n\n- Daemon: 236 passed\n- Merge: 14 passed\n- `tests-green`: passed\n- Failures-only output: empty",
+    "executed_by": "codex:luna",
+    "thread": "01a0fce6-1884-71f2-870c-ca20564cb92c",
+    "usage": {
+      "input_tokens": 5138247,
+      "cached_input_tokens": 5017856,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 15512,
+      "reasoning_output_tokens": 5079,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790949063.883414,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363
+      }
+    },
+    {
+      "ts": 1790949064.103798,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743
+      }
+    },
+    {
+      "ts": 1790949064.1124349,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365
+      }
+    },
+    {
+      "ts": 1790949150.747591,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 152,
+          "issue": "The empty_merge hold ('empty_merge: fix round added no commit') is not in auto_fix_round's skip list. Only unlanded_after_fix_round is added. A held fix-round task with an empty_merge reason goes through failure_kind and the autonomous routing branch (line 196). That can file a fix round of a fix round for a branch that has nothing to fix. The rollback text already treats empty_merge as a Planner-cleared hold, so it should be skipped like cancelled and gate_timeout.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1524,
+          "issue": "landed() returns False for any ancestor with no branch and no merged_into. That includes ancestors that never had a branch (T-1551 is the example), ancestors cancelled before work, and ancestors whose branch was cleaned before the merge stamped merged_into. Each of these is now overwritten to status 'held', including a previously failed or cancelled ancestor, and nothing refiles them. The spec accepts this for T-1551 through the manual step, but not for the general case. The walk also overwrites the ancestor's prior status without limiting which statuses it may hold.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1510,
+          "issue": "landed() wraps calls for subprocess.TimeoutExpired, but gitutil._git_in has no timeout, and gitutil.py is out of scope. The except clause can never fire, and a hung git call (index.lock, network filesystem) blocks the daemon tick. The spec presents this as a guard against hangs, but it does not provide one.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1536,
+          "issue": "The verdicts are computed for the whole chain before the lock, but the walk stops at the first False. The spec does not say what pipeline.ancestor_stamps holds for ancestors above the stop point. If they are omitted, readers cannot tell 'not evaluated' from 'merged'. The extra git calls for ancestors above the stop are also wasted.",
+          "severity": "low"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1496,
+          "issue": "landed(id, target) is called from report_merge without a git= argument. The acceptance test therefore cannot reach the git= seam through report_merge. It must patch daemon.landed with a wrapper such as functools.partial, or patch spawn.ROOT or gitutil._git_in. A default of git=gitutil._git_in bound at def time would also defeat the patch. The spec says the test 'injects through landed's git= seam or patches the ROOT reference' but does not say which one applies to the lock-depth assertion.",
+          "severity": "low"
+        },
+        {
+          "path": "orchestrator/merge.py",
+          "line": 50,
+          "issue": "The empty_merge check is specified as 'directly after the rebase succeeds'. In merge.py the reviewed-diff checks (diff_unavailable, rebase_changed_diff) sit between the rebase and the gate. The spec should place the new check after those checks, immediately before gate.run_gate. Otherwise a reviewed fix round with an empty diff gets a different early return than it gets today. The check should also use the in-function `wt` and `target`, not the stale task dict `t`.",
+          "severity": "low"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1549,
+          "issue": "For an empty_merge result, report_merge's non-merged branch still notifies '<id> merge failed: empty_merge', and the task is held with no extra explanation. Caller B changes behaviour for gate_timeout. The hold_reason becomes the plain 'gate_timeout' plus pipeline.infra_failure, where it used to be 'merge gate_timeout'. That makes auto_fix_round skip it, which is intended. tests/test_gate_timeout.py is outside scope but covers this path, so the spec should name it as a file to run.",
+          "severity": "low"
+        }
+      ]
+    },
+    {
+      "ts": 1790949156.553795,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212
+      }
+    },
+    {
+      "ts": 1790949156.5553422,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212
+      }
+    },
+    {
+      "ts": 1790949156.556567,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        }
+      }
+    },
+    {
+      "ts": 1790949163.040002,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 14985,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790949163.0416121,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525
+      }
+    },
+    {
+      "ts": 1790949326.482806,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        }
+      }
+    },
+    {
+      "ts": 1790949332.5586581,
+      "packet_meta": {
+        "chars": 14106,
+        "est_tokens": 3526,
+        "presented_tokens": 3526,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "3f7dfb5de128006667a7e2b9773565e9075c4edf0b3e406e8753bd92ed14e621"
+          },
+          "objective": {
+            "chars": 9602,
+            "est_tokens": 2400,
+            "sha256": "a55f44340a082635994266ce50a8c4568c6e22066f726f1001b7ca35e43df7f1"
+          },
+          "acceptance": {
+            "chars": 2726,
+            "est_tokens": 681,
+            "sha256": "b961cfee8c9530beac5ddedee90cde451b7c47654dd73b515a5aac810341767d"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "51a4a6f76261b6d68d93757d2b47a60a2f7880256682f0115b56ab633a8c4e72"
+          },
+          "read_scope": {
+            "chars": 1015,
+            "est_tokens": 253,
+            "sha256": "a625b78a196c12be68510f71f2fd105a76561d80f581282834f76ff5a2a8bbb0"
+          },
+          "constraints": {
+            "chars": 214,
+            "est_tokens": 53,
+            "sha256": "a5e486b27edde6a8ce8aaf47cb28eef48d44990c1192164ab62405a4ae63dd75"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "405c12fd9d1f",
+        "version": "405c12fd9d1f",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@e9b20feac56f gotchas@557ad0430c60 memory@notes over cap by 9306 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "557ad0430c60",
+        "candidate_tokens": 5381,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 15565,
+        "routed_reduction_ratio": 0.9173690104320151,
+        "routed_hidden": 27,
+        "routed_ambiguous": 19,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "b8c77b6f7424",
+          "757843b09142",
+          "90e94e641772",
+          "3b8ecfaf05ed",
+          "80c94f68a8f7",
+          "134e555f05e2",
+          "63407adb9b84",
+          "485f1d55f6ac",
+          "10357d124edf",
+          "a0d0c1503441",
+          "efaccdc33fc1",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "7566baf004f8",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "3f39a7d9595b",
+          "35383eb6bc30",
+          "d7cb61d8ae49",
+          "470a15f2b055",
+          "b36fb7aa59db",
+          "e66dc9c83f2f",
+          "9994d87354e7",
+          "130101e6822c",
+          "ee1cc388290d",
+          "0caed9a0a05f",
+          "6497dd311166",
+          "5d1598133ed6",
+          "232b32396f68",
+          "e784d6b6775a",
+          "566995dc2cc9",
+          "ca3928533cb9",
+          "b0ca78f96adc",
+          "a0d12ed68ea2",
+          "6df29b13d09d",
+          "781f6dd58df0",
+          "0ee3427dc84e",
+          "696e58c630a3",
+          "507492010e00",
+          "adf950236c0e",
+          "530faa3100ed",
+          "66e94eacb902",
+          "480de5597be4",
+          "550e54885504",
+          "fb46902a70b3",
+          "c94a64b8a288",
+          "cf436a5538a8",
+          "a5c96db123fb",
+          "e146114ba8ec",
+          "7d087b6e297c",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "6384980b1ac4",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 14985,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1790949332.560126,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1564",
+      "claimed_at": 1790949332.559935
+    },
+    {
+      "ts": 1790949332.5612092,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1790949958.847915,
+      "codex_thread": "01a0fce6-1884-71f2-870c-ca20564cb92c",
+      "codex_thread_head": "2acca7845f249bf11f744c70a7d73811683948af"
+    },
+    {
+      "ts": 1790949958.852881,
+      "packet_meta": {
+        "chars": 14106,
+        "est_tokens": 3526,
+        "presented_tokens": 3526,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "3f7dfb5de128006667a7e2b9773565e9075c4edf0b3e406e8753bd92ed14e621"
+          },
+          "objective": {
+            "chars": 9602,
+            "est_tokens": 2400,
+            "sha256": "a55f44340a082635994266ce50a8c4568c6e22066f726f1001b7ca35e43df7f1"
+          },
+          "acceptance": {
+            "chars": 2726,
+            "est_tokens": 681,
+            "sha256": "b961cfee8c9530beac5ddedee90cde451b7c47654dd73b515a5aac810341767d"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+          },
+          "write_scope": {
+            "chars": 109,
+            "est_tokens": 27,
+            "sha256": "51a4a6f76261b6d68d93757d2b47a60a2f7880256682f0115b56ab633a8c4e72"
+          },
+          "read_scope": {
+            "chars": 1015,
+            "est_tokens": 253,
+            "sha256": "a625b78a196c12be68510f71f2fd105a76561d80f581282834f76ff5a2a8bbb0"
+          },
+          "constraints": {
+            "chars": 214,
+            "est_tokens": 53,
+            "sha256": "a5e486b27edde6a8ce8aaf47cb28eef48d44990c1192164ab62405a4ae63dd75"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "405c12fd9d1f",
+        "version": "405c12fd9d1f",
+        "candidate_known": true,
+        "base": "355583cf1c12",
+        "sources": "pool.toml@e9b20feac56f gotchas@557ad0430c60 memory@notes over cap by 9306 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "557ad0430c60",
+        "candidate_tokens": 5381,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 15565,
+        "routed_reduction_ratio": 0.9173690104320151,
+        "routed_hidden": 27,
+        "routed_ambiguous": 19,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "b8c77b6f7424",
+          "757843b09142",
+          "90e94e641772",
+          "3b8ecfaf05ed",
+          "80c94f68a8f7",
+          "134e555f05e2",
+          "63407adb9b84",
+          "485f1d55f6ac",
+          "10357d124edf",
+          "a0d0c1503441",
+          "efaccdc33fc1",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "622de2bd3ec8",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "7566baf004f8",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "3f39a7d9595b",
+          "35383eb6bc30",
+          "d7cb61d8ae49",
+          "470a15f2b055",
+          "b36fb7aa59db",
+          "e66dc9c83f2f",
+          "9994d87354e7",
+          "130101e6822c",
+          "ee1cc388290d",
+          "0caed9a0a05f",
+          "6497dd311166",
+          "5d1598133ed6",
+          "232b32396f68",
+          "e784d6b6775a",
+          "566995dc2cc9",
+          "ca3928533cb9",
+          "b0ca78f96adc",
+          "a0d12ed68ea2",
+          "6df29b13d09d",
+          "781f6dd58df0",
+          "0ee3427dc84e",
+          "696e58c630a3",
+          "507492010e00",
+          "adf950236c0e",
+          "530faa3100ed",
+          "66e94eacb902",
+          "480de5597be4",
+          "550e54885504",
+          "fb46902a70b3",
+          "c94a64b8a288",
+          "cf436a5538a8",
+          "a5c96db123fb",
+          "e146114ba8ec",
+          "7d087b6e297c",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "6384980b1ac4",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 14985,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 411,
+        "instruction_tokens_modular": 411,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790949960.611153,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790949960.619612,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented empty fix-round merge guards, landed-ancestor verification, safe ancestor stamping, and hold preservation. Committed as `2acca78`.\n\nFiles changed:\n\n- `orchestrator/daemon.py`\n- `orchestrator/merge.py`\n- `tests/test_daemon.py`\n- `tests/test_merge.py`\n\nTests:\n\n- Daemon: 236 passed\n- Merge: 14 passed\n- `tests-green`: passed\n- Failures-only output: empty",
+        "executed_by": "codex:luna",
+        "thread": "01a0fce6-1884-71f2-870c-ca20564cb92c",
+        "usage": {
+          "input_tokens": 5138247,
+          "cached_input_tokens": 5017856,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 15512,
+          "reasoning_output_tokens": 5079,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790950002.54425,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790950187.5726779,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790950187.572421,
+        "gated_at_lease": 1790951087.572421,
+        "first_green_at": 1790950187.5718331,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790950188.374013,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790950187.572421,
+        "gated_at_lease": 1790951087.572421,
+        "first_green_at": 1790950187.5718331,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1564",
+          "goal_head": "06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "orchestrator/worker_control.py",
+            "tests/test_spawn.py",
+            "tests/test_worker_control.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790950188.373483,
+          "head": "2acca7845f249bf11f744c70a7d73811683948af"
+        }
+      }
+    },
+    {
+      "ts": 1790950188.672211,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790950187.572421,
+        "gated_at_lease": 1790951087.572421,
+        "first_green_at": 1790950187.5718331,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1564",
+          "goal_head": "06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "orchestrator/worker_control.py",
+            "tests/test_spawn.py",
+            "tests/test_worker_control.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790950188.373483,
+          "head": "2acca7845f249bf11f744c70a7d73811683948af"
+        },
+        "reviewed_sha": "2acca7845f249bf11f744c70a7d73811683948af"
+      }
+    },
+    {
+      "ts": 1790950188.682954,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790950187.572421,
+        "gated_at_lease": 1790951087.572421,
+        "first_green_at": 1790950187.5718331,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1564",
+          "goal_head": "06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "orchestrator/worker_control.py",
+            "tests/test_spawn.py",
+            "tests/test_worker_control.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790950188.373483,
+          "head": "2acca7845f249bf11f744c70a7d73811683948af"
+        },
+        "reviewed_sha": "2acca7845f249bf11f744c70a7d73811683948af",
+        "gated_at_done": 1790950188.682605
+      }
+    },
+    {
+      "ts": 1790950222.569479,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790950281.4911969,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790950187.572421,
+        "gated_at_lease": 1790951087.572421,
+        "first_green_at": 1790950187.5718331,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1564",
+          "goal_head": "06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "orchestrator/worker_control.py",
+            "tests/test_spawn.py",
+            "tests/test_worker_control.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790950188.373483,
+          "head": "2acca7845f249bf11f744c70a7d73811683948af"
+        },
+        "reviewed_sha": "2acca7845f249bf11f744c70a7d73811683948af",
+        "gated_at_done": 1790950188.682605,
+        "review_held_at": 1790950281.4908311
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-1568 (request_changes)"
+    },
+    {
+      "ts": 1790950283.080853,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790950187.572421,
+        "gated_at_lease": 1790951087.572421,
+        "first_green_at": 1790950187.5718331,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1564",
+          "goal_head": "06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "orchestrator/worker_control.py",
+            "tests/test_spawn.py",
+            "tests/test_worker_control.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790950188.373483,
+          "head": "2acca7845f249bf11f744c70a7d73811683948af"
+        },
+        "reviewed_sha": "2acca7845f249bf11f744c70a7d73811683948af",
+        "gated_at_done": 1790950188.682605,
+        "review_held_at": 1790950281.4908311,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790950284.78319,
+      "pipeline": {
+        "first_ready_at": 1790949063.883363,
+        "spec_review_at": 1790949064.103743,
+        "spec_review_at_lease": 1790949964.103743,
+        "spec_review_at_done": 1790949064.112365,
+        "dispatched_at": 1790949156.5537212,
+        "dispatched_at_lease": 1790950056.5537212,
+        "resume": {
+          "mode": "fresh",
+          "reason": "no_thread"
+        },
+        "dispatched_at_done": 1790949163.041525,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790949326.482419
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0196022727272727,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790950187.572421,
+        "gated_at_lease": 1790951087.572421,
+        "first_green_at": 1790950187.5718331,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1564",
+          "goal_head": "06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+          "moved_count": 4,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "orchestrator/worker_control.py",
+            "tests/test_spawn.py",
+            "tests/test_worker_control.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "severity": "medium",
+          "severity_reasons": [
+            "read_scope",
+            "imported_by_write_scope"
+          ],
+          "checked_at": 1790950188.373483,
+          "head": "2acca7845f249bf11f744c70a7d73811683948af"
+        },
+        "reviewed_sha": "2acca7845f249bf11f744c70a7d73811683948af",
+        "gated_at_done": 1790950188.682605,
+        "review_held_at": 1790950281.4908311,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790950281.4911969": true
+        }
+      }
+    },
+    {
+      "ts": 1790950836.8548899,
+      "codex_thread": "01a0fce6-1884-71f2-870c-ca20564cb92c",
+      "codex_thread_head": "badfb2e3d9ae34acdd1082f7f9190b7a159a3d9c"
+    },
+    {
+      "ts": 1790950837.209642,
+      "rounds": 1
+    },
+    {
+      "ts": 1790952267.173577,
+      "status": "done",
+      "merged_into": "goal/T-1403",
+      "merged_via": "fix round T-1569 9f59c6d4925075462acdae670c44fdced3cf17dd",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790949063.883363,
+    "spec_review_at": 1790949064.103743,
+    "spec_review_at_lease": 1790949964.103743,
+    "spec_review_at_done": 1790949064.112365,
+    "dispatched_at": 1790949156.5537212,
+    "dispatched_at_lease": 1790950056.5537212,
+    "resume": {
+      "mode": "fresh",
+      "reason": "no_thread"
+    },
+    "dispatched_at_done": 1790949163.041525,
+    "handoff": {
+      "baseline": "luna",
+      "selected": "luna",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790949326.482419
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "33a1d98a95424fd6bf710082e90edbbe8df912d8",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0196022727272727,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790950187.572421,
+    "gated_at_lease": 1790951087.572421,
+    "first_green_at": 1790950187.5718331,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1564",
+      "goal_head": "06fc558119dfb14642579d678e5a89aa7d5bf0f3",
+      "moved_count": 4,
+      "stale_paths": [
+        "orchestrator/spawn.py",
+        "orchestrator/worker_control.py",
+        "tests/test_spawn.py",
+        "tests/test_worker_control.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "severity": "medium",
+      "severity_reasons": [
+        "read_scope",
+        "imported_by_write_scope"
+      ],
+      "checked_at": 1790950188.373483,
+      "head": "2acca7845f249bf11f744c70a7d73811683948af"
+    },
+    "reviewed_sha": "2acca7845f249bf11f744c70a7d73811683948af",
+    "gated_at_done": 1790950188.682605,
+    "review_held_at": 1790950281.4908311,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790950281.4911969": true
+    }
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 152,
+      "issue": "The empty_merge hold ('empty_merge: fix round added no commit') is not in auto_fix_round's skip list. Only unlanded_after_fix_round is added. A held fix-round task with an empty_merge reason goes through failure_kind and the autonomous routing branch (line 196). That can file a fix round of a fix round for a branch that has nothing to fix. The rollback text already treats empty_merge as a Planner-cleared hold, so it should be skipped like cancelled and gate_timeout.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1524,
+      "issue": "landed() returns False for any ancestor with no branch and no merged_into. That includes ancestors that never had a branch (T-1551 is the example), ancestors cancelled before work, and ancestors whose branch was cleaned before the merge stamped merged_into. Each of these is now overwritten to status 'held', including a previously failed or cancelled ancestor, and nothing refiles them. The spec accepts this for T-1551 through the manual step, but not for the general case. The walk also overwrites the ancestor's prior status without limiting which statuses it may hold.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1510,
+      "issue": "landed() wraps calls for subprocess.TimeoutExpired, but gitutil._git_in has no timeout, and gitutil.py is out of scope. The except clause can never fire, and a hung git call (index.lock, network filesystem) blocks the daemon tick. The spec presents this as a guard against hangs, but it does not provide one.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1536,
+      "issue": "The verdicts are computed for the whole chain before the lock, but the walk stops at the first False. The spec does not say what pipeline.ancestor_stamps holds for ancestors above the stop point. If they are omitted, readers cannot tell 'not evaluated' from 'merged'. The extra git calls for ancestors above the stop are also wasted.",
+      "severity": "low"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1496,
+      "issue": "landed(id, target) is called from report_merge without a git= argument. The acceptance test therefore cannot reach the git= seam through report_merge. It must patch daemon.landed with a wrapper such as functools.partial, or patch spawn.ROOT or gitutil._git_in. A default of git=gitutil._git_in bound at def time would also defeat the patch. The spec says the test 'injects through landed's git= seam or patches the ROOT reference' but does not say which one applies to the lock-depth assertion.",
+      "severity": "low"
+    },
+    {
+      "path": "orchestrator/merge.py",
+      "line": 50,
+      "issue": "The empty_merge check is specified as 'directly after the rebase succeeds'. In merge.py the reviewed-diff checks (diff_unavailable, rebase_changed_diff) sit between the rebase and the gate. The spec should place the new check after those checks, immediately before gate.run_gate. Otherwise a reviewed fix round with an empty diff gets a different early return than it gets today. The check should also use the in-function `wt` and `target`, not the stale task dict `t`.",
+      "severity": "low"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1549,
+      "issue": "For an empty_merge result, report_merge's non-merged branch still notifies '<id> merge failed: empty_merge', and the task is held with no extra explanation. Caller B changes behaviour for gate_timeout. The hold_reason becomes the plain 'gate_timeout' plus pipeline.infra_failure, where it used to be 'merge gate_timeout'. That makes auto_fix_round skip it, which is intended. tests/test_gate_timeout.py is outside scope but covers this path, so the spec should name it as a file to run.",
+      "severity": "low"
+    }
+  ],
+  "packet_meta": {
+    "chars": 14106,
+    "est_tokens": 3526,
+    "presented_tokens": 3526,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "3f7dfb5de128006667a7e2b9773565e9075c4edf0b3e406e8753bd92ed14e621"
+      },
+      "objective": {
+        "chars": 9602,
+        "est_tokens": 2400,
+        "sha256": "a55f44340a082635994266ce50a8c4568c6e22066f726f1001b7ca35e43df7f1"
+      },
+      "acceptance": {
+        "chars": 2726,
+        "est_tokens": 681,
+        "sha256": "b961cfee8c9530beac5ddedee90cde451b7c47654dd73b515a5aac810341767d"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "5db46fd34f1f6e55e967f9123623a87c4ad51df1e50b0fea2a3d71008a387fb2"
+      },
+      "write_scope": {
+        "chars": 109,
+        "est_tokens": 27,
+        "sha256": "51a4a6f76261b6d68d93757d2b47a60a2f7880256682f0115b56ab633a8c4e72"
+      },
+      "read_scope": {
+        "chars": 1015,
+        "est_tokens": 253,
+        "sha256": "a625b78a196c12be68510f71f2fd105a76561d80f581282834f76ff5a2a8bbb0"
+      },
+      "constraints": {
+        "chars": 214,
+        "est_tokens": 53,
+        "sha256": "a5e486b27edde6a8ce8aaf47cb28eef48d44990c1192164ab62405a4ae63dd75"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "405c12fd9d1f",
+    "version": "405c12fd9d1f",
+    "candidate_known": true,
+    "base": "355583cf1c12",
+    "sources": "pool.toml@e9b20feac56f gotchas@557ad0430c60 memory@notes over cap by 9306 chars: acceptance kept whole routed=shadow",
+    "policy_version": "e9b20feac56f",
+    "gotchas": "557ad0430c60",
+    "candidate_tokens": 5381,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 15565,
+    "routed_reduction_ratio": 0.9173690104320151,
+    "routed_hidden": 27,
+    "routed_ambiguous": 19,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "b8c77b6f7424",
+      "757843b09142",
+      "90e94e641772",
+      "3b8ecfaf05ed",
+      "80c94f68a8f7",
+      "134e555f05e2",
+      "63407adb9b84",
+      "485f1d55f6ac",
+      "10357d124edf",
+      "a0d0c1503441",
+      "efaccdc33fc1",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "718b545b1eca",
+      "5b872ee10528",
+      "622de2bd3ec8",
+      "667ed6b21b31",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "b676757c3fa9",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "a595cbbe1665",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "d0b9e72fe363",
+      "00db509188f0",
+      "041199286363",
+      "7566baf004f8",
+      "acfaa314d8bc",
+      "df7350a0e379",
+      "4e7c92225364",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "3f39a7d9595b",
+      "35383eb6bc30",
+      "d7cb61d8ae49",
+      "470a15f2b055",
+      "b36fb7aa59db",
+      "e66dc9c83f2f",
+      "9994d87354e7",
+      "130101e6822c",
+      "ee1cc388290d",
+      "0caed9a0a05f",
+      "6497dd311166",
+      "5d1598133ed6",
+      "232b32396f68",
+      "e784d6b6775a",
+      "566995dc2cc9",
+      "ca3928533cb9",
+      "b0ca78f96adc",
+      "a0d12ed68ea2",
+      "6df29b13d09d",
+      "781f6dd58df0",
+      "0ee3427dc84e",
+      "696e58c630a3",
+      "507492010e00",
+      "adf950236c0e",
+      "530faa3100ed",
+      "66e94eacb902",
+      "480de5597be4",
+      "550e54885504",
+      "fb46902a70b3",
+      "c94a64b8a288",
+      "cf436a5538a8",
+      "a5c96db123fb",
+      "e146114ba8ec",
+      "7d087b6e297c",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "6384980b1ac4",
+      "e175a2554b06",
+      "575022ff3493",
+      "cc3f3bcac15a",
+      "ae61acc3156e",
+      "a48883e9da6e",
+      "a98276b73bf8",
+      "985ffb7f01b9",
+      "2993e8419e50",
+      "c6139725224e"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 14985,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 411,
+    "instruction_tokens_modular": 411,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "active",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790949332.559935,
+  "rounds": 1,
+  "executor": "luna",
+  "codex_thread_head": "badfb2e3d9ae34acdd1082f7f9190b7a159a3d9c",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-1403",
+  "merged_via": "fix round T-1569 9f59c6d4925075462acdae670c44fdced3cf17dd"
+}

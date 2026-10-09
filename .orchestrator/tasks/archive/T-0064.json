@@ -1,0 +1,84 @@
+{
+  "id": "T-0064",
+  "parent": "T-0043",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "Daemon treats a task as merged when its branch is an ancestor of the goal branch (fix rounds)",
+  "spec": "Why: merge(fix_round) sets merged_into only on the fix-round task; the original stays status done with merged_into unset. Inside an open goal the daemon's gate stage would then re-gate and re-review already-merged work (the first smoke run created T-0057..T-0062 this way; T-0063's closed-goal guard covers closed goals only). Depends on T-0063 merged into goal/T-0043.\n\nWhat (2 files: orchestrator/daemon.py, tests/test_daemon.py; worktree off goal/T-0043):\n1. daemon.py: `def already_merged(t) -> bool`: if t has merged_into \u2192 True; else if t has a parent and the branch `task/<id>` exists and `git merge-base --is-ancestor task/<id> goal/<parent>` (run from ROOT, check=False) returns 0 \u2192 set `bus.update(t[\"id\"], merged_into=f\"goal/{parent}\", merged_via=\"ancestor\")` and return True; else False. Call it at the top of the gate stage (and anywhere else a done execute task is considered un-merged), before any stamp is claimed. Never raise if git is unavailable or the branches are missing (treat as not merged).\n2. tests/test_daemon.py: with a scratch repo from the harness: create goal/G, a task branch with one commit, fast-forward goal/G to it; a done execute task for that branch with merged_into unset \u2192 one tick sets merged_into=goal/G, merged_via=ancestor, and neither the gate nor review is triggered (monkeypatched subprocess.run for tests-green and spawn.run_worker not called). A second task whose branch is NOT an ancestor is gated as before.\n\nRun `uv run python -m unittest discover -q tests`. Commit: \"daemon: mark ancestor-merged tasks as merged before gating (fix rounds)\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest discover -q tests exits 0 with the new ancestor test",
+    "a done execute task whose task/<id> branch is an ancestor of goal/<parent> gets merged_into set and is never gated or reviewed",
+    "a non-ancestor done task is still gated",
+    "git diff --stat limited to orchestrator/daemon.py and tests/test_daemon.py"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0064",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0064` at `901306a`.\n\n## Summary\n\nAdded `already_merged(t)` to `orchestrator/daemon.py`: returns `True` if `merged_into` is already set, or if `task/<id>` exists and is a git ancestor of `goal/<parent>` \u2014 in which case it stamps `merged_into`/`merged_via=ancestor` on the spot. Wired it into `gate()` (replacing the bare `t.get(\"merged_into\")` check) and `merge_reviewed()` (replacing `src.get(\"merged_into\")`), both before any pipeline stamp is claimed. Never raises \u2014 a missing branch or git binary is just treated as \"not merged\".\n\nWhile writing the test I hit a real gotcha in the existing harness: `gate_green()` faked `daemon.subprocess.run` unconditionally for *any* args, but `daemon.subprocess` is the literal stdlib `subprocess` module, shared with `spawn.git()`. Once `already_merged()` started making real git calls through that same channel, the old blanket fake made every git check silently report success. Fixed `gate_green()` to only fake tests-green/osascript calls and pass everything else (git) through to the real `subprocess.run`.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py`.\n\nTest output (final run): `Ran 87 tests in 10.379s / OK` \u2014 no failures. `.claude/hooks/tests-green.sh` also exits 0.\n\nNothing left outstanding on this task.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789679157.952638,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789679157.955981,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0064",
+      "claimed_at": 1789679157.9558458
+    },
+    {
+      "ts": 1789679157.9626722,
+      "pid": 88484,
+      "account": "B"
+    },
+    {
+      "ts": 1789679833.0627332,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0064` at `901306a`.\n\n## Summary\n\nAdded `already_merged(t)` to `orchestrator/daemon.py`: returns `True` if `merged_into` is already set, or if `task/<id>` exists and is a git ancestor of `goal/<parent>` \u2014 in which case it stamps `merged_into`/`merged_via=ancestor` on the spot. Wired it into `gate()` (replacing the bare `t.get(\"merged_into\")` check) and `merge_reviewed()` (replacing `src.get(\"merged_into\")`), both before any pipeline stamp is claimed. Never raises \u2014 a missing branch or git binary is just treated as \"not merged\".\n\nWhile writing the test I hit a real gotcha in the existing harness: `gate_green()` faked `daemon.subprocess.run` unconditionally for *any* args, but `daemon.subprocess` is the literal stdlib `subprocess` module, shared with `spawn.git()`. Once `already_merged()` started making real git calls through that same channel, the old blanket fake made every git check silently report success. Fixed `gate_green()` to only fake tests-green/osascript calls and pass everything else (git) through to the real `subprocess.run`.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py`.\n\nTest output (final run): `Ran 87 tests in 10.379s / OK` \u2014 no failures. `.claude/hooks/tests-green.sh` also exits 0.\n\nNothing left outstanding on this task.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789679870.68699,
+      "status": "done",
+      "merged_into": "goal/T-0043",
+      "sha": "901306aa77dfbdfdde84999822401b0a670481c0"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789679157.9558458,
+  "pid": 88484,
+  "account": "B",
+  "merged_into": "goal/T-0043",
+  "sha": "901306aa77dfbdfdde84999822401b0a670481c0"
+}

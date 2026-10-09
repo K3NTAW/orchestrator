@@ -1,0 +1,152 @@
+{
+  "id": "T-1049",
+  "created_at": 1790156319.3974268,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S1f env_policy: allowlisted environment propagation for worker subprocesses (off/shadow/active), names-only shadow log, never a secret value (P22)",
+  "spec": "Create orchestrator/env_policy.py. worker_env(role, *, base, extra, cfg) -> (env, stripped): base is the parent environment mapping, extra the keys the caller must set (CLAUDE_CONFIG_DIR, ORCH_TASK_ID, oauth token env for the account, resolved [secrets.<role>] keys), cfg the pool config. Config in .orchestrator/pool.toml [secrets]: env_mode = \"shadow\" (values off, shadow, active; add with a dated comment) and env_passthrough = [\"PATH\",\"HOME\",\"USER\",\"LOGNAME\",\"LANG\",\"LC_ALL\",\"TERM\",\"SHELL\",\"TMPDIR\",\"XDG_*\",\"CLAUDE_*\",\"ORCH_*\",\"UV_*\",\"VIRTUAL_ENV\",\"PYTHONPATH\",\"NODE_*\",\"GIT_*\",\"SSH_AUTH_SOCK\"] (glob patterns; defaults used when absent). Rules: active -> env contains only base keys matching the passthrough patterns plus every extra key; shadow -> env is base plus extra unchanged, but stripped lists the keys active would have removed; off -> no computation, stripped empty. Keys whose name contains KEY, TOKEN, SECRET, PASSWORD, PASSWD, CREDENTIAL or AUTH are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>] (so CLAUDE_CODE_OAUTH_TOKEN reaches the worker only because spawn passes it as extra). Shadow and active both log one runs row via bus.log_run(role=\"env_policy\", task=..., outcome=mode, stripped=<sorted key names>, count=n) \u2014 key names only, never values; the row must never raise.\nWire: spawn.py where the claude -p env is built (around line 1020-1025) and executor.py where codex exec subprocesses get their environment (find the subprocess call; if it inherits os.environ implicitly, pass env explicitly). Also audit and document (docs/hermes-hardening/06-credential-filtering.md): which env keys the current machine would strip in active mode (names only, measured by running worker_env against os.environ in shadow and listing the names), where jev.redact already applies, and that logs never carry values. Do not change [secrets.<role>] resolution. Test fixtures use synthetic names and values that are not credential-shaped.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_env_policy.py::test_active_mode_allowlists_and_keeps_extra (a base env with secret-looking names is stripped, PATH and ORCH_* kept, extra keys kept)",
+    "tests/test_env_policy.py::test_shadow_mode_only_reports (env unchanged, stripped names listed, log row written with names only)",
+    "tests/test_env_policy.py::test_off_mode_noop",
+    "tests/test_env_policy.py::test_log_row_never_contains_values (a synthetic value never appears in the runs row)",
+    "tests/test_spawn.py::test_spawn_uses_env_policy (patched Popen receives the env from worker_env; oauth token passed as extra)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/env_policy.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "tests/test_env_policy.py",
+    "tests/test_spawn.py",
+    ".orchestrator/pool.toml",
+    "docs/hermes-hardening/06-credential-filtering.md"
+  ],
+  "depends_on": [
+    "T-1048"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790164187.746443,
+      "pipeline": {
+        "first_ready_at": 1790164187.746349
+      }
+    },
+    {
+      "ts": 1790164187.918558,
+      "pipeline": {
+        "first_ready_at": 1790164187.746349,
+        "spec_review_at": 1790164187.91842,
+        "spec_review_at_lease": 1790165087.91842
+      }
+    },
+    {
+      "ts": 1790164187.926341,
+      "pipeline": {
+        "first_ready_at": 1790164187.746349,
+        "spec_review_at": 1790164187.91842,
+        "spec_review_at_lease": 1790165087.91842,
+        "spec_review_at_done": 1790164187.926271
+      }
+    },
+    {
+      "ts": 1790164635.630945,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "The spec's own default env_passthrough list includes SSH_AUTH_SOCK, but the credential-name veto rule ('keys whose name contains ... AUTH ... are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>]') matches SSH_AUTH_SOCK (contains 'AUTH' as substring) and also GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL/GIT_AUTHOR_DATE despite the GIT_* passthrough pattern. Implemented literally, active mode strips its own documented default passthrough entries, breaking SSH-agent-based git push and git author identity for any worker relying on ambient env in active mode. Self-contradictory defaults.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/env_policy.py",
+          "issue": "worker_env(role, *, base, extra, cfg) has no task parameter, but the spec requires bus.log_run(role='env_policy', task=..., outcome=mode, stripped=..., count=n) inside it every call. The only place a task id could come from is a magic lookup of extra['ORCH_TASK_ID'], which is never stated as a contract and silently breaks logging (task=None) for any caller (e.g. executor.py) that doesn't happen to name that exact key in extra.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "_create_goal_task (~line 114) and launch_planner (~line 334) build claude -p subprocess environments with the same shape as spawn.py's run_claude (CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN, resolved [secrets.<role>] keys) but are outside scope. Same for orchestrator/planner_shadow.py:launch (~line 40-52), which also injects CLAUDE_CODE_OAUTH_TOKEN into a claude -p subprocess env unfiltered. The task's audit doc will claim to measure/harden credential exposure for orchestrator workers while these equally credential-bearing spawn paths stay completely unfiltered and unlogged, giving false confidence about coverage.",
+          "severity": "med",
+          "line": 334
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "Spec says wire executor.py's codex subprocess to worker_env but never specifies what role name or extra dict to pass. executor.py currently has no secrets_for_role/[secrets.execute] usage at all -- today codex exec inherits the full unfiltered parent env implicitly. Without specifying role/extra here, the implementer has to guess, and the shadow-mode audit in the doc can't tell reviewers what codex actually needs (e.g. any registry/API credentials currently reached only via ambient inheritance) versus what active mode would cut.",
+          "severity": "low",
+          "line": 163
+        }
+      ]
+    },
+    {
+      "ts": 1790164667.133311,
+      "pipeline": {
+        "first_ready_at": 1790164187.746349,
+        "spec_review_at": 1790164187.91842,
+        "spec_review_at_lease": 1790165087.91842,
+        "spec_review_at_done": 1790164187.926271,
+        "spec_review_held_at": 1790164667.1332638
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790164691.039019,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 18:20: spec review T-1089 folded into T-1099"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790164187.746349,
+    "spec_review_at": 1790164187.91842,
+    "spec_review_at_lease": 1790165087.91842,
+    "spec_review_at_done": 1790164187.926271,
+    "spec_review_held_at": 1790164667.1332638
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "The spec's own default env_passthrough list includes SSH_AUTH_SOCK, but the credential-name veto rule ('keys whose name contains ... AUTH ... are never passed through by pattern in active mode unless named exactly in extra or listed in [secrets.<role>]') matches SSH_AUTH_SOCK (contains 'AUTH' as substring) and also GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL/GIT_AUTHOR_DATE despite the GIT_* passthrough pattern. Implemented literally, active mode strips its own documented default passthrough entries, breaking SSH-agent-based git push and git author identity for any worker relying on ambient env in active mode. Self-contradictory defaults.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/env_policy.py",
+      "issue": "worker_env(role, *, base, extra, cfg) has no task parameter, but the spec requires bus.log_run(role='env_policy', task=..., outcome=mode, stripped=..., count=n) inside it every call. The only place a task id could come from is a magic lookup of extra['ORCH_TASK_ID'], which is never stated as a contract and silently breaks logging (task=None) for any caller (e.g. executor.py) that doesn't happen to name that exact key in extra.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "_create_goal_task (~line 114) and launch_planner (~line 334) build claude -p subprocess environments with the same shape as spawn.py's run_claude (CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN, resolved [secrets.<role>] keys) but are outside scope. Same for orchestrator/planner_shadow.py:launch (~line 40-52), which also injects CLAUDE_CODE_OAUTH_TOKEN into a claude -p subprocess env unfiltered. The task's audit doc will claim to measure/harden credential exposure for orchestrator workers while these equally credential-bearing spawn paths stay completely unfiltered and unlogged, giving false confidence about coverage.",
+      "severity": "med",
+      "line": 334
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "Spec says wire executor.py's codex subprocess to worker_env but never specifies what role name or extra dict to pass. executor.py currently has no secrets_for_role/[secrets.execute] usage at all -- today codex exec inherits the full unfiltered parent env implicitly. Without specifying role/extra here, the implementer has to guess, and the shadow-mode audit in the doc can't tell reviewers what codex actually needs (e.g. any registry/API credentials currently reached only via ambient inheritance) versus what active mode would cut.",
+      "severity": "low",
+      "line": 163
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 18:20: spec review T-1089 folded into T-1099"
+}

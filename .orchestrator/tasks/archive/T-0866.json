@@ -1,0 +1,176 @@
+{
+  "id": "T-0866",
+  "created_at": 1790105584.954015,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S1b: skill telemetry in shadow: which skills each worker was exposed to and invoked, skill tokens per run, skill_selection decision rows, skill columns in the economy scorecard; exposure unchanged",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P0 telemetry, P29, P30 (P37 stage 1). Depends on S1a T-0863 (orchestrator/skills_registry.py: SkillRecord, sync, registry records with roles/est tokens). Facts: Claude workers run in worktrees that carry .claude/skills (11 symlinked skills; all descriptions are in context, bodies load on Skill-tool invocation); Codex executors load implement-spec via AGENTS.md and their final message says \"Skill used: <name>\" when they did; bus.log_run rows carry packet_meta and a context object (P1 telemetry); decision_log.KINDS has the context-program kinds; context_scorecard builds per role/goal/task_class rows and `scorecard --economy` joins sources.\nDo:\n1. Exposure: in spawn.run_worker (and the Claude execute fallback) compute `skills_exposed` = registry records whose roles include the worker's role or \"*\" and whose state is active (today: all 11 for Claude roles; implement-spec for codex_execute via AGENTS.md), with skill_tokens_l0 = sum est_tokens_l0; write them into the task's packet_meta (\"skills_exposed\": ids, \"skill_tokens_l0\") so bus.log_run carries them into the run context (add the keys to bus.py's copied list). Codex dispatch (daemon/executor.start) records [\"executor/implement-spec\"] and its l0 tokens the same way.\n2. Usage: after a worker finishes, detect invoked skills: for Claude workers parse the run transcript (the path recorded for the run; the executor verifies the exact JSON shape of a Skill tool_use in .orchestrator/runs transcripts and documents it) for tool_use names \"Skill\" with input.skill or the skill name; for Codex parse the result summary for \"Skill used: <name>\" lines. Record `skills_used` (ids), `skill_tokens_l2` (sum est_tokens_l2 of used skills) in the run row's context and in the task pipeline (\"skills_used\").\n3. decision_log: add kind \"skill_selection\" to KINDS (and CONTEXT_KINDS docstring mapping); record one row per worker spawn: candidates = all registry ids for the role, hard_constraints = [\"static exposure (stage 1)\"], deterministic = {\"role\", \"task_class\", \"exposed\": ids, \"skill_tokens_l0\"}, selected = exposed ids, reason = \"stage1 static\", mode = \"shadow\"; and after completion decision_log.outcome(task, \"skill_selection\", skills_used=..., skill_tokens_l2=...).\n4. Scorecard (P30 first metrics): orchestrator/skill_scorecard.py (new): from run rows: per role and per skill id: exposures, uses, use_rate, skill_tokens_l0 avg, skill_tokens_l2 avg, skill_overhead_ratio = (skill_tokens_l0 + skill_tokens_l2) / input tokens of the run (when input tokens known), plus per accepted task (lineage merged) skill_tokens_per_accepted_task. `orchestrator scorecard --skills` prints it; `scorecard --economy` gains a skills block.\n5. docs/skill-intelligence/02-telemetry.md (\u226460 lines): fields, where they live, how usage is detected for each worker kind, limits (Claude Code loads descriptions itself; l0 tokens are an estimate), revert path (nothing to revert: pure logging; remove the keys).\nConstraints: no change to prompts, allowlists, symlinks or which skills a worker sees; a telemetry failure never breaks a spawn (try/except + one notify line). Never quote double-brace placeholder tokens literally.\nTests (unittest): tests/test_spawn.py::test_run_worker_records_skills_exposed_and_l0_tokens, ::test_skill_usage_parsed_from_claude_transcript, ::test_skill_usage_parsed_from_codex_summary; tests/test_bus.py::test_log_run_carries_skill_keys; tests/test_decision_log.py::test_skill_selection_kind_records_and_outcome; tests/test_skill_scorecard.py::test_use_rate_and_overhead_ratio_per_skill, ::test_skill_tokens_per_accepted_task.\nDo not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_run_worker_records_skills_exposed_and_l0_tokens passes",
+    "tests/test_spawn.py::test_skill_usage_parsed_from_claude_transcript passes",
+    "tests/test_spawn.py::test_skill_usage_parsed_from_codex_summary passes",
+    "tests/test_bus.py::test_log_run_carries_skill_keys passes",
+    "tests/test_decision_log.py::test_skill_selection_kind_records_and_outcome passes",
+    "tests/test_skill_scorecard.py::test_use_rate_and_overhead_ratio_per_skill passes",
+    "tests/test_skill_scorecard.py::test_skill_tokens_per_accepted_task passes",
+    "docs/skill-intelligence/02-telemetry.md exists; `uv run orchestrator scorecard --skills` runs; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/cli.py",
+    "tests/test_spawn.py",
+    "tests/test_bus.py",
+    "tests/test_decision_log.py",
+    "tests/test_skill_scorecard.py",
+    "docs/skill-intelligence/02-telemetry.md"
+  ],
+  "depends_on": [
+    "T-0863"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790106912.888878,
+      "pipeline": {
+        "first_ready_at": 1790106912.8888378
+      }
+    },
+    {
+      "ts": 1790106912.946038,
+      "pipeline": {
+        "first_ready_at": 1790106912.8888378,
+        "spec_review_at": 1790106912.945997,
+        "spec_review_at_lease": 1790107812.945997
+      }
+    },
+    {
+      "ts": 1790106912.952258,
+      "pipeline": {
+        "first_ready_at": 1790106912.8888378,
+        "spec_review_at": 1790106912.945997,
+        "spec_review_at_lease": 1790107812.945997,
+        "spec_review_at_done": 1790106912.95211
+      }
+    },
+    {
+      "ts": 1790110245.0969222,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Step 2 assumes 'the run transcript (the path recorded for the run)' already exists for a completed Claude worker so it can be parsed for Skill tool_use blocks. It doesn't: run_claude() (spawn.py:773-845) invokes `claude -p ... --output-format json` and only ever reads the single JSON blob in stdout; it never captures session_id or a transcript file path, and bus.log_run's fields at spawn.py:839-841 carry no such key. The only place transcript_path exists in this repo is jev_gate.py, populated live by Claude Code's PreToolUse/PostToolUse hook payload (payload.get('transcript_path'), keyed by session_id in STATE/runs/jev/session-*.json) \u2014 a different, hook-driven, sampled/optional mechanism, and jev_gate.py is outside this task's scope. Implementing step 2 as written has no real insertion point for Claude workers; the executor will either invent an undocumented capture path (extra scope creep into jev_gate.py/session discovery) or the parser will silently find nothing every run, making skills_used/use_rate structurally zero for all Claude roles without any visible failure \u2014 exactly the 'silent fallback' pattern this review is supposed to catch.",
+          "severity": "high",
+          "line": 839
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "No insertion point is named for actually obtaining a session id/transcript handle post-subprocess in run_claude; out (the parsed CLI JSON) is never checked for a session identifier anywhere in spawn.py today, unlike planner_runs.py's separate headless-launch path which does read output.get('session_id'). The spec should either add an explicit sub-step to capture and record this (e.g. read out.get('session_id'), derive/store the transcript path in packet_meta or the run row) or explicitly scope Claude-side usage detection to best-effort/shadow with a documented known-gap, so the acceptance test doesn't just validate a parser fed a hand-built fixture path while the real wiring is absent.",
+          "severity": "med",
+          "line": 790
+        },
+        {
+          "path": "orchestrator/decision_log.py",
+          "issue": "Adding kind 'skill_selection' to KINDS is a clean insertion (line 31-45), but the instruction to also update 'the CONTEXT_KINDS docstring mapping' (module docstring lines 3-5) doesn't have a natural target: the existing mapping only pairs each CONTEXT_KINDS entry with a legacy KINDS synonym it generalizes (model_routing~routing, scheduling~wave/jev_sched, workflow_strategy~strategy, planner_routing~planner_route), and skill_selection is a new kind under CONTEXT_KINDS with no legacy counterpart to map to. Low risk of wrong behavior, but the spec should say explicitly that skill_selection gets no legacy-kind mapping (just added to the CONTEXT_KINDS tuple) so the executor doesn't force a spurious pairing.",
+          "severity": "low",
+          "line": 3
+        }
+      ]
+    },
+    {
+      "ts": 1790110261.817249,
+      "pipeline": {
+        "first_ready_at": 1790106912.8888378,
+        "spec_review_at": 1790106912.945997,
+        "spec_review_at_lease": 1790107812.945997,
+        "spec_review_at_done": 1790106912.95211,
+        "spec_review_held_at": 1790110261.8172002
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790110263.090205,
+      "pipeline": {
+        "first_ready_at": 1790106912.8888378,
+        "spec_review_at": 1790106912.945997,
+        "spec_review_at_lease": 1790107812.945997,
+        "spec_review_at_done": 1790106912.95211,
+        "spec_review_held_at": 1790110261.8172002,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790110263.4527721,
+      "pipeline": {
+        "first_ready_at": 1790106912.8888378,
+        "spec_review_at": 1790106912.945997,
+        "spec_review_at_lease": 1790107812.945997,
+        "spec_review_at_done": 1790106912.95211,
+        "spec_review_held_at": 1790110261.8172002,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790110261.817249": true
+        }
+      }
+    },
+    {
+      "ts": 1790110293.950426,
+      "status": "failed",
+      "reason": "superseded 01:50 by T-0888 (spec v2 after T-0872: session_id capture, gate-log usage detection, Skill tool logged in jev_gate, no transcript parsing)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790106912.8888378,
+    "spec_review_at": 1790106912.945997,
+    "spec_review_at_lease": 1790107812.945997,
+    "spec_review_at_done": 1790106912.95211,
+    "spec_review_held_at": 1790110261.8172002,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790110261.817249": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Step 2 assumes 'the run transcript (the path recorded for the run)' already exists for a completed Claude worker so it can be parsed for Skill tool_use blocks. It doesn't: run_claude() (spawn.py:773-845) invokes `claude -p ... --output-format json` and only ever reads the single JSON blob in stdout; it never captures session_id or a transcript file path, and bus.log_run's fields at spawn.py:839-841 carry no such key. The only place transcript_path exists in this repo is jev_gate.py, populated live by Claude Code's PreToolUse/PostToolUse hook payload (payload.get('transcript_path'), keyed by session_id in STATE/runs/jev/session-*.json) \u2014 a different, hook-driven, sampled/optional mechanism, and jev_gate.py is outside this task's scope. Implementing step 2 as written has no real insertion point for Claude workers; the executor will either invent an undocumented capture path (extra scope creep into jev_gate.py/session discovery) or the parser will silently find nothing every run, making skills_used/use_rate structurally zero for all Claude roles without any visible failure \u2014 exactly the 'silent fallback' pattern this review is supposed to catch.",
+      "severity": "high",
+      "line": 839
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "No insertion point is named for actually obtaining a session id/transcript handle post-subprocess in run_claude; out (the parsed CLI JSON) is never checked for a session identifier anywhere in spawn.py today, unlike planner_runs.py's separate headless-launch path which does read output.get('session_id'). The spec should either add an explicit sub-step to capture and record this (e.g. read out.get('session_id'), derive/store the transcript path in packet_meta or the run row) or explicitly scope Claude-side usage detection to best-effort/shadow with a documented known-gap, so the acceptance test doesn't just validate a parser fed a hand-built fixture path while the real wiring is absent.",
+      "severity": "med",
+      "line": 790
+    },
+    {
+      "path": "orchestrator/decision_log.py",
+      "issue": "Adding kind 'skill_selection' to KINDS is a clean insertion (line 31-45), but the instruction to also update 'the CONTEXT_KINDS docstring mapping' (module docstring lines 3-5) doesn't have a natural target: the existing mapping only pairs each CONTEXT_KINDS entry with a legacy KINDS synonym it generalizes (model_routing~routing, scheduling~wave/jev_sched, workflow_strategy~strategy, planner_routing~planner_route), and skill_selection is a new kind under CONTEXT_KINDS with no legacy counterpart to map to. Low risk of wrong behavior, but the spec should say explicitly that skill_selection gets no legacy-kind mapping (just added to the CONTEXT_KINDS tuple) so the executor doesn't force a spurious pairing.",
+      "severity": "low",
+      "line": 3
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 01:50 by T-0888 (spec v2 after T-0872: session_id capture, gate-log usage detection, Skill tool logged in jev_gate, no transcript parsing)"
+}

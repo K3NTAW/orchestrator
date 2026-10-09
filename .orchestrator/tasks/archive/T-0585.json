@@ -1,0 +1,168 @@
+{
+  "id": "T-0585",
+  "created_at": 1789971460.974077,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "R14a: jev_route active ranking (Phase I P5) \u2014 bounded Jev suitability adjustment over empirical scores, cold-start and failure reproduce baseline, plus the missing routing tests",
+  "spec": "Why: [jev.routing].mode accepts \"active\" but jev_route.shadow_context (orchestrator/jev_route.py:165-176) only emits a notify() stub (\"active ranking lands in P5\"); hypothetical() (146-163) is the shadow heuristic. Phase I P5 requires active mode to modify ranking among eligible candidates as candidate_score = configured_weight x empirical_score x jev_suitability_adjustment, with extreme probabilities unable to overwhelm strong empirical evidence, cold start safe, failure reproducing baseline. The audit (T-0573) also found shadow-isolation and active-mode untested.\nWhat (orchestrator/jev_route.py and tests/test_jev_route.py only; the executor.start hook that passes the adjusted scores into pool.pick_executor is a separate integration task):\n- adjustment(signals, evidence, eligible_ids, cfg) -> {executor_id: multiplier in [1 - max_adjustment, 1 + max_adjustment]} with cfg [jev.routing] max_adjustment (default 0.25), evidence_floor_n (default 10): direction from the same signals hypothetical() uses (substantial_reasoning/architectural/stronger_executor_helps favour higher class_success; localized_simple with low elevated_risk favours lower expected_cost); magnitude scaled by Jev confidence and shrunk toward 1.0 by a factor n/(n+evidence_floor_n) where n is the executor's sample count, so strong empirical evidence bounds the effect; missing signals or evidence -> 1.0 for every executor (cold start).\n- active_scores(task, pool, eligible, classification, evidence, base_scores=None) -> {executor_id: base_score x multiplier} for mode active only; any failure (classification None, malformed signals, empty eligible) returns base_scores unchanged (baseline reproduced); shadow and off return base_scores unchanged; never introduces ids outside eligible.\n- shadow_context() keeps its shape and adds \"adjustment\" (computed in shadow and active for telemetry) and \"active\": bool; drop the notify stub; record_shadow logs adjustment and mode.\n- Config documentation in the module docstring; no pool.toml edit (defaults in code).\nTests to add (unittest.TestCase): active can change ranking; shadow never changes routing; extreme probability cannot overturn strong evidence; cold start yields multipliers 1.0; classification failure reproduces base scores; multiplier bounds respected; cooldown/eligibility never bypassed (an executor missing from eligible never gains a score).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_route.py::test_active_mode_adjusts_ranking_within_bounds \u2014 mode active, signals favouring a stronger executor with confidence 0.9 and n 3 yield multipliers within [0.75, 1.25] and the favoured executor's score rises relative to the other",
+    "tests/test_jev_route.py::test_shadow_mode_never_changes_scores \u2014 mode shadow returns base_scores unchanged while shadow_context still reports the adjustment",
+    "tests/test_jev_route.py::test_extreme_probability_cannot_overturn_strong_evidence \u2014 signal 1.0 against an executor with n 200 and class_success 0.95 leaves that executor ranked first",
+    "tests/test_jev_route.py::test_cold_start_and_failure_reproduce_baseline \u2014 no evidence yields every multiplier 1.0; classification None in active mode returns base_scores identical to the input",
+    "tests/test_jev_route.py::test_active_scores_never_add_ineligible_executor \u2014 an executor absent from eligible receives no score even when signals favour it"
+  ],
+  "scope": [
+    "orchestrator/jev_route.py",
+    "tests/test_jev_route.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/jev_route.py",
+      "orchestrator/jev.py",
+      "orchestrator/jev_rank.py",
+      "orchestrator/pool.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/executor.py",
+      "orchestrator/daemon.py",
+      "tests/test_jev_route.py",
+      "tests/_harness.py",
+      ".orchestrator/pool.toml"
+    ],
+    "interface_contract": "adjustment(signals, evidence, eligible_ids, cfg) -> {id: multiplier}; active_scores(task, pool, eligible, classification, evidence, base_scores=None) -> {id: score}; shadow_context() gains keys adjustment and active; config [jev.routing] max_adjustment 0.25, evidence_floor_n 10 defaulted in code; existing functions classify, hypothetical, record_shadow keep their signatures"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by R14a v2 T-0602 after spec review T-0590 request_changes (per-class sample count via scorecard.class_sample_size, base_scores default defined)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789971516.138565,
+      "pipeline": {
+        "first_ready_at": 1789971516.1384268
+      }
+    },
+    {
+      "ts": 1789971516.247896,
+      "pipeline": {
+        "first_ready_at": 1789971516.1384268,
+        "spec_review_at": 1789971516.247537,
+        "spec_review_at_lease": 1789972416.247537
+      }
+    },
+    {
+      "ts": 1789971516.258224,
+      "pipeline": {
+        "first_ready_at": 1789971516.1384268,
+        "spec_review_at": 1789971516.247537,
+        "spec_review_at_lease": 1789972416.247537,
+        "spec_review_at_done": 1789971516.257944
+      }
+    },
+    {
+      "ts": 1789971688.786999,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/jev_route.py",
+          "issue": "adjustment()'s shrinkage factor n/(n+evidence_floor_n) requires a per-executor, per-class sample count n, but no in-scope function returns one. scorecard.class_success() (scorecard.py:64-91) computes this exact count internally as len(resolved) but only returns the success ratio, discarding n. The only per-executor count reachable from evidence_for() (jev_route.py:135-143) is scorecard.executor_economics()'s n_tasks, which aggregates lineage-root tasks across ALL task classes for that executor, not the class-conditioned n the shrinkage math assumes. Using n_tasks would let an executor's unrelated experience in other classes suppress shrinkage for a class it has barely touched (e.g. 3 samples at min_samples for 'architectural' but 200 total tasks overall), which is the opposite of what evidence_floor_n is meant to guard against. Scope forbids touching scorecard.py, and the spec's 'What' section doesn't direct evidence_for() to compute or source a real per-class n.",
+          "severity": "high",
+          "line": 141
+        },
+        {
+          "path": "orchestrator/jev_route.py",
+          "issue": "active_scores(task, pool, eligible, classification, evidence, base_scores=None) leaves the base_scores=None default undefined on the non-failure path (mode active, valid classification): should base_score default to 1.0 per eligible executor, or is the caller always expected to supply real scores? None of the five acceptance tests exercise the default-None success path, so this is a real ambiguity an implementer will resolve arbitrarily.",
+          "severity": "med",
+          "line": 165
+        }
+      ]
+    },
+    {
+      "ts": 1789971708.17178,
+      "pipeline": {
+        "first_ready_at": 1789971516.1384268,
+        "spec_review_at": 1789971516.247537,
+        "spec_review_at_lease": 1789972416.247537,
+        "spec_review_at_done": 1789971516.257944,
+        "spec_review_held_at": 1789971708.171731
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789971797.607914,
+      "pipeline": {
+        "first_ready_at": 1789971516.1384268,
+        "spec_review_at": 1789971516.247537,
+        "spec_review_at_lease": 1789972416.247537,
+        "spec_review_at_done": 1789971516.257944,
+        "spec_review_held_at": 1789971708.171731,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789971797.648724,
+      "pipeline": {
+        "first_ready_at": 1789971516.1384268,
+        "spec_review_at": 1789971516.247537,
+        "spec_review_at_lease": 1789972416.247537,
+        "spec_review_at_done": 1789971516.257944,
+        "spec_review_held_at": 1789971708.171731,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971708.17178": true
+        }
+      }
+    },
+    {
+      "ts": 1789972378.617968,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by R14a v2 T-0602 after spec review T-0590 request_changes (per-class sample count via scorecard.class_sample_size, base_scores default defined)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789971516.1384268,
+    "spec_review_at": 1789971516.247537,
+    "spec_review_at_lease": 1789972416.247537,
+    "spec_review_at_done": 1789971516.257944,
+    "spec_review_held_at": 1789971708.171731,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789971708.17178": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/jev_route.py",
+      "issue": "adjustment()'s shrinkage factor n/(n+evidence_floor_n) requires a per-executor, per-class sample count n, but no in-scope function returns one. scorecard.class_success() (scorecard.py:64-91) computes this exact count internally as len(resolved) but only returns the success ratio, discarding n. The only per-executor count reachable from evidence_for() (jev_route.py:135-143) is scorecard.executor_economics()'s n_tasks, which aggregates lineage-root tasks across ALL task classes for that executor, not the class-conditioned n the shrinkage math assumes. Using n_tasks would let an executor's unrelated experience in other classes suppress shrinkage for a class it has barely touched (e.g. 3 samples at min_samples for 'architectural' but 200 total tasks overall), which is the opposite of what evidence_floor_n is meant to guard against. Scope forbids touching scorecard.py, and the spec's 'What' section doesn't direct evidence_for() to compute or source a real per-class n.",
+      "severity": "high",
+      "line": 141
+    },
+    {
+      "path": "orchestrator/jev_route.py",
+      "issue": "active_scores(task, pool, eligible, classification, evidence, base_scores=None) leaves the base_scores=None default undefined on the non-failure path (mode active, valid classification): should base_score default to 1.0 per eligible executor, or is the caller always expected to supply real scores? None of the five acceptance tests exercise the default-None success path, so this is a real ambiguity an implementer will resolve arbitrarily.",
+      "severity": "med",
+      "line": 165
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

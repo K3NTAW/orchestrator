@@ -1,0 +1,77 @@
+{
+  "id": "T-0168",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "spec review: C-O7a v2: count the Planner's own usage from its transcripts into the pool, and `orchestrator pick <role>` (spec round 2 after T-0163; supersedes T-0118)",
+  "spec": "Why: the pool only counts tokens from worker JSON output (spawn.py run_claude usage), so the interactive Planner session, the largest consumer, is invisible; measured 2026-09-18: pool credited account A with 613k tokens while one Planner transcript summed to about 7.8M by the same metric (input + output + cache_read/10). Round 2 folds in spec review T-0163 (project-dir encoding, counter reset on rollover, tally inside pick, offset pruning); dispatched without a further spec review by Planner decision.\n\n(1) pool.py: `encode_project_dir(path) -> str` reproduces Claude Code's projects/ directory naming: every character that is not [A-Za-z0-9] becomes '-' (so '/' and '.' both map to '-'; '/Users/k3ntaw/.claude-mem' \u2192 '-Users-k3ntaw--claude-mem'). Verify against a real directory name under one of the configured config_dirs and put that example in a test; if the real convention differs from this rule, follow the real one and say so in the summary. Pool.tally_planner(now=None): for each account, dir = <config_dir>/projects/<encode_project_dir(str(ROOT.resolve()))>; if it does not exist, print one stderr line per tick at most (\"planner transcripts not found for <account> at <dir>\") and continue; read *.jsonl there, only lines of type \"assistant\" with a timestamp in the current day and the current 5-hour window (window_started in pool_state); sum message.usage.input_tokens + output_tokens + cache_read_input_tokens // 10 exactly as run_claude does; store per account planner_day_tokens and planner_window_tokens plus a per-file byte offset in pool_state so each tick reads only appended bytes (a shrunken file resets its offset; offsets for files that no longer exist are dropped). ROLLOVER: wherever Account.utilization() resets window_tokens/window_started or day_tokens/day, reset planner_window_tokens / planner_day_tokens to 0 in the same place (keep the offsets: incremental reading continues, only the counters restart); test that a rollover zeroes them and a later tally adds only new lines. Account.utilization and the daily-budget check include the planner numbers. Malformed lines are skipped, never fatal.\n(2) daemon.tick(): call pool.tally_planner() at the start of each tick, wrapped like the stages (a failure prints one stderr line).\n(3) status(): each account shows planner_day_tokens and the window utilization including them; `orchestrator status --plain` prints them too.\n(4) cli.py: `pick <role>` (role in planner|scout|review|execute) FIRST calls pool.tally_planner() (so a standalone launcher gets fresh numbers even with no daemon running), then prints the id and config_dir of the account pool.pick(role) returns, or exits 3 with \"hold: no account with headroom\".\nREADME.md: one paragraph \"Planner usage is counted from transcripts\" and the `pick planner` line under Run it.\nTests: tests/test_pool.py builds a fake config_dir with two JSONL files (assistant lines in and out of the window, a malformed line, a user line), asserts the sums, the offset resume on a second call, offset pruning for a deleted file, the rollover reset, the utilization change and the pick result flipping to B when A's planner usage crosses the cap, and encode_project_dir on a path with a dot; tests/test_cli.py covers pick output (and that tally_planner was called), and exit 3. No new dependency; finish with summary, files changed, failures-only test output; commit on the task branch when green.",
+  "inputs": [
+    "T-0167"
+  ],
+  "acceptance": [
+    "tests/test_pool.py: encode_project_dir_matches_claude_code, tally_sums_assistant_usage_in_window, tally_skips_malformed_and_user_lines, tally_resumes_from_offset, tally_prunes_missing_files, tally_resets_on_rollover, tally_raises_utilization_and_flips_pick; tests/test_cli.py: pick_tallies_then_prints_account_and_config_dir, pick_exits_3_when_none; all green",
+    "`orchestrator status --plain` shows planner_day_tokens per account after a tick in a test fixture; a missing transcripts dir prints one stderr line and never raises",
+    "No transcript content other than usage numbers and timestamps is read into memory beyond the current line, and nothing from transcripts is written to the bus or logs",
+    "`uv run python -m unittest discover -q tests` green; no new dependency; only the six scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_pool.py",
+    "tests/test_cli.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0168",
+  "codex_thread": null,
+  "result": {
+    "summary": "not run: spec review of T-0167 is waived by Planner decision after round 1 (T-0163, all risks folded into v2); the daemon created this in the gap before the waiver stamp landed. Killed at start.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789742214.88095,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0168",
+      "claimed_at": 1789742214.880564
+    },
+    {
+      "ts": 1789742214.887584,
+      "pid": 54754,
+      "account": "A"
+    },
+    {
+      "ts": 1789742247.634502,
+      "status": "failed",
+      "reason": "non-JSON output (rc=143): "
+    },
+    {
+      "ts": 1789742248.596577,
+      "status": "failed",
+      "result": {
+        "summary": "not run: spec review of T-0167 is waived by Planner decision after round 1 (T-0163, all risks folded into v2); the daemon created this in the gap before the waiver stamp landed. Killed at start.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789742214.880564,
+  "pid": 54754,
+  "account": "A",
+  "reason": "non-JSON output (rc=143): "
+}

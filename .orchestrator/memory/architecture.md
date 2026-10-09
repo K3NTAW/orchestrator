@@ -1,4 +1,4 @@
-repo map 91e264c 2026-09-23
+repo map 60c8f81 2026-10-09
 
 ## __init__.py — Tri-model orchestrator: bus + account pool + spawner + merge queue, exposed to t…
 
@@ -19,6 +19,8 @@ repo map 91e264c 2026-09-23
 ## cache_telemetry.py — Prompt-cache economics derived from canonical run rows.
 
 ## capacity.py — Read-only executor capacity snapshots and deterministic task admission.
+
+## claude_cli.py — One resolver for the `claude` and `uv` binaries.
 
 ## cli.py — orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] |…
 
@@ -51,6 +53,8 @@ repo map 91e264c 2026-09-23
 ## executor.py — Executor: GPT-6 Astra via ``codex exec``.
 
 ## failures.py — Validated failure evidence and conservative change-risk classification.
+
+## gate.py — Bounded execution for repository gates.
 
 ## gitutil.py — Read-only git evidence shared by pipeline and Planner routing.
 
@@ -86,8 +90,6 @@ repo map 91e264c 2026-09-23
 
 ## jev_skills.py — Bounded Jev classification for only the ambiguous skill-routing bucket.
 
-## mcp.py — MCP server `orchestrator`: scheduler for the Planner.
+## machine.py — Machine-wide leases and account usage shared by all orchestrator repos.
 
-## memory_eval.py — Deterministic P34 checks for HOT, WARM and COLD memory behavior.
-
-## memory_hot.py — Build the bounded, generated HOT memory vi
+##

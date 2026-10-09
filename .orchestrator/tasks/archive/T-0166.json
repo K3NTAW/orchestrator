@@ -1,0 +1,79 @@
+{
+  "id": "T-0166",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "spec review: C-O5 v2: executor image and host runbook \u2014 Dockerfile, compose, runbook, protected creds paths (spec round 2 after T-0162; supersedes T-0117)",
+  "spec": "Why: the executor runs on kenta-server (Ubuntu 20.04, Docker) in its own container so Claude Code, Codex, uv, git and gh get a current userland and the credentials live in mounted host files. Round 2 folds in spec review T-0162 (UID/GID alignment, version pins, objective secret check, protected credential paths); dispatched without a further spec review by Planner decision.\n\nDockerfile: FROM ubuntu:24.04; ARG UID=1000 ARG GID=1000 create group/user `orch` with those ids (HOME=/home/orch) so bind-mounted credential dirs created on the host with the same ids are writable; install ca-certificates, curl, git, gh (GitHub CLI apt repo), python3; uv via the official installer pinned with `ARG UV_VERSION` (installer supports a version); Claude Code via the native installer documented at code.claude.com/docs/en/setup (not npm) pinned with `ARG CLAUDE_VERSION` if the installer accepts a version argument, otherwise record the installed version in the build log with `claude --version` and note in a comment that the native installer only ships latest; Codex CLI from the openai/codex GitHub release for linux x86_64 pinned with `ARG CODEX_VERSION` (comment on how to bump; `codex --version` in the build); copy this repo to /opt/orchestrator, chown to orch, `uv sync --frozen`; USER orch; entrypoint `uv run orchestrator serve --host 0.0.0.0 --port 8090`.\ndocker-compose.executor.yml: service `orchestrator-executor`, build with args UID/GID from env (default 1000), volumes ./work:/work, ${ORCH_CREDS}/claude-a:/home/orch/.claude-a, ${ORCH_CREDS}/claude-b:/home/orch/.claude-b, ${ORCH_CREDS}/codex:/home/orch/.codex, ${ORCH_CREDS}/gh:/home/orch/.config/gh; env_file ./executor.env (gitignored; holds ORCH_SERVICE_TOKEN, CLAUDE_OAUTH_TOKEN_A, CLAUDE_OAUTH_TOKEN_B, ORCH_NOTIFY_URL, GH_READ_TOKEN); healthcheck curl -f http://localhost:8090/healthz; restart unless-stopped; no published ports (reached on the home docker network by the kgpt module).\n.dockerignore: wt/, .venv/, .orchestrator/runs, .orchestrator/bus.sqlite*, graphify-out/, executor.env.\n.orchestrator/protected-paths.txt: add the executor credential mount roots so guardrails.sh blocks them: `${ORCH_CREDS}`, `/home/orch/.claude-a`, `/home/orch/.claude-b`, `/home/orch/.codex`, `/home/orch/.config/gh` (follow the file's existing line format; look at how guardrails.sh reads it).\ndocs/executor-host.md runbook for the human: prerequisites; `id -u`/`id -g` on the host and export UID/GID for the build; create the creds dirs on the host owned by that uid; on the laptop run `CLAUDE_CONFIG_DIR=~/.claude-a claude setup-token` and the same for b, paste each token into executor.env (never into git); `docker compose -f docker-compose.executor.yml run --rm orchestrator-executor codex login --device-auth` once so auth.json lands in the mounted volume; `gh auth login` likewise; pool.toml on the host: oauth_token_env = \"CLAUDE_OAUTH_TOKEN_A\" / \"_B\" (C-O2a) and role secrets in env: form; repos.toml entry for kgpt; smoke test with curl against /healthz and a POST /goals on a scratch repo (using the bearer from executor.env, shown as `$ORCH_SERVICE_TOKEN`, never a literal); how to rotate a token; what to check when a goal does not start (planner log path under <repo>/.orchestrator/runs/). Every secret in the doc appears only as an env var name or the placeholder `<paste here>`. Add executor.env to .gitignore. README.md: link the runbook from \"Use on a project\".\nAcceptance check for secrets (objective): `git diff <base> HEAD | grep -E '(TOKEN|SECRET|PASSWORD)[A-Z_]*\\s*[=:]\\s*[A-Za-z0-9_\\-]{12,}'` returns nothing. Tests: `uv run python -m unittest discover -q tests` still green; no test_install change required. Finish with: summary, files changed, image size, the four version lines, failures-only test output; commit on the task branch when green.",
+  "inputs": [
+    "T-0165"
+  ],
+  "acceptance": [
+    "`docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) .` succeeds locally (record the image size) and `docker run --rm <image> sh -c 'claude --version && codex --version && uv --version && gh --version'` prints four versions; the container runs as orch with the build-arg uid",
+    "docker-compose.executor.yml validates with `docker compose -f docker-compose.executor.yml config` given a dummy executor.env, publishes no ports, and mounts exactly the four credential dirs plus ./work",
+    "docs/executor-host.md contains every human step incl. UID/GID alignment; the objective grep for secret-like assignments over the diff returns nothing; executor.env is in .gitignore and .dockerignore",
+    ".orchestrator/protected-paths.txt lists the five credential mount paths in the file's format",
+    "`uv run python -m unittest discover -q tests` green; no new dependency; only the seven scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    ".dockerignore",
+    "docs/executor-host.md",
+    ".gitignore",
+    "README.md",
+    ".orchestrator/protected-paths.txt"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0166",
+  "codex_thread": null,
+  "result": {
+    "summary": "not run: spec review of T-0165 is waived by Planner decision after round 1 (T-0162, all risks folded into v2); the daemon created this in the gap between task creation and the waiver stamp. Killed at start.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789742184.538849,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0166",
+      "claimed_at": 1789742184.5384939
+    },
+    {
+      "ts": 1789742184.545571,
+      "pid": 54018,
+      "account": "A"
+    },
+    {
+      "ts": 1789742224.657276,
+      "status": "failed",
+      "reason": "non-JSON output (rc=143): "
+    },
+    {
+      "ts": 1789742225.974984,
+      "status": "failed",
+      "result": {
+        "summary": "not run: spec review of T-0165 is waived by Planner decision after round 1 (T-0162, all risks folded into v2); the daemon created this in the gap between task creation and the waiver stamp. Killed at start.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789742184.5384939,
+  "pid": 54018,
+  "account": "A",
+  "reason": "non-JSON output (rc=143): "
+}

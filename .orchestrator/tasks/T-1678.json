@@ -1,0 +1,1625 @@
+{
+  "id": "T-1678",
+  "created_at": 1791318024.081368,
+  "parent": "T-1667",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "v4 ship v2: unattended merge of a closed goal to main after a full gate on the merged tree, resumable, with orchestrator rollback",
+  "spec": "v2 of T-1660 (spec review T-1666 request_changes, all five findings folded). Ship a finished goal to main\nunattended, with a full gate on the exact merged tree and a recorded rollback.\n\nBuild ON the existing close path, do not duplicate it: orchestrator/planner_runs.py routine_close() (line ~1495) already\ncloses a goal when gate_state is green and all children merged, writes the retrospective, and with\n[routes].auto_open_pr = true opens the goal/<id> -> main PR through _open_pr() (line ~1476, idempotent via\n`gh pr list --state all`). Ship is the next stage after that close, owned by the same module.\n\n1. Config: [ship] in pool.toml: enabled (default false), target \"main\", max_regates 3. This repo sets enabled = true and\n   [routes].auto_open_pr = true. With ship disabled behaviour is exactly as today.\n2. State on the goal task: pipeline.ship = {state, pr_url, pr_number, gated_head_sha, gated_target_sha, merge_sha,\n   attempts, last_error, updated_at}; states: pending -> gating -> merging -> shipped, or held. Every step first reads the\n   observable truth and reconciles: `gh pr view <n> --json state,mergeCommit,headRefOid`; if MERGED, record merge_sha,\n   set shipped, notify once, stop. This makes every step resumable after a crash (finding 3).\n3. Where it runs (finding 2): planner_runs.tick() picks at most one goal per tick whose result.goal_closed is true, ship\n   state not shipped/held. The gate never runs inside tick(): ship claims a stage lease on the goal (reuse the daemon's\n   claim/complete stage-lease helpers, daemon.py ~284-330, stage name \"ship\") and runs the work in a background thread\n   (the daemon's existing thread helper, daemon.py ~518). One ship per repo at a time (machine lease optional).\n4. Gating (finding 4): fresh worktree at goal/<id>; `git fetch origin`; merge origin/<target> into it (no rebase; conflict ->\n   held \"ship conflict\"); push that head to goal/<id>; record gated_target_sha = origin/<target> sha and gated_head_sha;\n   run the full gate (gate.run_gate on the worktree, env LUNA_GATE_FULL=1 for repos that scope their gate). Red/timeout ->\n   held with the failure tail.\n5. Merging: `git fetch origin` again; if origin/<target> moved since gated_target_sha, go back to gating (attempts+1, held\n   \"ship target kept moving\" after max_regates). Else `gh pr merge <n> --merge --match-head-commit <gated_head_sha>\n   --subject \"Merge PR <n>: <goal title> (goal/<id>, auto-merged after green full gate)\"`. Then reconcile as in 2.\n6. Holds (finding 5): held goals are excluded from ship readiness; notify through notify.notify_once (orchestrator/notify.py)\n   so a hold is reported once; release with `orchestrator ship --retry <goal>` which clears the hold.\n7. Shipped: pipeline.ship.state shipped, a decisions.md entry through the existing memory record script naming\n   `orchestrator rollback <merge_sha>`, and one notification \"<goal> shipped to main as <sha>; rollback: orchestrator rollback <sha>\".\n8. `orchestrator rollback <merge_sha>`: refuse unless the sha is a merge commit reachable from origin/<target>; branch\n   rollback/<short> from origin/<target>, `git revert -m 1 <sha>`, push, open PR \"Revert <subject>\", merge it with --merge\n   (no full gate: it restores a state that already passed one), record a decisions entry, notify.\n9. Never force-push, never push to the target branch directly (guardrails block it); all writes to main go through gh pr merge.\n10. CLAUDE.md: first line and step 8 say merges to main are automatic after a green full gate and every merge records\n    `orchestrator rollback <sha>`.\nTests tests/test_ship.py with a temp bare origin and a fake gh on PATH (records calls, returns PR numbers/state): test_ship_disabled_by_default,\ntest_ship_runs_after_routine_close_only, test_ship_gate_runs_in_background_not_in_tick, test_ship_resumes_after_crash_when_pr_already_merged,\ntest_ship_regates_when_target_moved, test_ship_holds_after_max_regates, test_ship_holds_on_conflict, test_ship_holds_on_red_gate_and_notifies_once,\ntest_ship_retry_releases_hold, test_ship_merge_uses_match_head_commit, test_rollback_reverts_merge_commit, test_rollback_refuses_non_merge.\n\n\nAMENDMENTS from spec review T-1671 (v3). Where they differ from the text above, the amendments win.\nS1 Selection: ship does not ride on decision_points(). planner_runs.tick() (or a new ship.tick(pool) called right after it\n   in daemon.tick) scans the bus itself: goal tasks (is_goal) with result.goal_closed true, pr_url present, and\n   pipeline.ship.state not in (shipped, held). Oldest closed first.\nS2 One ship per repo: a repo-level lock file .orchestrator/ship.lock taken with fcntl LOCK_EX|LOCK_NB by the background\n   thread for its whole run (released in finally). If the lock is held, ship.tick returns without starting anything.\n   This is the only concurrency guard; do not use stamp() for ship.\nS3 Crash recovery: no stage lease. pipeline.ship.updated_at is refreshed at every step; on start, a goal whose state is\n   gating/merging with no ship.lock holder is simply resumed from the state machine (step 2 reconcile reads the PR truth\n   first). A gate that was running when the process died is re-run.\nS4 Worktree: `git worktree add --detach <S>/ship-<goal> goal/<id>` under .orchestrator/ship-wt/ (removed in finally), merge\n   origin/<target> there, then `git push origin HEAD:refs/heads/goal/<id>` (fast-forward only; refuse and hold if it is not\n   a fast-forward). Never check out the goal branch itself.\nS5 Gate: call gate.run_gate(wt, script=merge.TESTS_GREEN, task_id=goal_id, cfg=pool.cfg). If run_gate cannot pass env,\n   add an optional env parameter to gate.run_gate/run_bounded (default None = inherit) and pass {\"LUNA_GATE_FULL\": \"1\"}\n   merged over os.environ; add orchestrator/gate.py to scope for this one parameter. Timeout from [gate].timeout_s as today.\nS6 Notifications: do not use notify.notify_once for ship (one slot per task). Keep ship's own dedupe in\n   pipeline.ship.notified = {key: ts} with keys \"held:<reason>:<attempt>\" and \"shipped\"; send via notify.notify. A retry\n   increments attempt, so a new hold after --retry is reported again.\nExtra tests: test_second_ship_waits_for_lock, test_resume_reads_pr_truth_after_crash, test_detached_worktree_and_ff_push,\ntest_gate_env_full_passed, test_hold_after_retry_notifies_again.\n\n\nAMENDMENTS v4 from spec review T-1676 (final; the Planner sends this to the builder without another spec review; the\npost-gate security review still applies). Where they differ from everything above, these win.\nG1 Gate env: [ship].gate_env (TOML table, default empty) is merged over os.environ for the ship gate; luna-inbox sets\n   {LUNA_GATE_FULL = \"1\"}, this repo sets nothing. Test that the configured env reaches the gate process. Worst-case gate\n   time is 2x [gate].timeout_s (run_gate retries once); ship.lock stays held for that long by design.\nG2 PR: ship does not use _open_pr and does not require result.pr_url. It runs\n   `gh pr list --head goal/<id> --base <target> --state all --json number,state,url,mergeCommit`, ignores CLOSED PRs,\n   uses an OPEN one, treats a MERGED one as shipped (step 2), and otherwise creates a PR with --base <target>.\n   routine_close and _open_pr stay unchanged.\nG3 Writes: every ship state change goes through one helper _ship_update(goal_id, **fields) that, inside bus.locked(),\n   re-reads the goal, replaces only pipeline[\"ship\"] with the merged dict and writes back. No other pipeline key is\n   written by ship.\nG4 Process model: in `daemon --once` ship runs inline (blocking) after the other stages; in loop mode the thread is\n   non-daemon, gets the loop's stop_event, checks it between steps, and the loop joins it on shutdown.\nG5 Base race: after the merge, read the merge commit's first parent; if it differs from gated_target_sha, run the full\n   gate on origin/<target> at the merge commit in a detached worktree; red -> run the rollback (G6) immediately, hold the\n   goal \"post-merge gate red\", notify. State this residual window in the module docstring.\nG6 Rollback hardening: refuse unless the sha is on the first-parent chain of origin/<target> (git rev-list --first-parent);\n   a revert conflict -> abort, no PR, notify; the revert PR gets the same full gate before merging (gate_env applies),\n   red -> no merge, notify; `--force` skips the gate for emergencies and says so in the PR body.\nG7 CLAUDE.md: the new rule is conditional: \"When [ship].enabled is true, merges to main are automatic after a green full\n   gate; every merge records `orchestrator rollback <sha>`. Otherwise a human approves the merge.\"\nExtra tests: test_gate_env_from_config, test_closed_pr_ignored_merged_pr_counts_as_shipped, test_ship_update_only_touches_ship_key,\ntest_once_mode_runs_inline, test_post_merge_gate_on_base_race_rolls_back, test_rollback_refuses_non_first_parent,\ntest_rollback_conflict_aborts, test_rollback_gate_red_no_merge.\n",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_ship.py: the twelve named tests exist and pass",
+    "[ship].enabled defaults to false; no force-push or direct push to main anywhere",
+    "CLAUDE.md states the automatic merge rule and the rollback command"
+  ],
+  "scope": [
+    "orchestrator/ship.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_ship.py",
+    "CLAUDE.md",
+    ".orchestrator/pool.toml",
+    "orchestrator/gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 5400,
+    "task_class": "architectural",
+    "route": "high-risk",
+    "respec_for": "T-1673",
+    "note": "c5 on purpose: three spec review rounds done (T-1666/T-1671/T-1676 or T-1672/T-1677); Planner folded the last findings; security review after the gate still runs"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1678",
+  "codex_thread": null,
+  "result": {
+    "summary": "I've built T-1678: a closed goal now ships to main on its own after a full gate on the merged tree. It's committed on `task/T-1678` in two commits (626802a, 1f3e7e8) and the worktree is clean. All 25 tests in `tests/test_ship.py` pass (the 12 required plus the 13 extras from the amendments). I did not run the full gate locally; the daemon runs it.\n\n**What it does:**\n- **New `orchestrator/ship.py`:** each goal moves through pending, gating, merging, shipped, or held. Every step first checks the PR's real state on GitHub, so a run that crashed picks up where it stopped, and a gate that died mid-run is re-run.\n- **Gating:** works in a separate temporary copy of the goal branch, merges main into it, and pushes back only if nothing is overwritten. It then finds or opens the PR and runs the full gate with `[ship].gate_env` added to the environment.\n- **Merging:** if main moved since the gate, it re-gates, and holds after `max_regates`. Otherwise it merges with `gh pr merge --merge --match-head-commit <gated_head_sha>`, so GitHub refuses if the branch changed after the gate.\n- **Main moving at the last moment:** if main still moves between the last check and the merge, the merge goes in and then gets a second full gate. If that gate is red, the merge is rolled back right away and the goal is held. Main briefly holds an ungated tree in that window; the module docstring says so.\n- **One ship at a time:** a lock file (`.orchestrator/ship.lock`) allows one ship per repo. Ship only ever writes its own `pipeline.ship` entry on the goal.\n- **Notifications:** each hold is reported once. `orchestrator ship --retry <goal>` clears a hold, and a hold after a retry is reported again.\n- **When it runs:** `daemon --once` ships inline. The long-running daemon uses a background thread, which it waits for when it shuts down.\n- **Rollback:** `orchestrator rollback <sha> [--force]` refuses anything that isn't a merge commit on main's main line. It reverts through a PR that goes through the full gate before merging; a revert conflict stops with no PR, and `--force` skips the gate for emergencies and says so in the PR body. Ship and rollback both record a decisions entry and send a notification.\n- **Pushes:** there is no force-push and no direct push to main anywhere; main only moves through `gh pr merge`.\n\n**Where I departed from the spec:**\n- **`auto_open_pr` stays false.** Setting it to true would break the existing test `test_close_default_leaves_pr_to_planner`, because tests read a copy of the live `pool.toml`, and that test file is outside my write scope. Ship doesn't need it, since ship opens its own PR (amendment G2).\n- **`planner_runs.py` is unchanged.** The ship step is called in `daemon.tick` right after the planner step, as amendment S1 allows. It runs even when the autonomous Planner is off, but does nothing if the repo has no `origin` remote, so other tests can't reach `gh`.\n\nNo new dependencies.\n\n**Files changed:**\n- `orchestrator/ship.py` (new)\n- `orchestrato",
+    "executed_by": "claude:opus",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791318036.71245,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383
+      }
+    },
+    {
+      "ts": 1791318036.714834,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751
+      }
+    },
+    {
+      "ts": 1791318036.716266,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751
+      }
+    },
+    {
+      "ts": 1791318048.230536,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 13261,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791318048.23432,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422
+      }
+    },
+    {
+      "ts": 1791318320.662933,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        }
+      }
+    },
+    {
+      "ts": 1791318321.359361,
+      "tier": "opus",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1791318321.3701289,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791318328.959682,
+      "executor": "claude:opus"
+    },
+    {
+      "ts": 1791318336.249352,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 13261,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791318336.2555819,
+      "packet_meta": {
+        "chars": 12382,
+        "est_tokens": 3095,
+        "presented_tokens": 3095,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "6ff78335dc1cba793ddd23b4e97364bfa7a5f89597537f849fb5fb5afc7cbe34"
+          },
+          "objective": {
+            "chars": 9073,
+            "est_tokens": 2268,
+            "sha256": "381fda6cf358ccc25c743bf3d0dab3ee9be62e00cf6b44afa5686c77491dad11"
+          },
+          "acceptance": {
+            "chars": 225,
+            "est_tokens": 56,
+            "sha256": "a5f3f9a19b6e69c2bee90d5d92afdf6b3a8245ce3dd2415b732da382f0651780"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+          },
+          "write_scope": {
+            "chars": 198,
+            "est_tokens": 49,
+            "sha256": "5c51c815edef49ad231ca8d3ac6ad378dbd134c36f6c2d97fc02936b93a51fed"
+          },
+          "read_scope": {
+            "chars": 2129,
+            "est_tokens": 532,
+            "sha256": "e555cbef554ae7afda3a64f42e69cc9fc7993989f3130f0932a71d573bb3ea89"
+          },
+          "constraints": {
+            "chars": 317,
+            "est_tokens": 79,
+            "sha256": "9216cf3aa65b01f2cbd23fcb3faec4aa1e1f5a652f59652ae61ed86794519019"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "49dbe572efaf",
+        "version": "49dbe572efaf",
+        "candidate_known": true,
+        "base": "247fe58bae3d",
+        "sources": "pool.toml@b9bca20e78ae gotchas@4bdb044f9b7c memory@notes over cap by 7582 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "4bdb044f9b7c",
+        "candidate_tokens": 4720,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 19355,
+        "routed_reduction_ratio": 0.9190844769457239,
+        "routed_hidden": 0,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "67a6e6645c97",
+          "a0fa21e29226",
+          "e9fa5c751c3e",
+          "52a59c2d8b66",
+          "4a226dc6afc3",
+          "63407adb9b84",
+          "cb01c9405ae6",
+          "cd4d69748d9d",
+          "34f30d64c6aa",
+          "2db2764f9bd8",
+          "6cfe8c026bbf",
+          "6f6b02dad815",
+          "f5a6d30b3f65",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "667ed6b21b31",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "e740210532e5",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "b9201efbf5a6",
+          "d5139aa32546",
+          "0fcd075d9f57",
+          "453b6e50c221",
+          "80291b312459",
+          "d39ac091b005",
+          "7657bd5d45a9",
+          "b1df544fdd98",
+          "34b6b61ecc58",
+          "1a7a7f5dc41a",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "84b6fb0bf229",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "9ea39468a2ec",
+          "0331f61415c0",
+          "260f2103255f",
+          "9ec23e1d874a",
+          "2fda1602f756",
+          "acbbb633de56",
+          "e8b1cefb7440",
+          "dfb462b1f665",
+          "fdbc1c6e4fc2",
+          "0d238bb278d4",
+          "e504840e892e",
+          "cb6c7d92a2a9",
+          "6fe073330586",
+          "23e771b7caa4",
+          "f96e9adce467",
+          "eb7c0cd2d192",
+          "fbe69af60117",
+          "18df6b59f1b8",
+          "8e3fcbc720a7",
+          "4748dac32cb6",
+          "8a95a03bdc65",
+          "800246adcbcb",
+          "62bb42ad80d2",
+          "e146114ba8ec",
+          "8f938ad31ca7",
+          "73edaf240ba4",
+          "347b2365cf0d",
+          "c465910e2b28",
+          "2a874b8ed171",
+          "42758e20cbaf",
+          "d8196cc161e2",
+          "dd248aa70410",
+          "f77f8a2af59d",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "386984bd9daf"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 13261,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1791318338.1358569,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1678",
+      "claimed_at": 1791318338.1356218
+    },
+    {
+      "ts": 1791318338.1373599,
+      "account": "B"
+    },
+    {
+      "ts": 1791318345.287873,
+      "pid": 28063,
+      "account": "B"
+    },
+    {
+      "ts": 1791318838.562062,
+      "packet_meta": {
+        "chars": 12382,
+        "est_tokens": 3095,
+        "presented_tokens": 3095,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "6ff78335dc1cba793ddd23b4e97364bfa7a5f89597537f849fb5fb5afc7cbe34"
+          },
+          "objective": {
+            "chars": 9073,
+            "est_tokens": 2268,
+            "sha256": "381fda6cf358ccc25c743bf3d0dab3ee9be62e00cf6b44afa5686c77491dad11"
+          },
+          "acceptance": {
+            "chars": 225,
+            "est_tokens": 56,
+            "sha256": "a5f3f9a19b6e69c2bee90d5d92afdf6b3a8245ce3dd2415b732da382f0651780"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+          },
+          "write_scope": {
+            "chars": 198,
+            "est_tokens": 49,
+            "sha256": "5c51c815edef49ad231ca8d3ac6ad378dbd134c36f6c2d97fc02936b93a51fed"
+          },
+          "read_scope": {
+            "chars": 2129,
+            "est_tokens": 532,
+            "sha256": "e555cbef554ae7afda3a64f42e69cc9fc7993989f3130f0932a71d573bb3ea89"
+          },
+          "constraints": {
+            "chars": 317,
+            "est_tokens": 79,
+            "sha256": "9216cf3aa65b01f2cbd23fcb3faec4aa1e1f5a652f59652ae61ed86794519019"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "49dbe572efaf",
+        "version": "49dbe572efaf",
+        "candidate_known": true,
+        "base": "247fe58bae3d",
+        "sources": "pool.toml@b9bca20e78ae gotchas@4bdb044f9b7c memory@notes over cap by 7582 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "4bdb044f9b7c",
+        "candidate_tokens": 4720,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 19355,
+        "routed_reduction_ratio": 0.9190844769457239,
+        "routed_hidden": 0,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "67a6e6645c97",
+          "a0fa21e29226",
+          "e9fa5c751c3e",
+          "52a59c2d8b66",
+          "4a226dc6afc3",
+          "63407adb9b84",
+          "cb01c9405ae6",
+          "cd4d69748d9d",
+          "34f30d64c6aa",
+          "2db2764f9bd8",
+          "6cfe8c026bbf",
+          "6f6b02dad815",
+          "f5a6d30b3f65",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "667ed6b21b31",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "e740210532e5",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "b9201efbf5a6",
+          "d5139aa32546",
+          "0fcd075d9f57",
+          "453b6e50c221",
+          "80291b312459",
+          "d39ac091b005",
+          "7657bd5d45a9",
+          "b1df544fdd98",
+          "34b6b61ecc58",
+          "1a7a7f5dc41a",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "84b6fb0bf229",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "9ea39468a2ec",
+          "0331f61415c0",
+          "260f2103255f",
+          "9ec23e1d874a",
+          "2fda1602f756",
+          "acbbb633de56",
+          "e8b1cefb7440",
+          "dfb462b1f665",
+          "fdbc1c6e4fc2",
+          "0d238bb278d4",
+          "e504840e892e",
+          "cb6c7d92a2a9",
+          "6fe073330586",
+          "23e771b7caa4",
+          "f96e9adce467",
+          "eb7c0cd2d192",
+          "fbe69af60117",
+          "18df6b59f1b8",
+          "8e3fcbc720a7",
+          "4748dac32cb6",
+          "8a95a03bdc65",
+          "800246adcbcb",
+          "62bb42ad80d2",
+          "e146114ba8ec",
+          "8f938ad31ca7",
+          "73edaf240ba4",
+          "347b2365cf0d",
+          "c465910e2b28",
+          "2a874b8ed171",
+          "42758e20cbaf",
+          "d8196cc161e2",
+          "dd248aa70410",
+          "f77f8a2af59d",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "386984bd9daf"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 13261,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "8f28885c-34af-4211-935a-dfa69789f501"
+      }
+    },
+    {
+      "ts": 1791318838.596679,
+      "packet_meta": {
+        "chars": 12382,
+        "est_tokens": 3095,
+        "presented_tokens": 3095,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "6ff78335dc1cba793ddd23b4e97364bfa7a5f89597537f849fb5fb5afc7cbe34"
+          },
+          "objective": {
+            "chars": 9073,
+            "est_tokens": 2268,
+            "sha256": "381fda6cf358ccc25c743bf3d0dab3ee9be62e00cf6b44afa5686c77491dad11"
+          },
+          "acceptance": {
+            "chars": 225,
+            "est_tokens": 56,
+            "sha256": "a5f3f9a19b6e69c2bee90d5d92afdf6b3a8245ce3dd2415b732da382f0651780"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+          },
+          "write_scope": {
+            "chars": 198,
+            "est_tokens": 49,
+            "sha256": "5c51c815edef49ad231ca8d3ac6ad378dbd134c36f6c2d97fc02936b93a51fed"
+          },
+          "read_scope": {
+            "chars": 2129,
+            "est_tokens": 532,
+            "sha256": "e555cbef554ae7afda3a64f42e69cc9fc7993989f3130f0932a71d573bb3ea89"
+          },
+          "constraints": {
+            "chars": 317,
+            "est_tokens": 79,
+            "sha256": "9216cf3aa65b01f2cbd23fcb3faec4aa1e1f5a652f59652ae61ed86794519019"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "49dbe572efaf",
+        "version": "49dbe572efaf",
+        "candidate_known": true,
+        "base": "247fe58bae3d",
+        "sources": "pool.toml@b9bca20e78ae gotchas@4bdb044f9b7c memory@notes over cap by 7582 chars: acceptance kept whole routed=shadow",
+        "policy_version": "b9bca20e78ae",
+        "gotchas": "4bdb044f9b7c",
+        "candidate_tokens": 4720,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 19355,
+        "routed_reduction_ratio": 0.9190844769457239,
+        "routed_hidden": 0,
+        "routed_ambiguous": 18,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "67a6e6645c97",
+          "a0fa21e29226",
+          "e9fa5c751c3e",
+          "52a59c2d8b66",
+          "4a226dc6afc3",
+          "63407adb9b84",
+          "cb01c9405ae6",
+          "cd4d69748d9d",
+          "34f30d64c6aa",
+          "2db2764f9bd8",
+          "6cfe8c026bbf",
+          "6f6b02dad815",
+          "f5a6d30b3f65",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "667ed6b21b31",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "e740210532e5",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "1010a8c11bac",
+          "b9201efbf5a6",
+          "d5139aa32546",
+          "0fcd075d9f57",
+          "453b6e50c221",
+          "80291b312459",
+          "d39ac091b005",
+          "7657bd5d45a9",
+          "b1df544fdd98",
+          "34b6b61ecc58",
+          "1a7a7f5dc41a",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "84b6fb0bf229",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "9ea39468a2ec",
+          "0331f61415c0",
+          "260f2103255f",
+          "9ec23e1d874a",
+          "2fda1602f756",
+          "acbbb633de56",
+          "e8b1cefb7440",
+          "dfb462b1f665",
+          "fdbc1c6e4fc2",
+          "0d238bb278d4",
+          "e504840e892e",
+          "cb6c7d92a2a9",
+          "6fe073330586",
+          "23e771b7caa4",
+          "f96e9adce467",
+          "eb7c0cd2d192",
+          "fbe69af60117",
+          "18df6b59f1b8",
+          "8e3fcbc720a7",
+          "4748dac32cb6",
+          "8a95a03bdc65",
+          "800246adcbcb",
+          "62bb42ad80d2",
+          "e146114ba8ec",
+          "8f938ad31ca7",
+          "73edaf240ba4",
+          "347b2365cf0d",
+          "c465910e2b28",
+          "2a874b8ed171",
+          "42758e20cbaf",
+          "d8196cc161e2",
+          "dd248aa70410",
+          "f77f8a2af59d",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "386984bd9daf"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 13261,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 471,
+        "instruction_tokens_modular": 411,
+        "role": "execute",
+        "tool_tokens_disclosed": 5995,
+        "tool_tokens_minimal": 5995,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_selected_l0": 25,
+        "skill_tokens_selected_l2": 62,
+        "skill_routing_mode": "shadow",
+        "session_id": "8f28885c-34af-4211-935a-dfa69789f501",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791318846.2179031,
+      "status": "done",
+      "result": {
+        "summary": "I've built T-1678: a closed goal now ships to main on its own after a full gate on the merged tree. It's committed on `task/T-1678` in two commits (626802a, 1f3e7e8) and the worktree is clean. All 25 tests in `tests/test_ship.py` pass (the 12 required plus the 13 extras from the amendments). I did not run the full gate locally; the daemon runs it.\n\n**What it does:**\n- **New `orchestrator/ship.py`:** each goal moves through pending, gating, merging, shipped, or held. Every step first checks the PR's real state on GitHub, so a run that crashed picks up where it stopped, and a gate that died mid-run is re-run.\n- **Gating:** works in a separate temporary copy of the goal branch, merges main into it, and pushes back only if nothing is overwritten. It then finds or opens the PR and runs the full gate with `[ship].gate_env` added to the environment.\n- **Merging:** if main moved since the gate, it re-gates, and holds after `max_regates`. Otherwise it merges with `gh pr merge --merge --match-head-commit <gated_head_sha>`, so GitHub refuses if the branch changed after the gate.\n- **Main moving at the last moment:** if main still moves between the last check and the merge, the merge goes in and then gets a second full gate. If that gate is red, the merge is rolled back right away and the goal is held. Main briefly holds an ungated tree in that window; the module docstring says so.\n- **One ship at a time:** a lock file (`.orchestrator/ship.lock`) allows one ship per repo. Ship only ever writes its own `pipeline.ship` entry on the goal.\n- **Notifications:** each hold is reported once. `orchestrator ship --retry <goal>` clears a hold, and a hold after a retry is reported again.\n- **When it runs:** `daemon --once` ships inline. The long-running daemon uses a background thread, which it waits for when it shuts down.\n- **Rollback:** `orchestrator rollback <sha> [--force]` refuses anything that isn't a merge commit on main's main line. It reverts through a PR that goes through the full gate before merging; a revert conflict stops with no PR, and `--force` skips the gate for emergencies and says so in the PR body. Ship and rollback both record a decisions entry and send a notification.\n- **Pushes:** there is no force-push and no direct push to main anywhere; main only moves through `gh pr merge`.\n\n**Where I departed from the spec:**\n- **`auto_open_pr` stays false.** Setting it to true would break the existing test `test_close_default_leaves_pr_to_planner`, because tests read a copy of the live `pool.toml`, and that test file is outside my write scope. Ship doesn't need it, since ship opens its own PR (amendment G2).\n- **`planner_runs.py` is unchanged.** The ship step is called in `daemon.tick` right after the planner step, as amendment S1 allows. It runs even when the autonomous Planner is off, but does nothing if the repo has no `origin` remote, so other tests can't reach `gh`.\n\nNo new dependencies.\n\n**Files changed:**\n- `orchestrator/ship.py` (new)\n- `orchestrato",
+        "executed_by": "claude:opus",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791318865.528203,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791319134.17573,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791319134.175476,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_pick_exits_3_when_none (test_cli.Cli.test_pick_exits_3_when_none)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_end_to_end_real_transcript (test_cli.Cli.test_pick_planner_end_to_end_real_transcript)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_model_flag (test_cli.Cli.test_pick_planner_model_flag)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_prints_pinned_account_with_notice (test_cli.Cli.test_pick_planner_prints_pinned_account_with_notice)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_tallies_then_prints_account_and_config_dir (test_cli.Cli.test_pick_tallies_then_prints_account_and_config_dir)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_tally_failure_prints_one_stderr_line_and_proceeds (test_cli.Cli.test_pick_tally_failure_prints_one_stderr_line_and_proceeds)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_scorecard_handoffs_preserves_legacy_sections_before_table (test_cli.Cli.test_scorecard_handoffs_preserves_legacy_sections_before_table)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_scorecard_handoffs_shows_cache_columns (test_cli.Cli.test_scorecard_handoffs_shows_cache_columns)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_lists_gates_near_timeout (test_cli.Cli.test_status_lists_gates_near_timeout)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_no_gates_near_timeout (test_cli.Cli.test_status_no_gates_near_timeout)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_plain_and_json (test_cli.Cli.test_status_plain_and_json)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_economy_join_keys_align (test_context_eval.ContextEval.test_economy_join_keys_align)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\n/Users/k3ntaw/code/orchestrator/wt/T-1678/.orchestrator/runs/tests/T-1678-20261006-223854.log\n"
+      }
+    },
+    {
+      "ts": 1791319138.708996,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_pick_exits_3_when_none (test_cli.Cli.test_pick_exits_3_when_none)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_end_to_end_real_transcript (test_cli.Cli.test_pick_planner_end_to_end_real_transcript)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_model_flag (test_cli.Cli.test_pick_planner_model_flag)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_prints_pinned_account_with_notice (test_cli.Cli.test_pick_planner_prints_pinned_account_with_notice)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_tallies_then_prints_account_and_config_dir (test_cli.Cli.test_pick_tallies_then_prints_account_and_config_dir)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_tally_failure_prints_one_stderr_line_and_proceeds (test_cli.Cli.test_pick_tally_failure_prints_one_stderr_line_and_proceeds)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_scorecard_handoffs_preserves_legacy_sections_before_table (test_cli.Cli.test_scorecard_handoffs_preserves_legacy_sections_before_table)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_scorecard_handoffs_shows_cache_columns (test_cli.Cli.test_scorecard_handoffs_shows_cache_columns)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_lists_gates_near_timeout (test_cli.Cli.test_status_lists_gates_near_timeout)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_no_gates_near_timeout (test_cli.Cli.test_status_no_gates_near_timeout)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_plain_and_json (test_cli.Cli.test_status_plain_and_json)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_economy_join_keys_align (test_context_eval.ContextEval.test_economy_join_keys_align)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\n/Users/k3ntaw/code/orchestrator/wt/T-1678/.orchestrator/runs/tests/T-1678-20261006-223854.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_cli.Cli.test_pick_exits_3_when_none",
+              "test_cli.Cli.test_pick_planner_end_to_end_real_transcript",
+              "test_cli.Cli.test_pick_planner_model_flag",
+              "test_cli.Cli.test_pick_planner_prints_pinned_account_with_notice",
+              "test_cli.Cli.test_pick_tallies_then_prints_account_and_config_dir",
+              "test_cli.Cli.test_pick_tally_failure_prints_one_stderr_line_and_proceeds",
+              "test_cli.Cli.test_scorecard_handoffs_preserves_legacy_sections_before_table",
+              "test_cli.Cli.test_scorecard_handoffs_shows_cache_columns",
+              "test_cli.Cli.test_status_lists_gates_near_timeout",
+              "test_cli.Cli.test_status_no_gates_near_timeout",
+              "test_cli.Cli.test_status_plain_and_json",
+              "test_context_eval.ContextEval.test_economy_join_keys_align",
+              "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+            ],
+            "returncode": 1,
+            "output": "taw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_context_eval (unittest.loader._FailedTest.test_context_eval)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_context_eval\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_context_eval'\n\n\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 13 tests in 0.000s\n\nFAILED (errors=13)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1791319138.7110112,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791319134.175476,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1791319140.526908,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791319134.175476,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1791319134.17573": true
+        }
+      }
+    },
+    {
+      "ts": 1791321674.714201,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791319134.175476,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1791319134.17573": true
+        },
+        "first_green_at": 1791321674.707901,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1791325141.4798038,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791319134.175476,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1791319134.17573": true
+        },
+        "first_green_at": 1791321674.707901,
+        "lineage_fix_rounds": 2
+      }
+    },
+    {
+      "ts": 1791329786.8494022,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791319134.175476,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1791319134.17573": true
+        },
+        "first_green_at": 1791321674.707901,
+        "lineage_fix_rounds": 3
+      }
+    },
+    {
+      "ts": 1791330206.30982,
+      "status": "done",
+      "merged_into": "goal/T-1667",
+      "merged_via": "fix round T-1696 600c51727f037b86b737e3ebe0e129b8e028cab3",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1791318036.712383,
+        "dispatched_at": 1791318036.714751,
+        "dispatched_at_lease": 1791318936.714751,
+        "dispatched_at_done": 1791318048.23422,
+        "handoff": {
+          "baseline": "claude:opus",
+          "selected": "claude:opus",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791318320.662545
+        },
+        "jev_route": {
+          "baseline": "opus",
+          "hypothetical": "claude:opus",
+          "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+          "adjustment": {
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "skills_used": [],
+        "gate_attempts": 1,
+        "gated_at": 1791319134.175476,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1791319134.17573": true
+        },
+        "first_green_at": 1791321674.707901,
+        "lineage_fix_rounds": 3,
+        "accepted_at": 1791330206.297769
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791318036.712383,
+    "dispatched_at": 1791318036.714751,
+    "dispatched_at_lease": 1791318936.714751,
+    "dispatched_at_done": 1791318048.23422,
+    "handoff": {
+      "baseline": "claude:opus",
+      "selected": "claude:opus",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791318320.662545
+    },
+    "jev_route": {
+      "baseline": "opus",
+      "hypothetical": "claude:opus",
+      "key": "7882132b891f3e4e57b60125c52f3e9357850272",
+      "adjustment": {
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "skills_used": [],
+    "gate_attempts": 1,
+    "gated_at": 1791319134.175476,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_skipped": {
+      "1791319134.17573": true
+    },
+    "first_green_at": 1791321674.707901,
+    "lineage_fix_rounds": 3,
+    "accepted_at": 1791330206.297769
+  },
+  "packet_meta": {
+    "chars": 12382,
+    "est_tokens": 3095,
+    "presented_tokens": 3095,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "6ff78335dc1cba793ddd23b4e97364bfa7a5f89597537f849fb5fb5afc7cbe34"
+      },
+      "objective": {
+        "chars": 9073,
+        "est_tokens": 2268,
+        "sha256": "381fda6cf358ccc25c743bf3d0dab3ee9be62e00cf6b44afa5686c77491dad11"
+      },
+      "acceptance": {
+        "chars": 225,
+        "est_tokens": 56,
+        "sha256": "a5f3f9a19b6e69c2bee90d5d92afdf6b3a8245ce3dd2415b732da382f0651780"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "065f7c2b0a8140ed188f21a71a1bbfa259c61216ff425ec5c76d0cc43e3c5e65"
+      },
+      "write_scope": {
+        "chars": 198,
+        "est_tokens": 49,
+        "sha256": "5c51c815edef49ad231ca8d3ac6ad378dbd134c36f6c2d97fc02936b93a51fed"
+      },
+      "read_scope": {
+        "chars": 2129,
+        "est_tokens": 532,
+        "sha256": "e555cbef554ae7afda3a64f42e69cc9fc7993989f3130f0932a71d573bb3ea89"
+      },
+      "constraints": {
+        "chars": 317,
+        "est_tokens": 79,
+        "sha256": "9216cf3aa65b01f2cbd23fcb3faec4aa1e1f5a652f59652ae61ed86794519019"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "49dbe572efaf",
+    "version": "49dbe572efaf",
+    "candidate_known": true,
+    "base": "247fe58bae3d",
+    "sources": "pool.toml@b9bca20e78ae gotchas@4bdb044f9b7c memory@notes over cap by 7582 chars: acceptance kept whole routed=shadow",
+    "policy_version": "b9bca20e78ae",
+    "gotchas": "4bdb044f9b7c",
+    "candidate_tokens": 4720,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 19355,
+    "routed_reduction_ratio": 0.9190844769457239,
+    "routed_hidden": 0,
+    "routed_ambiguous": 18,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "67a6e6645c97",
+      "a0fa21e29226",
+      "e9fa5c751c3e",
+      "52a59c2d8b66",
+      "4a226dc6afc3",
+      "63407adb9b84",
+      "cb01c9405ae6",
+      "cd4d69748d9d",
+      "34f30d64c6aa",
+      "2db2764f9bd8",
+      "6cfe8c026bbf",
+      "6f6b02dad815",
+      "f5a6d30b3f65",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "a9e3c482cf6d",
+      "36fba3c5b5ac",
+      "65c4d2b5db00",
+      "2380174927fc",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "ab047a2d7f21",
+      "df10911c0fd4",
+      "270a093d49c3",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "718b545b1eca",
+      "5b872ee10528",
+      "667ed6b21b31",
+      "2b71081a619f",
+      "e374e3dd1e88",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "6b0c3088acb2",
+      "b839fab17283",
+      "b676757c3fa9",
+      "84ae4852296a",
+      "e740210532e5",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "e42e3e70122c",
+      "a595cbbe1665",
+      "1c510a428e02",
+      "48de25429ecb",
+      "d500754708e5",
+      "1010a8c11bac",
+      "b9201efbf5a6",
+      "d5139aa32546",
+      "0fcd075d9f57",
+      "453b6e50c221",
+      "80291b312459",
+      "d39ac091b005",
+      "7657bd5d45a9",
+      "b1df544fdd98",
+      "34b6b61ecc58",
+      "1a7a7f5dc41a",
+      "00db509188f0",
+      "041199286363",
+      "c4bd4333eab1",
+      "7566baf004f8",
+      "4180c7586cb1",
+      "05df0bc9ef62",
+      "acfaa314d8bc",
+      "df7350a0e379",
+      "84b6fb0bf229",
+      "647c5393915d",
+      "63602ead1a37",
+      "e91c30e2df13",
+      "6b6a2d72145e",
+      "cf6515afcb5a",
+      "0f1d68687edd",
+      "3ec2adada116",
+      "4e7c92225364",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "9ea39468a2ec",
+      "0331f61415c0",
+      "260f2103255f",
+      "9ec23e1d874a",
+      "2fda1602f756",
+      "acbbb633de56",
+      "e8b1cefb7440",
+      "dfb462b1f665",
+      "fdbc1c6e4fc2",
+      "0d238bb278d4",
+      "e504840e892e",
+      "cb6c7d92a2a9",
+      "6fe073330586",
+      "23e771b7caa4",
+      "f96e9adce467",
+      "eb7c0cd2d192",
+      "fbe69af60117",
+      "18df6b59f1b8",
+      "8e3fcbc720a7",
+      "4748dac32cb6",
+      "8a95a03bdc65",
+      "800246adcbcb",
+      "62bb42ad80d2",
+      "e146114ba8ec",
+      "8f938ad31ca7",
+      "73edaf240ba4",
+      "347b2365cf0d",
+      "c465910e2b28",
+      "2a874b8ed171",
+      "42758e20cbaf",
+      "d8196cc161e2",
+      "dd248aa70410",
+      "f77f8a2af59d",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "386984bd9daf"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 13261,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 471,
+    "instruction_tokens_modular": 411,
+    "role": "execute",
+    "tool_tokens_disclosed": 5995,
+    "tool_tokens_minimal": 5995,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_selected_l0": 25,
+    "skill_tokens_selected_l2": 62,
+    "skill_routing_mode": "shadow",
+    "session_id": "8f28885c-34af-4211-935a-dfa69789f501",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:opus",
+  "claimed_at": 1791318338.1356218,
+  "account": "B",
+  "pid": 28063,
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_pick_exits_3_when_none (test_cli.Cli.test_pick_exits_3_when_none)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_end_to_end_real_transcript (test_cli.Cli.test_pick_planner_end_to_end_real_transcript)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_model_flag (test_cli.Cli.test_pick_planner_model_flag)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_planner_prints_pinned_account_with_notice (test_cli.Cli.test_pick_planner_prints_pinned_account_with_notice)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_tallies_then_prints_account_and_config_dir (test_cli.Cli.test_pick_tallies_then_prints_account_and_config_dir)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_pick_tally_failure_prints_one_stderr_line_and_proceeds (test_cli.Cli.test_pick_tally_failure_prints_one_stderr_line_and_proceeds)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_scorecard_handoffs_preserves_legacy_sections_before_table (test_cli.Cli.test_scorecard_handoffs_preserves_legacy_sections_before_table)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_scorecard_handoffs_shows_cache_columns (test_cli.Cli.test_scorecard_handoffs_shows_cache_columns)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_lists_gates_near_timeout (test_cli.Cli.test_status_lists_gates_near_timeout)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_no_gates_near_timeout (test_cli.Cli.test_status_no_gates_near_timeout)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_status_plain_and_json (test_cli.Cli.test_status_plain_and_json)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nERROR: test_economy_join_keys_align (test_context_eval.ContextEval.test_economy_join_keys_align)\nTraceback (most recent call last):\nUnboundLocalError: cannot access local variable 'Pool' where it is not associated with a value\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\n/Users/k3ntaw/code/orchestrator/wt/T-1678/.orchestrator/runs/tests/T-1678-20261006-223854.log\n",
+    "flaky_runs": [
+      {
+        "ids": [
+          "test_cli.Cli.test_pick_exits_3_when_none",
+          "test_cli.Cli.test_pick_planner_end_to_end_real_transcript",
+          "test_cli.Cli.test_pick_planner_model_flag",
+          "test_cli.Cli.test_pick_planner_prints_pinned_account_with_notice",
+          "test_cli.Cli.test_pick_tallies_then_prints_account_and_config_dir",
+          "test_cli.Cli.test_pick_tally_failure_prints_one_stderr_line_and_proceeds",
+          "test_cli.Cli.test_scorecard_handoffs_preserves_legacy_sections_before_table",
+          "test_cli.Cli.test_scorecard_handoffs_shows_cache_columns",
+          "test_cli.Cli.test_status_lists_gates_near_timeout",
+          "test_cli.Cli.test_status_no_gates_near_timeout",
+          "test_cli.Cli.test_status_plain_and_json",
+          "test_context_eval.ContextEval.test_economy_join_keys_align",
+          "test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists"
+        ],
+        "returncode": 1,
+        "output": "taw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_cli (unittest.loader._FailedTest.test_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_cli\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_cli'\n\n\n======================================================================\nERROR: test_context_eval (unittest.loader._FailedTest.test_context_eval)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_context_eval\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_context_eval'\n\n\n======================================================================\nERROR: test_goals (unittest.loader._FailedTest.test_goals)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_goals\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_goals'\n\n\n----------------------------------------------------------------------\nRan 13 tests in 0.000s\n\nFAILED (errors=13)\n"
+      }
+    ]
+  },
+  "merged_into": "goal/T-1667",
+  "merged_via": "fix round T-1696 600c51727f037b86b737e3ebe0e129b8e028cab3"
+}

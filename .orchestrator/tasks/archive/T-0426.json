@@ -1,0 +1,97 @@
+{
+  "id": "T-0426",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H4 fix round 9: usd for reservations is derived from tokens when a run row has no cost field (Codex rows), so the estimate median and the goal dollar cap stay meaningful; reconcile_dead releases with the whole result so top-level cost is kept (review T-0421)",
+  "spec": "STEP 0: the worktree must contain the rebased H4 chain through f27c9a4 (T-0419) in git log; never drop or amend it.\nReview T-0421 on T-0419, findings to address:\n1. (high) orchestrator/pool.py:355 release() and _reservation_estimate() read cost from usage[\"usd\"] or usage[\"total_cost_usd\"], but executor._run's Codex path returns raw token counts with no cost field, so once five or more execute runs exist the median usd settles at 0.0, every execute reservation gets est_usd 0, and a configured goal_budget_usd[\"execute\"] cap is a permanent no-op. Fix: one helper usd_of(row_or_usage, executor_or_account) that returns the recorded usd when present, else tokens converted with the executor's or account's configured usd-per-token ratio, else [limits].default_tokens_per_usd (already documented as an estimate); mark such values estimated (est_usd_source: \"tokens\") in the ledger; the history median uses the same helper so Codex rows contribute non-zero estimates. Test: tests/test_pool.py::test_estimate_uses_token_derived_usd_for_codex_rows (five Codex rows without usd yield a positive est_usd and a working goal cap).\n2. (med) orchestrator/daemon.py:348 reconcile_dead passes only result[\"usage\"] to pool.release, dropping the top-level usd that Claude results carry; pass the whole result (usage plus usd fields) and let release() use usd_of. Test: tests/test_daemon.py::test_reconcile_dead_release_keeps_top_level_cost.\n3. (low) no code change: the acceptance wording about grepping daemon.py for notified was imprecise; behaviour is covered by test_notify_once_per_transition.\nKeep every H4 lineage test green. Run .claude/hooks/tests-green.sh from the worktree root twice (exit 0 both), then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0423"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f27c9a4 and the rebased H4 chain below your commit",
+    "tests/test_pool.py::test_estimate_uses_token_derived_usd_for_codex_rows and tests/test_daemon.py::test_reconcile_dead_release_keeps_top_level_cost pass",
+    "one helper derives usd from tokens when a row lacks a cost field and both release() and the estimate use it (grep shows a single usd_of definition and no direct usage['usd'] reads elsewhere in pool.py)",
+    "tests/test_pool.py reservation tests, tests/test_daemon.py::test_notify_once_per_transition, ::test_budget_refusal_leaves_task_queued_without_repair, ::test_dispatch_passes_no_placeholder_ids and tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes, ::test_worker_refusal_requeues_without_hold still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0426",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/test_pool.py",
+        "line": 0,
+        "issue": "Acceptance criteria require tests/test_pool.py::test_estimate_uses_token_derived_usd_for_codex_rows and tests/test_daemon.py::test_reconcile_dead_release_keeps_top_level_cost to pass. Neither test exists anywhere in the worktree (grep confirms zero matches), so this required acceptance check is unmet \u2014 the diff is missing the codex-token-derived-usd estimate test and the top-level-cost release test entirely.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789913982.646295,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0426",
+      "claimed_at": 1789913982.645995
+    },
+    {
+      "ts": 1789913982.647201,
+      "account": "B"
+    },
+    {
+      "ts": 1789913982.6771579,
+      "pid": 16299,
+      "account": "B"
+    },
+    {
+      "ts": 1789914058.758686,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_pool.py",
+            "line": 0,
+            "issue": "Acceptance criteria require tests/test_pool.py::test_estimate_uses_token_derived_usd_for_codex_rows and tests/test_daemon.py::test_reconcile_dead_release_keeps_top_level_cost to pass. Neither test exists anywhere in the worktree (grep confirms zero matches), so this required acceptance check is unmet \u2014 the diff is missing the codex-token-derived-usd estimate test and the top-level-cost release test entirely.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789914058.759945,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789913982.645995,
+  "account": "B",
+  "pid": 16299,
+  "review_verdict": "request_changes"
+}

@@ -1,0 +1,122 @@
+{
+  "id": "T-0231",
+  "parent": "T-0201",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review: E6: Jev relevance ranking for memory recall and the handover snapshot \u2014 prune what the Planner reads, keep the rest verbatim",
+  "spec": "Compaction the jev-compactor way: score each candidate item for relevance to the current goal, drop the low ones, never summarize. Two Planner inputs qualify. Build on E2 (T-0214) and P3 (T-0204).\n1. orchestrator/jev_rank.py rank(items: list[dict], goal_text: str, *, threshold=0.35, batch=40) -> list[dict]: each item {id, text}; asks Jev one noul question per item ('Is this entry relevant to the goal below?' with the goal as part of the state; batch up to 40 questions per request within the 64k limit), attaches p_relevant, returns items with p >= threshold sorted by p desc. jev.ask() None -> return items unchanged (fail-open) with p_relevant = None.\n2. skills/planner/memory/scripts/recall.py index: new flag --goal \"<text>\" (or env ORCH_GOAL_TEXT): rank the hits with jev_rank before printing, print p as a fourth column, and print 'jev: off' when the client is disabled. Default output without --goal unchanged.\n3. orchestrator/handover.py: the 'done (not merged)', 'failed' and 'Last events' groups pass through jev_rank against the open goal's title+spec with threshold 0.5 before rendering; merged and held groups are never pruned; the section header notes 'pruned N by jev' when N is greater than 0. Without Jev the output is byte-identical to today.\nTests: tests/test_jev_rank.py (batching, threshold, fail-open) and tests/test_handover.py::test_handover_prunes_with_jev and ::test_handover_unchanged_without_jev with jev.ask monkeypatched; tests/test_memory_skill.py::test_recall_goal_flag_ranks.",
+  "inputs": [
+    "T-0216"
+  ],
+  "acceptance": [
+    "tests/test_jev_rank.py::test_rank_batches_questions, ::test_rank_applies_threshold, ::test_rank_fail_open pass",
+    "tests/test_handover.py::test_handover_prunes_with_jev and ::test_handover_unchanged_without_jev pass",
+    "tests/test_memory_skill.py::test_recall_goal_flag_ranks passes",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/jev_rank.py",
+    "skills/planner/memory/scripts/recall.py",
+    "orchestrator/handover.py",
+    "tests/test_jev_rank.py",
+    "tests/test_handover.py",
+    "tests/test_memory_skill.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0231",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/jev_rank.py",
+        "line": 34,
+        "issue": "An HTTP-200 response whose `answers` map is missing an id (or has `noul: null`) yields `p_relevant=None`, and the `kept` filter on line 36 drops those items as if they scored 0. The callers' fail-open guard only fires when `len(ranked) == len(items)` and *all* are None, so a partial answer set is silently treated as 'these entries are irrelevant'. Concretely: Jev returns 200 with `{\"answers\": {}}` (or a body shape without `answers`, e.g. `{\"result\": ...}` after an API change) -> rank() returns [] -> handover._prune returns ([], N) -> the whole 'done (not merged)' and 'failed' lists vanish from plan.md and the header claims 'pruned N by jev'; recall.py prints '# 0 hits (showing 0)'. A 200 with an unexpected body is strictly worse than a network error, which is backwards for a module whose docstring is 'fail-open'. Unscored items should be kept (p_relevant=None -> keep), not dropped. No test covers a 200 with partial/absent answers \u2014 only all-or-nothing.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/handover.py",
+        "line": 249,
+        "issue": "`_render_section` now performs blocking network I/O while the global bus flock is held (`write()` line 243 `with bus.locked():` -> line 249 `_render_section`), and `maybe_write` wraps that in a second acquisition on the daemon tick path. Per handover it issues up to 2 `jev.ask` calls per goal (failed + done groups) x MAX_GOALS=12, plus 1 for events = up to 25 sequential HTTPS round trips. At the default `timeout_s` of 5s with the 429/529 retry (+0.5s backoff) that is a worst case of roughly 2 minutes holding the flock; even a healthy Jev adds seconds. Every other orchestrator process \u2014 daemon dispatch, worker `bus.update`, task creation \u2014 blocks on that flock for the duration. Before this change `_render_section` was pure local sqlite reads. Render (and score) outside the lock, or cap/parallelize the calls.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/jev_rank.py",
+        "line": 37,
+        "issue": "`rank` promises 'never raises', but `answer.get(\"noul\")` is unvalidated external API data. A non-numeric value (string \"0.9\", a dict, a bool-in-a-list) makes the `item[\"p_relevant\"] >= threshold` comparison on line 36 or the `sort` on line 37 raise TypeError. That escapes rank() -> handover._prune -> `handover.write()` -> the daemon tick, aborting the handover write with the bus flock semantics of a raised exception, rather than degrading to the unranked list. Coerce with a float()/isinstance check and treat anything non-numeric as unscored.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789817558.2143612,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0231",
+      "claimed_at": 1789817558.213954
+    },
+    {
+      "ts": 1789817558.216479,
+      "account": "A"
+    },
+    {
+      "ts": 1789817558.249525,
+      "pid": 85700,
+      "account": "A"
+    },
+    {
+      "ts": 1789817683.870247,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/jev_rank.py",
+            "line": 34,
+            "issue": "An HTTP-200 response whose `answers` map is missing an id (or has `noul: null`) yields `p_relevant=None`, and the `kept` filter on line 36 drops those items as if they scored 0. The callers' fail-open guard only fires when `len(ranked) == len(items)` and *all* are None, so a partial answer set is silently treated as 'these entries are irrelevant'. Concretely: Jev returns 200 with `{\"answers\": {}}` (or a body shape without `answers`, e.g. `{\"result\": ...}` after an API change) -> rank() returns [] -> handover._prune returns ([], N) -> the whole 'done (not merged)' and 'failed' lists vanish from plan.md and the header claims 'pruned N by jev'; recall.py prints '# 0 hits (showing 0)'. A 200 with an unexpected body is strictly worse than a network error, which is backwards for a module whose docstring is 'fail-open'. Unscored items should be kept (p_relevant=None -> keep), not dropped. No test covers a 200 with partial/absent answers \u2014 only all-or-nothing.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/handover.py",
+            "line": 249,
+            "issue": "`_render_section` now performs blocking network I/O while the global bus flock is held (`write()` line 243 `with bus.locked():` -> line 249 `_render_section`), and `maybe_write` wraps that in a second acquisition on the daemon tick path. Per handover it issues up to 2 `jev.ask` calls per goal (failed + done groups) x MAX_GOALS=12, plus 1 for events = up to 25 sequential HTTPS round trips. At the default `timeout_s` of 5s with the 429/529 retry (+0.5s backoff) that is a worst case of roughly 2 minutes holding the flock; even a healthy Jev adds seconds. Every other orchestrator process \u2014 daemon dispatch, worker `bus.update`, task creation \u2014 blocks on that flock for the duration. Before this change `_render_section` was pure local sqlite reads. Render (and score) outside the lock, or cap/parallelize the calls.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/jev_rank.py",
+            "line": 37,
+            "issue": "`rank` promises 'never raises', but `answer.get(\"noul\")` is unvalidated external API data. A non-numeric value (string \"0.9\", a dict, a bool-in-a-list) makes the `item[\"p_relevant\"] >= threshold` comparison on line 36 or the `sort` on line 37 raise TypeError. That escapes rank() -> handover._prune -> `handover.write()` -> the daemon tick, aborting the handover write with the bus flock semantics of a raised exception, rather than degrading to the unranked list. Coerce with a float()/isinstance check and treat anything non-numeric as unscored.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789817683.872802,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789817558.213954,
+  "account": "A",
+  "pid": 85700,
+  "review_verdict": "request_changes"
+}

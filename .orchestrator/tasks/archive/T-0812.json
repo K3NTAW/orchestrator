@@ -1,0 +1,183 @@
+{
+  "id": "T-0812",
+  "created_at": 1790091042.217535,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: P12/P13/P25 conditional instruction modules, shadow: split role prompts into a minimal base plus deterministic modules selected by scope, language and task class; log instruction_loading decisions; rendered prompts byte-identical until active",
+  "spec": "Facts (Planner grep, provenance repo): prompts live in .orchestrator/prompts/*.md and are rendered by spawn.render (spawn.py:101-113, str.replace of double-brace tokens, unfilled check). Sizes: execute.md 1513 B (after the dedup task; carries repo-specific unittest/_harness rules and a tool-call budget), planner.md 4307 B, planner-shadow.md 1110 B, fix-delta.md 849 B, review.md 599 B, spec-review.md 575 B, fix-round.md 550 B, scout.md 537 B, challenge.md 257 B. The P1 telemetry records instruction_tokens per run (rendered prompt minus packet).\nDo:\n1. Module store: .orchestrators/prompts is wrong; use .orchestrator/prompts/modules/<name>.md. Create modules by moving text out of the existing prompts WITHOUT changing the rendered result in shadow: python-unittest.md (the unittest/_harness/no-pytest rules from execute.md), tool-budget.md (the tool-call budget lines), review-security.md (the security checklist pointer currently added in review_packet's security section stays where it is; this module carries the security-review instructions if any live in review.md, else create it with the two-line trust-boundary reminder from CLAUDE.md \"Trust\" and mark it mandatory for security_review), docs-task.md (new: for scope that is all .md: \"no tests to add; keep line width; link revert path\"), migrations.md (new, selected when any scope path matches *migrations* or *alembic*: \"never edit an applied migration; add a new revision; downgrade must work\"). Fundamental safety rules (never touch files outside scope, never leave uncommitted changes, commit message starts with the task id, report the gate result) stay in the base prompt and are never a module.\n2. orchestrator/instructions.py (new): RULES = ordered list of (module, predicate) with deterministic predicates over task fields: role, scope globs, language (by scope suffixes: .py \u2192 python; .ts/.tsx \u2192 typescript; .swift \u2192 swift; .md only \u2192 docs), task_class, constraints. `select(task, role) -> {\"modules\": [...], \"mandatory\": [...], \"reasons\": {module: reason}}`. `compose(base_text, modules) -> str` appends modules in RULES order under a single \"## conditional instructions\" heading. `mode()` reads promotion.mode(\"conditional_instructions\").\n3. spawn.render gains an optional `task=` kwarg: when given and mode is off \u2192 today's behaviour (the full legacy prompt file, unchanged bytes). When shadow: render the legacy prompt exactly as today AND compute the modular variant (base = the prompt file minus the module texts, plus selected modules) and record decision_log.record(kind=\"instruction_loading\", subject=task id, candidates=all module names, hard_constraints=mandatory, deterministic={\"selected\", \"reasons\", \"legacy_tokens\", \"modular_tokens\", \"delta_tokens\"}, selected=modules, reason=\"deterministic rules v1\", mode=\"shadow\"); add instruction_tokens_modular to packet_meta/run context (bus.py copied keys). When active: return the modular variant (this is the only place bytes change, gated by the mode; the mode stays \"shadow\" in pool.toml).\n4. All render call sites (spawn.run_worker execute/review/spec_review/scout/challenge, daemon dispatch and _dispatch_fresh_fix, planner packets if they use render) pass task=. Keep every existing render test green; the legacy files stay as the shadow source of truth so nothing changes for the models.\n5. context_scorecard: per-role columns instruction_tokens (avg, from P1) and instruction_tokens_modular (avg) and instruction_reduction.\nTests (unittest): tests/test_instructions.py::test_select_python_scope_loads_unittest_module, ::test_docs_only_scope_loads_docs_module_and_not_unittest, ::test_migration_scope_loads_migration_module, ::test_mandatory_modules_never_dropped; tests/test_spawn.py::test_render_bytes_identical_in_shadow (render with task= in shadow equals render without task= for execute, review, scout), ::test_render_active_appends_selected_modules_only (with mode patched to active the output contains the selected module text once and no unselected module). docs/context-economy/07-instructions.md (\u226460 lines): base vs modules, the rule table, what shadow logs, revert path (mode off; the legacy prompt files are untouched).\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally anywhere in code comments or docs that spawn.render might read; describe them in words.",
+  "inputs": [
+    "T-0803"
+  ],
+  "acceptance": [
+    "tests/test_instructions.py::test_select_python_scope_loads_unittest_module passes",
+    "tests/test_instructions.py::test_docs_only_scope_loads_docs_module_and_not_unittest passes",
+    "tests/test_instructions.py::test_migration_scope_loads_migration_module passes",
+    "tests/test_instructions.py::test_mandatory_modules_never_dropped passes",
+    "tests/test_spawn.py::test_render_bytes_identical_in_shadow passes",
+    "tests/test_spawn.py::test_render_active_appends_selected_modules_only passes",
+    "docs/context-economy/07-instructions.md exists; .orchestrator/prompts/modules/ holds at least python-unittest.md, tool-budget.md, review-security.md, docs-task.md, migrations.md; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/instructions.py",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    "orchestrator/context_scorecard.py",
+    ".orchestrator/prompts/modules/python-unittest.md",
+    ".orchestrator/prompts/modules/tool-budget.md",
+    ".orchestrator/prompts/modules/review-security.md",
+    ".orchestrator/prompts/modules/docs-task.md",
+    ".orchestrator/prompts/modules/migrations.md",
+    "tests/test_instructions.py",
+    "tests/test_spawn.py",
+    "docs/context-economy/07-instructions.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0812",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/instructions.py",
+        "issue": "review-security.md's selection must be a deterministic predicate over task fields (role/scope globs/language/task_class/constraints), but the real 'is this a security review' signal computed in review_packet() (spawn.py:570-586) also includes a semantic regex match over diff/spec text (auth|credential|secret|token|permission|crypt|security). That signal has no task-field equivalent, so instructions.select() will silently miss exactly the reviews that only trip the semantic trigger (clean scope, no review_reason, complexity below threshold) \u2014 the mandatory trust-boundary module won't load for them even though review_packet() already flagged them as security_review for context routing.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/context_scorecard.py",
+        "issue": "instruction_tokens_modular (avg) and instruction_reduction columns are speced but have no listed test in tests/test_instructions.py or tests/test_spawn.py, and no acceptance criterion covers them \u2014 unlike every other deliverable in this spec. A key-name mismatch against bus.py's context-dict allowlist or a wrong reduction formula would ship without failing the gate.",
+        "severity": "med",
+        "line": 50
+      },
+      {
+        "path": ".orchestrator/prompts/execute.md",
+        "issue": "Spec's Facts section states execute.md is 1513 B (claimed provenance: repo grep) but the file currently measures 1585 B and no commit since T-0799 touched it \u2014 the quoted size is stale.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Either add an explicit task-field-derivable proxy for the semantic security trigger (e.g. persist review_reason/matched-glob/complexity results consistently, and accept that semantic-only triggers are out of scope for module selection with that limitation stated), or have render() receive the already-computed security flag from review_packet() instead of having instructions.select() re-derive it independently, so the two checks cannot drift.",
+      "Add a context_scorecard test (or acceptance line) asserting instruction_tokens_modular and instruction_reduction are computed and keyed consistently with bus.py's context-dict allowlist, or drop that item from this task's scope until such a test exists.",
+      "Correct the Facts section's execute.md byte count (1585 B, not 1513 B) before executors rely on it for module-extraction math."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790091050.169292,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0812",
+      "claimed_at": 1790091050.166543
+    },
+    {
+      "ts": 1790091050.1829069,
+      "account": "B"
+    },
+    {
+      "ts": 1790091062.43756,
+      "pid": 11774,
+      "account": "B"
+    },
+    {
+      "ts": 1790091308.9686441,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/instructions.py",
+            "issue": "review-security.md's selection must be a deterministic predicate over task fields (role/scope globs/language/task_class/constraints), but the real 'is this a security review' signal computed in review_packet() (spawn.py:570-586) also includes a semantic regex match over diff/spec text (auth|credential|secret|token|permission|crypt|security). That signal has no task-field equivalent, so instructions.select() will silently miss exactly the reviews that only trip the semantic trigger (clean scope, no review_reason, complexity below threshold) \u2014 the mandatory trust-boundary module won't load for them even though review_packet() already flagged them as security_review for context routing.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/context_scorecard.py",
+            "issue": "instruction_tokens_modular (avg) and instruction_reduction columns are speced but have no listed test in tests/test_instructions.py or tests/test_spawn.py, and no acceptance criterion covers them \u2014 unlike every other deliverable in this spec. A key-name mismatch against bus.py's context-dict allowlist or a wrong reduction formula would ship without failing the gate.",
+            "severity": "med",
+            "line": 50
+          },
+          {
+            "path": ".orchestrator/prompts/execute.md",
+            "issue": "Spec's Facts section states execute.md is 1513 B (claimed provenance: repo grep) but the file currently measures 1585 B and no commit since T-0799 touched it \u2014 the quoted size is stale.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Either add an explicit task-field-derivable proxy for the semantic security trigger (e.g. persist review_reason/matched-glob/complexity results consistently, and accept that semantic-only triggers are out of scope for module selection with that limitation stated), or have render() receive the already-computed security flag from review_packet() instead of having instructions.select() re-derive it independently, so the two checks cannot drift.",
+          "Add a context_scorecard test (or acceptance line) asserting instruction_tokens_modular and instruction_reduction are computed and keyed consistently with bus.py's context-dict allowlist, or drop that item from this task's scope until such a test exists.",
+          "Correct the Facts section's execute.md byte count (1585 B, not 1513 B) before executors rely on it for module-extraction math."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790091308.9708889,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/instructions.py",
+          "issue": "review-security.md's selection must be a deterministic predicate over task fields (role/scope globs/language/task_class/constraints), but the real 'is this a security review' signal computed in review_packet() (spawn.py:570-586) also includes a semantic regex match over diff/spec text (auth|credential|secret|token|permission|crypt|security). That signal has no task-field equivalent, so instructions.select() will silently miss exactly the reviews that only trip the semantic trigger (clean scope, no review_reason, complexity below threshold) \u2014 the mandatory trust-boundary module won't load for them even though review_packet() already flagged them as security_review for context routing.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/context_scorecard.py",
+          "issue": "instruction_tokens_modular (avg) and instruction_reduction columns are speced but have no listed test in tests/test_instructions.py or tests/test_spawn.py, and no acceptance criterion covers them \u2014 unlike every other deliverable in this spec. A key-name mismatch against bus.py's context-dict allowlist or a wrong reduction formula would ship without failing the gate.",
+          "severity": "med",
+          "line": 50
+        },
+        {
+          "path": ".orchestrator/prompts/execute.md",
+          "issue": "Spec's Facts section states execute.md is 1513 B (claimed provenance: repo grep) but the file currently measures 1585 B and no commit since T-0799 touched it \u2014 the quoted size is stale.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790091050.166543,
+  "account": "B",
+  "pid": 11774,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/instructions.py",
+      "issue": "review-security.md's selection must be a deterministic predicate over task fields (role/scope globs/language/task_class/constraints), but the real 'is this a security review' signal computed in review_packet() (spawn.py:570-586) also includes a semantic regex match over diff/spec text (auth|credential|secret|token|permission|crypt|security). That signal has no task-field equivalent, so instructions.select() will silently miss exactly the reviews that only trip the semantic trigger (clean scope, no review_reason, complexity below threshold) \u2014 the mandatory trust-boundary module won't load for them even though review_packet() already flagged them as security_review for context routing.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/context_scorecard.py",
+      "issue": "instruction_tokens_modular (avg) and instruction_reduction columns are speced but have no listed test in tests/test_instructions.py or tests/test_spawn.py, and no acceptance criterion covers them \u2014 unlike every other deliverable in this spec. A key-name mismatch against bus.py's context-dict allowlist or a wrong reduction formula would ship without failing the gate.",
+      "severity": "med",
+      "line": 50
+    },
+    {
+      "path": ".orchestrator/prompts/execute.md",
+      "issue": "Spec's Facts section states execute.md is 1513 B (claimed provenance: repo grep) but the file currently measures 1585 B and no commit since T-0799 touched it \u2014 the quoted size is stale.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

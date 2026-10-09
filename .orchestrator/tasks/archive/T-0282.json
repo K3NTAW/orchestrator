@@ -1,0 +1,170 @@
+{
+  "id": "T-0282",
+  "parent": "T-0260",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: G6 v2: stage stamps get a lease and a done marker with an explicit field mapping; sweep_leases only reconciles tasks in queued, running or done, never a held task; merge retries counted (spec review T-0269 folded in)",
+  "spec": "Replaces T-0268 after spec review T-0269 (request_changes). Same problem: daemon.stamp() claims pipeline.<field> under bus.locked() before the stage acts and nothing clears it, so a crash between stamp and action wedges the task (worst first: merged_at before merge.merge, gated_at before review spawn or merge, spec_review_at before create_task, dispatched_at before executor.start).\nDesign, with the reviewer's four points resolved:\n1. Field mapping (explicit): for each claim field F in {dispatched_at, spec_review_at, gated_at, merged_at}, stamp(tid, F, ...) also writes pipeline.<F>_lease = now + [daemon].stage_lease_s (pool.toml, default 900) and complete(tid, F) writes pipeline.<F>_done = now under the lock. Callers keep passing the same F strings they pass today. Hold stamps (review_held_at, spec_review_held_at, and gate()'s three held branches that reuse gated_at for worktree missing, dirty scope and gate_red) get no lease because a stamp that also sets status=held skips the lease (stamp() checks its status kwarg).\n2. complete() calls: dispatch after spawn_async is issued; spec_review after bus.create_task returns; gate after either the review task exists or merge returned; merge_reviewed after merge.merge returns (any status: F6 already handles tests_red by popping merged_at and holding, conflict keeps merged_at and holds).\n3. sweep_leases(), first in tick(): only tasks whose status is queued, running or done; a held or failed task is never touched. For a stage with _at set, _done unset and lease expired: dispatched_at: if the task is running with a live pid or a codex_thread, mark done; else clear dispatched_at and its lease so dispatch() re-runs. spec_review_at: if a spec_review task with inputs[0] == id exists, mark done; else clear. gated_at: if a review task with inputs[0] == id exists or already_merged(), mark done; else clear so gate() re-runs. merged_at: if already_merged(), mark done and set merged_into; else increment pipeline.merge_retries and clear merged_at so merge_reviewed() retries; when merge_retries reaches 2, instead hold with hold_reason 'merge lease expired twice' (hold_reason is never overwritten on a task that is already held, guaranteed by the status filter).\n4. pool.toml [daemon] stage_lease_s = 900 with a comment; README Pipeline: the crash-and-retry sentence becomes 'a stage whose lease expires without a done marker is reconciled against process and git state and re-run; held tasks are never touched'.\n5. Tests in tests/test_daemon.py: test_lease_dispatch_rerun, test_lease_spec_review_rerun, test_lease_gate_rerun, test_lease_merge_retry_then_hold (asserts merge_retries and the hold text), test_lease_reconciles_already_merged, test_sweep_skips_held_tasks (a held merge-conflict task with merged_at and an expired lease keeps its hold_reason and merged_at), test_hold_stamps_have_no_lease. Every existing test stays green; the harness runs spawn_async synchronously.",
+  "inputs": [
+    "T-0281"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_lease_dispatch_rerun, ::test_lease_spec_review_rerun, ::test_lease_gate_rerun, ::test_lease_merge_retry_then_hold, ::test_lease_reconciles_already_merged, ::test_sweep_skips_held_tasks, ::test_hold_stamps_have_no_lease pass",
+    "every existing test_daemon test passes unchanged in intent",
+    "pool.toml documents [daemon].stage_lease_s and README describes the lease, the done marker and the held-task exclusion",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0282",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "sweep_leases() is not specified to tolerate pipeline stamps that predate the lease field. On the very first tick after this ships, every task already stamped dispatched_at/gated_at/merged_at under the old stamp()-with-no-lease code has no matching `_lease` key. If a missing lease is treated as 'already expired' (the natural default, e.g. `now > pipeline.get(f'{stage}_lease', 0)`), every in-flight execute task gets swept on deploy. For dispatched_at specifically there is no live signal to save it (see next finding), so every task genuinely mid-Codex-run at deploy time has dispatched_at cleared and gets re-dispatched by dispatch() in the same tick \u2014 a second concurrent `codex exec` in the same worktree. None of the listed tests exercise this rollout/migration case.",
+        "severity": "high",
+        "line": 98
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The design's dispatched_at reconciliation ('if the task is running with a live pid or a codex_thread, mark done') has no real signal to check for the primary execution path: bus.claim(tid, 'codex', worktree) (bus.py:158-159) never records a pid, and executor.start()/_run() only calls bus.update(codex_thread=...) after the codex subprocess has fully exited (daemon.py has no visibility into it while running \u2014 see executor.py _run(), thread_id is parsed from output only after subprocess.run returns). So for a Codex-dispatched task the 'live' check can never actually observe true, making the safety net for dispatched_at effectively decorative for the dominant code path, not just a rare crash window.",
+        "severity": "medium",
+        "line": 348
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "gate()'s gated_at reconciliation ('if a review task with inputs[0]==id exists ... mark done') only checks that at least one review task exists, not that the count matches pipeline.reviews_expected. Under code_review='always' at complexity >= two_reviews_from, gate() may create review 1 then review 2 in two separate bus.create_task calls (lines ~554-568); a crash between them leaves exactly one review task on disk. Sweep would mark gated_at done (a review exists) without ever creating the second one, permanently capping the task below its frozen reviews_expected. merge_reviewed()'s bucketing (approved/pending/stuck/unknown) has no category for 'fewer reviews than expected with nothing pending', so this surfaces later as a hold with the confusing reason 'review state unknown: ' (empty id list) instead of a diagnosis pointing at the missing second review. Not covered by the acceptance test list.",
+        "severity": "medium",
+        "line": 559
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify that sweep_leases() must not treat a pipeline.<F> stamp with no matching <F>_lease key as expired \u2014 either skip reconciliation entirely for such tasks (they were stamped under the pre-lease code path, whose action already ran synchronously) or require a one-time backfill of <F>_lease/_done alongside the deploy so nothing already in flight gets reinterpreted as abandoned.",
+      "Either give the dispatched_at liveness check a real signal for Codex tasks (e.g. record the codex subprocess's pid the same way spawn.py:147 does for Claude workers, or check for a running `codex exec` bound to the task's worktree) before relying on it, or drop the 'live pid or codex_thread' branch and state plainly that dispatched_at recovery only protects the narrow stamp-to-spawn_async window, not a crash mid-run.",
+      "Change gated_at's sweep check to count existing review tasks for the source id against pipeline.reviews_expected (not just >=1), and add a test for a crash between creating the first and second review under code_review='always' at complexity >= two_reviews_from."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789845259.8270872,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0282",
+      "claimed_at": 1789845259.826775
+    },
+    {
+      "ts": 1789845259.828353,
+      "account": "A"
+    },
+    {
+      "ts": 1789845259.837065,
+      "pid": 1796,
+      "account": "A"
+    },
+    {
+      "ts": 1789845652.741367,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "sweep_leases() is not specified to tolerate pipeline stamps that predate the lease field. On the very first tick after this ships, every task already stamped dispatched_at/gated_at/merged_at under the old stamp()-with-no-lease code has no matching `_lease` key. If a missing lease is treated as 'already expired' (the natural default, e.g. `now > pipeline.get(f'{stage}_lease', 0)`), every in-flight execute task gets swept on deploy. For dispatched_at specifically there is no live signal to save it (see next finding), so every task genuinely mid-Codex-run at deploy time has dispatched_at cleared and gets re-dispatched by dispatch() in the same tick \u2014 a second concurrent `codex exec` in the same worktree. None of the listed tests exercise this rollout/migration case.",
+            "severity": "high",
+            "line": 98
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The design's dispatched_at reconciliation ('if the task is running with a live pid or a codex_thread, mark done') has no real signal to check for the primary execution path: bus.claim(tid, 'codex', worktree) (bus.py:158-159) never records a pid, and executor.start()/_run() only calls bus.update(codex_thread=...) after the codex subprocess has fully exited (daemon.py has no visibility into it while running \u2014 see executor.py _run(), thread_id is parsed from output only after subprocess.run returns). So for a Codex-dispatched task the 'live' check can never actually observe true, making the safety net for dispatched_at effectively decorative for the dominant code path, not just a rare crash window.",
+            "severity": "medium",
+            "line": 348
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "gate()'s gated_at reconciliation ('if a review task with inputs[0]==id exists ... mark done') only checks that at least one review task exists, not that the count matches pipeline.reviews_expected. Under code_review='always' at complexity >= two_reviews_from, gate() may create review 1 then review 2 in two separate bus.create_task calls (lines ~554-568); a crash between them leaves exactly one review task on disk. Sweep would mark gated_at done (a review exists) without ever creating the second one, permanently capping the task below its frozen reviews_expected. merge_reviewed()'s bucketing (approved/pending/stuck/unknown) has no category for 'fewer reviews than expected with nothing pending', so this surfaces later as a hold with the confusing reason 'review state unknown: ' (empty id list) instead of a diagnosis pointing at the missing second review. Not covered by the acceptance test list.",
+            "severity": "medium",
+            "line": 559
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify that sweep_leases() must not treat a pipeline.<F> stamp with no matching <F>_lease key as expired \u2014 either skip reconciliation entirely for such tasks (they were stamped under the pre-lease code path, whose action already ran synchronously) or require a one-time backfill of <F>_lease/_done alongside the deploy so nothing already in flight gets reinterpreted as abandoned.",
+          "Either give the dispatched_at liveness check a real signal for Codex tasks (e.g. record the codex subprocess's pid the same way spawn.py:147 does for Claude workers, or check for a running `codex exec` bound to the task's worktree) before relying on it, or drop the 'live pid or codex_thread' branch and state plainly that dispatched_at recovery only protects the narrow stamp-to-spawn_async window, not a crash mid-run.",
+          "Change gated_at's sweep check to count existing review tasks for the source id against pipeline.reviews_expected (not just >=1), and add a test for a crash between creating the first and second review under code_review='always' at complexity >= two_reviews_from."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789845652.7428632,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "sweep_leases() is not specified to tolerate pipeline stamps that predate the lease field. On the very first tick after this ships, every task already stamped dispatched_at/gated_at/merged_at under the old stamp()-with-no-lease code has no matching `_lease` key. If a missing lease is treated as 'already expired' (the natural default, e.g. `now > pipeline.get(f'{stage}_lease', 0)`), every in-flight execute task gets swept on deploy. For dispatched_at specifically there is no live signal to save it (see next finding), so every task genuinely mid-Codex-run at deploy time has dispatched_at cleared and gets re-dispatched by dispatch() in the same tick \u2014 a second concurrent `codex exec` in the same worktree. None of the listed tests exercise this rollout/migration case.",
+          "severity": "high",
+          "line": 98
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The design's dispatched_at reconciliation ('if the task is running with a live pid or a codex_thread, mark done') has no real signal to check for the primary execution path: bus.claim(tid, 'codex', worktree) (bus.py:158-159) never records a pid, and executor.start()/_run() only calls bus.update(codex_thread=...) after the codex subprocess has fully exited (daemon.py has no visibility into it while running \u2014 see executor.py _run(), thread_id is parsed from output only after subprocess.run returns). So for a Codex-dispatched task the 'live' check can never actually observe true, making the safety net for dispatched_at effectively decorative for the dominant code path, not just a rare crash window.",
+          "severity": "medium",
+          "line": 348
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "gate()'s gated_at reconciliation ('if a review task with inputs[0]==id exists ... mark done') only checks that at least one review task exists, not that the count matches pipeline.reviews_expected. Under code_review='always' at complexity >= two_reviews_from, gate() may create review 1 then review 2 in two separate bus.create_task calls (lines ~554-568); a crash between them leaves exactly one review task on disk. Sweep would mark gated_at done (a review exists) without ever creating the second one, permanently capping the task below its frozen reviews_expected. merge_reviewed()'s bucketing (approved/pending/stuck/unknown) has no category for 'fewer reviews than expected with nothing pending', so this surfaces later as a hold with the confusing reason 'review state unknown: ' (empty id list) instead of a diagnosis pointing at the missing second review. Not covered by the acceptance test list.",
+          "severity": "medium",
+          "line": 559
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789845259.826775,
+  "account": "A",
+  "pid": 1796,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "sweep_leases() is not specified to tolerate pipeline stamps that predate the lease field. On the very first tick after this ships, every task already stamped dispatched_at/gated_at/merged_at under the old stamp()-with-no-lease code has no matching `_lease` key. If a missing lease is treated as 'already expired' (the natural default, e.g. `now > pipeline.get(f'{stage}_lease', 0)`), every in-flight execute task gets swept on deploy. For dispatched_at specifically there is no live signal to save it (see next finding), so every task genuinely mid-Codex-run at deploy time has dispatched_at cleared and gets re-dispatched by dispatch() in the same tick \u2014 a second concurrent `codex exec` in the same worktree. None of the listed tests exercise this rollout/migration case.",
+      "severity": "high",
+      "line": 98
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The design's dispatched_at reconciliation ('if the task is running with a live pid or a codex_thread, mark done') has no real signal to check for the primary execution path: bus.claim(tid, 'codex', worktree) (bus.py:158-159) never records a pid, and executor.start()/_run() only calls bus.update(codex_thread=...) after the codex subprocess has fully exited (daemon.py has no visibility into it while running \u2014 see executor.py _run(), thread_id is parsed from output only after subprocess.run returns). So for a Codex-dispatched task the 'live' check can never actually observe true, making the safety net for dispatched_at effectively decorative for the dominant code path, not just a rare crash window.",
+      "severity": "medium",
+      "line": 348
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "gate()'s gated_at reconciliation ('if a review task with inputs[0]==id exists ... mark done') only checks that at least one review task exists, not that the count matches pipeline.reviews_expected. Under code_review='always' at complexity >= two_reviews_from, gate() may create review 1 then review 2 in two separate bus.create_task calls (lines ~554-568); a crash between them leaves exactly one review task on disk. Sweep would mark gated_at done (a review exists) without ever creating the second one, permanently capping the task below its frozen reviews_expected. merge_reviewed()'s bucketing (approved/pending/stuck/unknown) has no category for 'fewer reviews than expected with nothing pending', so this surfaces later as a hold with the confusing reason 'review state unknown: ' (empty id list) instead of a diagnosis pointing at the missing second review. Not covered by the acceptance test list.",
+      "severity": "medium",
+      "line": 559
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "id": "T-0305",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G2b fix round 1: repo-map trimming spreads cuts across modules so daemon.py and spawn.py keep their public functions; the merge gate never skips on an ambient env var (review T-0295)",
+  "spec": "STEP 0: the worktree must contain dd8ab79 \"T-0267 add repository map generator\" in git log; never drop it.\nReview T-0295 on T-0267: (high) repomap.build's budget trim sorts candidates by (rank, module, symbol) and pops from the front, so it empties whole modules in rank-then-alphabetical order; on this repo daemon.py and spawn.py sections end up with only their docstring, failing acceptance 3 (daemon.py, bus.py and spawn.py must list their public functions); the three-module fixture is too small to expose it. (med) merge.py guards the entire tests-green invocation with `if not os.environ.get(IN_TESTS_GREEN)`, so any process with ORCH_TESTS_GREEN in its environment skips the merge gate and fast-forwards unverified code; the gate is the merge bar and must never be skippable by an ambient variable.\nChange:\n1. repomap.build: trim round-robin across modules by removing the lowest-value symbol from the module that currently has the most symbols (ties by lower rank), never removing a module's last 3 public symbols while any module still has more than 3; module order and header unchanged. Test with a fixture of four modules where two have 12 symbols each and the budget forces cuts: every module keeps at least 3 symbols and the two big modules lose symbols first. Verify on this repo that `orchestrator repomap --stdout` lists at least 3 functions each for daemon.py, bus.py and spawn.py under 4,000 chars.\n2. merge.merge: the tests-green gate always runs; remove the environment-based skip of the gate. Only the repo-map refresh may be skipped, and only when merge() is called with an explicit keyword refresh_repomap=False or ORCH_ROOT has no orchestrator/repomap.py. If the recursion the first thread saw (test_merge's real-repo merges re-running the suite) reappears, fix its cause explicitly: the nested gate must run inside the scratch repo only (cwd and ORCH_ROOT of the scratch repo, whose tests are tiny), never against this repo; document the mechanism in a comment. Test: test_merge_gate_runs_even_with_marker_env (ORCH_TESTS_GREEN set in os.environ, merge still invokes the gate, asserted through a monkeypatched subprocess.run).\n3. Keep tests/test_repomap.py and tests/test_merge.py green; final message reports the repomap --stdout size and the per-module function counts for daemon, bus and spawn.",
+  "inputs": [
+    "T-0302"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows dd8ab79 below your commit",
+    "tests/test_repomap.py::test_trim_spreads_across_modules passes and the three T-0267 repomap tests still pass",
+    "tests/test_merge.py::test_merge_gate_runs_even_with_marker_env passes and test_merge_refreshes_repomap_on_py_change still passes",
+    "uv run orchestrator repomap --stdout prints under 4,000 chars with at least 3 functions each for daemon.py, bus.py and spawn.py (counts in the final message)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree within 10 minutes"
+  ],
+  "scope": [
+    "orchestrator/repomap.py",
+    "orchestrator/merge.py",
+    "tests/test_repomap.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0305",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/merge.py",
+        "line": 72,
+        "issue": "build(ROOT) reads ROOT's on-disk working tree, not the merged sha. Whenever ROOT doesn't have the target branch checked out (the default case per the comment at line 43-44, since ROOT is normally on main while merges target goal/<parent>), the 'else' branch only does update-ref and never touches ROOT's working files. architecture.md then gets written from whatever branch ROOT happens to have checked out, and repomap.py's own internal 'git rev-parse --short HEAD' (run with cwd=ROOT) reports that unrelated HEAD sha in the header, not the sha just merged. The feature silently produces a wrong/stale architecture doc in the common path.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/merge.py",
+        "line": 33,
+        "issue": "gate_env sets ORCH_ROOT=wt for the tests-green.sh subprocess, but ORCH_ROOT is the load-bearing env var orchestrator/__init__.py uses to resolve the whole package's ROOT. grep confirms tests-green.sh never reads ORCH_TESTS_GREEN or ORCH_ROOT, so the comment's claimed 'pin the nested gate to the task worktree so recursion validates its tiny scratch repository' recursion guard does not actually exist anywhere. If any nested process spawned by tests-green.sh imports `orchestrator` fresh (not going through tests/_harness.py's override), it would silently treat the task worktree as the real orchestrator root. The new test test_merge_gate_runs_even_with_marker_env only checks the subprocess call still happens with the marker pre-set in os.environ; it doesn't exercise any real recursion-guard behavior, since none is wired up.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/merge.py",
+        "line": 73,
+        "issue": "Bare `except Exception` around repomap regeneration only prints to stderr and lets the merge proceed as 'done' with no record that architecture.md failed to refresh (e.g. on a git diff failure or an unparseable .py file), making the failure easy to miss in daemon logs.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789848586.923929,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0305",
+      "claimed_at": 1789848586.923619
+    },
+    {
+      "ts": 1789848586.925397,
+      "account": "B"
+    },
+    {
+      "ts": 1789848586.954633,
+      "pid": 90803,
+      "account": "B"
+    },
+    {
+      "ts": 1789848764.732533,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/merge.py",
+            "line": 72,
+            "issue": "build(ROOT) reads ROOT's on-disk working tree, not the merged sha. Whenever ROOT doesn't have the target branch checked out (the default case per the comment at line 43-44, since ROOT is normally on main while merges target goal/<parent>), the 'else' branch only does update-ref and never touches ROOT's working files. architecture.md then gets written from whatever branch ROOT happens to have checked out, and repomap.py's own internal 'git rev-parse --short HEAD' (run with cwd=ROOT) reports that unrelated HEAD sha in the header, not the sha just merged. The feature silently produces a wrong/stale architecture doc in the common path.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/merge.py",
+            "line": 33,
+            "issue": "gate_env sets ORCH_ROOT=wt for the tests-green.sh subprocess, but ORCH_ROOT is the load-bearing env var orchestrator/__init__.py uses to resolve the whole package's ROOT. grep confirms tests-green.sh never reads ORCH_TESTS_GREEN or ORCH_ROOT, so the comment's claimed 'pin the nested gate to the task worktree so recursion validates its tiny scratch repository' recursion guard does not actually exist anywhere. If any nested process spawned by tests-green.sh imports `orchestrator` fresh (not going through tests/_harness.py's override), it would silently treat the task worktree as the real orchestrator root. The new test test_merge_gate_runs_even_with_marker_env only checks the subprocess call still happens with the marker pre-set in os.environ; it doesn't exercise any real recursion-guard behavior, since none is wired up.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/merge.py",
+            "line": 73,
+            "issue": "Bare `except Exception` around repomap regeneration only prints to stderr and lets the merge proceed as 'done' with no record that architecture.md failed to refresh (e.g. on a git diff failure or an unparseable .py file), making the failure easy to miss in daemon logs.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789848764.7343879,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789848586.923619,
+  "account": "B",
+  "pid": 90803,
+  "review_verdict": "request_changes"
+}

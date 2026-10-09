@@ -1,0 +1,81 @@
+{
+  "id": "T-0369",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H3a: orchestrator/decision.py \u2014 deterministic routine / investigate / escalate routing for decision points with persisted launch reasons, evidence and cheaper steps tried; pool.toml [planner.routes]",
+  "spec": "Build on goal/T-0353. Handover section 3. Evidence: no decision.py exists; daemon.py:1044-1049 launches a Planner unconditionally per decision point when planner.autonomous is true; planner_runs.py:271-317 records kind, payload_key, attempts, account but no reason, evidence or cheaper steps. Pure functions only in this task; wiring into planner_runs/daemon is H3b.\n1. New module orchestrator/decision.py with route(point, ctx) -> Route(name, reason, evidence, cheaper_steps, tier). point is a decision point dict as planner_runs.decision_points yields (kind in held, scouts_done, closable; goal_id; task ids; payload_key). ctx is a plain dict the caller fills from bus state: goal complexity, task_class (scorecard.task_class), hold_reason, failure signature and whether it repeats an earlier one in the lineage, auto fix rounds used vs [daemon].auto_fix_rounds, spec review round count, number of scouts and whether every scout posted, gate state, security or semantic review triggers present, blocked scouts, whether the diff touches auth/migrations/public interfaces (from the same lists _review_plan uses), infra failure kind (auth, quota, unavailable) if any.\n2. Deterministic rules, in this order, each naming its reason string: (a) infra failure kind present -> route none with reason \"infra:<kind>\" (hold, no model); (b) held with a routine fix round still possible (G7 rules: extractable failing ids or in-scope review comments, lineage cap not reached, signature not repeated) -> routine (daemon handles, no launch); (c) held with a repeated unchanged signature, lineage cap reached, spec review request_changes twice, scout blocked, or hold touching auth/migrations/interfaces/data deletion -> escalate; (d) scouts_done for a goal with complexity at most [planner.routes].investigate_max_complexity (default 4) and no security or semantic trigger -> investigate (tier [planner.routes].investigate_tier, default sonnet); (e) scouts_done otherwise -> escalate; (f) closable with every child merged and the goal-head gate green -> routine (deterministic close; no launch); closable with anything unmerged or a red gate -> escalate. Unknown risk (missing ctx fields) never picks routine or investigate: it escalates with reason \"unknown:<field>\".\n3. Every Route carries evidence (task ids, hold reasons, failing ids, signatures actually used) and cheaper_steps (what the daemon already did: auto rounds used, scouts run, reruns) as lists of short strings, so the launch record and the decision packet can persist them. Never call a model inside decision.py.\n4. pool.toml gains [planner.routes] with escalate_tier = \"fable\" (resolved through [models].planner, never a hard-coded model id), investigate_tier = \"sonnet\", investigate_max_complexity = 4, premium_launches_soft_per_goal = 2 (soft: exceeding it is recorded as a justified exception, never blocks), enabled = true (false restores today's behaviour: every point escalates). Config is read by the caller and passed in ctx; decision.py stays pure.\nTests in tests/test_decision.py: test_infra_failure_routes_to_hold_without_model, test_routine_hold_when_auto_fix_possible, test_repeated_signature_escalates, test_scouts_done_small_goal_investigates, test_scouts_done_security_trigger_escalates, test_closable_all_merged_routine, test_unknown_risk_escalates, test_disabled_routes_everything_to_escalate, test_route_carries_evidence_and_cheaper_steps. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0357"
+  ],
+  "acceptance": [
+    "tests/test_decision.py::test_infra_failure_routes_to_hold_without_model, ::test_routine_hold_when_auto_fix_possible, ::test_repeated_signature_escalates, ::test_scouts_done_small_goal_investigates, ::test_scouts_done_security_trigger_escalates, ::test_closable_all_merged_routine, ::test_unknown_risk_escalates, ::test_disabled_routes_everything_to_escalate, ::test_route_carries_evidence_and_cheaper_steps pass",
+    "orchestrator/decision.py imports nothing that calls a model or the network and reads no files (grep: no subprocess, no open, no bus import)",
+    "pool.toml [planner.routes] documents every key with defaults and states that enabled = false restores the previous behaviour",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/decision.py",
+    ".orchestrator/pool.toml",
+    "tests/test_decision.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0369",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789901823.9804292,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0369",
+      "claimed_at": 1789901823.980053
+    },
+    {
+      "ts": 1789901823.981653,
+      "account": "B"
+    },
+    {
+      "ts": 1789901824.0179899,
+      "pid": 54046,
+      "account": "B"
+    },
+    {
+      "ts": 1789901908.3220139,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789901908.32364,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789901823.980053,
+  "account": "B",
+  "pid": 54046,
+  "review_verdict": "approve"
+}

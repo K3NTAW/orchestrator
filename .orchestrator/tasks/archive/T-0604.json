@@ -1,0 +1,147 @@
+{
+  "id": "T-0604",
+  "created_at": 1789972537.6355221,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: R14a v2: jev_route active ranking (Phase I P5) \u2014 bounded Jev suitability adjustment shrunk by a real per-class sample count, default base scores, cold start and failure reproduce baseline",
+  "spec": "Why: [jev.routing].mode accepts \"active\" but jev_route.shadow_context (orchestrator/jev_route.py:165-176) only emits a notify() stub; hypothetical() (146-163) is the shadow heuristic. Phase I P5 requires active mode to modify ranking among eligible candidates as candidate_score = configured_weight x empirical_score x jev_suitability_adjustment, with extreme probabilities unable to overwhelm strong empirical evidence, cold start safe, failure reproducing baseline. v2 after spec review T-0590: the shrinkage needs a real per-executor per-class sample count and the default base_scores path must be defined.\nWhat (the executor.start hook that feeds adjusted scores into pool.pick_executor is a later integration task). Tests are unittest.TestCase methods.\n- scorecard.py: add class_sample_size(executor_id, task_class_name, root=STATE) -> int returning len(resolved) exactly as class_success (scorecard.py:64-93) computes it (same task filter), without changing class_success. evidence_for() in jev_route adds \"n\": class_sample_size(...) per executor.\n- jev_route.adjustment(signals, evidence, eligible_ids, cfg) -> {executor_id: multiplier} with cfg [jev.routing] max_adjustment (default 0.25) and evidence_floor_n (default 10): direction from the signals hypothetical() uses (substantial_reasoning/architectural/stronger_executor_helps >= 0.6 favour executors with higher class_success; localized_simple >= 0.7 with elevated_risk < 0.3 favour lower expected_cost); raw magnitude = max_adjustment x max(signal) x (confidence or 0.5); shrink toward 1.0 by factor evidence_floor_n / (n + evidence_floor_n) so an executor with many samples moves little and one with n 0 moves fully; multiplier clamped to [1 - max_adjustment, 1 + max_adjustment]; missing signals, empty evidence or no direction -> 1.0 for every id (cold start); ids outside eligible_ids never appear.\n- jev_route.active_scores(task, pool, eligible, classification, evidence, base_scores=None) -> {executor_id: base x multiplier} only when [jev.routing].mode == \"active\"; base_scores None -> 1.0 for every eligible executor; shadow/off return base_scores unchanged (or the 1.0 map when None); classification None, malformed signals (non-numeric or outside [0,1]) or empty eligible -> return base_scores unchanged (baseline reproduced).\n- shadow_context() keeps its shape and adds \"adjustment\" (computed for shadow and active) and \"active\": bool; the notify stub is removed; record_shadow logs adjustment and mode. No pool.toml edit; defaults in code and documented in the module docstring.",
+  "inputs": [
+    "T-0602"
+  ],
+  "acceptance": [
+    "tests/test_scorecard.py::test_class_sample_size_matches_class_success_filter \u2014 the count equals the number of resolved execute tasks class_success uses for that executor and class",
+    "tests/test_jev_route.py::test_active_mode_adjusts_ranking_within_bounds \u2014 mode active, signals favouring a stronger executor with confidence 0.9 and n 3 yield multipliers within [0.75, 1.25] and the favoured executor's score rises relative to the other",
+    "tests/test_jev_route.py::test_shadow_mode_never_changes_scores \u2014 mode shadow returns base_scores unchanged while shadow_context still reports the adjustment",
+    "tests/test_jev_route.py::test_extreme_probability_cannot_overturn_strong_evidence \u2014 signal 1.0 against an executor with n 200 and class_success 0.95 leaves that executor ranked first",
+    "tests/test_jev_route.py::test_cold_start_default_scores_and_failure_reproduce_baseline \u2014 no evidence yields multipliers 1.0; base_scores None in active mode yields 1.0 per eligible executor before adjustment; classification None returns base_scores identical to the input",
+    "tests/test_jev_route.py::test_active_scores_never_add_ineligible_executor \u2014 an executor absent from eligible receives no score even when signals favour it"
+  ],
+  "scope": [
+    "orchestrator/jev_route.py",
+    "orchestrator/scorecard.py",
+    "tests/test_jev_route.py",
+    "tests/test_scorecard.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0604",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/jev_route.py",
+        "issue": "adjustment() specifies a single scalar raw magnitude (max_adjustment x max(signal) x confidence) plus a per-executor shrink by n, but never specifies how to split more than two eligible executors into 'favoured' vs 'disfavoured' for the class_success and expected_cost branches. hypothetical() (the referenced heuristic) picks exactly one winner via max/min; it is undefined whether adjustment() should apply +raw to that single winner and -raw to every other id, or scale continuously by each executor's distance from the group's best value. The acceptance tests (test_active_mode_adjusts_ranking_within_bounds, test_extreme_probability_cannot_overturn_strong_evidence) only exercise 2 eligible executors, so both interpretations pass, but they diverge materially once a pool has 3+ eligible executors in production active mode.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/scorecard.py",
+        "issue": "class_sample_size is specified to duplicate class_success's resolved-task filter (task/run loading + same predicate at scorecard.py:73-91) rather than sharing a helper. Spec says 'without changing class_success', which is fine for behavior, but doesn't rule out extracting a private helper both functions call; leaving it as literal duplication risks the two drifting out of sync on a future edit to the filter.",
+        "severity": "low",
+        "line": 73
+      }
+    ],
+    "suggested_spec_changes": [
+      "State explicitly that adjustment() must reuse hypothetical()'s exact selection call (max class_success / min expected_cost, tie-broken by executor id) to pick exactly one favoured id among eligible_ids per branch; apply +max_adjustment*max(signal)*(confidence or 0.5)*shrink(n_id) to that id and the negative of the same (with each id's own shrink) to every other eligible id.",
+      "Add a line noting the resolved-task filter used by class_success (scorecard.py:73-91) should be factored into a shared private helper that both class_success and class_sample_size call, to avoid future drift between the two."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789972542.963936,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0604",
+      "claimed_at": 1789972542.949703
+    },
+    {
+      "ts": 1789972542.9897542,
+      "account": "B"
+    },
+    {
+      "ts": 1789972555.26797,
+      "pid": 62768,
+      "account": "B"
+    },
+    {
+      "ts": 1789972741.3807979,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/jev_route.py",
+            "issue": "adjustment() specifies a single scalar raw magnitude (max_adjustment x max(signal) x confidence) plus a per-executor shrink by n, but never specifies how to split more than two eligible executors into 'favoured' vs 'disfavoured' for the class_success and expected_cost branches. hypothetical() (the referenced heuristic) picks exactly one winner via max/min; it is undefined whether adjustment() should apply +raw to that single winner and -raw to every other id, or scale continuously by each executor's distance from the group's best value. The acceptance tests (test_active_mode_adjusts_ranking_within_bounds, test_extreme_probability_cannot_overturn_strong_evidence) only exercise 2 eligible executors, so both interpretations pass, but they diverge materially once a pool has 3+ eligible executors in production active mode.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/scorecard.py",
+            "issue": "class_sample_size is specified to duplicate class_success's resolved-task filter (task/run loading + same predicate at scorecard.py:73-91) rather than sharing a helper. Spec says 'without changing class_success', which is fine for behavior, but doesn't rule out extracting a private helper both functions call; leaving it as literal duplication risks the two drifting out of sync on a future edit to the filter.",
+            "severity": "low",
+            "line": 73
+          }
+        ],
+        "suggested_spec_changes": [
+          "State explicitly that adjustment() must reuse hypothetical()'s exact selection call (max class_success / min expected_cost, tie-broken by executor id) to pick exactly one favoured id among eligible_ids per branch; apply +max_adjustment*max(signal)*(confidence or 0.5)*shrink(n_id) to that id and the negative of the same (with each id's own shrink) to every other eligible id.",
+          "Add a line noting the resolved-task filter used by class_success (scorecard.py:73-91) should be factored into a shared private helper that both class_success and class_sample_size call, to avoid future drift between the two."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789972741.382313,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/jev_route.py",
+          "issue": "adjustment() specifies a single scalar raw magnitude (max_adjustment x max(signal) x confidence) plus a per-executor shrink by n, but never specifies how to split more than two eligible executors into 'favoured' vs 'disfavoured' for the class_success and expected_cost branches. hypothetical() (the referenced heuristic) picks exactly one winner via max/min; it is undefined whether adjustment() should apply +raw to that single winner and -raw to every other id, or scale continuously by each executor's distance from the group's best value. The acceptance tests (test_active_mode_adjusts_ranking_within_bounds, test_extreme_probability_cannot_overturn_strong_evidence) only exercise 2 eligible executors, so both interpretations pass, but they diverge materially once a pool has 3+ eligible executors in production active mode.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/scorecard.py",
+          "issue": "class_sample_size is specified to duplicate class_success's resolved-task filter (task/run loading + same predicate at scorecard.py:73-91) rather than sharing a helper. Spec says 'without changing class_success', which is fine for behavior, but doesn't rule out extracting a private helper both functions call; leaving it as literal duplication risks the two drifting out of sync on a future edit to the filter.",
+          "severity": "low",
+          "line": 73
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789972542.949703,
+  "account": "B",
+  "pid": 62768,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/jev_route.py",
+      "issue": "adjustment() specifies a single scalar raw magnitude (max_adjustment x max(signal) x confidence) plus a per-executor shrink by n, but never specifies how to split more than two eligible executors into 'favoured' vs 'disfavoured' for the class_success and expected_cost branches. hypothetical() (the referenced heuristic) picks exactly one winner via max/min; it is undefined whether adjustment() should apply +raw to that single winner and -raw to every other id, or scale continuously by each executor's distance from the group's best value. The acceptance tests (test_active_mode_adjusts_ranking_within_bounds, test_extreme_probability_cannot_overturn_strong_evidence) only exercise 2 eligible executors, so both interpretations pass, but they diverge materially once a pool has 3+ eligible executors in production active mode.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/scorecard.py",
+      "issue": "class_sample_size is specified to duplicate class_success's resolved-task filter (task/run loading + same predicate at scorecard.py:73-91) rather than sharing a helper. Spec says 'without changing class_success', which is fine for behavior, but doesn't rule out extracting a private helper both functions call; leaving it as literal duplication risks the two drifting out of sync on a future edit to the filter.",
+      "severity": "low",
+      "line": 73
+    }
+  ]
+}

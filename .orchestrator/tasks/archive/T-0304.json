@@ -1,0 +1,110 @@
+{
+  "id": "T-0304",
+  "parent": "T-0260",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: G9: executors routed by expected completion cost per task class with a success floor, falling back to weight times score below the sample size",
+  "spec": "Depends on G1b (T-0265, token buckets per run and per goal). Today pool.pick_executor ranks enabled in-range executors by weight times scorecard score (live success rate or a bench prior). The analysis: aggregate success rates punish models given harder work; route by initial tokens + expected repair tokens + orchestration and review overhead per task class, with an acceptable success rate as a floor, and let local outcomes replace external priors.\nChange:\n1. Task class: constraints.task_class when the spec sets it (mechanical, unfamiliar, debugging, architectural, security), else inferred: security when any scope path matches [review].security_paths, architectural when complexity is 7 or more, debugging when the title starts with 'fix' or has fix_round_for, mechanical when complexity is 3 or less, unfamiliar otherwise. scorecard.task_class(task) exposes the rule.\n2. scorecard.expected_cost(executor_id, task_class) from run rows: median total_tokens of that executor's execute runs of the class + P(fail or fix round) times median total_tokens of its fix-round runs (tasks with fix_round_for) + median review and spec_review tokens for tasks of the class; None when fewer than [models].min_samples (default 3) merged tasks of that class exist for the executor.\n3. pool.pick_executor(role, complexity, scores, task=None): among enabled in-range executors with success rate at or above [models].success_floor (default 0.6) and an expected cost, pick the lowest expected cost; when no executor has enough samples, today's weight times score ranking applies unchanged. status() and `orchestrator scorecard --by executor` show expected cost per class when present.\n4. pool.toml [models]: success_floor = 0.6, min_samples = 3, with comments; README Executors and routing paragraph updated.\nTests: tests/test_scorecard.py::test_task_class_inference, ::test_expected_cost_needs_samples, ::test_expected_cost_includes_repairs; tests/test_pool.py::test_pick_by_expected_cost_with_floor, ::test_pick_falls_back_without_samples.",
+  "inputs": [
+    "T-0275"
+  ],
+  "acceptance": [
+    "tests/test_scorecard.py::test_task_class_inference, ::test_expected_cost_needs_samples, ::test_expected_cost_includes_repairs pass",
+    "tests/test_pool.py::test_pick_by_expected_cost_with_floor, ::test_pick_falls_back_without_samples pass",
+    "pool.toml [models] documents success_floor and min_samples; README updated",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/scorecard.py",
+    "tests/test_pool.py",
+    "tests/test_scorecard.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0304",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/pool.py",
+        "line": 339,
+        "issue": "When `measured` is non-empty but every executor in it falls below `success_floor`, `pick_executor` returns None (task held) instead of falling back to the weight\u00d7score ranking, contradicting its own docstring ('otherwise retain the established score ranking') and the README ('Until then, it ranks enabled, in-range rows by weight \u00d7 score'). Reproduced live: with two executors both past min_samples but success=0.2 (<0.6 floor) and scores={'luna':5.0,'terra':1.0}, pick_executor returns None even though legacy scoring would clearly pick luna. Any class whose sampled executor(s) dip below the floor permanently stalls dispatch for that whole class instead of falling back to score-based routing among the same enabled, in-range executors. Neither new test covers this branch (one covers zero samples, the other covers one safe executor).",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 341,
+        "issue": "pool.toml documents success_floor as a per-class gate ('A locally measured class must meet this merge success rate before cost routing may select it'), but the code computes `success` from `card.get(ex.id, {})`, the executor's global merged/failed across all bands/classes, not merged/failed scoped to task_class_name. An executor with a poor record specifically in 'security' but good overall stats would still clear the floor for security-task routing, defeating the stated per-class purpose of the gate.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789848087.6809962,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0304",
+      "claimed_at": 1789848087.680796
+    },
+    {
+      "ts": 1789848087.6823602,
+      "account": "B"
+    },
+    {
+      "ts": 1789848087.7080681,
+      "pid": 29195,
+      "account": "B"
+    },
+    {
+      "ts": 1789848226.411364,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 339,
+            "issue": "When `measured` is non-empty but every executor in it falls below `success_floor`, `pick_executor` returns None (task held) instead of falling back to the weight\u00d7score ranking, contradicting its own docstring ('otherwise retain the established score ranking') and the README ('Until then, it ranks enabled, in-range rows by weight \u00d7 score'). Reproduced live: with two executors both past min_samples but success=0.2 (<0.6 floor) and scores={'luna':5.0,'terra':1.0}, pick_executor returns None even though legacy scoring would clearly pick luna. Any class whose sampled executor(s) dip below the floor permanently stalls dispatch for that whole class instead of falling back to score-based routing among the same enabled, in-range executors. Neither new test covers this branch (one covers zero samples, the other covers one safe executor).",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 341,
+            "issue": "pool.toml documents success_floor as a per-class gate ('A locally measured class must meet this merge success rate before cost routing may select it'), but the code computes `success` from `card.get(ex.id, {})`, the executor's global merged/failed across all bands/classes, not merged/failed scoped to task_class_name. An executor with a poor record specifically in 'security' but good overall stats would still clear the floor for security-task routing, defeating the stated per-class purpose of the gate.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789848226.414032,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789848087.680796,
+  "account": "B",
+  "pid": 29195,
+  "review_verdict": "request_changes"
+}

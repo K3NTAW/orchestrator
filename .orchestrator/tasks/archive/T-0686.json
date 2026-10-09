@@ -1,0 +1,60 @@
+{
+  "id": "T-0686",
+  "created_at": 1789998172.103028,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Q6: orchestrator/planner_shadow.py + .mcp.planner-shadow.json \u2014 non-mutating Opus shadow Planner launches, structured result parsing, agreement scoring (P6)",
+  "spec": "Why: the brief (P6) requires shadow mode where Fable stays the production Planner and an Opus shadow decision is recorded without any production effect. goals.launch_planner (goals.py:322-353) and planner_runs.launch_routed give the headless Planner the full MCP surface (.mcp.planner.json: orchestrator, bus, github) and all tools, so a shadow launch through them could mutate the bus, plan.md or git.\nWhat: new module orchestrator/planner_shadow.py and new file .mcp.planner-shadow.json = {\"mcpServers\": {}}. The prompt template .orchestrator/prompts/planner-shadow.md already exists on the goal branch (placeholder {{packet}}); render it with spawn.render(\"planner-shadow\", packet=...). Do not edit any prompt file.\n- eligible(router_decision, cfg, *, sample) -> (bool, reason): True only when router_decision.mode == \"shadow\", router_decision.shadow_tier is not None, router_decision.hold is False, sample <= cfg[\"shadow_sample_rate\"]; reasons: mode_not_shadow, hard_decision, no_shadow_tier, held, sampled_out.\n- argv(prompt, *, model, budget_usd, system_prompt_path) -> list: [\"claude\", \"-p\", prompt, \"--model\", model, \"--output-format\", \"json\", \"--max-budget-usd\", str(budget_usd), \"--mcp-config\", \".mcp.planner-shadow.json\", \"--strict-mcp-config\", \"--disallowedTools\", \"Edit,Write,MultiEdit,NotebookEdit,Bash,Task,WebFetch,WebSearch\", \"--append-system-prompt\", <text of .orchestrator/prompts/planner.md>, \"--dangerously-skip-permissions\"]; no bus/orchestrator MCP server, no write tools.\n- launch(prompt, *, model, account, budget_usd, log, root=ROOT, popen=None) -> {\"pid\", \"log\", \"stderr_log\", \"argv\"} or None on any exception (logged to stderr, never raised; the production launch must not be affected). Env: CLAUDE_CONFIG_DIR from account.config_dir, ORCH_ROOT, ORCH_SHADOW=1, oauth token like goals.launch_planner; never resolve [secrets.planner] (a shadow has no GitHub or Jev access). popen defaults to goals.Popen so tests inject a fake. Budget from [limits].max_budget_usd.planner_shadow default 1.5 (caller passes).\n- parse(log_path) -> structured dict or None: last JSON line of the log, take its \"result\" text, spawn.extract_json (orchestrator/spawn.py:646) it, whitelist keys proposed_action (one of fix_round, respec, escalate, noop, synthesize_now, wait_for_more, drop_low_confidence, write_specs, close, other), summary (cap 800 chars, jev.redact applied), tasks_proposed (list of {title (cap 120), scope (list cap 10)} cap 10), confidence (float 0-1 or None), needs_fable (bool), unresolved (list of str cap 10, each cap 200); plus usage fields via bus.normalize_usage(\"claude\", usage), total_cost_usd, session_id, is_error. Anything else dropped; malformed -> {\"parse_error\": True, usage...}.\n- record(*, launch_id, goal_id, decision_type, state_version, model, tier, started_at, parsed, latency_s, root=None) -> schedlog.append(\"planner_shadow\", row) row without prompt text.\n- score(shadow_row, production_materiality) -> {\"agreement\": True|False|None, \"basis\"}: compare shadow proposed_action to what production did: production materiality (Q2 shape: new_tasks, fix_strategy_for, escalated, plan_changed) maps to fix_round when fix_strategy_for non-empty, write_specs/synthesize_now when new_tasks non-empty and no fix_strategy, escalate when escalated, noop when nothing material; agreement None when production materiality is missing or shadow parse_error. Also record whether shadow needs_fable matched a later production re-escalation (field needs_fable_matched, None when unknown).\n- summary(root=None) -> {\"n\", \"agreement_rate\", \"needs_fable_rate\", \"parse_error_rate\", \"usd\", \"tokens\"} tolerant of malformed lines.",
+  "inputs": [
+    "T-0684"
+  ],
+  "acceptance": [
+    "tests/test_planner_shadow.py::test_argv_has_no_bus_mcp_and_no_write_tools \u2014 argv uses .mcp.planner-shadow.json (whose file content has an empty mcpServers map), --strict-mcp-config, a --disallowedTools list containing Edit, Write and Bash, the shadow model, and never .mcp.planner.json",
+    "tests/test_planner_shadow.py::test_launch_failure_is_isolated_and_production_unchanged \u2014 a popen that raises makes launch return None without raising; the bus tasks directory and plan.md hash are identical before and after a successful fake launch; env carries ORCH_SHADOW=1 and no secrets.planner values",
+    "tests/test_planner_shadow.py::test_parse_whitelists_and_caps \u2014 a log whose result JSON has proposed_action fix_round, a 3000-char summary, 15 tasks and an extra transcript key parses to summary 800 chars, 10 tasks, no transcript; a non-JSON result gives parse_error True with usage still read",
+    "tests/test_planner_shadow.py::test_score_agreement_against_production_materiality \u2014 shadow fix_round vs production fix_strategy_for gives agreement True; shadow escalate vs production new_tasks gives False; missing materiality gives None",
+    "tests/test_planner_shadow.py::test_eligible_and_summary \u2014 eligible is False with reasons for mode off, hard, hold and sampled_out and True for a shadow decision; summary over three rows including one malformed line reports n 3 style counts without raising"
+  ],
+  "scope": [
+    "orchestrator/planner_shadow.py",
+    ".mcp.planner-shadow.json",
+    "tests/test_planner_shadow.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "not run: the daemon stamped respawned_at at 16:26 but never launched a worker (backlog: review respawn retries). Planner spawned a fresh spec review for T-0684 at 16:47.",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789998362.481469,
+      "pipeline": {
+        "respawned_at": 1789998362.4470599
+      }
+    },
+    {
+      "ts": 1789999607.3536232,
+      "status": "failed",
+      "result": {
+        "summary": "not run: the daemon stamped respawned_at at 16:26 but never launched a worker (backlog: review respawn retries). Planner spawned a fresh spec review for T-0684 at 16:47.",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "respawned_at": 1789998362.4470599
+  }
+}

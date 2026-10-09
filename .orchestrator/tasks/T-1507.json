@@ -1,0 +1,48 @@
+{
+  "id": "T-1507",
+  "created_at": 1790894322.236792,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Acceptance gate v2: every acceptance path that looks like a test file (any language) must exist and be in the task diff",
+  "spec": "Goal T-1403, wave 2, plan label E6v2 (refile of T-1441 so it depends on B2v2 T-1451, which replaced T-1434; the\ncontent is unchanged). Evidence: luna T-0104 passed the gate without backend/test/oauth.test.ts and\ngoogle-oauth.test.ts although its acceptance named them (plan.md backlog); fix rounds are 41% of execute runs,\npartly missing non-Python acceptance tests (analysis finding 5).\n\nFacts (goal/T-1403 at 92c1a98; acceptance.py and the daemon gate unchanged since main 355583c; re-check daemon.py\nline numbers after B2v2 merges):\n- orchestrator/acceptance.py:8-11 _TEST_ID only matches tests/<...>.py::name; named_tests() (23-37) and\n  missing_tests() (52-66) check that the named Python function is defined. Non-Python paths are never checked.\n- orchestrator/daemon.py:1437-1450 gate(): after the dirty-scope check, missing = acceptance.missing_tests(...);\n  non-empty -> stamp gated_at, hold gate_red with resume_hint {'failures': ['FAILED path::name (missing: ...)'],\n  'missing_tests': missing}, gate_reds += 1, and skip the gate run.\n- daemon.py:26-27 changed_paths(task) wraps gitutil.changed_paths (diff base..HEAD names, None when unavailable).\n- tests/test_daemon.py:161 patches daemon.acceptance.missing_tests; most daemon gate tests use acceptance like\n  ['pass'] with no test-file path, so the new check returns [] for them.\n\nChange:\n1. acceptance.py: test_file_paths(acceptance) -> sorted unique paths from whitespace tokens (strip surrounding\n   quotes, backticks, brackets and trailing ':,;.'): skip tokens containing '*' or ending in '/'; drop tokens\n   containing '::' whose left side ends in '.py' (missing_tests owns those); for other '::' tokens use the left\n   side. A token is a test file when it has a file extension and either a path component is exactly 'test',\n   'tests' or '__tests__', or the file name matches *.test.<js|jsx|ts|tsx|mjs|cjs>, *.spec.<same>,\n   *Test.swift, *Tests.swift, *Test.kt, *Tests.kt, *Test.java, *Tests.java. '.claude/hooks/tests-green.sh' must not\n   match.\n   missing_test_files(worktree, acceptance, changed=None) -> paths that are not files under worktree, or (when\n   changed is a list) not in changed.\n2. daemon.gate(): compute files = acceptance.missing_test_files(worktree, acceptance, changed_paths(t)) next to\n   the existing missing_tests call; when either list is non-empty, one gate_red hold whose failures list holds the\n   existing lines plus 'FAILED <path> (missing: test file not in task diff)' per file and resume_hint gains\n   'missing_test_files': files. Same stamp/gate_reds/_hold_stale_high handling as today; no second code path.\n3. roadmap.py's missing_tests call is unchanged.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_acceptance.py tests (13-75) pin Python-id behaviour and\nmust pass unchanged; tests/test_failures.py (~32-39) parses 'FAILED ... (missing: test not defined)' lines, keep that\ntext for Python ids. Run tests/test_acceptance.py, tests/test_failures.py and tests/test_daemon.py.\n\nDepends on B2v2 T-1451 (daemon.py, tests/test_daemon.py).\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.\n\nRe-filed 2026-10-01 (replaces T-1454): depends_on re-pointed to T-1467 after the B2v3/B4v3 respecs; the spec, acceptance and scope are unchanged.\n\nRe-filed 2026-10-02 (replaces T-1470): depends_on re-pointed to T-1488 after the round-3 respecs (B2v4, B4a/B4b, E12v3); spec, acceptance and scope unchanged.\n\nRe-filed 2026-10-02 00:50 (replaces T-1492): B2 was split into B2a T-1504 (executor/pool/capacity) and B2b T-1506 (daemon.py); depends_on re-pointed to T-1506 because this task edits daemon.py; spec, acceptance and scope unchanged.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_acceptance.py::test_missing_test_files_requires_test_paths_in_diff: passes: acceptance.test_file_paths() extracts backend/test/oauth.test.ts, web/src/a.spec.ts, apple/AppTests/FooTests.swift, android/app/src/test/BarTest.kt and tests/test_x.py (bare, no ::) but not tests/test_x.py::test_y (handled by missing_tests), .claude/hooks/tests-green.sh, globs or directories; missing_test_files(worktree, acceptance, changed) returns those absent from the worktree or not in changed (changed None -> existence only)",
+    "tests/test_daemon.py::test_gate_holds_when_acceptance_test_file_missing_from_diff: passes: daemon.gate holds a done execute task gate_red with resume_hint.missing_test_files and a 'FAILED <path> (missing: test file not in task diff)' failure line, without running tests-green, when its acceptance names backend/test/oauth.test.ts that the task diff does not contain",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/acceptance.py",
+    "orchestrator/daemon.py",
+    "tests/test_acceptance.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-1506"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "E6v2",
+    "goal_branch": "goal/T-1403",
+    "respec_for": "T-1492"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790934686.461301,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1548 (E6v2 re-filed 2026-10-02 10:40 with depends_on T-1504; B2b T-1506 parked)"
+    }
+  ],
+  "hold_reason": "superseded by T-1548 (E6v2 re-filed 2026-10-02 10:40 with depends_on T-1504; B2b T-1506 parked)"
+}

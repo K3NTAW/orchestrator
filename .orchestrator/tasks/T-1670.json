@@ -1,0 +1,178 @@
+{
+  "id": "T-1670",
+  "created_at": 1791317696.858786,
+  "parent": "T-1667",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "watchdog: restart dead daemons, report spawn failures and stalled queues; resolve the claude CLI without PATH",
+  "spec": "Stall watchdog and the PATH root cause.\n\nRoot cause first: worker spawns run the `claude` CLI found on the daemon's PATH; a daemon started from a shell without the\nHomebrew bin dir failed every spawn with \"claude CLI not found on PATH\" (luna-inbox review T-0599, 2026-10-06).\n1. Resolve the CLI once per spawn: shutil.which(\"claude\") on PATH, else the first existing of\n   /opt/homebrew/bin/claude, /usr/local/bin/claude, ~/.local/bin/claude, ~/.claude/local/claude; pass the absolute path.\n   Find every place that spawns claude (grep orchestrator/ for \"claude\" in subprocess argv) and route them through one helper.\n2. New orchestrator/watchdog.py and CLI `orchestrator watchdog [--once] [--install-launchd]`, machine level:\n   - Repos to watch: every repo with a .orchestrator/daemon.lock known to the machine registry (~/.orchestrator-machine,\n     orchestrator/machine.py) or listed in [watchdog].repos of the orchestrator's pool.toml.\n   - Every 5 minutes per repo: (a) daemon alive = its daemon.lock is held (fcntl test, no write); if not and the repo has\n     queued/running/held tasks or an open goal -> start `uv run orchestrator daemon` with ORCH_ROOT=<repo> and a PATH that\n     includes the Homebrew bin dir, log to <repo>/.orchestrator/runs/daemon-<ts>.log, notify once;\n     (b) a task \"running\" for more than 2x its timeout_s with no live worker pid -> let the daemon's reconcile_dead handle it\n     if the daemon is alive, else count it as stalled; (c) spawn failures in the last 30 minutes of bus events\n     (\"not found on PATH\", spawn error) -> notify once with the error; (d) nothing dispatched, gated or merged for 60 min\n     while ready tasks exist and accounts are not cooling -> notify once \"queue stalled\".\n   - Notifications through notify.notify_once with keys per repo+condition, so each condition is reported once until it clears.\n   - --install-launchd prints (does not write) a LaunchAgent plist that runs `orchestrator watchdog` every 300 s, and the\n     two commands the human runs to load it; installing it is the human's step.\n3. The machine registry gains the repo path when a daemon acquires its lock (machine.py), so new repos are watched automatically.\nTests tests/test_watchdog.py (temp repos, fake clock, no real daemons: patch the start function): test_claude_resolved_without_path_entry,\ntest_restarts_dead_daemon_with_work, test_no_restart_without_work, test_reports_spawn_failure_once, test_reports_stalled_queue_once,\ntest_registry_adds_repo_on_lock, test_install_launchd_prints_only.\n",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_watchdog.py: the seven named tests exist and pass",
+    "every claude spawn goes through one resolver helper",
+    "--install-launchd prints and writes nothing outside the repo"
+  ],
+  "scope": [
+    "orchestrator/watchdog.py",
+    "orchestrator/spawn.py",
+    "orchestrator/machine.py",
+    "orchestrator/cli.py",
+    "tests/test_watchdog.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 5400,
+    "task_class": "feature",
+    "route": "high-risk"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791317760.569435,
+      "pipeline": {
+        "first_ready_at": 1791317760.5692549
+      }
+    },
+    {
+      "ts": 1791317761.1917608,
+      "pipeline": {
+        "first_ready_at": 1791317760.5692549,
+        "spec_review_at": 1791317761.191715,
+        "spec_review_at_lease": 1791318661.191715
+      }
+    },
+    {
+      "ts": 1791317761.2025468,
+      "pipeline": {
+        "first_ready_at": 1791317760.5692549,
+        "spec_review_at": 1791317761.191715,
+        "spec_review_at_lease": 1791318661.191715,
+        "spec_review_at_done": 1791317761.202471
+      }
+    },
+    {
+      "ts": 1791317823.875637,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Item 3 says the machine registry gains the repo path when a daemon acquires its lock. The lock is acquired in daemon.acquire_lock (daemon.py ~1949), which is outside the scope list. machine.py only holds leases and usage and has no repo registry or ~/.orchestrator-machine repo list. The registry has to be created, and something has to call it. The call is either in daemon.py (out of scope) or in the CLI path that calls acquire_lock, which the spec does not name. test_registry_adds_repo_on_lock cannot pass as scoped.",
+          "severity": "high",
+          "line": 1949
+        },
+        {
+          "path": "orchestrator/notify.py",
+          "issue": "notify.notify_once(task_id, transition, msg) dedupes through bus.get(task_id) and bus.update, using the pipeline.notification_transition field of one task in the current ORCH_ROOT bus. The watchdog is machine-level and works across repos, with keys such as repo+condition and no task. The spec's 'keys per repo+condition' does not fit the signature. Using it would hit the wrong bus or fail on a missing task. It also stores only one transition per task, so it cannot track independent conditions (a)-(d). It cannot be 'reported once until it clears' either, because the field never resets. notify.py is out of scope.",
+          "severity": "high",
+          "line": 32
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "Acceptance says every claude spawn goes through one resolver helper. goals.py:350 (planner argv) and planner_shadow.py:33 both build [\"claude\", \"-p\", ...] directly, and neither file is in scope. Only spawn.py:1317 and the which check at 1336 are covered. Planner launches would still fail with the same PATH error, so the root cause stays half fixed. The criterion cannot be checked unless a grep-style test is added.",
+          "severity": "high",
+          "line": 350
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "There are two 'not found on PATH' holds (spawn.py:1339 and 1365, the second on FileNotFoundError at Popen). Both need to use the resolved path. The spec does not say what happens when no candidate exists: keep the hold with an explicit reason that lists the paths tried. It also does not say that the daemon's PATH must stay unchanged, or that the resolved absolute path must be what is logged and cached (once per spawn, not per process).",
+          "severity": "med",
+          "line": 1336
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "The daemon-alive check does a flock LOCK_NB on daemon.lock. If the daemon is dead, the watchdog takes the lock and could race a daemon that is starting up. It must release the lock before starting the daemon. It should open the file read-only without truncating it (daemon.acquire_lock opens it with 'w'), and it needs to handle a missing STATE dir. It should also use a start cooldown and a cap on start attempts, so a daemon that crashes immediately does not get restarted every 5 minutes without limit. The spec says nothing about this.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/watchdog.py",
+          "issue": "Conditions (b) and (d) depend on data the spec does not name: the bus task schema (timeout_s, worker pid, running since), the event types for dispatched/gated/merged, and a 'ready tasks exist' and 'accounts not cooling' predicate that normally lives in the capacity/pool modules. Reading the bus of another repo means switching ORCH_ROOT, since bus.py and daemon.py use module-level STATE constants. The spec does not say how. Without that, (b) and (d) are not testable with a fake clock. Condition (c) 'last 30 minutes of bus events' has the same gap. The spec also does not say what a 'stalled' count means for (b), or what is done with it.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "--install-launchd 'prints and writes nothing outside the repo' leaves the plist content open. It has to avoid embedded secrets and tokens (house secrets rule) and use absolute paths for uv and the repo. It also needs a PATH that includes the Homebrew bin dir. The test only checks 'prints only' and does not name the files to snapshot, for example that HOME is unchanged.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "tests/test_watchdog.py",
+          "issue": "No rollback or disable path for auto-starting daemons: no kill switch such as [watchdog].enabled or an env var. The tests also need to make sure the notification sink and the start function are patched, so that osascript and ORCH_NOTIFY_URL are never called from the suite. The new file also needs the 'import _harness' first line, and the machine registry must live under the harness's shared temp dir and not the real ~/.orchestrator-machine.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791317890.957442,
+      "status": "superseded",
+      "reason": "respec v3 filed as T-1674"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791317760.5692549,
+    "spec_review_at": 1791317761.191715,
+    "spec_review_at_lease": 1791318661.191715,
+    "spec_review_at_done": 1791317761.202471
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Item 3 says the machine registry gains the repo path when a daemon acquires its lock. The lock is acquired in daemon.acquire_lock (daemon.py ~1949), which is outside the scope list. machine.py only holds leases and usage and has no repo registry or ~/.orchestrator-machine repo list. The registry has to be created, and something has to call it. The call is either in daemon.py (out of scope) or in the CLI path that calls acquire_lock, which the spec does not name. test_registry_adds_repo_on_lock cannot pass as scoped.",
+      "severity": "high",
+      "line": 1949
+    },
+    {
+      "path": "orchestrator/notify.py",
+      "issue": "notify.notify_once(task_id, transition, msg) dedupes through bus.get(task_id) and bus.update, using the pipeline.notification_transition field of one task in the current ORCH_ROOT bus. The watchdog is machine-level and works across repos, with keys such as repo+condition and no task. The spec's 'keys per repo+condition' does not fit the signature. Using it would hit the wrong bus or fail on a missing task. It also stores only one transition per task, so it cannot track independent conditions (a)-(d). It cannot be 'reported once until it clears' either, because the field never resets. notify.py is out of scope.",
+      "severity": "high",
+      "line": 32
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "Acceptance says every claude spawn goes through one resolver helper. goals.py:350 (planner argv) and planner_shadow.py:33 both build [\"claude\", \"-p\", ...] directly, and neither file is in scope. Only spawn.py:1317 and the which check at 1336 are covered. Planner launches would still fail with the same PATH error, so the root cause stays half fixed. The criterion cannot be checked unless a grep-style test is added.",
+      "severity": "high",
+      "line": 350
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "There are two 'not found on PATH' holds (spawn.py:1339 and 1365, the second on FileNotFoundError at Popen). Both need to use the resolved path. The spec does not say what happens when no candidate exists: keep the hold with an explicit reason that lists the paths tried. It also does not say that the daemon's PATH must stay unchanged, or that the resolved absolute path must be what is logged and cached (once per spawn, not per process).",
+      "severity": "med",
+      "line": 1336
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "The daemon-alive check does a flock LOCK_NB on daemon.lock. If the daemon is dead, the watchdog takes the lock and could race a daemon that is starting up. It must release the lock before starting the daemon. It should open the file read-only without truncating it (daemon.acquire_lock opens it with 'w'), and it needs to handle a missing STATE dir. It should also use a start cooldown and a cap on start attempts, so a daemon that crashes immediately does not get restarted every 5 minutes without limit. The spec says nothing about this.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/watchdog.py",
+      "issue": "Conditions (b) and (d) depend on data the spec does not name: the bus task schema (timeout_s, worker pid, running since), the event types for dispatched/gated/merged, and a 'ready tasks exist' and 'accounts not cooling' predicate that normally lives in the capacity/pool modules. Reading the bus of another repo means switching ORCH_ROOT, since bus.py and daemon.py use module-level STATE constants. The spec does not say how. Without that, (b) and (d) are not testable with a fake clock. Condition (c) 'last 30 minutes of bus events' has the same gap. The spec also does not say what a 'stalled' count means for (b), or what is done with it.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "--install-launchd 'prints and writes nothing outside the repo' leaves the plist content open. It has to avoid embedded secrets and tokens (house secrets rule) and use absolute paths for uv and the repo. It also needs a PATH that includes the Homebrew bin dir. The test only checks 'prints only' and does not name the files to snapshot, for example that HOME is unchanged.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "tests/test_watchdog.py",
+      "issue": "No rollback or disable path for auto-starting daemons: no kill switch such as [watchdog].enabled or an env var. The tests also need to make sure the notification sink and the start function are patched, so that osascript and ORCH_NOTIFY_URL are never called from the suite. The new file also needs the 'import _harness' first line, and the machine registry must live under the harness's shared temp dir and not the real ~/.orchestrator-machine.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "reason": "respec v3 filed as T-1674"
+}

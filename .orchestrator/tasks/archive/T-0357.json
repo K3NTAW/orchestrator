@@ -1,0 +1,137 @@
+{
+  "id": "T-0357",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 4,
+  "title": "H3a: orchestrator/decision.py \u2014 deterministic routine / investigate / escalate routing for decision points with persisted launch reasons, evidence and cheaper steps tried; pool.toml [planner.routes]",
+  "spec": "Build on goal/T-0353. Handover section 3. Evidence: no decision.py exists; daemon.py:1044-1049 launches a Planner unconditionally per decision point when planner.autonomous is true; planner_runs.py:271-317 records kind, payload_key, attempts, account but no reason, evidence or cheaper steps. Pure functions only in this task; wiring into planner_runs/daemon is H3b.\n1. New module orchestrator/decision.py with route(point, ctx) -> Route(name, reason, evidence, cheaper_steps, tier). point is a decision point dict as planner_runs.decision_points yields (kind in held, scouts_done, closable; goal_id; task ids; payload_key). ctx is a plain dict the caller fills from bus state: goal complexity, task_class (scorecard.task_class), hold_reason, failure signature and whether it repeats an earlier one in the lineage, auto fix rounds used vs [daemon].auto_fix_rounds, spec review round count, number of scouts and whether every scout posted, gate state, security or semantic review triggers present, blocked scouts, whether the diff touches auth/migrations/public interfaces (from the same lists _review_plan uses), infra failure kind (auth, quota, unavailable) if any.\n2. Deterministic rules, in this order, each naming its reason string: (a) infra failure kind present -> route none with reason \"infra:<kind>\" (hold, no model); (b) held with a routine fix round still possible (G7 rules: extractable failing ids or in-scope review comments, lineage cap not reached, signature not repeated) -> routine (daemon handles, no launch); (c) held with a repeated unchanged signature, lineage cap reached, spec review request_changes twice, scout blocked, or hold touching auth/migrations/interfaces/data deletion -> escalate; (d) scouts_done for a goal with complexity at most [planner.routes].investigate_max_complexity (default 4) and no security or semantic trigger -> investigate (tier [planner.routes].investigate_tier, default sonnet); (e) scouts_done otherwise -> escalate; (f) closable with every child merged and the goal-head gate green -> routine (deterministic close; no launch); closable with anything unmerged or a red gate -> escalate. Unknown risk (missing ctx fields) never picks routine or investigate: it escalates with reason \"unknown:<field>\".\n3. Every Route carries evidence (task ids, hold reasons, failing ids, signatures actually used) and cheaper_steps (what the daemon already did: auto rounds used, scouts run, reruns) as lists of short strings, so the launch record and the decision packet can persist them. Never call a model inside decision.py.\n4. pool.toml gains [planner.routes] with escalate_tier = \"fable\" (resolved through [models].planner, never a hard-coded model id), investigate_tier = \"sonnet\", investigate_max_complexity = 4, premium_launches_soft_per_goal = 2 (soft: exceeding it is recorded as a justified exception, never blocks), enabled = true (false restores today's behaviour: every point escalates). Config is read by the caller and passed in ctx; decision.py stays pure.\nTests in tests/test_decision.py: test_infra_failure_routes_to_hold_without_model, test_routine_hold_when_auto_fix_possible, test_repeated_signature_escalates, test_scouts_done_small_goal_investigates, test_scouts_done_security_trigger_escalates, test_closable_all_merged_routine, test_unknown_risk_escalates, test_disabled_routes_everything_to_escalate, test_route_carries_evidence_and_cheaper_steps. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0354"
+  ],
+  "acceptance": [
+    "tests/test_decision.py::test_infra_failure_routes_to_hold_without_model, ::test_routine_hold_when_auto_fix_possible, ::test_repeated_signature_escalates, ::test_scouts_done_small_goal_investigates, ::test_scouts_done_security_trigger_escalates, ::test_closable_all_merged_routine, ::test_unknown_risk_escalates, ::test_disabled_routes_everything_to_escalate, ::test_route_carries_evidence_and_cheaper_steps pass",
+    "orchestrator/decision.py imports nothing that calls a model or the network and reads no files (grep: no subprocess, no open, no bus import)",
+    "pool.toml [planner.routes] documents every key with defaults and states that enabled = false restores the previous behaviour",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/decision.py",
+    ".orchestrator/pool.toml",
+    "tests/test_decision.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500,
+    "task_class": "routing"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0357",
+  "codex_thread": "01a0be6c-41b5-7b50-affb-82fa61e3a872",
+  "result": {
+    "summary": "Implemented pure routing, audit evidence, configurable tiers, and tests.\nCommit: `e3b2b368984965f8ba9efc2ae8b6f07be91211ad`.\n`.claude/hooks/tests-green.sh` exited 0; `scripts/tests_green.sh` is absent.\n\n```text\n.orchestrator/pool.toml  |  12 ++++\norchestrator/decision.py | 151 +++++++++++++++++++++++++++++++++++++++++++++++\ntests/test_decision.py   | 149 ++++++++++++++++++++++++++++++++++++++++++++++\n3 files changed, 312 insertions(+)\n```\n\nFinal failures-only test output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0be6c-41b5-7b50-affb-82fa61e3a872",
+    "usage": {
+      "input_tokens": 786874,
+      "cached_input_tokens": 732800,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 12326,
+      "reasoning_output_tokens": 1204
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789901159.058775,
+      "pipeline": {
+        "dispatched_at": 1789901159.058592
+      }
+    },
+    {
+      "ts": 1789901160.585644,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0357",
+      "claimed_at": 1789901160.585296
+    },
+    {
+      "ts": 1789901160.58699,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789901687.405854,
+      "codex_thread": "01a0be6c-41b5-7b50-affb-82fa61e3a872"
+    },
+    {
+      "ts": 1789901687.408535,
+      "status": "done",
+      "result": {
+        "summary": "Implemented pure routing, audit evidence, configurable tiers, and tests.\nCommit: `e3b2b368984965f8ba9efc2ae8b6f07be91211ad`.\n`.claude/hooks/tests-green.sh` exited 0; `scripts/tests_green.sh` is absent.\n\n```text\n.orchestrator/pool.toml  |  12 ++++\norchestrator/decision.py | 151 +++++++++++++++++++++++++++++++++++++++++++++++\ntests/test_decision.py   | 149 ++++++++++++++++++++++++++++++++++++++++++++++\n3 files changed, 312 insertions(+)\n```\n\nFinal failures-only test output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0be6c-41b5-7b50-affb-82fa61e3a872",
+        "usage": {
+          "input_tokens": 786874,
+          "cached_input_tokens": 732800,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 12326,
+          "reasoning_output_tokens": 1204
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789901822.62289,
+      "pipeline": {
+        "dispatched_at": 1789901159.058592,
+        "gated_at": 1789901822.622777,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789901908.324884,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789902073.6786408,
+      "pipeline": {
+        "dispatched_at": 1789901159.058592,
+        "gated_at": 1789901822.622777,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789902073.678546
+      }
+    },
+    {
+      "ts": 1789902151.960771,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "sha": "e3b2b368984965f8ba9efc2ae8b6f07be91211ad"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789901159.058592,
+    "gated_at": 1789901822.622777,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789902073.678546
+  },
+  "claimed_at": 1789901160.585296,
+  "rounds": 0,
+  "executor": "astra",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0353",
+  "sha": "e3b2b368984965f8ba9efc2ae8b6f07be91211ad"
+}

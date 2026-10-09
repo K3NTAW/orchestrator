@@ -1,0 +1,148 @@
+{
+  "id": "T-0566",
+  "created_at": 1789970885.9916658,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: R2: orchestrator/capacity.py \u2014 global capacity snapshot and deterministic admission with critical-path reservation only against present demand (AP P6)",
+  "spec": "Why: daemon.free_slots (orchestrator/daemon.py:449-465) reduces capacity to one integer; waves then ignore per-task executor eligibility (complexity range, cooling, daily task budget, Claude worker headroom, account utilization) and premium capacity can be spent on low-impact work while a critical-path task waits (AP P6; brief P3).\nWhat: new pure module orchestrator/capacity.py; no daemon edits (integration is a later task).\n- snapshot(pool, running_claude=0, inflight_claude=0) -> {\"executors\": {id: {\"free\": max_parallel-running, \"cooling_s\", \"enabled\", \"roles\", \"complexity\": [min, max], \"day_tasks_left\": daily_budget_tasks-day_tasks or None, \"weight\"}}, \"claude_workers_free\": limits.max_parallel_claude_workers - running_claude - inflight_claude, \"accounts\": {id: {\"utilization\": acct.utilization(window_cap), \"cooling_s\"}}, \"fallback\": bool(all enabled execute executors cooling)}. Read fields from pool.Executor/Account (orchestrator/pool.py:68-145, 522-536); never mutate the pool.\n- eligible_executors_from_snapshot(task, snapshot) -> executor ids with role execute, enabled, not cooling, complexity in range, free > 0, day_tasks_left None or > 0.\n- admit(ranked_ids, tasks, snapshot, priorities, durations=None, cfg=None) -> {\"admit\": [ids in rank order], \"deferred\": {id: reason}, \"assignments\": {id: executor_id}, \"reasons\": {id: text}}. Greedy in rank order: pick the eligible executor with most free then lowest weight; decrement free. Reservation rule (deterministic, present demand only): if task X is eligible on exactly the executors that a higher-ranked still-unassigned ready task Y needs and admitting X leaves Y with zero capacity this tick, defer X with reason reserved_for_critical naming Y. Never defer when no higher-ranked task competes (no speculative reservation). Reasons vocabulary: executor_capacity, cooldown, account_capacity, budget, reserved_for_critical:<id>, no_eligible_executor. In fallback mode capacity is claude_workers_free and every task is eligible when pool.fallback_tier(complexity) is not None.\n- priorities: {task_id: critical_path.explain dict} (priority key used for ordering ties).",
+  "inputs": [
+    "T-0565"
+  ],
+  "acceptance": [
+    "tests/test_capacity.py::test_executor_full_defers_with_executor_capacity_reason \u2014 every eligible executor at max_parallel yields deferred reason executor_capacity",
+    "tests/test_capacity.py::test_quota_cooling_executor_is_not_eligible \u2014 a cooling executor is excluded and a task only it could run is deferred with reason cooldown",
+    "tests/test_capacity.py::test_account_fallback_uses_claude_worker_headroom \u2014 fallback snapshot admits at most claude_workers_free tasks and defers the rest with account_capacity",
+    "tests/test_capacity.py::test_critical_path_contention_reserves_for_higher_priority \u2014 a low-priority task whose only eligible executor is the last free slot the higher-ranked task needs is deferred with reserved_for_critical naming that task",
+    "tests/test_capacity.py::test_idle_capacity_admits_everything_and_no_unnecessary_reservation \u2014 with spare capacity every ready task is admitted and no reserved_for_critical reason appears when no higher-ranked task competes"
+  ],
+  "scope": [
+    "orchestrator/capacity.py",
+    "tests/test_capacity.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0566",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/capacity.py",
+        "issue": "snapshot()'s accounts entry is specced as acct.utilization(window_cap), but Account.utilization (orchestrator/pool.py:85-94) is mutating: it resets window_tokens/planner_window_tokens on window rollover and day_tokens/planner_day_tokens on day rollover as a side effect of being called. That directly violates the spec's own 'never mutate the pool' constraint for this module. Since capacity.py is meant to be a pure snapshot taken every daemon tick, calling this on every tick means whichever code path calls snapshot() first each window/day silently zeroes real usage counters that other code (tally_planner, pool.save()) still depends on. Needs a non-mutating read of the same value (e.g. a pure helper or inlined equivalent of utilization's math) instead of calling the existing method.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/capacity.py",
+        "issue": "day_tasks_left is specced as a raw read: daily_budget_tasks-day_tasks (or None). Executor.day_tasks is only rolled over by Executor.roll_day() (orchestrator/pool.py:134-137), which today is invoked only inside Pool.eligible_executors (pool.py:530, mutating) and at actual dispatch time in executor.py:290 -- never inside daemon.py, which has no roll_day/eligible_executors call at all. capacity.py's snapshot() bypasses both call sites, so right after local midnight, before any task has dispatched on a given executor, ex.day still holds yesterday's date and ex.day_tasks still holds yesterday's count. snapshot() would then compute day_tasks_left against a stale count (e.g. an executor that hit daily_budget_tasks=5 yesterday reports day_tasks_left=0 today instead of 5), spuriously excluding it via eligible_executors_from_snapshot. None of the five acceptance tests exercise a day boundary, so this ships green. snapshot() needs to check ex.day against today (read-only, same comparison roll_day uses) and treat day_tasks as 0 when the date doesn't match, without mutating the Executor.",
+        "severity": "high",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "snapshot(): replace the acct.utilization(window_cap) call with a pure computation of the same ratio that does not reset window_tokens/day_tokens as a side effect (or explicitly document why mutating here is acceptable, e.g. only ever called immediately before a pool.save() this same tick -- current wording forbids it outright).",
+      "snapshot(): for each executor's day_tasks_left, compare ex.day to date.today().isoformat() (Europe/Zurich per Account, but Executor.roll_day uses date.today() naively -- match whichever the codebase already treats as canonical) and treat day_tasks as 0 when stale, mirroring roll_day's check without calling it.",
+      "Add an acceptance test for the day-rollover case (executor with day_tasks==daily_budget_tasks but ex.day != today) asserting it is still eligible/admitted, since none of the five listed tests would catch this.",
+      "Clarify the reserved_for_critical rule's 'eligible on exactly the executors' phrase -- state explicitly whether it means the low-priority task's eligible set must be a subset of, or identical to, the executors the higher-ranked task needs, so the executor doesn't have to infer it from the single acceptance test."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789970888.2971451,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0566",
+      "claimed_at": 1789970888.294535
+    },
+    {
+      "ts": 1789970888.303672,
+      "account": "B"
+    },
+    {
+      "ts": 1789970890.254345,
+      "pid": 68832,
+      "account": "B"
+    },
+    {
+      "ts": 1789971046.062686,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/capacity.py",
+            "issue": "snapshot()'s accounts entry is specced as acct.utilization(window_cap), but Account.utilization (orchestrator/pool.py:85-94) is mutating: it resets window_tokens/planner_window_tokens on window rollover and day_tokens/planner_day_tokens on day rollover as a side effect of being called. That directly violates the spec's own 'never mutate the pool' constraint for this module. Since capacity.py is meant to be a pure snapshot taken every daemon tick, calling this on every tick means whichever code path calls snapshot() first each window/day silently zeroes real usage counters that other code (tally_planner, pool.save()) still depends on. Needs a non-mutating read of the same value (e.g. a pure helper or inlined equivalent of utilization's math) instead of calling the existing method.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/capacity.py",
+            "issue": "day_tasks_left is specced as a raw read: daily_budget_tasks-day_tasks (or None). Executor.day_tasks is only rolled over by Executor.roll_day() (orchestrator/pool.py:134-137), which today is invoked only inside Pool.eligible_executors (pool.py:530, mutating) and at actual dispatch time in executor.py:290 -- never inside daemon.py, which has no roll_day/eligible_executors call at all. capacity.py's snapshot() bypasses both call sites, so right after local midnight, before any task has dispatched on a given executor, ex.day still holds yesterday's date and ex.day_tasks still holds yesterday's count. snapshot() would then compute day_tasks_left against a stale count (e.g. an executor that hit daily_budget_tasks=5 yesterday reports day_tasks_left=0 today instead of 5), spuriously excluding it via eligible_executors_from_snapshot. None of the five acceptance tests exercise a day boundary, so this ships green. snapshot() needs to check ex.day against today (read-only, same comparison roll_day uses) and treat day_tasks as 0 when the date doesn't match, without mutating the Executor.",
+            "severity": "high",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "snapshot(): replace the acct.utilization(window_cap) call with a pure computation of the same ratio that does not reset window_tokens/day_tokens as a side effect (or explicitly document why mutating here is acceptable, e.g. only ever called immediately before a pool.save() this same tick -- current wording forbids it outright).",
+          "snapshot(): for each executor's day_tasks_left, compare ex.day to date.today().isoformat() (Europe/Zurich per Account, but Executor.roll_day uses date.today() naively -- match whichever the codebase already treats as canonical) and treat day_tasks as 0 when stale, mirroring roll_day's check without calling it.",
+          "Add an acceptance test for the day-rollover case (executor with day_tasks==daily_budget_tasks but ex.day != today) asserting it is still eligible/admitted, since none of the five listed tests would catch this.",
+          "Clarify the reserved_for_critical rule's 'eligible on exactly the executors' phrase -- state explicitly whether it means the low-priority task's eligible set must be a subset of, or identical to, the executors the higher-ranked task needs, so the executor doesn't have to infer it from the single acceptance test."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789971046.0641458,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "snapshot()'s accounts entry is specced as acct.utilization(window_cap), but Account.utilization (orchestrator/pool.py:85-94) is mutating: it resets window_tokens/planner_window_tokens on window rollover and day_tokens/planner_day_tokens on day rollover as a side effect of being called. That directly violates the spec's own 'never mutate the pool' constraint for this module. Since capacity.py is meant to be a pure snapshot taken every daemon tick, calling this on every tick means whichever code path calls snapshot() first each window/day silently zeroes real usage counters that other code (tally_planner, pool.save()) still depends on. Needs a non-mutating read of the same value (e.g. a pure helper or inlined equivalent of utilization's math) instead of calling the existing method.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/capacity.py",
+          "issue": "day_tasks_left is specced as a raw read: daily_budget_tasks-day_tasks (or None). Executor.day_tasks is only rolled over by Executor.roll_day() (orchestrator/pool.py:134-137), which today is invoked only inside Pool.eligible_executors (pool.py:530, mutating) and at actual dispatch time in executor.py:290 -- never inside daemon.py, which has no roll_day/eligible_executors call at all. capacity.py's snapshot() bypasses both call sites, so right after local midnight, before any task has dispatched on a given executor, ex.day still holds yesterday's date and ex.day_tasks still holds yesterday's count. snapshot() would then compute day_tasks_left against a stale count (e.g. an executor that hit daily_budget_tasks=5 yesterday reports day_tasks_left=0 today instead of 5), spuriously excluding it via eligible_executors_from_snapshot. None of the five acceptance tests exercise a day boundary, so this ships green. snapshot() needs to check ex.day against today (read-only, same comparison roll_day uses) and treat day_tasks as 0 when the date doesn't match, without mutating the Executor.",
+          "severity": "high",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789970888.294535,
+  "account": "B",
+  "pid": 68832,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "snapshot()'s accounts entry is specced as acct.utilization(window_cap), but Account.utilization (orchestrator/pool.py:85-94) is mutating: it resets window_tokens/planner_window_tokens on window rollover and day_tokens/planner_day_tokens on day rollover as a side effect of being called. That directly violates the spec's own 'never mutate the pool' constraint for this module. Since capacity.py is meant to be a pure snapshot taken every daemon tick, calling this on every tick means whichever code path calls snapshot() first each window/day silently zeroes real usage counters that other code (tally_planner, pool.save()) still depends on. Needs a non-mutating read of the same value (e.g. a pure helper or inlined equivalent of utilization's math) instead of calling the existing method.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/capacity.py",
+      "issue": "day_tasks_left is specced as a raw read: daily_budget_tasks-day_tasks (or None). Executor.day_tasks is only rolled over by Executor.roll_day() (orchestrator/pool.py:134-137), which today is invoked only inside Pool.eligible_executors (pool.py:530, mutating) and at actual dispatch time in executor.py:290 -- never inside daemon.py, which has no roll_day/eligible_executors call at all. capacity.py's snapshot() bypasses both call sites, so right after local midnight, before any task has dispatched on a given executor, ex.day still holds yesterday's date and ex.day_tasks still holds yesterday's count. snapshot() would then compute day_tasks_left against a stale count (e.g. an executor that hit daily_budget_tasks=5 yesterday reports day_tasks_left=0 today instead of 5), spuriously excluding it via eligible_executors_from_snapshot. None of the five acceptance tests exercise a day boundary, so this ships green. snapshot() needs to check ex.day against today (read-only, same comparison roll_day uses) and treat day_tasks as 0 when the date doesn't match, without mutating the Executor.",
+      "severity": "high",
+      "line": 0
+    }
+  ]
+}

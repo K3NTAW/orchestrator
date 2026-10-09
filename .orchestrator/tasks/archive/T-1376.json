@@ -1,0 +1,933 @@
+{
+  "id": "T-1376",
+  "created_at": 1790199395.4883652,
+  "parent": "T-1375",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 4,
+  "title": "F1: retry a spec review that failed without a verdict; hold the task after respawn_max failures",
+  "spec": "Goal T-1375. Today daemon.py:981 opens a spec review only when no spec_review child exists for the task (`not any(r[\"inputs\"][:1] == [t[\"id\"]] ...)`); a child that failed (spawn.py:1689 \"review returned no parseable verdict\", or any status \"failed\") still counts, so the task stays queued as spec_review_pending forever (T-1355 on 2026-09-23).\nChange the spec-review block in orchestrator/daemon.py (the `elif not any(...)` / `else: entry[\"reason\"] = \"spec_review_pending\"` branches after `elif verdict == \"request_changes\"`):\n1. children = spec_review tasks whose inputs[0] == t[\"id\"]; live = children not in status (\"failed\", \"superseded\").\n2. No children: unchanged (create one).\n3. live non-empty: unchanged (spec_review_pending).\n4. Only failed children: if len(failed) < cfg [daemon].respawn_max (default 3): clear_stage(t[\"id\"], \"spec_review_at\") then create a new spec review exactly as the creation path does (same title/spec/acceptance/scope/role/inputs/parent/complexity/tier, spawn_async(spawn.run_worker, ...), complete(...)); entry reason \"spec_review_retry\". Else: stamp/hold t with status \"held\", hold_reason f\"spec_review_failed: {len(failed)} spec reviews returned no verdict\", and notify(...) once.\nKeep the lease sweep (daemon.py:1633) behaviour; it only re-spawns queued unclaimed children.\nTests (unittest.TestCase methods in tests/test_daemon.py, using the existing daemon test fixtures): a task whose only spec review failed gets a second spec review on the next tick; after respawn_max failed reviews the task is held with the spec_review_failed reason; a live pending review is not duplicated.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_failed_spec_review_is_retried",
+    "tests/test_daemon.py::test_spec_review_failures_hold_after_respawn_max",
+    "tests/test_daemon.py::test_pending_spec_review_not_duplicated",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "debugging",
+    "route": "straightforward",
+    "read_scope": [
+      "orchestrator/spawn.py",
+      "orchestrator/bus.py",
+      "tests/_harness.py"
+    ]
+  },
+  "status": "superseded",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1376",
+  "codex_thread": "01a0d036-78a2-7410-9dc5-67064ab38fc1",
+  "result": {
+    "summary": "Summary: Implemented spec-review retry, pending-review deduplication, and hold-after-`respawn_max`. Acceptance tests pass.\n\nFiles changed:\n- `orchestrator/daemon.py`\n- `tests/test_daemon.py`\n\nGate result: **RED** due pre-existing/out-of-scope pool/spawn failures.  \nCommit: `d36d4e1050d370310a5a17d5c0a852b7c40aa224`  \nWorktree: clean.\n\nFailures-only test output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_affinity_reserve_cooldown_budget (test_pool.PoolSel.test_affinity_reserve_cooldown_budget)\nTraceback (most recent call last):\nAttributeError: 'NoneType' object has no attribute 'id'\nERROR: test_active_contract_deterministic_repair_does_not_resume (test_spawn.OutputContracts.test_active_contract_deterministic_repair_does_not_resume)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_does_not_resume_when_final_verdict_exists (test_spawn.OutputContracts.test_active_contract_does_not_resume_when_final_verdict_exists) (role='review')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_invalid_repair_falls_through_once (test_spawn.OutputContracts.test_active_contract_invalid_repair_falls_through_once)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'summary': 'finished'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final='Finished; see the posted verdict.')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'verdict': 'request_changes'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' o",
+    "executed_by": "codex:sol",
+    "thread": "01a0d036-78a2-7410-9dc5-67064ab38fc1",
+    "usage": {
+      "input_tokens": 1888490,
+      "cached_input_tokens": 1790080,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6875,
+      "reasoning_output_tokens": 1378
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790199435.02123,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125
+      }
+    },
+    {
+      "ts": 1790199435.025001,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895
+      }
+    },
+    {
+      "ts": 1790199435.026761,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895
+      }
+    },
+    {
+      "ts": 1790199439.299524,
+      "packet_meta": {
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5664,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790199439.3021069,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895,
+        "dispatched_at_done": 1790199439.300784
+      }
+    },
+    {
+      "ts": 1790199617.5996811,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895,
+        "dispatched_at_done": 1790199439.300784,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790199617.5978398
+        }
+      }
+    },
+    {
+      "ts": 1790199623.838916,
+      "packet_meta": {
+        "chars": 4785,
+        "est_tokens": 1196,
+        "presented_tokens": 1196,
+        "sections": {
+          "_preamble": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "4f4c9363f9048e2b2ea09c456ba1d85eb7e0176bbb1b2ff57de4e7abddcd4088"
+          },
+          "objective": {
+            "chars": 1742,
+            "est_tokens": 435,
+            "sha256": "03deaacc7612e0f9663773122f7be221238a0d9141b486d84ff8f380bf355540"
+          },
+          "acceptance": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "c6bb1e4ce95d5e49d77eb4e496f0aef9dcc78a8bb9632487fed6ce2c825863b5"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5ddfa16ac79ae10d85aad8c82f3678ef09bff68afb0ac929f6715fbf6783285d"
+          },
+          "write_scope": {
+            "chars": 63,
+            "est_tokens": 15,
+            "sha256": "2dfd6a9d8b8161bddea00e17f98c126e319d725c06dff05dd4578aa8edf383c2"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 208,
+            "est_tokens": 52,
+            "sha256": "08b8ae100821ae0a2c817718b3ea1700b4ac177669329c19f0eb29af0bed017f"
+          },
+          "relevant_tests": {
+            "chars": 1091,
+            "est_tokens": 272,
+            "sha256": "c4afeb3b425389f827943d9fde42c704aaaf766dfddd30134ceb8e5732412241"
+          },
+          "symbols": {
+            "chars": 1039,
+            "est_tokens": 259,
+            "sha256": "b4e1301e8df773ad27c2cc3e1b715bacca576511a3a6083adf9cd5ed7b54160a"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "9dd131d12447",
+        "version": "9dd131d12447",
+        "candidate_known": true,
+        "base": "e953e540333c",
+        "sources": "pool.toml@4d1e6f1bb235 gotchas@7aeee5e94115 memory@notes routed=active",
+        "policy_version": "4d1e6f1bb235",
+        "gotchas": "7aeee5e94115",
+        "candidate_tokens": 2992,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 8632,
+        "routed_reduction_ratio": 0.8974838843834477,
+        "routed_hidden": 0,
+        "routed_ambiguous": 19,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "0c2370dbc217",
+          "282163e9209b",
+          "209b2be1b1d7",
+          "0b385cc56494",
+          "40d3f7304407",
+          "f7e783c7a144",
+          "cf58579c93c0",
+          "53fd11e92901",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "28a89cbf8629",
+          "48bfc3a04fc9",
+          "ff41509e1f4e",
+          "b5b7e9cc6de7",
+          "bf8bf26a7769",
+          "a2c317df0481",
+          "3d42356de85c",
+          "b373c0fc36fd",
+          "a4b4de8d0f9e",
+          "ff84206f4efa",
+          "23714d98e9ab",
+          "c96d2d48c24b",
+          "d9ec9de3d689",
+          "03eebbfa4917",
+          "5ca9497c031c",
+          "8866fd1cf067",
+          "a59528469c99",
+          "ce0d9f6fe875",
+          "a016231404f8",
+          "ca55f94e1ede",
+          "b41dd33a26be",
+          "943b2f9c54f5",
+          "6729e8f80afb",
+          "027ce19bab00",
+          "09cc5a26d0d0",
+          "1af2aacf71c0",
+          "7babae326b13",
+          "393dc9581492",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e",
+          "12208bb79454",
+          "9e12df8d5fe6"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5664,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1790199623.840841,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1376",
+      "claimed_at": 1790199623.840681
+    },
+    {
+      "ts": 1790199623.841986,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790200573.797739,
+      "codex_thread": "01a0d036-78a2-7410-9dc5-67064ab38fc1",
+      "codex_thread_head": "d36d4e1050d370310a5a17d5c0a852b7c40aa224"
+    },
+    {
+      "ts": 1790200573.800384,
+      "packet_meta": {
+        "chars": 4785,
+        "est_tokens": 1196,
+        "presented_tokens": 1196,
+        "sections": {
+          "_preamble": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "4f4c9363f9048e2b2ea09c456ba1d85eb7e0176bbb1b2ff57de4e7abddcd4088"
+          },
+          "objective": {
+            "chars": 1742,
+            "est_tokens": 435,
+            "sha256": "03deaacc7612e0f9663773122f7be221238a0d9141b486d84ff8f380bf355540"
+          },
+          "acceptance": {
+            "chars": 264,
+            "est_tokens": 66,
+            "sha256": "c6bb1e4ce95d5e49d77eb4e496f0aef9dcc78a8bb9632487fed6ce2c825863b5"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5ddfa16ac79ae10d85aad8c82f3678ef09bff68afb0ac929f6715fbf6783285d"
+          },
+          "write_scope": {
+            "chars": 63,
+            "est_tokens": 15,
+            "sha256": "2dfd6a9d8b8161bddea00e17f98c126e319d725c06dff05dd4578aa8edf383c2"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 208,
+            "est_tokens": 52,
+            "sha256": "08b8ae100821ae0a2c817718b3ea1700b4ac177669329c19f0eb29af0bed017f"
+          },
+          "relevant_tests": {
+            "chars": 1091,
+            "est_tokens": 272,
+            "sha256": "c4afeb3b425389f827943d9fde42c704aaaf766dfddd30134ceb8e5732412241"
+          },
+          "symbols": {
+            "chars": 1039,
+            "est_tokens": 259,
+            "sha256": "b4e1301e8df773ad27c2cc3e1b715bacca576511a3a6083adf9cd5ed7b54160a"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "9dd131d12447",
+        "version": "9dd131d12447",
+        "candidate_known": true,
+        "base": "e953e540333c",
+        "sources": "pool.toml@4d1e6f1bb235 gotchas@7aeee5e94115 memory@notes routed=active",
+        "policy_version": "4d1e6f1bb235",
+        "gotchas": "7aeee5e94115",
+        "candidate_tokens": 2992,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 8632,
+        "routed_reduction_ratio": 0.8974838843834477,
+        "routed_hidden": 0,
+        "routed_ambiguous": 19,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "0c2370dbc217",
+          "282163e9209b",
+          "209b2be1b1d7",
+          "0b385cc56494",
+          "40d3f7304407",
+          "f7e783c7a144",
+          "cf58579c93c0",
+          "53fd11e92901",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d0b9e72fe363",
+          "00db509188f0",
+          "041199286363",
+          "acfaa314d8bc",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "28a89cbf8629",
+          "48bfc3a04fc9",
+          "ff41509e1f4e",
+          "b5b7e9cc6de7",
+          "bf8bf26a7769",
+          "a2c317df0481",
+          "3d42356de85c",
+          "b373c0fc36fd",
+          "a4b4de8d0f9e",
+          "ff84206f4efa",
+          "23714d98e9ab",
+          "c96d2d48c24b",
+          "d9ec9de3d689",
+          "03eebbfa4917",
+          "5ca9497c031c",
+          "8866fd1cf067",
+          "a59528469c99",
+          "ce0d9f6fe875",
+          "a016231404f8",
+          "ca55f94e1ede",
+          "b41dd33a26be",
+          "943b2f9c54f5",
+          "6729e8f80afb",
+          "027ce19bab00",
+          "09cc5a26d0d0",
+          "1af2aacf71c0",
+          "7babae326b13",
+          "393dc9581492",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "2993e8419e50",
+          "c6139725224e",
+          "12208bb79454",
+          "9e12df8d5fe6"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 5664,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895,
+        "dispatched_at_done": 1790199439.300784,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790199617.5978398
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790200574.140146,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895,
+        "dispatched_at_done": 1790199439.300784,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790199617.5978398
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "f828eaabd878a95bd89dc9e2a5fbb7b9d3b72d14",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.039,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790200574.1432571,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented spec-review retry, pending-review deduplication, and hold-after-`respawn_max`. Acceptance tests pass.\n\nFiles changed:\n- `orchestrator/daemon.py`\n- `tests/test_daemon.py`\n\nGate result: **RED** due pre-existing/out-of-scope pool/spawn failures.  \nCommit: `d36d4e1050d370310a5a17d5c0a852b7c40aa224`  \nWorktree: clean.\n\nFailures-only test output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_affinity_reserve_cooldown_budget (test_pool.PoolSel.test_affinity_reserve_cooldown_budget)\nTraceback (most recent call last):\nAttributeError: 'NoneType' object has no attribute 'id'\nERROR: test_active_contract_deterministic_repair_does_not_resume (test_spawn.OutputContracts.test_active_contract_deterministic_repair_does_not_resume)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_does_not_resume_when_final_verdict_exists (test_spawn.OutputContracts.test_active_contract_does_not_resume_when_final_verdict_exists) (role='review')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_invalid_repair_falls_through_once (test_spawn.OutputContracts.test_active_contract_invalid_repair_falls_through_once)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'summary': 'finished'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final='Finished; see the posted verdict.')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'verdict': 'request_changes'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' o",
+        "executed_by": "codex:sol",
+        "thread": "01a0d036-78a2-7410-9dc5-67064ab38fc1",
+        "usage": {
+          "input_tokens": 1888490,
+          "cached_input_tokens": 1790080,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6875,
+          "reasoning_output_tokens": 1378
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790200596.314946,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895,
+        "dispatched_at_done": 1790199439.300784,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790199617.5978398
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "f828eaabd878a95bd89dc9e2a5fbb7b9d3b72d14",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.039,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790200765.336884,
+      "pipeline": {
+        "first_ready_at": 1790199435.021125,
+        "dispatched_at": 1790199435.024895,
+        "dispatched_at_lease": 1790200335.024895,
+        "dispatched_at_done": 1790199439.300784,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790199617.5978398
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "f828eaabd878a95bd89dc9e2a5fbb7b9d3b72d14",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.039,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790200765.336661,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_affinity_reserve_cooldown_budget (test_pool.PoolSel.test_affinity_reserve_cooldown_budget)\nTraceback (most recent call last):\nAttributeError: 'NoneType' object has no attribute 'id'\nERROR: test_active_contract_deterministic_repair_does_not_resume (test_spawn.OutputContracts.test_active_contract_deterministic_repair_does_not_resume)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_does_not_resume_when_final_verdict_exists (test_spawn.OutputContracts.test_active_contract_does_not_resume_when_final_verdict_exists) (role='review')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_invalid_repair_falls_through_once (test_spawn.OutputContracts.test_active_contract_invalid_repair_falls_through_once)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'summary': 'finished'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final='Finished; see the posted verdict.')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'verdict': 'request_changes'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_contract_fallback_execute_shadow_preserves_envelope (test_spawn.OutputContracts.test_contract_fallback_execute_shadow_preserves_envelope)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\n/Users/k3ntaw/code/orchestrator/wt/T-1376/.orchestrator/runs/tests/T-1376-20260923-235925.log\n"
+      }
+    },
+    {
+      "ts": 1790200783.1334982,
+      "status": "superseded",
+      "hold_reason": "respec T-1379: built on red base e953e54; cherry-pick onto ffae658"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790199435.021125,
+    "dispatched_at": 1790199435.024895,
+    "dispatched_at_lease": 1790200335.024895,
+    "dispatched_at_done": 1790199439.300784,
+    "handoff": {
+      "baseline": "sol",
+      "selected": "sol",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790199617.5978398
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "f828eaabd878a95bd89dc9e2a5fbb7b9d3b72d14",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.039,
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790200765.336661,
+    "gate_reds": 1
+  },
+  "packet_meta": {
+    "chars": 4785,
+    "est_tokens": 1196,
+    "presented_tokens": 1196,
+    "sections": {
+      "_preamble": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "4f4c9363f9048e2b2ea09c456ba1d85eb7e0176bbb1b2ff57de4e7abddcd4088"
+      },
+      "objective": {
+        "chars": 1742,
+        "est_tokens": 435,
+        "sha256": "03deaacc7612e0f9663773122f7be221238a0d9141b486d84ff8f380bf355540"
+      },
+      "acceptance": {
+        "chars": 264,
+        "est_tokens": 66,
+        "sha256": "c6bb1e4ce95d5e49d77eb4e496f0aef9dcc78a8bb9632487fed6ce2c825863b5"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "5ddfa16ac79ae10d85aad8c82f3678ef09bff68afb0ac929f6715fbf6783285d"
+      },
+      "write_scope": {
+        "chars": 63,
+        "est_tokens": 15,
+        "sha256": "2dfd6a9d8b8161bddea00e17f98c126e319d725c06dff05dd4578aa8edf383c2"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 208,
+        "est_tokens": 52,
+        "sha256": "08b8ae100821ae0a2c817718b3ea1700b4ac177669329c19f0eb29af0bed017f"
+      },
+      "relevant_tests": {
+        "chars": 1091,
+        "est_tokens": 272,
+        "sha256": "c4afeb3b425389f827943d9fde42c704aaaf766dfddd30134ceb8e5732412241"
+      },
+      "symbols": {
+        "chars": 1039,
+        "est_tokens": 259,
+        "sha256": "b4e1301e8df773ad27c2cc3e1b715bacca576511a3a6083adf9cd5ed7b54160a"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "9dd131d12447",
+    "version": "9dd131d12447",
+    "candidate_known": true,
+    "base": "e953e540333c",
+    "sources": "pool.toml@4d1e6f1bb235 gotchas@7aeee5e94115 memory@notes routed=active",
+    "policy_version": "4d1e6f1bb235",
+    "gotchas": "7aeee5e94115",
+    "candidate_tokens": 2992,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 8632,
+    "routed_reduction_ratio": 0.8974838843834477,
+    "routed_hidden": 0,
+    "routed_ambiguous": 19,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "0c2370dbc217",
+      "282163e9209b",
+      "209b2be1b1d7",
+      "0b385cc56494",
+      "40d3f7304407",
+      "f7e783c7a144",
+      "cf58579c93c0",
+      "53fd11e92901",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "718b545b1eca",
+      "5b872ee10528",
+      "667ed6b21b31",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "b676757c3fa9",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "a595cbbe1665",
+      "d500754708e5",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "d0b9e72fe363",
+      "00db509188f0",
+      "041199286363",
+      "acfaa314d8bc",
+      "4e7c92225364",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "28a89cbf8629",
+      "48bfc3a04fc9",
+      "ff41509e1f4e",
+      "b5b7e9cc6de7",
+      "bf8bf26a7769",
+      "a2c317df0481",
+      "3d42356de85c",
+      "b373c0fc36fd",
+      "a4b4de8d0f9e",
+      "ff84206f4efa",
+      "23714d98e9ab",
+      "c96d2d48c24b",
+      "d9ec9de3d689",
+      "03eebbfa4917",
+      "5ca9497c031c",
+      "8866fd1cf067",
+      "a59528469c99",
+      "ce0d9f6fe875",
+      "a016231404f8",
+      "ca55f94e1ede",
+      "b41dd33a26be",
+      "943b2f9c54f5",
+      "6729e8f80afb",
+      "027ce19bab00",
+      "09cc5a26d0d0",
+      "1af2aacf71c0",
+      "7babae326b13",
+      "393dc9581492",
+      "e146114ba8ec",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "e175a2554b06",
+      "575022ff3493",
+      "cc3f3bcac15a",
+      "ae61acc3156e",
+      "a48883e9da6e",
+      "a98276b73bf8",
+      "985ffb7f01b9",
+      "2993e8419e50",
+      "c6139725224e",
+      "12208bb79454",
+      "9e12df8d5fe6"
+    ],
+    "prefix_sha": "ca8679e33dc1",
+    "prefix_chars": 725,
+    "suffix_chars": 5664,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "active",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790199623.840681,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "d36d4e1050d370310a5a17d5c0a852b7c40aa224",
+  "hold_reason": "respec T-1379: built on red base e953e54; cherry-pick onto ffae658",
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_affinity_reserve_cooldown_budget (test_pool.PoolSel.test_affinity_reserve_cooldown_budget)\nTraceback (most recent call last):\nAttributeError: 'NoneType' object has no attribute 'id'\nERROR: test_active_contract_deterministic_repair_does_not_resume (test_spawn.OutputContracts.test_active_contract_deterministic_repair_does_not_resume)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_does_not_resume_when_final_verdict_exists (test_spawn.OutputContracts.test_active_contract_does_not_resume_when_final_verdict_exists) (role='review')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_invalid_repair_falls_through_once (test_spawn.OutputContracts.test_active_contract_invalid_repair_falls_through_once)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'summary': 'finished'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final='Finished; see the posted verdict.')\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_active_contract_preserves_mid_run_verdict_without_recovery (test_spawn.OutputContracts.test_active_contract_preserves_mid_run_verdict_without_recovery) (role='review', final={'verdict': 'request_changes'})\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nERROR: test_contract_fallback_execute_shadow_preserves_envelope (test_spawn.OutputContracts.test_contract_fallback_execute_shadow_preserves_envelope)\nTraceback (most recent call last):\nTypeError: 'Mock' object does not support the context manager protocol\nTraceback (most recent call last):\n/Users/k3ntaw/code/orchestrator/wt/T-1376/.orchestrator/runs/tests/T-1376-20260923-235925.log\n"
+  }
+}

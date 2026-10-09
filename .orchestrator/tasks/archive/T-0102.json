@@ -1,0 +1,101 @@
+{
+  "id": "T-0102",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-O6b: fallback capacity only when every Codex executor is out, count all in-flight Claude workers, skip un-fallbackable tasks, guard cfg, and honour the other-account rule for reviews",
+  "spec": "Fix round for T-0083 from opus review T-0093 (merged already on sonnet approve; this task bases on goal/T-0073). (1) daemon.free_slots: unlock the Claude fallback branch only when no enabled execute executor is available, i.e. `not any(ex.enabled and \"execute\" in ex.roles and not ex.cooling() for ex in pool.executors.values())`, never when the Codex sum is 0 because rows are merely saturated (running == max_parallel); saturated-but-healthy Codex must return 0 so tasks wait for the next tick. (2) Under fallback, capacity = limits.max_parallel_claude_workers minus every in-flight Claude worker of any role: tasks with status running whose assigned_to starts with \"claude:\", plus execute tasks with pipeline.dispatched_at stamped, no gated_at, and status still queued (the spawn_async window before bus.claim); never below 0. (3) dispatch(): while in fallback mode, skip (leave queued, do not stamp) any execute task whose pool.fallback_tier(complexity) is None, so complexity 9+ waits for Codex instead of being held. (4) Read pool.cfg with .get and the current defaults (\"hold\" for codex.on_exhausted, 4 for limits.max_parallel_claude_workers) so a pool.toml without [codex] or [limits] cannot raise inside dispatch. (5) spawn.run_worker: derive `avoid` for a review from the reviewed task's assigned_to (\"claude:<acct id>\") when no explicit account field exists, so pool.pick(\"review\", avoid=...) really avoids the executing account; also have bus.claim record account=<acct id> alongside assigned_to for Claude workers (bus.claim signature unchanged: parse from assigned_to). Tests: tests/test_daemon.py \u2014 saturated_codex_returns_zero_not_fallback, fallback_counts_running_claude_roles_and_inflight_dispatches, fallback_skips_complexity_without_tier (complexity 9 stays queued, no dispatched_at), free_slots_survives_missing_cfg_tables; tests/test_spawn.py \u2014 review_avoids_executing_account_from_assigned_to (pool.pick receives avoid == the executor's account). Existing tests untouched and green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py gains the four named tests and tests/test_spawn.py the one named test; all green with existing tests untouched",
+    "With the committed pool.toml, four healthy Codex rows at running == max_parallel give free_slots() == 0; with all rows cooling and one running claude scout plus one dispatched-but-unclaimed execute, free_slots() == 2",
+    "A complexity-9 execute task is neither dispatched nor held while Codex cools (no pipeline.dispatched_at, status queued)",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/spawn.py",
+    "tests/test_daemon.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_daemon.py",
+    "fix_round_for": "T-0083"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0102",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nFixed the T-0083 fallback-dispatch bug flagged by opus review T-0093, in four parts:\n\n1. **`free_slots()`** (`orchestrator/daemon.py`): split the fallback-trigger condition from the Codex slot count. Fallback now only unlocks when *no* enabled execute executor is non-cooling (`_codex_available`/`_fallback_mode` helpers) \u2014 a saturated-but-healthy pool (`running == max_parallel`, none cooling) correctly returns `0` instead of unlocking Claude fallback.\n2. Under fallback, capacity subtracts every in-flight Claude worker of **any role** (`running` status, `assigned_to` or `executor` prefixed `\"claude:\"`) plus dispatched-but-unclaimed execute tasks (`pipeline.dispatched_at` set, no `gated_at`, still `queued`), floored at 0.\n3. **`dispatch()`**: while in fallback mode, skips (leaves queued, no stamp) any execute task whose `pool.fallback_tier(complexity)` is `None`, so complexity 9+ waits for Codex instead of getting held via `executor.start()`'s `_exhausted()` path.\n4. All `pool.cfg` reads in this path now use `.get` with the documented defaults (`\"hold\"` / `4`), so a `pool.toml` missing `[codex]` or `[limits]` can't raise.\n5. **`spawn.run_worker`**: derives a review's `avoid` account from the reviewed task's `assigned_to` (`\"claude:<acct>\"`) when no explicit `account` field exists, and now stamps `account=<acct id>` on every Claude-worker claim.\n\n**Files changed:** `orchestrator/daemon.py`, `orchestrator/spawn.py`, `tests/test_daemon.py`, `tests/test_spawn.py`.\n\n**Tests:** all 116 pass (`uv run python -m unittest discover -q tests` \u2192 `OK`), including the five newly added: `test_saturated_codex_returns_zero_not_fallback`, `test_fallback_counts_running_claude_roles_and_inflight_dispatches`, `test_fallback_skips_complexity_without_tier`, `test_free_slots_survives_missing_cfg_tables`, `test_review_avoids_executing_account_from_assigned_to`. No existing test needed modification \u2014 `free_slots`'s running-worker check ORs the new `assigned_to` check with the old `executor` check, so the pre-existing execute-role test stays valid alongside the new any-role behavior.\n\n**Failures-only output:** none \u2014 clean run, `.claude/hooks/tests-green.sh` exits 0.\n\nCommitted as `35bf7e2` on `task/T-0102`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789734205.137131,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789734206.3069608,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0102",
+      "claimed_at": 1789734206.306518
+    },
+    {
+      "ts": 1789734206.314846,
+      "pid": 52423,
+      "account": "B"
+    },
+    {
+      "ts": 1789734720.479855,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nFixed the T-0083 fallback-dispatch bug flagged by opus review T-0093, in four parts:\n\n1. **`free_slots()`** (`orchestrator/daemon.py`): split the fallback-trigger condition from the Codex slot count. Fallback now only unlocks when *no* enabled execute executor is non-cooling (`_codex_available`/`_fallback_mode` helpers) \u2014 a saturated-but-healthy pool (`running == max_parallel`, none cooling) correctly returns `0` instead of unlocking Claude fallback.\n2. Under fallback, capacity subtracts every in-flight Claude worker of **any role** (`running` status, `assigned_to` or `executor` prefixed `\"claude:\"`) plus dispatched-but-unclaimed execute tasks (`pipeline.dispatched_at` set, no `gated_at`, still `queued`), floored at 0.\n3. **`dispatch()`**: while in fallback mode, skips (leaves queued, no stamp) any execute task whose `pool.fallback_tier(complexity)` is `None`, so complexity 9+ waits for Codex instead of getting held via `executor.start()`'s `_exhausted()` path.\n4. All `pool.cfg` reads in this path now use `.get` with the documented defaults (`\"hold\"` / `4`), so a `pool.toml` missing `[codex]` or `[limits]` can't raise.\n5. **`spawn.run_worker`**: derives a review's `avoid` account from the reviewed task's `assigned_to` (`\"claude:<acct>\"`) when no explicit `account` field exists, and now stamps `account=<acct id>` on every Claude-worker claim.\n\n**Files changed:** `orchestrator/daemon.py`, `orchestrator/spawn.py`, `tests/test_daemon.py`, `tests/test_spawn.py`.\n\n**Tests:** all 116 pass (`uv run python -m unittest discover -q tests` \u2192 `OK`), including the five newly added: `test_saturated_codex_returns_zero_not_fallback`, `test_fallback_counts_running_claude_roles_and_inflight_dispatches`, `test_fallback_skips_complexity_without_tier`, `test_free_slots_survives_missing_cfg_tables`, `test_review_avoids_executing_account_from_assigned_to`. No existing test needed modification \u2014 `free_slots`'s running-worker check ORs the new `assigned_to` check with the old `executor` check, so the pre-existing execute-role test stays valid alongside the new any-role behavior.\n\n**Failures-only output:** none \u2014 clean run, `.claude/hooks/tests-green.sh` exits 0.\n\nCommitted as `35bf7e2` on `task/T-0102`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789734737.033538,
+      "pipeline": {
+        "gated_at": 1789734737.0334358
+      }
+    },
+    {
+      "ts": 1789734907.9679291,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789734933.261729,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "35bf7e2613c3f7509f08287c8f30ed2c7b4adaf9"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789734206.306518,
+  "pid": 52423,
+  "account": "B",
+  "pipeline": {
+    "gated_at": 1789734737.0334358
+  },
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0073",
+  "sha": "35bf7e2613c3f7509f08287c8f30ed2c7b4adaf9"
+}

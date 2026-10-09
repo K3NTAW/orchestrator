@@ -1,0 +1,84 @@
+{
+  "id": "T-0024",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "B4b: scorecard.scores() uses bench.json as the cold-start prior for executors with few runs",
+  "spec": "Why: live outcomes (B3 scorecard) need \u22655 runs per executor before they mean anything; until then the benchmark numbers from bench.json (B4a) should bias pick_executor. Depends on B3 (T-0018) and B4a (T-0023) merged into goal/T-0005.\n\nWhat (2 files: orchestrator/scorecard.py, tests/test_orchestrator.py):\n1. scorecard.py \u2014 `def prior_weights(executors: dict[id, Executor]) -> dict[id, float]`: load bench.json via bench.load(); for each executor whose model has a `coding` value use it, else `intelligence`; weight = 0.5 + value / max_value_among_executors (range 0.5\u20131.5); executors with no value \u2192 1.0. In `scores(card, min_runs=5)`: for executors with fewer than min_runs recorded runs, return the prior weight instead of 1.0; warm executors keep the live score. bench.json missing or unreadable \u2192 all 1.0 (never raise).\n2. tests: write a bench.json under TMP with coding values for two of the four codex models; assert prior_weights orders them 1.5 then lower, unknown \u2192 1.0; scores() on an empty card returns the prior weights; scores() with a warm failing executor (min_runs=1) is below 1.0 regardless of prior.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"scorecard: bench.json cold-start prior for pick_executor\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new prior tests",
+    "scorecard.scores({}) returns bench-derived weights in 0.5\u20131.5 for models with numbers and 1.0 otherwise",
+    "no exception when .orchestrator/bench.json is absent",
+    "git diff --stat limited to orchestrator/scorecard.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0024",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nImplemented `prior_weights()` in `orchestrator/scorecard.py`: for each executor, uses bench.json's `coding` value (falling back to `intelligence`) for that executor's model, scaled to 0.5\u20131.5 relative to the max value among scored executors; unscored or unmatched \u2192 1.0; missing/unreadable bench.json \u2192 all 1.0, never raises.\n\n`scores(card, min_runs=5)` now loads executors via `Pool()` and uses `prior_weights` as the fallback for any executor with fewer than `min_runs` resolved tasks, instead of a flat 1.0. Warm executors (\u2265 min_runs) keep their live merged/failed score untouched.\n\n**Files changed:**\n- `orchestrator/scorecard.py` \u2014 added `prior_weights()`, rewired `scores()`\n- `tests/test_orchestrator.py` \u2014 4 new tests covering prior ordering, missing-bench-file neutrality, empty-card priors, and warm-failure overriding a high prior\n\n**Test output:** 63/63 pass, no failures. `tests_green.sh` exits 0. `git diff --stat` limited to the two scoped files.\n\nCommitted as `763986d` on `task/T-0024`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789662397.933672,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789662397.939599,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0024",
+      "claimed_at": 1789662397.9394188
+    },
+    {
+      "ts": 1789662397.947587,
+      "pid": 46296,
+      "account": "B"
+    },
+    {
+      "ts": 1789662603.717154,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nImplemented `prior_weights()` in `orchestrator/scorecard.py`: for each executor, uses bench.json's `coding` value (falling back to `intelligence`) for that executor's model, scaled to 0.5\u20131.5 relative to the max value among scored executors; unscored or unmatched \u2192 1.0; missing/unreadable bench.json \u2192 all 1.0, never raises.\n\n`scores(card, min_runs=5)` now loads executors via `Pool()` and uses `prior_weights` as the fallback for any executor with fewer than `min_runs` resolved tasks, instead of a flat 1.0. Warm executors (\u2265 min_runs) keep their live merged/failed score untouched.\n\n**Files changed:**\n- `orchestrator/scorecard.py` \u2014 added `prior_weights()`, rewired `scores()`\n- `tests/test_orchestrator.py` \u2014 4 new tests covering prior ordering, missing-bench-file neutrality, empty-card priors, and warm-failure overriding a high prior\n\n**Test output:** 63/63 pass, no failures. `tests_green.sh` exits 0. `git diff --stat` limited to the two scoped files.\n\nCommitted as `763986d` on `task/T-0024`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789662677.511264,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "763986d9333c83691bf2ee1f3488be4a10a16d31"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789662397.9394188,
+  "pid": 46296,
+  "account": "B",
+  "merged_into": "goal/T-0005",
+  "sha": "763986d9333c83691bf2ee1f3488be4a10a16d31"
+}

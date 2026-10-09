@@ -1,0 +1,221 @@
+{
+  "id": "T-0633",
+  "created_at": 1789977140.5809731,
+  "parent": "T-0561",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: R10 v2: orchestrator/strategy.py \u2014 workflow-strategy ids from task lineage (real bus fields), per-strategy outcome scorecard and shadow recommendation with evidence thresholds (AP P18)",
+  "spec": "Why: the orchestrator records which model worked (scorecard.executor_economics) but not which workflow worked per task kind; AP P18 / brief P12 want explicit strategy ids, per-strategy outcomes, a strategy scorecard, and an observe-only then off/shadow/active recommendation that never removes deterministic safety steps. v2 after spec review T-0618: real field names and sources.\nWhat: new pure module orchestrator/strategy.py reading tasks/*.json and runs under root. Tests are unittest.TestCase methods in the named file (this repo runs unittest; no pytest fixtures).\n- Field sources (bus schema): acceptance = truthy task['merged_into']; time_s = task['merged_at'] (top-level, else pipeline['merged_at']) - task['created_at'], None when either is missing; task_class = attribution.task_class(task); band = attribution.band(task['complexity']); scout objective = (task.get('constraints') or {}).get('objective') \u2014 the Planner's convention for scout tasks (see T-0562/T-0563/T-0573 on this bus; it is not stamped automatically, so strategies keyed on it fire only for scouts created with it, stated in the docstring); waves_rows = schedlog.read('waves') rows shaped {'wave': [task ids], ...} from STATE/runs/sched/waves.jsonl, the same file scorecard.parallelism reads; review roles = (review task constraints or {}).get('reviewer_role'); security review = pipeline.review_reason startswith 'security_paths'.\n- STRATEGIES = ('direct_execute', 'scout_execute', 'dependency_scout_execute', 'architecture_impact_scouts_then_decompose', 'execute_specialist_review', 'security_context_strong_execute_security_review', 'parallel_wave'); derive(task, tasks, waves_rows=None) -> {'strategy': composite id joined by '+' in STRATEGIES order, 'steps': ordered list of step names actually observed among ['scout', 'spec_review', 'execute', 'review', 'security_review', 'fix_round'], 'components': the list of matched STRATEGIES}: goal scouts = tasks with role scout, same parent, created_at before the task; any scout with objective dependency-map -> dependency_scout_execute; >= 2 scouts with objectives in (architecture, migration-impact, API-consumers) -> architecture_impact_scouts_then_decompose; any scout otherwise -> scout_execute; reviews of the task (inputs[0] == task id) carrying reviewer_role acceptance and adversarial -> execute_specialist_review; security review_reason -> security_context_strong_execute_security_review; task id inside a waves row 'wave' list with >= 2 members -> parallel_wave; nothing -> direct_execute.\n- observations(root=STATE) -> per execute lineage root (scorecard._task_lineage) that is merged or failed: {'task', 'goal', 'repo': root.parent.name, 'strategy', 'steps', 'task_class', 'band', 'complexity', 'models': sorted executor plus review tiers, 'tokens', 'usd' (from scorecard._efficiency_rows for the lineage), 'time_s', 'first_pass': lineage_fix_rounds == 0 and gate_reds == 0, 'fix_rounds', 'gate_reds', 'review_request_changes', 'accepted'}.\n- scorecard(root=STATE, by=('task_class', 'band')) -> {(strategy, class, band): {'n', 'accepted_rate', 'first_pass_rate', 'median_usd', 'median_time_s', 'avg_fix_rounds'}}; format(card).\n- recommend(task_class, band, *, repo=None, root=STATE, cfg=None) -> {'mode', 'strategy'|None, 'n', 'evidence', 'reason', 'required': ['security_review_if_security_paths', 'tests_green', 'spec_review_from_6']}: cfg [strategy] mode off|shadow|active (default shadow), min_samples 10; observations filtered to the same repo (when given) and the same task_class and band; total n < min_samples -> strategy None, reason insufficient_evidence; rank by accepted_rate, then first_pass_rate, then lower median_usd; off -> mode off and strategy None. Active still only recommends (the Planner policy applies); 'required' is always present and never empty.",
+  "inputs": [
+    "T-0630"
+  ],
+  "acceptance": [
+    "tests/test_strategy.py::test_derive_attributes_strategy_steps_and_components \u2014 a task with a goal scout of objective dependency-map, reviews with roles acceptance and adversarial, review_reason security_paths and membership in a two-task wave derives dependency_scout_execute+execute_specialist_review+security_context_strong_execute_security_review+parallel_wave, steps in observed order and components listing those four",
+    "tests/test_strategy.py::test_observations_use_real_bus_fields \u2014 a merged lineage with merged_into, created_at and merged_at yields accepted True and the right time_s; task_class and band come from attribution helpers, not stored fields",
+    "tests/test_strategy.py::test_observations_aggregate_outcomes_per_strategy \u2014 three merged lineages of two strategies yield scorecard rows with n, accepted_rate, first_pass_rate, median_usd",
+    "tests/test_strategy.py::test_cold_start_and_insufficient_evidence_return_no_strategy \u2014 empty root and n below min_samples both yield strategy None with reason insufficient_evidence and a non-empty required list",
+    "tests/test_strategy.py::test_shadow_recommendation_prefers_evidence_without_changing_policy \u2014 with 12 observations per strategy the better accepted_rate wins in shadow mode; mode off yields strategy None",
+    "tests/test_strategy.py::test_repository_and_task_class_are_separated \u2014 observations from another repo or another task class never count toward a recommendation for this one"
+  ],
+  "scope": [
+    "orchestrator/strategy.py",
+    "tests/test_strategy.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0633",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/strategy.py",
+        "issue": "Spec requires calling scorecard._task_lineage and scorecard._efficiency_rows, private (underscore) helpers in orchestrator/scorecard.py, a file outside this task's scope list. No stability contract; a scorecard refactor can silently break strategy.py.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/strategy.py",
+        "issue": "security_context_strong_execute_security_review keys off pipeline.review_reason.startswith('security_paths'), but daemon.py._open_reviews (~line 1008) also treats review_reason=='diff_unavailable' (a deliberate fail-closed path per its own docstring at ~941-944) and startswith('semantic_') as security reviews. The spec's predicate silently misses diff_unavailable, undercounting the strategy for exactly the fail-closed cases that matter most. attribution.py's _SECURITY_REASONS is a third, still different definition -- three inconsistent definitions of 'security review' now exist.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/strategy.py",
+        "issue": "'spec_review' and 'fix_round' are listed as observable step names but the spec never states the join key to find them (unlike scout: parent+created_at, review: inputs[0]). Established codebase convention (scorecard.py lines 137, 790) uses constraints.spec_review_for / constraints.fix_round_for. No acceptance test exercises either step, so a missing/wrong implementation ships undetected.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/strategy.py",
+        "issue": "observations() fields 'gate_reds' and 'review_request_changes' have no stated field source. Two non-equivalent existing conventions exist (single-task pipeline.gate_reds vs lineage-summed; single review_verdict flag vs counted review_facts verdicts) and the spec doesn't pick one.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/strategy.py",
+        "issue": "time_s reads task['merged_at'] top-level first, then pipeline['merged_at'], reversed from every existing reader in this codebase (scorecard.py, sched_scorecard.py check pipeline first). Harmless today since nothing writes top-level merged_at, but contradicts this packet's own claim of using 'real field names and sources' post spec-review.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Replace scorecard._task_lineage/_efficiency_rows calls with the public scorecard.efficiency(root)['tasks'][tid] entries (already public, already provides usd, tokens, band, task_class, fix_rounds, first_pass, goal_id per accepted lineage root) or promote _task_lineage into attribution.py alongside the existing public attribution.lineage().",
+      "Define the security-review predicate as pipeline.review_reason in ('diff_unavailable','security_paths_empty') or review_reason.startswith('security_paths:') -- matching daemon.py._open_reviews's actual 'security' boolean -- and reconcile with attribution._SECURITY_REASONS in the same change so there is one definition, not three.",
+      "State the constraints key used to associate spec_review and fix_round tasks with the task under analysis (constraints.spec_review_for / constraints.fix_round_for, matching scorecard.py's existing convention), and add an acceptance test that exercises both step types.",
+      "State explicit sources for gate_reds and review_request_changes (single-task pipeline field vs lineage-summed; verdict flag vs counted review children) and add an acceptance test covering a lineage with at least one fix round so the aggregation choice is pinned down."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789977144.068629,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0633",
+      "claimed_at": 1789977144.068136
+    },
+    {
+      "ts": 1789977144.070146,
+      "account": "B"
+    },
+    {
+      "ts": 1789977144.993481,
+      "pid": 64897,
+      "account": "B"
+    },
+    {
+      "ts": 1789977402.266077,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/strategy.py",
+            "issue": "Spec requires calling scorecard._task_lineage and scorecard._efficiency_rows, private (underscore) helpers in orchestrator/scorecard.py, a file outside this task's scope list. No stability contract; a scorecard refactor can silently break strategy.py.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/strategy.py",
+            "issue": "security_context_strong_execute_security_review keys off pipeline.review_reason.startswith('security_paths'), but daemon.py._open_reviews (~line 1008) also treats review_reason=='diff_unavailable' (a deliberate fail-closed path per its own docstring at ~941-944) and startswith('semantic_') as security reviews. The spec's predicate silently misses diff_unavailable, undercounting the strategy for exactly the fail-closed cases that matter most. attribution.py's _SECURITY_REASONS is a third, still different definition -- three inconsistent definitions of 'security review' now exist.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/strategy.py",
+            "issue": "'spec_review' and 'fix_round' are listed as observable step names but the spec never states the join key to find them (unlike scout: parent+created_at, review: inputs[0]). Established codebase convention (scorecard.py lines 137, 790) uses constraints.spec_review_for / constraints.fix_round_for. No acceptance test exercises either step, so a missing/wrong implementation ships undetected.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/strategy.py",
+            "issue": "observations() fields 'gate_reds' and 'review_request_changes' have no stated field source. Two non-equivalent existing conventions exist (single-task pipeline.gate_reds vs lineage-summed; single review_verdict flag vs counted review_facts verdicts) and the spec doesn't pick one.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/strategy.py",
+            "issue": "time_s reads task['merged_at'] top-level first, then pipeline['merged_at'], reversed from every existing reader in this codebase (scorecard.py, sched_scorecard.py check pipeline first). Harmless today since nothing writes top-level merged_at, but contradicts this packet's own claim of using 'real field names and sources' post spec-review.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Replace scorecard._task_lineage/_efficiency_rows calls with the public scorecard.efficiency(root)['tasks'][tid] entries (already public, already provides usd, tokens, band, task_class, fix_rounds, first_pass, goal_id per accepted lineage root) or promote _task_lineage into attribution.py alongside the existing public attribution.lineage().",
+          "Define the security-review predicate as pipeline.review_reason in ('diff_unavailable','security_paths_empty') or review_reason.startswith('security_paths:') -- matching daemon.py._open_reviews's actual 'security' boolean -- and reconcile with attribution._SECURITY_REASONS in the same change so there is one definition, not three.",
+          "State the constraints key used to associate spec_review and fix_round tasks with the task under analysis (constraints.spec_review_for / constraints.fix_round_for, matching scorecard.py's existing convention), and add an acceptance test that exercises both step types.",
+          "State explicit sources for gate_reds and review_request_changes (single-task pipeline field vs lineage-summed; verdict flag vs counted review children) and add an acceptance test covering a lineage with at least one fix round so the aggregation choice is pinned down."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789977402.2678962,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "Spec requires calling scorecard._task_lineage and scorecard._efficiency_rows, private (underscore) helpers in orchestrator/scorecard.py, a file outside this task's scope list. No stability contract; a scorecard refactor can silently break strategy.py.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "security_context_strong_execute_security_review keys off pipeline.review_reason.startswith('security_paths'), but daemon.py._open_reviews (~line 1008) also treats review_reason=='diff_unavailable' (a deliberate fail-closed path per its own docstring at ~941-944) and startswith('semantic_') as security reviews. The spec's predicate silently misses diff_unavailable, undercounting the strategy for exactly the fail-closed cases that matter most. attribution.py's _SECURITY_REASONS is a third, still different definition -- three inconsistent definitions of 'security review' now exist.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "'spec_review' and 'fix_round' are listed as observable step names but the spec never states the join key to find them (unlike scout: parent+created_at, review: inputs[0]). Established codebase convention (scorecard.py lines 137, 790) uses constraints.spec_review_for / constraints.fix_round_for. No acceptance test exercises either step, so a missing/wrong implementation ships undetected.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "observations() fields 'gate_reds' and 'review_request_changes' have no stated field source. Two non-equivalent existing conventions exist (single-task pipeline.gate_reds vs lineage-summed; single review_verdict flag vs counted review_facts verdicts) and the spec doesn't pick one.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/strategy.py",
+          "issue": "time_s reads task['merged_at'] top-level first, then pipeline['merged_at'], reversed from every existing reader in this codebase (scorecard.py, sched_scorecard.py check pipeline first). Harmless today since nothing writes top-level merged_at, but contradicts this packet's own claim of using 'real field names and sources' post spec-review.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789977144.068136,
+  "account": "B",
+  "pid": 64897,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "Spec requires calling scorecard._task_lineage and scorecard._efficiency_rows, private (underscore) helpers in orchestrator/scorecard.py, a file outside this task's scope list. No stability contract; a scorecard refactor can silently break strategy.py.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "security_context_strong_execute_security_review keys off pipeline.review_reason.startswith('security_paths'), but daemon.py._open_reviews (~line 1008) also treats review_reason=='diff_unavailable' (a deliberate fail-closed path per its own docstring at ~941-944) and startswith('semantic_') as security reviews. The spec's predicate silently misses diff_unavailable, undercounting the strategy for exactly the fail-closed cases that matter most. attribution.py's _SECURITY_REASONS is a third, still different definition -- three inconsistent definitions of 'security review' now exist.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "'spec_review' and 'fix_round' are listed as observable step names but the spec never states the join key to find them (unlike scout: parent+created_at, review: inputs[0]). Established codebase convention (scorecard.py lines 137, 790) uses constraints.spec_review_for / constraints.fix_round_for. No acceptance test exercises either step, so a missing/wrong implementation ships undetected.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "observations() fields 'gate_reds' and 'review_request_changes' have no stated field source. Two non-equivalent existing conventions exist (single-task pipeline.gate_reds vs lineage-summed; single review_verdict flag vs counted review_facts verdicts) and the spec doesn't pick one.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/strategy.py",
+      "issue": "time_s reads task['merged_at'] top-level first, then pipeline['merged_at'], reversed from every existing reader in this codebase (scorecard.py, sched_scorecard.py check pipeline first). Harmless today since nothing writes top-level merged_at, but contradicts this packet's own claim of using 'real field names and sources' post spec-review.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "T-0062",
+  "parent": "T-0043",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: C-C: daemon advances tasks \u2014 dispatch on ready, gate, review, merge, dependents; pipeline stamps; locked writes",
+  "spec": "Why: every pipeline hop waits for the Planner today (scout T-0045: daemon.tick only requeues dead pids). Depends on C-B (depends_on, ready()) and C-D (spec_review verdict) merged into goal/T-0043.\n\nWhat (3 files: orchestrator/daemon.py, orchestrator/bus.py (lock helper only), tests/test_daemon.py; worktree off goal/T-0043):\n1. bus.py: `with bus.locked():` context manager using fcntl.flock on STATE/bus.lock; wrap _save() and update() bodies in it (cheap; same pattern as merge.lock). Pool.save is out of scope; the daemon builds a fresh Pool() per tick to reduce staleness.\n2. daemon.py, new stages in tick(pool), each guarded by a `pipeline` dict on the task json with stage timestamps, written via bus.update inside the lock so a stage runs once:\n   - dispatch: for execute tasks with status queued, `bus.ready(t)` True, and (complexity < 5 or t.get(\"spec_review_verdict\") == \"approve\"): render .orchestrator/prompts/execute.md and call executor.start(t[\"id\"], prompt); stamp pipeline.dispatched_at. If complexity \u2265 5 and no spec_review task exists for it yet, create one (bus.create_task role spec_review, inputs=[id], parent=t[\"parent\"], acceptance/scope copied) and spawn it via spawn.run_worker in a thread; stamp pipeline.spec_review_at. On request_changes: bus.update(status held, hold_reason \"spec_review request_changes\"), notify.\n   - gate+review: for execute tasks done with merged_into unset and pipeline.gated_at unset: run TESTS_GREEN (merge.TESTS_GREEN) on t[\"worktree\"]; red \u2192 status held, hold_reason \"gate_red\", notify; green \u2192 if complexity \u2264 3 call merge.merge(id) directly, else create a review task (role review, inputs=[id], complexity = t complexity, parent, acceptance/scope copied) and spawn it; stamp gated_at.\n   - merge: for review tasks done whose inputs[0] execute task has review_verdict approve and merged_into unset: merge.merge(inputs[0]); on merged, stamp merged_at and notify; on conflict/tests_red the merge already sets status failed \u2014 notify. review_verdict request_changes \u2192 hold the execute task with hold_reason \"review request_changes\", notify (the Planner writes the fix-round spec).\n   - dependents: nothing extra; dispatch picks up ready tasks next tick.\n   Never re-spawn a task with a live pid; keep the existing dead-pid requeue. Keep tick() total work bounded (one dispatch per executor slot per tick).\n3. `orchestrator daemon --once` runs a single tick (for tests and for the Planner). tests/test_daemon.py: with executor.start, spawn.run_worker, merge.merge and subprocess.run monkeypatched to record calls: (a) B depends_on A: tick dispatches A only; after A merged_into set, next tick dispatches B; (b) complexity 6 task is not dispatched until spec_review_verdict approve; a spec_review task is created once; (c) done execute task at complexity 2 with a fake green gate \u2192 merge called; at complexity 5 \u2192 review task created and spawned once across two ticks; (d) red gate \u2192 held with hold_reason gate_red and no review created; (e) review approve \u2192 merge called; request_changes \u2192 execute task held.\n\nRun `uv run python -m unittest discover -q tests`. Commit: \"daemon: dependency-driven dispatch, gate, review, merge with pipeline stamps; bus write lock\" with a revert-path body.",
+  "inputs": [
+    "T-0050"
+  ],
+  "acceptance": [
+    "uv run python -m unittest discover -q tests exits 0 with the five daemon scenarios",
+    "a task with unmet depends_on is never dispatched; a complexity >=5 task waits for spec_review_verdict approve",
+    "each stage runs at most once per task across repeated ticks (pipeline stamps)",
+    "red gate or request_changes leaves the task held with a hold_reason and calls notify",
+    "bus._save/update run under an flock on .orchestrator/bus.lock",
+    "git diff --stat limited to orchestrator/daemon.py, orchestrator/bus.py, orchestrator/cli.py (only the --once flag), tests/test_daemon.py"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    "orchestrator/cli.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "stale: daemon smoke run review of T-0050, already reviewed (T-0054) and merged via T-0056. Superseded.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789678773.286444,
+      "status": "failed",
+      "result": {
+        "summary": "stale: daemon smoke run review of T-0050, already reviewed (T-0054) and merged via T-0056. Superseded.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ]
+}

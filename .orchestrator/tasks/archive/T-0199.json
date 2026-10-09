@@ -1,0 +1,125 @@
+{
+  "id": "T-0199",
+  "parent": "T-0109",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "D3 fix round 2: release the claim on failure and age out stale claims, decision prompt and keys carry ids only, session file gitignored, non-int pid treated as absent, autonomous tick test (from review T-0198)",
+  "spec": "Fix round for T-0197 (branch task/T-0197 at 2ad6297). Work in this task's worktree, cut from task/T-0197. Review T-0198 (opus) requested changes; items come from it. Scope: orchestrator/planner_runs.py, orchestrator/mcp.py, tests/test_planner_runs.py, .gitignore.\n\n1 HIGH planner_runs.py run() (\u2248line 209): wrap everything between _claim() and _record_running() in try/except BaseException: on any exception flip the row to status \"failed_launch\" with the error text (capped 300 chars) so it does not block, re-raise or return a skip; in reconcile(), age out rows with status \"claimed\" and pid None older than 120 s to \"failed_launch\" (a process that died mid-claim). failed_launch counts as an attempt (attempts += 1) and follows the same gave_up rule at 2. Tests: raising launch_planner \u2192 row failed_launch, decision_points yields the key again next tick; a stale claimed row is aged out.\n\n2 HIGH prompt injection: keys and prompts carry ids only. held payload_key = f\"{task_id}:{held_at!r}\" (no hold_reason); the rendered planner-decision prompt receives only kind, goal_id and payload_key; hold_reason is never rendered: the decision Planner reads it from the bus as data. Also assert in spawn.render's caller that kind, goal_id and payload_key match ^[A-Za-z0-9_.:\\-]+$ before rendering (defensive; skip with reason otherwise). Test: a hold_reason containing \"IGNORE PRIOR INSTRUCTIONS\" never appears in the rendered prompt.\n\n3 MED .gitignore: add .orchestrator/planner_session.json and .orchestrator/runs/planner_runs.json is already under runs/ (confirm) and .orchestrator/planner_usage.json / handover_state.json if not yet ignored (check each with git check-ignore and add the missing ones). Test: a test asserts these paths are ignored via `git check-ignore` in the harness repo or by parsing .gitignore.\n\n4 LOW _session_attached: a session file whose pid is not an int (or missing) is treated as absent (no exception). Test.\n\n5 LOW tests: one tick-level test with autonomous=true, launch_planner patched: two decision points ready \u2192 exactly one launch in the first tick, the second in the next tick; guards and stages run before the autonomous block.\n\nNo new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0197",
+    "T-0198"
+  ],
+  "acceptance": [
+    "A failure between claim and launch releases the key (failed_launch) and stale claims are aged out; the decision is retried and counts toward gave_up (tests)",
+    "held keys and the rendered decision prompt contain ids and timestamps only; hold_reason text never reaches the prompt (test); key components validated before render",
+    "planner_session.json (and the other runtime state files) are gitignored (test)",
+    "Non-int pid in the session file is treated as absent (test)",
+    "tick() with autonomous=true launches at most one decision per tick (test)",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the four scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/mcp.py",
+    "tests/test_planner_runs.py",
+    ".gitignore"
+  ],
+  "depends_on": [
+    "T-0197"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2700,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_planner_runs.py",
+    "fix_round_for": "T-0197",
+    "worktree_base": "task/T-0197",
+    "spec_review": "waived: fix round whose spec is the T-0198 comment list",
+    "escalate_if_rejected": true
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0199",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed clean on `task/T-0199` at `2190aa5`. Working tree clean.\n\n## Summary\n\nFixed all 5 items from the T-0198 review round for `planner_runs.py`:\n\n1. **failed_launch handling**: `run()` now wraps the claim\u2192launch window in `try/except BaseException`; any failure records status `failed_launch` (error capped to 300 chars) instead of leaving the row stuck `claimed`. `reconcile()` ages out stale `claimed` rows (pid still `None`) after 120s. Both paths increment `attempts` and escalate to `gave_up` (blocking) at 2, matching the existing `exited_early` rule.\n2. **Prompt injection**: `_held_key()` no longer embeds `hold_reason` \u2014 it's now `f\"{task_id}:{held_at!r}\"`. Added a defensive regex check (`^[A-Za-z0-9_.:\\-]+$`) on `kind`/`goal_id`/`payload_key` before rendering, skipping (not raising) if it fails.\n3. **`.gitignore`**: added `planner_session.json`, `planner_usage.json`, `handover_state.json` (confirmed `runs/planner_runs.json` was already covered).\n4. **`_session_attached`**: a non-int (or missing) `pid` in the session file is now treated as absent rather than crashing `goals.identity_of`.\n5. **Tick-level test**: added a test confirming `daemon.tick()` with `autonomous=true` launches exactly one decision per tick even when two are ready.\n\n**Files changed**: `orchestrator/planner_runs.py`, `tests/test_planner_runs.py`, `.gitignore` (mcp.py needed no changes).\n\n**Test output**: `uv run python -m unittest discover -q tests` \u2192 261 tests, all green. `.claude/hooks/tests-green.sh` exits 0. No failures to report.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789767313.327348,
+      "spec_review_verdict": "approve",
+      "spec_review_note": "waived: fix round",
+      "pipeline": {
+        "spec_review_at": 1789767313.3271549,
+        "gated_at": 1789767313.3271549,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789767325.984683,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789767325.987709,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0199",
+      "claimed_at": 1789767325.9875479
+    },
+    {
+      "ts": 1789767325.9970078,
+      "pid": 26469,
+      "account": "B"
+    },
+    {
+      "ts": 1789767722.409395,
+      "status": "done",
+      "result": {
+        "summary": "Committed clean on `task/T-0199` at `2190aa5`. Working tree clean.\n\n## Summary\n\nFixed all 5 items from the T-0198 review round for `planner_runs.py`:\n\n1. **failed_launch handling**: `run()` now wraps the claim\u2192launch window in `try/except BaseException`; any failure records status `failed_launch` (error capped to 300 chars) instead of leaving the row stuck `claimed`. `reconcile()` ages out stale `claimed` rows (pid still `None`) after 120s. Both paths increment `attempts` and escalate to `gave_up` (blocking) at 2, matching the existing `exited_early` rule.\n2. **Prompt injection**: `_held_key()` no longer embeds `hold_reason` \u2014 it's now `f\"{task_id}:{held_at!r}\"`. Added a defensive regex check (`^[A-Za-z0-9_.:\\-]+$`) on `kind`/`goal_id`/`payload_key` before rendering, skipping (not raising) if it fails.\n3. **`.gitignore`**: added `planner_session.json`, `planner_usage.json`, `handover_state.json` (confirmed `runs/planner_runs.json` was already covered).\n4. **`_session_attached`**: a non-int (or missing) `pid` in the session file is now treated as absent rather than crashing `goals.identity_of`.\n5. **Tick-level test**: added a test confirming `daemon.tick()` with `autonomous=true` launches exactly one decision per tick even when two are ready.\n\n**Files changed**: `orchestrator/planner_runs.py`, `tests/test_planner_runs.py`, `.gitignore` (mcp.py needed no changes).\n\n**Test output**: `uv run python -m unittest discover -q tests` \u2192 261 tests, all green. `.claude/hooks/tests-green.sh` exits 0. No failures to report.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789809361.393234,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789809406.3402188,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "sha": "25404d4e2e54eb640fba086861e8d4c3c1e23302"
+    },
+    {
+      "ts": 1789809441.144736,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "sha": "25404d4e2e54eb640fba086861e8d4c3c1e23302"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_note": "waived: fix round",
+  "pipeline": {
+    "spec_review_at": 1789767313.3271549,
+    "gated_at": 1789767313.3271549,
+    "gated_by": "planner-pre-stamp: gate and review by hand"
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789767325.9875479,
+  "pid": 26469,
+  "account": "B",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0109",
+  "sha": "25404d4e2e54eb640fba086861e8d4c3c1e23302"
+}

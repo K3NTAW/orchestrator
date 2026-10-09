@@ -1,0 +1,94 @@
+{
+  "id": "T-0246",
+  "parent": "T-0240",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: F1: jev-gate in one process per tool call \u2014 enabled check inside the scorer, venv python instead of uv run, latency target under 400 ms",
+  "spec": "Review T-0239 (approve, low): .claude/hooks/jev-gate.sh runs `uv run python -m orchestrator.jev_gate --enabled` and then a second `uv run` for the real scoring, so every Read/Grep/Bash of every worker pays two interpreter startups plus one network call. Measured 704 ms per call from the main checkout. Change:\n1. jev-gate.sh: one invocation. Resolve the interpreter as $ORCH_ROOT/.venv/bin/python when it exists (fall back to `uv run python`), pipe the hook JSON once to `-m orchestrator.jev_gate`; the module itself exits 0 immediately when [jev].enabled is false or the role is not gated, before any import of urllib or the transcript reader. Keep the 3 s alarm and fail-open semantics. Remove the --enabled subcommand or keep it only for tests.\n2. jev_gate.py: import jev lazily after the enabled check; cache the parsed pool.toml [jev] table per process (one read); log latency_ms as before plus startup_ms (time from process start to the ask call) so the scorecard can split interpreter cost from network cost.\n3. Skip scoring entirely (exit 0, no log row) for tool calls whose input is empty or for tool_name Glob with a bare pattern, to save calls that never need judgment; make the skip list a module constant with a test.\nTests in tests/test_jev_gate.py: disabled config exits 0 without importing urllib (assert via a sentinel monkeypatch), the hook script issues exactly one python invocation (subprocess spy or a counter file), startup_ms present in a logged row, skip list honoured. Report the measured latency of one live smoke call in the summary (ORCH_TASK_ID set, key in the Keychain).",
+  "inputs": [
+    "T-0242"
+  ],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_disabled_exits_before_network_imports, ::test_hook_single_invocation, ::test_startup_ms_logged, ::test_skip_list pass",
+    "The summary reports one live smoke call latency_ms under 400 (or explains why not)",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    ".claude/hooks/jev-gate.sh",
+    "orchestrator/jev_gate.py",
+    "tests/test_jev_gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0246",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/jev_gate.py",
+        "line": 259,
+        "issue": "main() does `P.config = cache(P.config)` unconditionally on every call with no reset. Harmless today because main() only ever runs once per subprocess (`python -m orchestrator.jev_gate`), but if it's ever called more than once in-process (future test harness, embedding), each call wraps the already-cached function in another cache layer, permanently freezing the first config snapshot and leaking it into every other consumer of orchestrator.pool.config in that process. Low severity given current call sites, but worth a guard (e.g. only wrap if not already wrapped, or cache-clear on entry) before this is reused anywhere else.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789835684.164592,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0246",
+      "claimed_at": 1789835684.164202
+    },
+    {
+      "ts": 1789835684.166156,
+      "account": "B"
+    },
+    {
+      "ts": 1789835684.2058702,
+      "pid": 40381,
+      "account": "B"
+    },
+    {
+      "ts": 1789836102.1007419,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/jev_gate.py",
+            "line": 259,
+            "issue": "main() does `P.config = cache(P.config)` unconditionally on every call with no reset. Harmless today because main() only ever runs once per subprocess (`python -m orchestrator.jev_gate`), but if it's ever called more than once in-process (future test harness, embedding), each call wraps the already-cached function in another cache layer, permanently freezing the first config snapshot and leaking it into every other consumer of orchestrator.pool.config in that process. Low severity given current call sites, but worth a guard (e.g. only wrap if not already wrapped, or cache-clear on entry) before this is reused anywhere else.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789836102.102958,
+      "review_verdict": "approve"
+    }
+  ],
+  "claimed_at": 1789835684.164202,
+  "account": "B",
+  "pid": 40381,
+  "review_verdict": "approve"
+}

@@ -1,0 +1,102 @@
+{
+  "id": "T-0413",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H4 fix round 7: drop the dispatch-side pre-reservation and placeholder account ids; the run that actually starts (executor.start for Codex, spawn.run_worker for Claude) reserves for exactly its executor or account and releases in its own finally; dispatch only checks slots (review T-0409)",
+  "spec": "STEP 0: the worktree must contain the T-0362 lineage through 43ab83f (T-0408) in git log; never drop or amend them.\nReview T-0409 on T-0408, one high finding: daemon.dispatch defaults account_id to the placeholder strings \"codex\" or \"claude\" when pick_executor or pick returns None; the placeholder flows into executor.start(executor_id=\"codex\"), which is not a real executor key, then into _exhausted(account_id=\"codex\"), where a truthy account_id makes it look up an account literally named codex instead of falling back to pool.pick(\"execute\"), so the fallback path breaks. This is the seventh defect in the dispatch-to-worker reservation hand-off; the Planner decision is to remove the hand-off rather than patch it again.\nDesign (simplify): (1) daemon.dispatch no longer reserves and no longer picks an account or executor for the worker; it checks free_slots as before, stamps dispatched_at, and calls the worker with the task id only (the T-0400 backward-compatible signature stays, the optional executor argument is simply not passed). (2) The run that actually starts owns the reservation: executor.start reserves for the executor it selected (real executor id) immediately after selection and releases in its finally on every path except the fallback hand-off, where ownership passes to spawn.run_worker exactly as T-0404 arranged; spawn.run_worker reserves for the account it selected (real account id) when it did not inherit one and releases in its finally. A refused reservation inside the worker leaves the task queued with pipeline.hold_note budget and clears dispatched_at so the next tick can retry (no hold_reason, no fix round). (3) No placeholder ids anywhere: grep for the literals \"codex\" and \"claude\" used as account ids in daemon.py and executor.py shows none. (4) Keep the reservation ledger, estimate rule, lease sweep, notify-per-transition and goal-budget semantics from the lineage unchanged.\nTests: replace test_reservation_owner_matches_running_executor with the same assertion driven through the new flow (the reservation's owner is the executor or account that ran); add tests/test_daemon.py::test_dispatch_passes_no_placeholder_ids (pick returns None: dispatch still calls the worker with the task id only and no account_id argument) and tests/test_executor.py::test_worker_refusal_requeues_without_hold (reserve refused inside the worker: task queued, hold_note budget, dispatched_at cleared). Keep every other lineage test green: test_parallel_reservations_cannot_exceed_daily_budget, test_expired_lease_with_live_pid_still_counts, test_release_reconciles_estimate_with_actual, test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap, test_two_parallel_execute_dispatches_allowed_without_goal_budget, test_estimate_never_zero_without_history, test_budget_refusal_leaves_task_queued_without_repair (adapt its trigger point to the worker), test_notify_once_per_transition, test_depends_on_gates_dispatch, test_failed_dispatch_stamp_releases_reservation (now trivially: dispatch holds no reservation; keep or retire with a comment), test_exhausted_hold_releases_dispatch_reservation (adapt: the worker's own reservation is released on the exhausted hold), test_fallback_handoff_keeps_reservation_until_worker_finishes, test_refused_or_exception_path_releases_immediately, test_fallback_claude_when_codex_cooling. Run .claude/hooks/tests-green.sh from the worktree root twice (exit 0 both), then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0411"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 43ab83f and the rest of the T-0362 lineage below your commit",
+    "grep of orchestrator/daemon.py and orchestrator/executor.py shows no account_id or executor_id defaulted to the literal strings codex or claude, and dispatch calls no reserve",
+    "tests/test_daemon.py::test_dispatch_passes_no_placeholder_ids and tests/test_executor.py::test_worker_refusal_requeues_without_hold pass",
+    "tests/test_daemon.py::test_reservation_owner_matches_running_executor, ::test_depends_on_gates_dispatch, ::test_budget_refusal_leaves_task_queued_without_repair, ::test_notify_once_per_transition and tests/test_executor.py::test_fallback_handoff_keeps_reservation_until_worker_finishes, ::test_refused_or_exception_path_releases_immediately, ::test_fallback_claude_when_codex_cooling and the tests/test_pool.py reservation tests pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree on two consecutive runs"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/pool.py",
+    "tests/test_daemon.py",
+    "tests/test_executor.py",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0413",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/pool.py",
+        "line": 204,
+        "issue": "Pool.save() blindly serializes self.reservations/reservation_history/notified_state without taking the reservation file's flock or re-reading current disk state, while reserve()/release()/sweep_reservations() do their own locked read-modify-write via _reservation_file(). Every Pool() instance keeps its own in-memory snapshot of these fields, and Pool instances are long-lived across slow operations \u2014 e.g. executor.py's _run() holds a `pool` object through a subprocess.run() call that can block up to 1800s (constraints.timeout_s), and on a rate-limit hit calls `pool.codex.cooldown_until = ...; pool.save()` (executor.py:126) using the snapshot captured before the subprocess ran. Any reserve()/release() done by other concurrently-dispatched tasks (each via their own fresh Pool()) during that window is silently discarded when this stale save() overwrites pool_state.json. This defeats the atomicity the reservation system exists to provide: it can under-count outstanding reservations (letting reserve() over-admit tasks past the daily budget) or resurrect an already-released reservation (permanently blocking a run_key from ever reserving again). This is exactly the concurrent-dispatch scenario the daemon runs in (spawn_async fans out multiple threads each doing their own executor.start()/run_worker()), so it's not a theoretical edge case.",
+        "failure_scenario": "Task A's start() reserves budget, then _run() blocks in subprocess.run() for several minutes. During that window, task B (different thread, fresh Pool()) reserves and releases its own budget via the locked _reservation_file path. Task A's subprocess hits a rate-limit error, and _run() calls pool.save() using task A's stale in-memory reservations snapshot (which doesn't include B's now-released reservation state) \u2014 B's release is wiped from disk, so B's tokens/usd are double-counted as still outstanding forever (or, if B's reservation still existed when A's stale snapshot was captured but was since legitimately dropped by sweep_reservations, save() resurrects a dead reservation), corrupting the daily-budget accounting this diff was written to make atomic.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789911491.0181398,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0413",
+      "claimed_at": 1789911491.017652
+    },
+    {
+      "ts": 1789911491.0197382,
+      "account": "B"
+    },
+    {
+      "ts": 1789911491.0566862,
+      "pid": 88758,
+      "account": "B"
+    },
+    {
+      "ts": 1789911644.627608,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/pool.py",
+            "line": 204,
+            "issue": "Pool.save() blindly serializes self.reservations/reservation_history/notified_state without taking the reservation file's flock or re-reading current disk state, while reserve()/release()/sweep_reservations() do their own locked read-modify-write via _reservation_file(). Every Pool() instance keeps its own in-memory snapshot of these fields, and Pool instances are long-lived across slow operations \u2014 e.g. executor.py's _run() holds a `pool` object through a subprocess.run() call that can block up to 1800s (constraints.timeout_s), and on a rate-limit hit calls `pool.codex.cooldown_until = ...; pool.save()` (executor.py:126) using the snapshot captured before the subprocess ran. Any reserve()/release() done by other concurrently-dispatched tasks (each via their own fresh Pool()) during that window is silently discarded when this stale save() overwrites pool_state.json. This defeats the atomicity the reservation system exists to provide: it can under-count outstanding reservations (letting reserve() over-admit tasks past the daily budget) or resurrect an already-released reservation (permanently blocking a run_key from ever reserving again). This is exactly the concurrent-dispatch scenario the daemon runs in (spawn_async fans out multiple threads each doing their own executor.start()/run_worker()), so it's not a theoretical edge case.",
+            "failure_scenario": "Task A's start() reserves budget, then _run() blocks in subprocess.run() for several minutes. During that window, task B (different thread, fresh Pool()) reserves and releases its own budget via the locked _reservation_file path. Task A's subprocess hits a rate-limit error, and _run() calls pool.save() using task A's stale in-memory reservations snapshot (which doesn't include B's now-released reservation state) \u2014 B's release is wiped from disk, so B's tokens/usd are double-counted as still outstanding forever (or, if B's reservation still existed when A's stale snapshot was captured but was since legitimately dropped by sweep_reservations, save() resurrects a dead reservation), corrupting the daily-budget accounting this diff was written to make atomic.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789911644.6301062,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789911491.017652,
+  "account": "B",
+  "pid": 88758,
+  "review_verdict": "request_changes"
+}
