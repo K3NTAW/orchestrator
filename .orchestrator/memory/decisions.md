@@ -385,3 +385,16 @@ type: decision · goal: T-1705 · tasks: T-1705 · provenance: repo
 - goal/T-1705 is an ancestor of main (PR 47 merged 2026-10-09 03:15); only superseded children were unmerged, so the closable_goal packet is answered with no new PR
 - pool.toml [ship].enabled true again per the goal acceptance; preconditions checked: daemon started 03:15 from this checkout which includes goal/T-1705, ship_state.json absent so goals closed before the next tick are ignored
 outcome: revert path: git revert a867101 (ship goes off again), or set [ship].enabled = false by hand; reset the T-1705 result by hand if the close was wrong
+
+## 2026-10-09 2026-10-09 PR 48 merged (98932a6): daemon keeps ticking during background gates, no orphaned gates; goal T-1742 complete
+type: decision · goal: T-1742 · tasks: T-1743 · provenance: repo
+- Full gate on goal/T-1742 merged with origin/main: tests-green OK 1741 901e204 1780s; merged by the Planner under the 2026-10-06 policy
+- Auto-ship skipped T-1742 because the Planner filed the goal without constraints.goal; ship.candidates only selects goal tasks with that flag. File future goals with constraints goal true
+- Local main at 26e0a37; daemons restarted 06:49: orchestrator 23389, luna-inbox 23397, ai-apprentice 23411, docs-kentawaibel 23418
+outcome: Revert: git revert -m 1 98932a6 via a revert PR, then restart the daemons
+
+## 2026-10-09 T-1748 re-superseded: late gate result had re-held a superseded fix round
+type: decision · goal: T-1745 · tasks: T-1746,T-1748 · provenance: repo
+- T-1746 merged into goal/T-1745 at 6a11de8 after a re-gate; T-1748 (auto fix round 1) made no code change and was superseded 09:37:09; a gate started before the supersede landed at 09:37:43 and set held/gate_red with empty failures
+- daemon._apply_gate_result drops results only for mismatched gate_run_id or merged_into, not for superseded/failed status; follow-up candidate recorded in plan.md
+outcome: noop on the fix-round packet; T-1748 superseded via bus.update under bus.locked(); revert: bus.update('T-1748', status='held', hold_reason='gate_red')

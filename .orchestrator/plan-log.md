@@ -364,3 +364,10 @@ Later (not filed): LS3 heavy reads in fresh subagents (review triage, respec and
 - Needs the human: local main is 17+ planner commits ahead of origin/main (bus closes for T-1334, T-1391, T-1658, memory entries); guardrails block the Planner from pushing main. Push it, or say the Planner may open a plan PR instead.
 - T-1590 human edits applied 2026-10-03 (settings.json SessionStart compact hook; launcher autocompact 350000). Effective from the next f orch launch.
 - PR 38 (goal/T-1403 -> main, https://github.com/K3NTAW/orchestrator/pull/38): MERGEABLE/CLEAN, waiting for the human. After merge: pull main, restart both daemons (this repo and ORCH_ROOT=/Users/k3ntaw/code/luna-inbox), record.sh draft T-1403, delete branch task/T-1580 and wt/T-1580 (human approved the deletion).
+
+
+## 2026-10-09 09:55 moved from plan.md (size): ## GOAL T-1403 (human 2026-09-30): full-Claude orchestrator
+Landed on goal/T-1403 (PR 38): B4b T-1563, base_for T-1494, D-fixkind T-1566, B6 v3 T-1569, B9 T-1578, M-sync T-1583 (1827be6); after PR 38 opened: B5 v6 (T-1629 via T-1634, f010804).
+Open: wave 3 T-1640 B5b -> T-1650 (see Now). B8 T-1509 parked (session fix round must share the owner worktree; findings .orchestrator/pending/v4-reviews.md). B2b T-1506 parked (plan-log.md backlog B2b-redesign). Unverified: auto_fix_skipped for unittest-form gate failures; check _test_ids against 'ERROR: test_x (module.Class.test_x)' lines.
+Known workarounds: a Codex fix-round resume commits on the parent's branch; create ref task/<fix id> at the commit, fail the bad review, reset the task to done, file a review naming `git diff <base>..<sha> -- <scope>`. The merge queue flattens merge commits; for a main-into-goal sync move the ref with `git branch -f`.
+
