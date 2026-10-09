@@ -3980,6 +3980,8 @@ class Daemon(unittest.TestCase):
         tick()'s stage loop: dispatch/gate/merge_reviewed must still run for every other task this tick."""
         dead = self.task("dead git", complexity=2)
         bus.update(dead, status="running", pid=self.dead_pid(), claimed_at=time.time() - 61, worktree=str(TMP))
+        # A resolved base makes reconcile_dead reach the raising git call even when no other test made goal/T-0043.
+        self.swap(daemon, "_resolve_base", lambda *a, **k: "goal/T-0043")
         self.swap(daemon, "_git_in", raiser(RuntimeError("git blew up")))
         self.first_come_dispatch()
         other = self.task("other queued", complexity=3)
