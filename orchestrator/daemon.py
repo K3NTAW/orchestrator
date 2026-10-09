@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import contextvars, fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request, uuid
+import contextvars, fcntl, fnmatch, hashlib, inspect, json, os, re, signal, subprocess, sys, threading, time, urllib.request, uuid
 import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
@@ -81,6 +81,8 @@ GATE_MARKER_KEYS = ("gate_started_at", "gate_started_at_lease", "gate_run_id")
 TICK_GATE_WAIT_S = 2.0   # how long one tick waits for the gates it just started before moving on
 _LIVE_GATES = {}         # task id -> {"task_id", "worktree", "run_id", "started_at", "thread"}
 _GATE_RESULTS = {}       # task id -> {"run_id", "result" | "error"}, finished and waiting for _reap_gates()
+_LIVE_MERGES = {}        # task id -> merge worker thread; merge.merge runs its own full gate (_merge_then)
+_MERGE_RESULTS = {}      # task id -> {"then", "on_error", "result" | "error"}, applied by _reap_merges()
 _LIVE_GATES_LOCK = threading.Lock()
 _GATE_WAIT_S = contextvars.ContextVar("gate_wait_s", default=None)  # None: gate() blocks; tick() sets a bound
 
@@ -1643,11 +1645,14 @@ def _gate_worker(run, runner, worktree, script, cfg):
 
 
 def _reap_gates(pool):
-    """Apply every finished gate result on the tick thread."""
+    """Apply every finished gate and background merge result on the tick thread."""
+    _reap_merges()
     with _LIVE_GATES_LOCK:
         finished = list(_GATE_RESULTS.items())
         _GATE_RESULTS.clear()
     for tid, done in finished:
+        if isinstance(done.get("error"), gate_runner.Aborted):
+            continue  # killed on shutdown; the marker is cleared when the next daemon starts
         try:
             _apply_gate_result(pool, tid, done)
         except Exception as e:
@@ -1711,12 +1716,82 @@ def _apply_gate_result(pool, tid, done):
             if _stale_rebase(t, evidence):
                 return
         if n_reviews == 0:
-            report_merge(tid, merge.merge(tid))
-        else:
-            _open_reviews(t, n_reviews, review_reason, cfg=pool.cfg)
+            def merged(r):
+                report_merge(tid, r)
+                complete(tid, "gated_at")
+            _merge_then(tid, merged, lambda e: hold_failed(tid, "gated_error", "gate", e))
+            return
+        _open_reviews(t, n_reviews, review_reason, cfg=pool.cfg)
         complete(tid, "gated_at")
     except Exception as e:
         hold_failed(tid, "gated_error", "gate", e)
+
+
+def _merge_then(tid, then, on_error):
+    """merge.merge rebases and runs the full tests-green gate under the global merge lock, which takes as long
+    as any gate. Called directly (no tick bound) it runs inline. Inside tick() it runs on a worker thread so the
+    tick keeps its interval: the tick waits at most TICK_GATE_WAIT_S, and _reap_gates() applies then(result)
+    (or on_error(exc)) on the tick thread once the merge finishes. A task already merging is not merged twice."""
+    wait_s = _GATE_WAIT_S.get()
+    if wait_s is None:
+        try:
+            then(merge.merge(tid))
+        except Exception as e:
+            on_error(e)
+        return
+    with _LIVE_GATES_LOCK:
+        if tid in _LIVE_MERGES or tid in _MERGE_RESULTS:
+            return
+        _LIVE_MERGES[tid] = None
+
+    def work():
+        outcome = {"error": RuntimeError("merge worker exited without a result")}
+        try:
+            outcome = {"result": merge.merge(tid)}
+        except Exception as e:
+            outcome = {"error": e}
+        finally:
+            with _LIVE_GATES_LOCK:
+                _MERGE_RESULTS[tid] = {**outcome, "then": then, "on_error": on_error}
+                _LIVE_MERGES.pop(tid, None)
+
+    thread = threading.Thread(target=work, name=f"merge-{tid}", daemon=True)
+    with _LIVE_GATES_LOCK:
+        _LIVE_MERGES[tid] = thread
+    try:
+        thread.start()
+    except Exception as e:
+        with _LIVE_GATES_LOCK:
+            _LIVE_MERGES.pop(tid, None)
+        on_error(e)
+        return
+    thread.join(wait_s)
+    _reap_merges()
+
+
+def _merge_live(tid):
+    with _LIVE_GATES_LOCK:
+        return tid in _LIVE_MERGES or tid in _MERGE_RESULTS
+
+
+def _reap_merges():
+    """Apply every finished background merge on the tick thread."""
+    with _LIVE_GATES_LOCK:
+        finished = list(_MERGE_RESULTS.items())
+        _MERGE_RESULTS.clear()
+    for tid, done in finished:
+        if isinstance(done.get("error"), gate_runner.Aborted):
+            continue  # killed on shutdown: the next daemon merges it again
+        try:
+            if "error" in done:
+                done["on_error"](done["error"])
+            else:
+                done["then"](done["result"])
+        except Exception as e:
+            try:
+                done["on_error"](e)
+            except Exception as e2:
+                print(f"[daemon] merge result for {tid} failed: {e2}", file=sys.stderr)
 
 
 # Keep the long-standing daemon.gate(pool) entry point while exposing the bounded-runner
@@ -1863,15 +1938,16 @@ def _merge_reviewed_one(t):
         # retrying it every tick would just rebuild the same conflict; stamping here means a task with two
         # reviews attempts the merge exactly once no matter which review finishes last
         if stamp(t["id"], "merged_at"):
-            try:
-                result = report_merge(t["id"], merge.merge(t["id"]))
-                complete(t["id"], "merged_at")
+            tid = t["id"]
+
+            def merged(r):
+                result = report_merge(tid, r)
+                complete(tid, "merged_at")
                 if result.get("status") != "merged":
                     if result.get("status") == "tests_red":
-                        clear_stage(t["id"], "merged_at")
-                    bus.update(t["id"], status="held", hold_reason=f"merge {result.get('status')}")
-            except Exception as e:
-                hold_failed(t["id"], "merged_error", "merge", e)
+                        clear_stage(tid, "merged_at")
+                    bus.update(tid, status="held", hold_reason=f"merge {result.get('status')}")
+            _merge_then(tid, merged, lambda e: hold_failed(tid, "merged_error", "merge", e))
         return
     if len(approved) + len(pending) >= needed:
         return  # a still-live sibling could yet supply the missing approval(s); keep waiting
@@ -1904,6 +1980,8 @@ def sweep_leases(pool):
                 if not lease or pipeline.get(f"{stage}_done") or lease > now:
                     continue
                 tid = t["id"]
+                if stage in ("gated_at", "merged_at") and _merge_live(tid):
+                    continue  # its merge (and that merge's gate) still runs on a worker thread
                 if stage == "dispatched_at":
                     if status == "queued":
                         clear_stage(tid, stage)
@@ -1936,8 +2014,10 @@ def sweep_leases(pool):
                     if expected is None:
                         expected = reviews_expected(t)
                     if expected == 0:
-                        report_merge(tid, merge.merge(tid))
-                        complete(tid, stage)
+                        def merged(r, tid=tid, stage=stage):
+                            report_merge(tid, r)
+                            complete(tid, stage)
+                        _merge_then(tid, merged, lambda e, tid=tid: hold_failed(tid, "gated_error", "gate", e))
                         continue
                     children = bus.children(tid, role="review")
                     if len(children) >= expected:
@@ -2144,6 +2224,8 @@ def steering_tick(pool, *, depth_tick=None):
 
 SLOW_STAGE_S = 5.0
 SLOW_TICK_S = 30.0
+# Stages that can say why they were slow: a second line `[daemon] slow stage <name> causes: ...` follows.
+SLOW_STAGE_CAUSES = {"worker_registry": lambda: worker_registry.reconcile_causes()}
 
 
 def _timed(name, fn, *args, **kwargs):
@@ -2155,6 +2237,12 @@ def _timed(name, fn, *args, **kwargs):
         elapsed = time.monotonic() - started
         if elapsed > SLOW_STAGE_S:
             print(f"[daemon] slow stage {name} {elapsed:.1f}s", file=sys.stderr)
+            causes = SLOW_STAGE_CAUSES.get(name)
+            if causes is not None:
+                try:
+                    print(f"[daemon] slow stage {name} causes: {causes()}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[daemon] slow stage {name} causes unavailable: {e}", file=sys.stderr)
 
 
 def tick(pool=None, stop_event=None):
@@ -2318,9 +2406,11 @@ def start_background(cfg, env=os.environ):
 
     def run():
         try:
+            adopt_orphaned_gates()
             _loop(interval, stop_event)
         finally:
             try:
+                terminate_own_gates()
                 fcntl.flock(lock, fcntl.LOCK_UN)
             finally:
                 lock.close()
@@ -2345,20 +2435,87 @@ def stop_background(thread, timeout=5):
 SHIP_JOIN_TIMEOUT_S = 60
 
 
+def adopt_orphaned_gates():
+    """Daemon start, lock held: kill the gate process groups a dead daemon left behind (gate.reap_orphans) and
+    drop in-flight gate markers no thread of this process owns, so gate() re-gates them now instead of after
+    STAGE_LEASE_S. Returns the killed registry entries."""
+    try:
+        killed = gate_runner.reap_orphans()
+    except Exception as e:
+        print(f"[daemon] orphaned gate sweep failed: {e}", file=sys.stderr)
+        killed = []
+    try:
+        for t in bus.read(status="done", role="execute"):
+            run_id = (t.get("pipeline") or {}).get("gate_run_id")
+            if not (t.get("pipeline") or {}).get("gate_started_at"):
+                continue
+            with _LIVE_GATES_LOCK:
+                live = any((entries.get(t["id"]) or {}).get("run_id") == run_id
+                           for entries in (_LIVE_GATES, _GATE_RESULTS))
+            if not live:
+                clear_stage(t["id"], "gate_started_at", clear_pipeline_keys=GATE_MARKER_KEYS)
+    except Exception as e:
+        print(f"[daemon] gate marker cleanup failed: {e}", file=sys.stderr)
+    return killed
+
+
+def terminate_own_gates():
+    """Daemon shutdown: kill every gate process group this daemon started so none runs on as an orphan."""
+    try:
+        killed = gate_runner.terminate_own()
+    except Exception as e:
+        print(f"[daemon] gate shutdown failed: {e}", file=sys.stderr)
+        return []
+    if killed:
+        print(f"[daemon] terminated {len(killed)} running gate(s) on shutdown", file=sys.stderr)
+    return killed
+
+
+def _drain_gates(pool):
+    """--once: wait for the gates and merges this tick left on worker threads and apply their results inline,
+    so a one-shot run never exits with a gate still running."""
+    while True:
+        with _LIVE_GATES_LOCK:
+            threads = [run.get("thread") for run in _LIVE_GATES.values()] + list(_LIVE_MERGES.values())
+            pending = bool(_GATE_RESULTS or _MERGE_RESULTS)
+        threads = [thread for thread in threads if thread is not None]
+        if not threads and not pending:
+            return
+        for thread in threads:
+            thread.join()
+        _reap_gates(pool)
+
+
+def _sigterm(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main(interval=30, once=False):
     if once:
-        tick(Pool())
+        pool = Pool()
+        try:
+            tick(pool)
+            _drain_gates(pool)
+        finally:
+            terminate_own_gates()
         return
     lock = acquire_lock()
     if lock is None:
         print("[daemon] another instance already holds the lock; exiting", file=sys.stderr)
         sys.exit(1)
     stop_event = threading.Event()
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, _sigterm)  # run the finally below: kill own gates, drop the lock
     try:
+        adopt_orphaned_gates()
         _loop(interval, stop_event)
     finally:
         # Ctrl-C skips _loop's join: stop the non-daemon ship thread before another daemon can take the lock.
         stop_event.set()
+        terminate_own_gates()
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
         ship.join_threads(SHIP_JOIN_TIMEOUT_S)
         if any(t.is_alive() for t in ship._THREADS):
             print(f"[daemon] ship thread still running after {SHIP_JOIN_TIMEOUT_S}s; releasing lock", file=sys.stderr)

@@ -4085,6 +4085,150 @@ class Daemon(unittest.TestCase):
         self.assertGreater(pipeline_started, 0)
         self.assertNotIn("gate_started_at", pipeline)
 
+    def drain_merges(self):
+        for thread in list(daemon._LIVE_MERGES.values()):
+            if thread is not None:
+                thread.join(5)
+        daemon._LIVE_MERGES.clear()
+        daemon._MERGE_RESULTS.clear()
+
+    def test_tick_continues_while_background_gate_runs(self):
+        """The 2026-10-09 stall: a green gate with zero reviews ran merge.merge (and its full tests-green gate) on
+        the tick thread. Both the gate and the merge now run on worker threads; every tick returns promptly."""
+        release, calls = self.bg_setup()
+        self.swap(daemon, "TICK_GATE_WAIT_S", 0.05)
+        self.swap(daemon, "_review_plan", lambda task: (0, "never"))
+        merging, merge_release = threading.Event(), threading.Event()
+
+        def slow_merge(tid, target=None):
+            merging.set()
+            merge_release.wait(30)
+            self.merged.append(tid)
+            return {"status": "merged", "target": "goal/G", "sha": "abc12345"}
+        self.swap(merge, "merge", slow_merge)
+        self.addCleanup(self.drain_merges)
+        self.addCleanup(merge_release.set)
+        tid = self.bg_task("slow gate then slow merge", "wt-tick")
+
+        def timed_tick():
+            started = time.monotonic()
+            daemon.tick()
+            return time.monotonic() - started
+        self.assertLess(max(timed_tick() for _ in range(3)), 5)    # gate in flight: ticks keep running
+        self.assertEqual(calls, [tid])
+        self.assertIn("gate_started_at", bus.get(tid)["pipeline"])
+        release.set()
+        for run in list(daemon._LIVE_GATES.values()):
+            run["thread"].join(5)
+        self.assertLess(timed_tick(), 5)                            # reaps green, merge starts on a worker
+        self.assertTrue(merging.wait(5))
+        self.assertTrue(daemon._merge_live(tid))
+        self.assertLess(max(timed_tick() for _ in range(3)), 5)    # merge gate in flight: ticks keep running
+        self.assertEqual(self.merged, [])
+        thread = daemon._LIVE_MERGES.get(tid)
+        merge_release.set()
+        if thread is not None:
+            thread.join(5)
+        daemon.tick()
+        self.assertEqual(self.merged, [tid])
+        self.assertFalse(daemon._merge_live(tid))
+        self.assertIn("gated_at_done", bus.get(tid)["pipeline"])
+
+    def test_shutdown_terminates_own_gates(self):
+        """Daemon shutdown kills the process group of every gate it started (descendants included), drops their
+        registry entries, and the killed run raises gate.Aborted instead of reporting red or timed out."""
+        gate_mod = daemon.gate_runner
+        self.swap(gate_mod, "STATE", self.sandbox)
+        worktree = self.sandbox / "wt-shutdown"
+        worktree.mkdir()
+        script = self.sandbox / "slow-gate.sh"
+        script.write_text("#!/bin/bash\nsleep 60 &\necho $! > child.pid\nwait\n")
+        script.chmod(0o755)
+        seen = {}
+
+        def run():
+            try:
+                seen["result"] = gate_mod.run_gate(worktree, script=script, task_id="T-shutdown", cfg={})
+            except Exception as e:
+                seen["error"] = e
+
+        def fake_loop(interval, stop_event):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            seen["thread"] = thread
+            deadline = time.monotonic() + 10
+            while not (worktree / "child.pid").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            seen["entry"] = json.loads((self.sandbox / "gates" / "T-shutdown.json").read_text())
+            raise KeyboardInterrupt
+
+        lock = tempfile.TemporaryFile("a+")
+        with mock.patch.object(daemon, "acquire_lock", return_value=lock), \
+                mock.patch.object(daemon, "_loop", fake_loop), \
+                mock.patch.object(daemon, "adopt_orphaned_gates"), \
+                mock.patch.object(daemon.fcntl, "flock"), \
+                mock.patch.object(daemon.executor, "join_fallback_threads"):
+            with self.assertRaises(KeyboardInterrupt):
+                daemon.main(interval=60)
+        seen["thread"].join(10)
+        self.assertFalse(seen["thread"].is_alive())
+        self.assertIsInstance(seen.get("error"), gate_mod.Aborted)
+        self.assertEqual(seen["entry"]["owner_pid"], os.getpid())
+        self.assertEqual(seen["entry"]["pgid"], seen["entry"]["pid"])
+        child = int((worktree / "child.pid").read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)                                      # the gate's descendant died with its group
+        self.assertEqual(list((self.sandbox / "gates").glob("*.json")), [])
+        self.assertEqual(gate_mod._PROCS, {})
+        self.assertTrue(lock.closed)
+
+    def test_restart_kills_or_adopts_orphaned_gate(self):
+        """A restarted daemon kills the gate a dead daemon left running, clears that task's in-flight marker so it
+        is re-gated now, and leaves alone a gate whose owner is still alive."""
+        gate_mod = daemon.gate_runner
+        self.swap(gate_mod, "STATE", self.sandbox)
+        gates = self.sandbox / "gates"
+        gates.mkdir()
+        dead_owner = subprocess.Popen(["true"])
+        dead_owner.wait()
+        procs = {}
+        for name in ("orphan", "owned"):
+            proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            self.addCleanup(lambda proc=proc: (proc.poll() is None and proc.kill(), proc.wait()))
+            threading.Thread(target=proc.wait, daemon=True).start()   # reap promptly once killed
+            procs[name] = proc
+        live_owner = os.getppid()
+        for name, owner in (("orphan", dead_owner.pid), ("owned", live_owner)):
+            pid = procs[name].pid
+            (gates / f"T-{name}.json").write_text(json.dumps({
+                "task_id": f"T-{name}", "worktree": "/wt", "pid": pid, "pgid": pid,
+                "proc_start": daemon.machine.process_start(pid), "owner_pid": owner,
+                "owner_start": daemon.machine.process_start(owner), "started_at": time.time(),
+                "timeout_s": 2700}))
+        tid = self.task("gate in flight when the old daemon died")
+        bus.update(tid, status="done", pipeline={"gate_started_at": time.time(),
+                                                 "gate_started_at_lease": time.time() + 900,
+                                                 "gate_run_id": "old-daemon-run"})
+        killed = daemon.adopt_orphaned_gates()
+        self.assertEqual([entry["task_id"] for entry in killed], ["T-orphan"])
+        deadline = time.monotonic() + 5
+        while procs["orphan"].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIsNotNone(procs["orphan"].poll())
+        self.assertIsNone(procs["owned"].poll())
+        self.assertFalse((gates / "T-orphan.json").exists())
+        self.assertTrue((gates / "T-owned.json").exists())
+        pipeline = bus.get(tid).get("pipeline") or {}
+        self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(pipeline))
+        self.assertEqual(daemon.adopt_orphaned_gates(), [])         # idempotent: nothing left to kill
+
 class BusLock(unittest.TestCase):
     def test_writes_take_the_flock(self):
         taken = []
