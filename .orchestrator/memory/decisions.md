@@ -379,3 +379,9 @@ type: decision · goal: T-1667 · tasks: T-1667 · provenance: repo
 - goal/T-1667 shipped as PR 44 (1c72a58) but the goal task stayed queued with no result, so the daemon replayed a closable_goal decision; origin/goal/T-1667 has 0 commits not in main, all remaining children superseded
 - Answer: bus_post_result status=done with goal_closed=true and pr_url=PR 44; same pattern as T-1334 (d2cd953) and T-1658 (0262fbb). plan.md trimmed from 26k to 7k chars: old ## Now moved to plan-log.md, daemon auto-handover snapshot replaced by a stub (it is regenerated on the next handover)
 outcome: revert path: git revert the plan commit; reset the T-1667 result by hand if the close was wrong
+
+## 2026-10-09 closed goal T-1705 on the bus (PRs 46/47 on main) and re-enabled ship
+type: decision · goal: T-1705 · tasks: T-1705 · provenance: repo
+- goal/T-1705 is an ancestor of main (PR 47 merged 2026-10-09 03:15); only superseded children were unmerged, so the closable_goal packet is answered with no new PR
+- pool.toml [ship].enabled true again per the goal acceptance; preconditions checked: daemon started 03:15 from this checkout which includes goal/T-1705, ship_state.json absent so goals closed before the next tick are ignored
+outcome: revert path: git revert a867101 (ship goes off again), or set [ship].enabled = false by hand; reset the T-1705 result by hand if the close was wrong
