@@ -228,6 +228,42 @@ class GateTimeoutTest(unittest.TestCase):
             gate.run_gate(self.root, script=script, cfg={"gate": {"timeout_s": 1}})
         self.assertFalse(marker.exists())
 
+    def test_post_cmd_runs_after_green_red_and_timeout(self):
+        marker = self.root / "post"
+        cfg = {"gate": {"timeout_s": 1, "post_cmd": f"echo x >> {marker}", "cleanup_timeout_s": 1}}
+        for code in (0, 3):
+            script = self.script(f"exit {code}\n", f"exit-{code}.sh")
+            result = gate.run_gate(self.root, script=script, cfg=cfg)
+            self.assertEqual(result["returncode"], code)
+            self.assertEqual(marker.read_text().splitlines(), ["x"])
+            marker.unlink()
+        with mock.patch.object(gate.notify, "notify"):
+            result = gate.run_gate(self.root, script=self.script("sleep 60\n", "slow.sh"), cfg=cfg)
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(marker.read_text().splitlines(), ["x", "x"])
+
+    def test_post_cmd_failure_does_not_change_result(self):
+        for post_cmd in ("exit 9", "sleep 60"):
+            cfg = {"gate": {"post_cmd": post_cmd, "cleanup_timeout_s": 1}}
+            for code in (0, 4):
+                script = self.script(f"echo out\nexit {code}\n", f"exit-{code}.sh")
+                with mock.patch("sys.stderr"):
+                    result = gate.run_gate(self.root, script=script, cfg=cfg)
+                self.assertEqual((result["returncode"], result["timed_out"], result["attempts"]),
+                                 (code, False, 1))
+                self.assertIn("out", result["stdout"])
+        with mock.patch.object(gate, "run_bounded", wraps=gate.run_bounded) as runner, \
+                mock.patch("sys.stderr"):
+            def boom(argv, **kw):
+                if argv[0] == "bash":
+                    raise OSError("no bash")
+                return gate._run(argv, input=kw.get("input"), kill_grace_s=gate.KILL_GRACE_S,
+                                 **{k: kw[k] for k in ("cwd", "timeout_s", "env") if k in kw})
+            runner.side_effect = boom
+            result = gate.run_gate(self.root, script=self.script("exit 0\n", "ok.sh"),
+                                   cfg={"gate": {"post_cmd": "true"}})
+        self.assertEqual(result["returncode"], 0)
+
     def test_timeout_retries_once(self):
         count = self.root / "count"
         always = self.script(f"echo x >> {count}\nsleep 60\n", "always.sh")
@@ -259,10 +295,15 @@ class GateTimeoutTest(unittest.TestCase):
 
     def test_settings_defaults_and_override(self):
         self.assertEqual(gate.settings({}), {"timeout_s": 2700, "cleanup_cmd": None,
-                                             "cleanup_timeout_s": 300})
-        cfg = {"gate": {"timeout_s": 9, "cleanup_cmd": "true", "cleanup_timeout_s": 4}}
+                                             "cleanup_timeout_s": 300, "post_cmd": None,
+                                             "max_parallel": 1})
+        cfg = {"gate": {"timeout_s": 9, "cleanup_cmd": "true", "cleanup_timeout_s": 4, "post_cmd": "true",
+                        "max_parallel": 3}}
         self.assertEqual(gate.settings(cfg), {"timeout_s": 9, "cleanup_cmd": "true",
-                                              "cleanup_timeout_s": 4})
+                                              "cleanup_timeout_s": 4, "post_cmd": "true",
+                                              "max_parallel": 3})
+        for invalid in (0, -1, 1.5, "2", True):
+            self.assertEqual(gate.settings({"gate": {"max_parallel": invalid}})["max_parallel"], 1)
         for invalid in (0, -1, 1.5, "1", True):
             self.assertEqual(gate.settings({"gate": {"timeout_s": invalid}})["timeout_s"], 2700)
 

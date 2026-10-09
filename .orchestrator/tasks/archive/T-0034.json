@@ -1,0 +1,83 @@
+{
+  "id": "T-0034",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "B3 fix round: scorecard counts only execute tasks (review T-0031)",
+  "spec": "Why: review T-0031 on B3 commit 1b5a17f (full text: /Users/k3ntaw/code/orchestrator/.orchestrator/tasks/T-0031.json). scorecard.build() aggregates every task json; spawn.run_worker stamps review_verdict on both the review task and the reviewed task, and review tasks have no executor field, so key_of() buckets them as claude:<tier> (tier defaults to sonnet) \u2014 request_changes is double-counted and review/scout/challenge tasks pollute executor rows.\n\nWhat (2 files: orchestrator/scorecard.py, tests/test_orchestrator.py; this worktree branches from task/T-0018):\n1. build(): only tasks with role == \"execute\" contribute to per-executor counts (merged, failed, rounds, review_request_changes, by_complexity); runs jsonl lines are filtered to role == \"execute\" as well for the executor scorecard (scout/review runs still count under `by=\"tier\"` if that mode exists; otherwise ignore them). key_of() for an execute task without an executor field returns f\"claude:{tier}\" as before.\n2. tests: a review task json with review_verdict=request_changes and tier sonnet alongside one execute task executed by claude:sonnet with review_verdict=request_changes \u2192 build()[\"claude:sonnet\"][\"review_request_changes\"] == 1; a scout run line in runs jsonl does not create an executor row.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"scorecard: aggregate execute tasks only; no double count of review verdicts (review T-0031)\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 with the new double-count regression test",
+    "build() ignores review/scout/challenge tasks and runs for executor rows",
+    "git diff --stat limited to orchestrator/scorecard.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/scorecard.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0034",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed as `815af4d`.\n\n**Summary:** `scorecard.build()` was bucketing review/scout/challenge tasks and runs under `claude:<tier>` (since they lack an `executor` field), which double-counted `review_request_changes` and mixed non-execute work into executor rows. Fixed by skipping any task or run whose `role` isn't `\"execute\"` in the default (`by=\"executor\"`) view; `by=\"tier\"` still counts all runs.\n\n**Files changed:** `orchestrator/scorecard.py`, `tests/test_orchestrator.py`\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 50 tests, OK (no failures). `tests-green.sh` gate \u2192 exit 0.\n\nRevert path: `git revert 815af4d`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789660922.7124438,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789660922.717747,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0034",
+      "claimed_at": 1789660922.7176719
+    },
+    {
+      "ts": 1789660922.727057,
+      "pid": 84817,
+      "account": "A"
+    },
+    {
+      "ts": 1789661051.838878,
+      "status": "done",
+      "result": {
+        "summary": "Committed as `815af4d`.\n\n**Summary:** `scorecard.build()` was bucketing review/scout/challenge tasks and runs under `claude:<tier>` (since they lack an `executor` field), which double-counted `review_request_changes` and mixed non-execute work into executor rows. Fixed by skipping any task or run whose `role` isn't `\"execute\"` in the default (`by=\"executor\"`) view; `by=\"tier\"` still counts all runs.\n\n**Files changed:** `orchestrator/scorecard.py`, `tests/test_orchestrator.py`\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 50 tests, OK (no failures). `tests-green.sh` gate \u2192 exit 0.\n\nRevert path: `git revert 815af4d`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789661081.20181,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "815af4d5488474a6a89137be82e645285556da37"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789660922.7176719,
+  "pid": 84817,
+  "account": "A",
+  "merged_into": "goal/T-0005",
+  "sha": "815af4d5488474a6a89137be82e645285556da37"
+}

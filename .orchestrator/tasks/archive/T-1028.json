@@ -1,0 +1,511 @@
+{
+  "id": "T-1028",
+  "created_at": 1790154103.2886488,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S1b cache_telemetry: per-invocation prompt-cache economics (hit ratio, effective cost, prefix identity) from existing run rows and packet metadata (P6)",
+  "spec": "Create orchestrator/cache_telemetry.py. normalize(provider, usage) -> dict(input_uncached, cache_read, cache_write, output, hit_ratio) where hit_ratio = cache_read / (input_uncached + cache_read + cache_write) or 0.0; Claude usage keys input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens; Codex keys input_tokens (includes cached), cached_input_tokens, output_tokens (see bus.py usage normalization around line 224 and executor.py around line 113; reuse, do not duplicate the semantics). effective_cost(norm, cfg) = input_uncached + cache_read*read_ratio + cache_write*write_ratio + output*output_ratio in token-equivalents, with per-provider ratios from pool.toml [cache] (new section: claude_read_ratio default 0.1, claude_write_ratio 1.25, codex_read_ratio 0.25, codex_write_ratio 1.0, output_ratio 5.0; add the section with dated comments).\nPrefix identity: in orchestrator/spawn.py packet_meta (and the meta remembered by _remember_packet_meta) add prefix_sha (sha256 first 12 hex of the rendered role template text up to and including the first packet section that is task-specific, i.e. everything before the objective section), prefix_chars, suffix_chars and dynamic_sections (names of sections after the prefix). Do not reorder or change any section content in this task (stage 2 does). Also make bus.log_run rows (already written by spawn/executor with usage) carry cache fields: input_uncached_tokens, cache_read_tokens, cache_write_tokens, hit_ratio, effective_tokens, prefix_sha when available, via a single helper cache_telemetry.annotate(row) called from bus.log_run (guard: never raise from log_run).\nreport(root, days=7) -> per role and per provider: runs, input_uncached, cache_read, cache_write, hit_ratio, effective_tokens, distinct prefix_sha count and the share of runs whose prefix_sha was seen before within the window (reuse_rate); plus per goal totals. CLI: `orchestrator scorecard --cache [--days n] [--json]` (extend the existing scorecard subcommand in cli.py). The report must run on this repository's real .orchestrator/runs/*.jsonl rows (they exist for 2026-09-17..23; rows before this task lack prefix_sha and count as unknown prefix). Docs: docs/hermes-hardening/02-cache-telemetry.md with the definitions and the numbers measured on the real rows.\nSpec review T-0999 folded in: (1) Prefix definition: prefix = the rendered text strictly BEFORE the objective section (role template rules plus the skills section when present); the objective section and everything after it is the suffix. prefix_sha must be identical for two tasks of the same role and goal that differ only in task-specific sections. (2) bus.log_run already writes input_uncached_tokens, cache_read_tokens, cache_write_tokens and output_tokens through normalize_usage (bus.py near line 353): cache_telemetry.normalize is a thin wrapper that returns exactly those key names (with the _tokens suffix) by calling bus.normalize_usage, and annotate(row) reuses the row's existing fields, adding only hit_ratio, effective_tokens and prefix_sha (from the task's packet_meta when present); never a second divergent key set. (3) cli.py scorecard: --cache joins the existing mutual-exclusivity check of scorecard modes (near line 216) as one more exclusive mode. (4) Task worktrees have no .orchestrator/runs data (uncommitted state): tests use synthetic rows only; the report function takes root explicitly and the CLI accepts --root; for the numbers in docs/hermes-hardening/02-cache-telemetry.md run the report read-only against /Users/k3ntaw/code/orchestrator/.orchestrator (the main checkout) and state that rows before this task carry no prefix_sha, so the report shows the unknown-prefix share and reuse_rate is reported as not measurable until new rows arrive (no invented baseline).\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [
+    "T-1019"
+  ],
+  "acceptance": [
+    "tests/test_cache_telemetry.py::test_normalize_claude_and_codex_usage (both providers, hit_ratio bounds, zero-safe)",
+    "tests/test_cache_telemetry.py::test_effective_cost_uses_pool_ratios (ratios from a temp pool.toml; defaults when the section is absent)",
+    "tests/test_cache_telemetry.py::test_report_groups_by_role_provider_and_prefix_reuse (synthetic rows with repeated prefix_sha give reuse_rate)",
+    "tests/test_spawn.py::test_packet_meta_carries_prefix_identity (prefix_sha stable when only task-specific sections change)",
+    "tests/test_bus.py::test_log_run_annotates_cache_fields (row gets cache fields; annotate failure never raises)",
+    "tests/test_cache_telemetry.py::test_annotate_reuses_existing_row_fields_and_adds_only_ratio_cost_prefix",
+    "tests/test_cli.py::test_scorecard_cache_is_exclusive_with_other_modes",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/cache_telemetry.py",
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "orchestrator/cli.py",
+    "tests/test_cache_telemetry.py",
+    "tests/test_spawn.py",
+    "tests/test_bus.py",
+    ".orchestrator/pool.toml",
+    "docs/hermes-hardening/02-cache-telemetry.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1028",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The spec defines prefix_sha as a hash of the rendered text 'up to and including the first packet section...everything before the objective section', but every packet type prepends a self-referential header \u2014 `packet v{hash} base {base} sources ...` (spawn.py:698-703, 753-754; same pattern via _role_packet at spawn.py:778-781 for review/spec-review/scout) \u2014 where {hash} is sha256 of the ENTIRE body, including the task-specific sections (acceptance, scope, evidence, tests) that come AFTER the objective section. That header sits textually before the objective (and before the skills section, when present), so it is part of the literal 'prefix' slice. Because the hash embedded in it varies with the task-specific suffix content, two tasks of the same role/goal that differ only in task-specific sections will NOT produce an identical prefix_sha \u2014 this directly contradicts the spec's own acceptance criterion ('prefix_sha must be identical for two tasks of the same role and goal that differ only in task-specific sections') and the acceptance test tests/test_spawn.py::test_packet_meta_carries_prefix_identity.",
+        "severity": "high",
+        "line": 753
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "packet_meta(task, worktree) (spawn.py:706-708) only ever sees packet()'s own output (header+skills+objective+...); it has no access to the surrounding 'rendered role template text' (prompts/{name}.md content, tool-disclosure text, instructions.compose() modules) that render() (spawn.py:242-287) assembles separately. render()'s return value is the final prompt string handed to the executor CLI and is never written back into task packet_meta or _remember_packet_meta. So the insertion point named in the spec cannot literally compute a hash over 'the rendered role template text' as worded \u2014 only over the packet body \u2014 without either (a) threading render()'s template text back into packet_meta/_remember_packet_meta (a bigger change than the spec scopes: it touches render(), not just packet_meta), or (b) silently narrowing prefix_sha to packet-body-only content, which conflicts with the spec's explicit inclusion of 'role template rules'.",
+        "severity": "high",
+        "line": 706
+      }
+    ],
+    "suggested_spec_changes": [
+      "Redefine the prefix boundary to exclude the packet's self-referential 'packet vHASH base ... sources ...' header/marker line entirely (it is derived from the full body and is never stable across tasks); compute prefix_sha from the concatenation of (a) the static role template bytes read in render() before packet substitution and (b) the packet's skills section content only (available via the existing `sections` list in _packet_body before `build()` joins them, or via `section_meta()` boundaries) \u2014 never by raw string-slicing the rendered text on the literal substring '## objective'.",
+      "Name the exact function that owns prefix_sha computation and how it reaches both render()'s template text and packet()'s skills section, since packet_meta()/_remember_packet_meta() (spawn.py) currently cannot see render()'s output; either have render() call back into _remember_packet_meta with the template text, or have packet_meta gain a parameter carrying the already-rendered role template so prefix_sha can be computed without duplicating render()'s placeholder/instructions-mode logic.",
+      "Add a concrete worked example (two synthetic tasks, same role+goal+skills, differing acceptance/scope) to the spec showing the expected prefix_sha equality, so the executor has a falsifiable target instead of reverse-engineering the header self-reference issue mid-implementation."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790154105.0002701,
+      "status": "held",
+      "hold_reason": "no account with headroom"
+    },
+    {
+      "ts": 1790156109.2829561,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner sweeper: re-spawned after account B cooldown"
+    },
+    {
+      "ts": 1790156109.8073542,
+      "packet_meta": {
+        "chars": 6281,
+        "est_tokens": 1570,
+        "presented_tokens": 1570,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "eb20de913268cb754c70022503d9992c95add049aafae02ad1ecbaf9ec5ffd79"
+          },
+          "spec": {
+            "chars": 4441,
+            "est_tokens": 1110,
+            "sha256": "95b20df7bfa0df803218fdbcacb3558d9e48399c28749f4acd4d0d34ab566163"
+          },
+          "acceptance": {
+            "chars": 866,
+            "est_tokens": 216,
+            "sha256": "278a4a94c43ac6742f1e5b2e90aaba009199f9e098ef823878988da409db7002"
+          },
+          "scope": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "f10fd34f25a61f3dd44d10826261a6e3dff8cd597ee2742ec6db6d5269f8ac26"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 595,
+            "est_tokens": 148,
+            "sha256": "4cad9ee9dd181308e93f334a156252e0e8d2c5832feadfbdc00469b99ca5ba45"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b946dd5f2aca",
+        "version": "b946dd5f2aca",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1019 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790156111.5411,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1028",
+      "claimed_at": 1790156111.540797
+    },
+    {
+      "ts": 1790156111.542482,
+      "account": "B"
+    },
+    {
+      "ts": 1790156112.351588,
+      "pid": 27689,
+      "account": "B"
+    },
+    {
+      "ts": 1790156315.180635,
+      "packet_meta": {
+        "chars": 6281,
+        "est_tokens": 1570,
+        "presented_tokens": 1570,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "eb20de913268cb754c70022503d9992c95add049aafae02ad1ecbaf9ec5ffd79"
+          },
+          "spec": {
+            "chars": 4441,
+            "est_tokens": 1110,
+            "sha256": "95b20df7bfa0df803218fdbcacb3558d9e48399c28749f4acd4d0d34ab566163"
+          },
+          "acceptance": {
+            "chars": 866,
+            "est_tokens": 216,
+            "sha256": "278a4a94c43ac6742f1e5b2e90aaba009199f9e098ef823878988da409db7002"
+          },
+          "scope": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "f10fd34f25a61f3dd44d10826261a6e3dff8cd597ee2742ec6db6d5269f8ac26"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 595,
+            "est_tokens": 148,
+            "sha256": "4cad9ee9dd181308e93f334a156252e0e8d2c5832feadfbdc00469b99ca5ba45"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b946dd5f2aca",
+        "version": "b946dd5f2aca",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1019 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "e1ef0f5a-04dc-423e-b0f4-b68e0f24fd9c"
+      }
+    },
+    {
+      "ts": 1790156315.201548,
+      "packet_meta": {
+        "chars": 6281,
+        "est_tokens": 1570,
+        "presented_tokens": 1570,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "eb20de913268cb754c70022503d9992c95add049aafae02ad1ecbaf9ec5ffd79"
+          },
+          "spec": {
+            "chars": 4441,
+            "est_tokens": 1110,
+            "sha256": "95b20df7bfa0df803218fdbcacb3558d9e48399c28749f4acd4d0d34ab566163"
+          },
+          "acceptance": {
+            "chars": 866,
+            "est_tokens": 216,
+            "sha256": "278a4a94c43ac6742f1e5b2e90aaba009199f9e098ef823878988da409db7002"
+          },
+          "scope": {
+            "chars": 257,
+            "est_tokens": 64,
+            "sha256": "f10fd34f25a61f3dd44d10826261a6e3dff8cd597ee2742ec6db6d5269f8ac26"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 595,
+            "est_tokens": 148,
+            "sha256": "4cad9ee9dd181308e93f334a156252e0e8d2c5832feadfbdc00469b99ca5ba45"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "b946dd5f2aca",
+        "version": "b946dd5f2aca",
+        "candidate_known": false,
+        "base": "87bea11f32d9",
+        "sources": "task@T-1019 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "e1ef0f5a-04dc-423e-b0f4-b68e0f24fd9c",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790156315.211467,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The spec defines prefix_sha as a hash of the rendered text 'up to and including the first packet section...everything before the objective section', but every packet type prepends a self-referential header \u2014 `packet v{hash} base {base} sources ...` (spawn.py:698-703, 753-754; same pattern via _role_packet at spawn.py:778-781 for review/spec-review/scout) \u2014 where {hash} is sha256 of the ENTIRE body, including the task-specific sections (acceptance, scope, evidence, tests) that come AFTER the objective section. That header sits textually before the objective (and before the skills section, when present), so it is part of the literal 'prefix' slice. Because the hash embedded in it varies with the task-specific suffix content, two tasks of the same role/goal that differ only in task-specific sections will NOT produce an identical prefix_sha \u2014 this directly contradicts the spec's own acceptance criterion ('prefix_sha must be identical for two tasks of the same role and goal that differ only in task-specific sections') and the acceptance test tests/test_spawn.py::test_packet_meta_carries_prefix_identity.",
+            "severity": "high",
+            "line": 753
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "packet_meta(task, worktree) (spawn.py:706-708) only ever sees packet()'s own output (header+skills+objective+...); it has no access to the surrounding 'rendered role template text' (prompts/{name}.md content, tool-disclosure text, instructions.compose() modules) that render() (spawn.py:242-287) assembles separately. render()'s return value is the final prompt string handed to the executor CLI and is never written back into task packet_meta or _remember_packet_meta. So the insertion point named in the spec cannot literally compute a hash over 'the rendered role template text' as worded \u2014 only over the packet body \u2014 without either (a) threading render()'s template text back into packet_meta/_remember_packet_meta (a bigger change than the spec scopes: it touches render(), not just packet_meta), or (b) silently narrowing prefix_sha to packet-body-only content, which conflicts with the spec's explicit inclusion of 'role template rules'.",
+            "severity": "high",
+            "line": 706
+          }
+        ],
+        "suggested_spec_changes": [
+          "Redefine the prefix boundary to exclude the packet's self-referential 'packet vHASH base ... sources ...' header/marker line entirely (it is derived from the full body and is never stable across tasks); compute prefix_sha from the concatenation of (a) the static role template bytes read in render() before packet substitution and (b) the packet's skills section content only (available via the existing `sections` list in _packet_body before `build()` joins them, or via `section_meta()` boundaries) \u2014 never by raw string-slicing the rendered text on the literal substring '## objective'.",
+          "Name the exact function that owns prefix_sha computation and how it reaches both render()'s template text and packet()'s skills section, since packet_meta()/_remember_packet_meta() (spawn.py) currently cannot see render()'s output; either have render() call back into _remember_packet_meta with the template text, or have packet_meta gain a parameter carrying the already-rendered role template so prefix_sha can be computed without duplicating render()'s placeholder/instructions-mode logic.",
+          "Add a concrete worked example (two synthetic tasks, same role+goal+skills, differing acceptance/scope) to the spec showing the expected prefix_sha equality, so the executor has a falsifiable target instead of reverse-engineering the header self-reference issue mid-implementation."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790156315.21248,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The spec defines prefix_sha as a hash of the rendered text 'up to and including the first packet section...everything before the objective section', but every packet type prepends a self-referential header \u2014 `packet v{hash} base {base} sources ...` (spawn.py:698-703, 753-754; same pattern via _role_packet at spawn.py:778-781 for review/spec-review/scout) \u2014 where {hash} is sha256 of the ENTIRE body, including the task-specific sections (acceptance, scope, evidence, tests) that come AFTER the objective section. That header sits textually before the objective (and before the skills section, when present), so it is part of the literal 'prefix' slice. Because the hash embedded in it varies with the task-specific suffix content, two tasks of the same role/goal that differ only in task-specific sections will NOT produce an identical prefix_sha \u2014 this directly contradicts the spec's own acceptance criterion ('prefix_sha must be identical for two tasks of the same role and goal that differ only in task-specific sections') and the acceptance test tests/test_spawn.py::test_packet_meta_carries_prefix_identity.",
+          "severity": "high",
+          "line": 753
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "packet_meta(task, worktree) (spawn.py:706-708) only ever sees packet()'s own output (header+skills+objective+...); it has no access to the surrounding 'rendered role template text' (prompts/{name}.md content, tool-disclosure text, instructions.compose() modules) that render() (spawn.py:242-287) assembles separately. render()'s return value is the final prompt string handed to the executor CLI and is never written back into task packet_meta or _remember_packet_meta. So the insertion point named in the spec cannot literally compute a hash over 'the rendered role template text' as worded \u2014 only over the packet body \u2014 without either (a) threading render()'s template text back into packet_meta/_remember_packet_meta (a bigger change than the spec scopes: it touches render(), not just packet_meta), or (b) silently narrowing prefix_sha to packet-body-only content, which conflicts with the spec's explicit inclusion of 'role template rules'.",
+          "severity": "high",
+          "line": 706
+        }
+      ]
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner sweeper: re-spawned after account B cooldown",
+  "packet_meta": {
+    "chars": 6281,
+    "est_tokens": 1570,
+    "presented_tokens": 1570,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "eb20de913268cb754c70022503d9992c95add049aafae02ad1ecbaf9ec5ffd79"
+      },
+      "spec": {
+        "chars": 4441,
+        "est_tokens": 1110,
+        "sha256": "95b20df7bfa0df803218fdbcacb3558d9e48399c28749f4acd4d0d34ab566163"
+      },
+      "acceptance": {
+        "chars": 866,
+        "est_tokens": 216,
+        "sha256": "278a4a94c43ac6742f1e5b2e90aaba009199f9e098ef823878988da409db7002"
+      },
+      "scope": {
+        "chars": 257,
+        "est_tokens": 64,
+        "sha256": "f10fd34f25a61f3dd44d10826261a6e3dff8cd597ee2742ec6db6d5269f8ac26"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 595,
+        "est_tokens": 148,
+        "sha256": "4cad9ee9dd181308e93f334a156252e0e8d2c5832feadfbdc00469b99ca5ba45"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "b946dd5f2aca",
+    "version": "b946dd5f2aca",
+    "candidate_known": false,
+    "base": "87bea11f32d9",
+    "sources": "task@T-1019 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "e1ef0f5a-04dc-423e-b0f4-b68e0f24fd9c",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790156111.540797,
+  "account": "B",
+  "pid": 27689,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The spec defines prefix_sha as a hash of the rendered text 'up to and including the first packet section...everything before the objective section', but every packet type prepends a self-referential header \u2014 `packet v{hash} base {base} sources ...` (spawn.py:698-703, 753-754; same pattern via _role_packet at spawn.py:778-781 for review/spec-review/scout) \u2014 where {hash} is sha256 of the ENTIRE body, including the task-specific sections (acceptance, scope, evidence, tests) that come AFTER the objective section. That header sits textually before the objective (and before the skills section, when present), so it is part of the literal 'prefix' slice. Because the hash embedded in it varies with the task-specific suffix content, two tasks of the same role/goal that differ only in task-specific sections will NOT produce an identical prefix_sha \u2014 this directly contradicts the spec's own acceptance criterion ('prefix_sha must be identical for two tasks of the same role and goal that differ only in task-specific sections') and the acceptance test tests/test_spawn.py::test_packet_meta_carries_prefix_identity.",
+      "severity": "high",
+      "line": 753
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "packet_meta(task, worktree) (spawn.py:706-708) only ever sees packet()'s own output (header+skills+objective+...); it has no access to the surrounding 'rendered role template text' (prompts/{name}.md content, tool-disclosure text, instructions.compose() modules) that render() (spawn.py:242-287) assembles separately. render()'s return value is the final prompt string handed to the executor CLI and is never written back into task packet_meta or _remember_packet_meta. So the insertion point named in the spec cannot literally compute a hash over 'the rendered role template text' as worded \u2014 only over the packet body \u2014 without either (a) threading render()'s template text back into packet_meta/_remember_packet_meta (a bigger change than the spec scopes: it touches render(), not just packet_meta), or (b) silently narrowing prefix_sha to packet-body-only content, which conflicts with the spec's explicit inclusion of 'role template rules'.",
+      "severity": "high",
+      "line": 706
+    }
+  ]
+}

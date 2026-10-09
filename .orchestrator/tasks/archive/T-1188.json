@@ -1,0 +1,103 @@
+{
+  "id": "T-1188",
+  "created_at": 1790168766.0376651,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S2b memory_scorecard and memory_eval: retrieval precision, downstream use, utility per token, and the P34 memory eval cases (P5, P34 memory)",
+  "spec": "Create orchestrator/memory_scorecard.py: read decision_log rows of kind retrieval (the kind T-1151 writes for memory retrievals; there is no memory_retrieval kind) and the bus outcome of their subject tasks. Per task: records_retrieved (candidates), records_presented (selected in active, legacy_ids in shadow), memory_tokens, downstream_use = share of presented records whose files or components appear in the task's changed paths (gitutil.changed_paths when a worktree exists, else the result's files list) or whose id/title words appear in the result summary, first_pass (merged without a fix round: no task with constraints.fix_round_for equal to it), fix_rounds count, repeated_retrieval (same record presented to the same lineage more than once), irrelevant = presented and not used. Aggregate per mode and per 7 days: precision (used/presented), utility_per_token (used records / memory_tokens * 1000), first_pass rate for tasks with memory vs without. CLI `orchestrator scorecard --memory [--days n] [--json]`. Create orchestrator/memory_eval.py with the P34 memory cases as deterministic checks over a temp root seeded from fixtures: current decision found in HOT, older decision found in WARM by search, historical provenance (superseded decision) found in COLD by search with tier cold, an irrelevant record excluded from a task's tiered sections, compaction preserves knowledge (every record still findable after compact). run(root) -> {cases: [{name, passed, detail}], passed, total}; persist to .orchestrator/memory_eval.json like context_eval does; CLI `orchestrator memory-eval [--json]`. Docs: docs/hermes-hardening/08-memory-scorecard.md.\nSpec review T-1181 folded in: (1) kind is 'retrieval'. (2) downstream_use uses the paths the task actually changed: gitutil.changed_paths when the worktree still exists, else the file list of the task's commits on the goal branch (commits whose subject starts with the task id, read with git log --name-only on goal/<parent>), else task scope as the last fallback; document which source was used per task in the row. (3) memory_tokens is mode-conditional exactly like records_presented: tokens_tiered when the row's mode is active, tokens_legacy when shadow, so utility_per_token compares like with like; the report states the mode per aggregate.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_memory_scorecard.py::test_precision_and_downstream_use_from_rows_and_outcomes",
+    "tests/test_memory_scorecard.py::test_repeated_and_irrelevant_counted",
+    "tests/test_memory_eval.py::test_all_five_cases_pass_on_fixture_root",
+    "tests/test_cli.py::test_scorecard_memory_and_memory_eval_cli",
+    "tests/test_memory_scorecard.py::test_changed_paths_fallback_order_and_mode_conditional_tokens",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/memory_scorecard.py",
+    "orchestrator/memory_eval.py",
+    "orchestrator/cli.py",
+    "tests/test_memory_scorecard.py",
+    "tests/test_memory_eval.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/08-memory-scorecard.md"
+  ],
+  "depends_on": [
+    "T-1151"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790168850.293889,
+      "pipeline": {
+        "first_ready_at": 1790168850.293771
+      }
+    },
+    {
+      "ts": 1790168850.655583,
+      "pipeline": {
+        "first_ready_at": 1790168850.293771,
+        "spec_review_at": 1790168850.655371,
+        "spec_review_at_lease": 1790169750.655371
+      }
+    },
+    {
+      "ts": 1790168850.6653068,
+      "pipeline": {
+        "first_ready_at": 1790168850.293771,
+        "spec_review_at": 1790168850.655371,
+        "spec_review_at_lease": 1790169750.655371,
+        "spec_review_at_done": 1790168850.66498
+      }
+    },
+    {
+      "ts": 1790169013.139331,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/memory_scorecard.py",
+          "issue": "The T-1181 fold-in fallback for downstream_use, when no worktree exists, calls for parsing `git log --name-only` on goal/<parent> and matching commits whose subject 'starts with the task id'. This duplicates and is strictly worse than data merge.merge() already writes: at merge.py:93-99, `changed_files = git(\"diff\",\"--name-only\", f\"{previous_sha}..{sha}\")` is computed from the exact merge commit range and stored directly on the bus task row via `bus.update(task_id, ..., changed_files=changed_files, ...)`. Every merged task already carries its precise changed-file list; no goal-branch history walk or commit-subject parsing is needed. Additionally, a raw `startswith(task_id)` prefix check is a real correctness bug independent of this: a commit subject 'T-1193 fix bug' also satisfies `startswith('T-119')`, so if a task T-119 exists its retrieval row would wrongly attribute T-1193's commits as its own changed paths.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790169043.9627688,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner: spec review T-1193 folded into T-1194"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790168850.293771,
+    "spec_review_at": 1790168850.655371,
+    "spec_review_at_lease": 1790169750.655371,
+    "spec_review_at_done": 1790168850.66498
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/memory_scorecard.py",
+      "issue": "The T-1181 fold-in fallback for downstream_use, when no worktree exists, calls for parsing `git log --name-only` on goal/<parent> and matching commits whose subject 'starts with the task id'. This duplicates and is strictly worse than data merge.merge() already writes: at merge.py:93-99, `changed_files = git(\"diff\",\"--name-only\", f\"{previous_sha}..{sha}\")` is computed from the exact merge commit range and stored directly on the bus task row via `bus.update(task_id, ..., changed_files=changed_files, ...)`. Every merged task already carries its precise changed-file list; no goal-branch history walk or commit-subject parsing is needed. Additionally, a raw `startswith(task_id)` prefix check is a real correctness bug independent of this: a commit subject 'T-1193 fix bug' also satisfies `startswith('T-119')`, so if a task T-119 exists its retrieval row would wrongly attribute T-1193's commits as its own changed paths.",
+      "severity": "med",
+      "line": 0
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner: spec review T-1193 folded into T-1194"
+}

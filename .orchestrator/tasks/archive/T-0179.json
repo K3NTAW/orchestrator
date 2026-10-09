@@ -1,0 +1,116 @@
+{
+  "id": "T-0179",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-O7b fix round 1: failed and unknown statuses in the handover snapshot, atomic plan.md write, throttle state out of pool_state, last heading match, single task read, non-merged worktrees only (from review T-0177)",
+  "spec": "Fix round for T-0119 (branch task/T-0119 at 41cf86a). Work in this task's worktree, cut from task/T-0119. Review T-0177 (opus) requested changes; items come from it. Scope: orchestrator/handover.py, orchestrator/daemon.py, tests/test_handover.py.\n\n1 HIGH handover.py _status_groups: add a \"failed\" group (id, title, reason, resume_hint keys) and bucket any status outside queued/running/held/done/failed into an \"other (<status>)\" line so no child can vanish; a goal whose only child failed must render that child, never \"no child tasks\". Test: goal with one failed child (reason rebase_conflict) \u2192 section lists it under failed with the reason.\n\n2 MED handover.py write: build the full new text first, write it to a sibling temp file in the same directory and os.replace() it over plan.md, inside the bus lock; never write_text() over plan.md directly. Test: patch os.replace to raise \u2192 plan.md unchanged.\n\n3 LOW daemon.py throttle: keep the last-handover timestamp in `.orchestrator/handover_state.json` (read-modify-write under an fcntl flock on that file, truncate+write like pool._save_planner_account), not in pool_state.json. Adjust the throttle test.\n\n4 LOW handover.py: replace the existing section by matching the LAST `## Auto-handover ` heading at line start (finditer \u2192 last), so Planner prose that quotes the heading earlier in the file is never deleted. Test: a plan.md containing the heading text inside a fenced block above the real section keeps that block.\n\n5 LOW handover.py: read all tasks once (bus.read() without filter) before the loop and group children by parent in memory; no per-goal bus.read.\n\n6 LOW handover.py _worktree_names: list only worktrees whose task id (directory name) belongs to a task that is not merged (merged_into unset) and skip wt/_state. Test with a merged task's worktree and a _state dir present.\n\nNo new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0119",
+    "T-0177"
+  ],
+  "acceptance": [
+    "Failed children render with reason under a failed group and unknown statuses under other; a goal with only a failed child never says no child tasks (test)",
+    "plan.md is written via temp file + os.replace inside the bus lock; a failing replace leaves plan.md unchanged (test)",
+    "Throttle timestamp lives in .orchestrator/handover_state.json under a flock; pool_state.json untouched by handover (test adjusted)",
+    "The last Auto-handover heading is replaced; earlier quoted headings survive (test)",
+    "Tasks are read once per write; worktree list excludes merged tasks and _state (test)",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the three scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/handover.py",
+    "orchestrator/daemon.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [
+    "T-0119"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 2100,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_handover.py",
+    "fix_round_for": "T-0119",
+    "worktree_base": "task/T-0119"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0179",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0179` (3657876).\n\n**Summary**\n\nFixed all 6 review items from T-0177:\n1. `_status_groups` now buckets `failed` (with `reason`/`resume_hint` keys) and any unrecognized status into `other (<status>)`, so a goal never falsely reports \"no child tasks.\"\n2. `write()` builds the full text, writes to a sibling temp file, then `os.replace()`s it over `plan.md`, still inside `bus.locked()`; a failing replace leaves `plan.md` untouched (cleans up the temp file on error).\n3. Daemon's handover throttle timestamp now lives in `.orchestrator/handover_state.json`, read-modify-write under an `fcntl` flock (mirrors `pool._save_planner_account`), no longer touching `pool_state.json`.\n4. `write()` matches the *last* `## Auto-handover ` heading via `finditer`, so quoted headings earlier in the file survive.\n5. `_render_section` does one `bus.read()` and groups children by parent in memory instead of a `bus.read()` per goal.\n6. `_worktree_names` excludes `wt/_state` and any worktree whose task is already merged.\n\n**Files changed:** `orchestrator/handover.py`, `orchestrator/daemon.py`, `tests/test_handover.py` (only the scoped three).\n\n**Test output:** all green \u2014 `uv run python -m unittest discover -q tests` \u2192 216 tests OK; `.claude/hooks/tests-green.sh` exit 0. No failures to report.\n\nNo new dependencies.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789754776.707365,
+      "pipeline": {
+        "gated_at": 1789754776.707228,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789754783.04053,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789754783.042518,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0179",
+      "claimed_at": 1789754783.042424
+    },
+    {
+      "ts": 1789754783.0504498,
+      "pid": 21992,
+      "account": "B"
+    },
+    {
+      "ts": 1789755082.5528479,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0179` (3657876).\n\n**Summary**\n\nFixed all 6 review items from T-0177:\n1. `_status_groups` now buckets `failed` (with `reason`/`resume_hint` keys) and any unrecognized status into `other (<status>)`, so a goal never falsely reports \"no child tasks.\"\n2. `write()` builds the full text, writes to a sibling temp file, then `os.replace()`s it over `plan.md`, still inside `bus.locked()`; a failing replace leaves `plan.md` untouched (cleans up the temp file on error).\n3. Daemon's handover throttle timestamp now lives in `.orchestrator/handover_state.json`, read-modify-write under an `fcntl` flock (mirrors `pool._save_planner_account`), no longer touching `pool_state.json`.\n4. `write()` matches the *last* `## Auto-handover ` heading via `finditer`, so quoted headings earlier in the file survive.\n5. `_render_section` does one `bus.read()` and groups children by parent in memory instead of a `bus.read()` per goal.\n6. `_worktree_names` excludes `wt/_state` and any worktree whose task is already merged.\n\n**Files changed:** `orchestrator/handover.py`, `orchestrator/daemon.py`, `tests/test_handover.py` (only the scoped three).\n\n**Test output:** all green \u2014 `uv run python -m unittest discover -q tests` \u2192 216 tests OK; `.claude/hooks/tests-green.sh` exit 0. No failures to report.\n\nNo new dependencies.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789755413.068625,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789755430.458982,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "fdf9d2f9dd8f761a6047756e3a0bf87ac7b9410a"
+    },
+    {
+      "ts": 1789755450.910393,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "fdf9d2f9dd8f761a6047756e3a0bf87ac7b9410a"
+    }
+  ],
+  "pipeline": {
+    "gated_at": 1789754776.707228,
+    "gated_by": "planner-pre-stamp: gate and review by hand"
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789754783.042424,
+  "pid": 21992,
+  "account": "B",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0073",
+  "sha": "fdf9d2f9dd8f761a6047756e3a0bf87ac7b9410a"
+}

@@ -1,0 +1,172 @@
+{
+  "id": "T-0542",
+  "created_at": 1789949670.388986,
+  "parent": "T-0503",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S3 v4: orchestrator/critical_path.py \u2014 deterministic critical-path ranking of ready tasks (recursive downstream chain, blocked descendants, cold-start durations) wired as the daemon's wave order (spec review T-0540 folded in)",
+  "spec": "Goal T-0503, brief .orchestrator/adaptive-parallelism-program.md section P4 (prioritize tasks that determine goal completion time; design and test a ranking function, do not implement the sketch blindly) and P5 (cold start simple and deterministic, no false precision). Base goal/T-0503 with S2 v4 (T-0534) merged: daemon._wave_order(candidate_ids, tasks) identity hook; waves.jsonl row has an empty \"priority\"; the tasks dict covers candidates, running and their transitive depends_on ancestry. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only. Tests are unittest.TestCase methods (the gate runs unittest discover).\nFacts: tasks are dicts with id, parent, depends_on, status, merged_into, complexity, constraints; bus.dependents(tid) (bus.py:153-155) returns every task, any status, whose depends_on names tid; scorecard._band (scorecard.py:56) maps complexity to bands 1-3, 4-6, 7-10. A dependent is \"unresolved\" unless it is merged (merged_into set) or failed; queued, held (budget retries) and running dependents all count.\n1. New orchestrator/critical_path.py, pure: est_duration_s(task, durations=None) = durations[task id] if present, else durations[band] if present, else COLD_START_S = {\"1-3\": 600, \"4-6\": 1200, \"7-10\": 2400} by complexity band. critical_path_s(t) = est_duration_s(t) + max(critical_path_s(child) for child in unresolved direct dependents of t within tasks, default 0), memoised, with a visiting set so a back edge is ignored and never recursed (no hang). explain(task_id, tasks, durations=None) -> {\"downstream_depth\": longest chain of unresolved transitive dependents (edges), \"blocked_descendants\": number of distinct unresolved transitive dependents, \"est_duration_s\", \"critical_path_s\", \"priority\": critical_path_s}. rank(ready_ids, tasks, durations=None) -> ids sorted by priority desc, then blocked_descendants desc, then id asc; deterministic; ids not in tasks keep their relative order at the end.\n2. daemon: _wave_order(candidate_ids, tasks) returns critical_path.rank(candidate_ids, tasks); the waves.jsonl row's \"priority\" becomes {id: explain(...)} for every candidate. Extend the tasks dict built in dispatch with the transitive dependents of every candidate via bus.dependents, keeping execute tasks that are unresolved (not merged, not failed) whatever their status; state this in a comment. In shadow mode the order is only logged (baseline_order stays first-come); in active mode the wave is dispatched in this order.\n3. README Pipeline paragraph: one sentence on the ranking and its cold-start durations.\n4. Tests: tests/test_critical_path.py::test_rank_prefers_longer_downstream_chain, ::test_rank_tie_breaks_on_blocked_descendants_then_id, ::test_explain_cold_start_durations_by_band, ::test_rank_ignores_merged_and_failed_descendants, ::test_rank_handles_cycles, ::test_durations_override_cold_start, ::test_critical_path_sums_along_the_whole_chain (A -> B -> C with durations 1, 10, 100: critical_path_s(A) = 111, not 11); tests/test_daemon.py::test_wave_row_carries_priority_order (two ready candidates, one with a budget-held dependent: the wave order puts it first and the row's priority explains both). Existing tests stay green.",
+  "inputs": [
+    "T-0541"
+  ],
+  "acceptance": [
+    "tests/test_critical_path.py::test_rank_prefers_longer_downstream_chain, tests/test_critical_path.py::test_rank_tie_breaks_on_blocked_descendants_then_id, tests/test_critical_path.py::test_rank_ignores_merged_and_failed_descendants, tests/test_critical_path.py::test_rank_handles_cycles and tests/test_critical_path.py::test_critical_path_sums_along_the_whole_chain pass: rank orders a task that unblocks a longer or heavier chain first, breaks ties by blocked descendants then id, ignores merged and failed descendants, terminates on cycles, and critical_path_s accumulates along the whole chain",
+    "tests/test_critical_path.py::test_explain_cold_start_durations_by_band and tests/test_critical_path.py::test_durations_override_cold_start pass: explain reports downstream_depth, blocked_descendants, est_duration_s (600/1200/2400 s by band unless durations override) and critical_path_s",
+    "tests/test_daemon.py::test_wave_row_carries_priority_order passes: the waves.jsonl row carries priority explanations for all candidates, held dependents count, the wave order follows rank, and shadow mode still dispatches first-come",
+    "full .claude/hooks/tests-green.sh exits 0 and the suite gains eight tests"
+  ],
+  "scope": [
+    "orchestrator/critical_path.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_critical_path.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0542",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Extending `tasks` with transitive dependents via `bus.dependents(tid)` calls `bus.read()` (a full JSON read of every task) once per node visited. If implemented as a naive per-candidate BFS without a shared visited-set/cache across candidates, overlapping downstream chains get re-scanned repeatedly every dispatch tick. Existing dispatch already does full `bus.read()` scans (lines 665, 673), so this isn't a new complexity class, but the spec should still say to build the reverse-adjacency once and reuse it across all candidates.",
+        "severity": "low",
+        "line": 679
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "`_wave_tasks`'s ancestor walk guards against revisits with a `seen` set (bus.py:637-640), but the spec doesn't require the same guard for the new dependents walk. Since critical_path.py is explicitly required to defend against depends_on cycles (a back edge \"is ignored and never recursed\"), the same cyclic data can reach daemon.py's traversal first and loop or duplicate reads if it isn't deduped the same way.",
+        "severity": "low",
+        "line": 679
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "issue": "test_dispatch_shadow_logs_wave_and_keeps_first_come currently asserts wave[\"priority\"] == {} in shadow mode (line 222). Once _wave_order calls critical_path.rank unconditionally, priority will be populated in shadow mode too (wave_row is written for both shadow and active). This pre-existing assertion needs updating alongside the new tests, but it isn't named in the acceptance list, so it's easy to overlook and mistake for a regression.",
+        "severity": "low",
+        "line": 222
+      }
+    ],
+    "suggested_spec_changes": [
+      "In step 2, add: build the reverse depends_on index from a single bus.read() pass (or otherwise dedupe bus.dependents calls with a shared seen-set across candidates) so the transitive dependents walk doesn't rescan the whole bus per node.",
+      "In step 2, require the daemon's dependents walk to track visited ids the same way _wave_tasks does for ancestors, so a depends_on cycle can't cause a hang or duplicate entries before critical_path.py's own cycle guard ever runs.",
+      "Note explicitly that test_dispatch_shadow_logs_wave_and_keeps_first_come's `wave[\"priority\"] == {}` assertion must be updated to reflect populated priority explanations, since it's an existing test affected by this change but not named in acceptance."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789949672.365623,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0542",
+      "claimed_at": 1789949672.365335
+    },
+    {
+      "ts": 1789949672.366879,
+      "account": "B"
+    },
+    {
+      "ts": 1789949672.690986,
+      "pid": 72147,
+      "account": "B"
+    },
+    {
+      "ts": 1789949863.2222981,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Extending `tasks` with transitive dependents via `bus.dependents(tid)` calls `bus.read()` (a full JSON read of every task) once per node visited. If implemented as a naive per-candidate BFS without a shared visited-set/cache across candidates, overlapping downstream chains get re-scanned repeatedly every dispatch tick. Existing dispatch already does full `bus.read()` scans (lines 665, 673), so this isn't a new complexity class, but the spec should still say to build the reverse-adjacency once and reuse it across all candidates.",
+            "severity": "low",
+            "line": 679
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "`_wave_tasks`'s ancestor walk guards against revisits with a `seen` set (bus.py:637-640), but the spec doesn't require the same guard for the new dependents walk. Since critical_path.py is explicitly required to defend against depends_on cycles (a back edge \"is ignored and never recursed\"), the same cyclic data can reach daemon.py's traversal first and loop or duplicate reads if it isn't deduped the same way.",
+            "severity": "low",
+            "line": 679
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "issue": "test_dispatch_shadow_logs_wave_and_keeps_first_come currently asserts wave[\"priority\"] == {} in shadow mode (line 222). Once _wave_order calls critical_path.rank unconditionally, priority will be populated in shadow mode too (wave_row is written for both shadow and active). This pre-existing assertion needs updating alongside the new tests, but it isn't named in the acceptance list, so it's easy to overlook and mistake for a regression.",
+            "severity": "low",
+            "line": 222
+          }
+        ],
+        "suggested_spec_changes": [
+          "In step 2, add: build the reverse depends_on index from a single bus.read() pass (or otherwise dedupe bus.dependents calls with a shared seen-set across candidates) so the transitive dependents walk doesn't rescan the whole bus per node.",
+          "In step 2, require the daemon's dependents walk to track visited ids the same way _wave_tasks does for ancestors, so a depends_on cycle can't cause a hang or duplicate entries before critical_path.py's own cycle guard ever runs.",
+          "Note explicitly that test_dispatch_shadow_logs_wave_and_keeps_first_come's `wave[\"priority\"] == {}` assertion must be updated to reflect populated priority explanations, since it's an existing test affected by this change but not named in acceptance."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789949863.2237298,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Extending `tasks` with transitive dependents via `bus.dependents(tid)` calls `bus.read()` (a full JSON read of every task) once per node visited. If implemented as a naive per-candidate BFS without a shared visited-set/cache across candidates, overlapping downstream chains get re-scanned repeatedly every dispatch tick. Existing dispatch already does full `bus.read()` scans (lines 665, 673), so this isn't a new complexity class, but the spec should still say to build the reverse-adjacency once and reuse it across all candidates.",
+          "severity": "low",
+          "line": 679
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "`_wave_tasks`'s ancestor walk guards against revisits with a `seen` set (bus.py:637-640), but the spec doesn't require the same guard for the new dependents walk. Since critical_path.py is explicitly required to defend against depends_on cycles (a back edge \"is ignored and never recursed\"), the same cyclic data can reach daemon.py's traversal first and loop or duplicate reads if it isn't deduped the same way.",
+          "severity": "low",
+          "line": 679
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "test_dispatch_shadow_logs_wave_and_keeps_first_come currently asserts wave[\"priority\"] == {} in shadow mode (line 222). Once _wave_order calls critical_path.rank unconditionally, priority will be populated in shadow mode too (wave_row is written for both shadow and active). This pre-existing assertion needs updating alongside the new tests, but it isn't named in the acceptance list, so it's easy to overlook and mistake for a regression.",
+          "severity": "low",
+          "line": 222
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789949672.365335,
+  "account": "B",
+  "pid": 72147,
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Extending `tasks` with transitive dependents via `bus.dependents(tid)` calls `bus.read()` (a full JSON read of every task) once per node visited. If implemented as a naive per-candidate BFS without a shared visited-set/cache across candidates, overlapping downstream chains get re-scanned repeatedly every dispatch tick. Existing dispatch already does full `bus.read()` scans (lines 665, 673), so this isn't a new complexity class, but the spec should still say to build the reverse-adjacency once and reuse it across all candidates.",
+      "severity": "low",
+      "line": 679
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "`_wave_tasks`'s ancestor walk guards against revisits with a `seen` set (bus.py:637-640), but the spec doesn't require the same guard for the new dependents walk. Since critical_path.py is explicitly required to defend against depends_on cycles (a back edge \"is ignored and never recursed\"), the same cyclic data can reach daemon.py's traversal first and loop or duplicate reads if it isn't deduped the same way.",
+      "severity": "low",
+      "line": 679
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "test_dispatch_shadow_logs_wave_and_keeps_first_come currently asserts wave[\"priority\"] == {} in shadow mode (line 222). Once _wave_order calls critical_path.rank unconditionally, priority will be populated in shadow mode too (wave_row is written for both shadow and active). This pre-existing assertion needs updating alongside the new tests, but it isn't named in the acceptance list, so it's easy to overlook and mistake for a regression.",
+      "severity": "low",
+      "line": 222
+    }
+  ]
+}

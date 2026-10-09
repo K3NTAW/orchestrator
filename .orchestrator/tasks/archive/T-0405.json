@@ -1,0 +1,138 @@
+{
+  "id": "T-0405",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 2,
+  "title": "H5b fix round 4: the review re-spawn re-reads the task under the bus lock and only re-spawns when it is still queued, and skips stale tasks like the execute dispatch loop does (review T-0403)",
+  "spec": "STEP 0: the worktree must contain ec54196, 3164bed, f7df4d7, a553af1 and f25d62f (T-0363, T-0393, T-0396, T-0401) in git log; never drop or amend them.\nReview T-0403 on T-0401, both findings to address:\n1. (high) orchestrator/daemon.py:584 the re-spawn loop stamps respawned_at and calls spawn_async(spawn.run_worker, id) under bus.locked() without re-reading the task; the outer bus.read(status queued) snapshot can be stale, so a slow (not dead) original spawn thread that claims in that window is followed by a second run_worker for the same task, and both race on the worktree and both post results. Fix: inside the lock, re-read the task with bus.get and proceed only when status is still queued and respawned_at is still absent for the current requeue; otherwise skip. Test: tests/test_daemon.py::test_respawn_skips_task_claimed_between_snapshot_and_lock (patch bus.get to return a running task on the locked re-read; no spawn, no stamp).\n2. (low) orchestrator/daemon.py:563 the re-spawn loop never checks stale(task) unlike the execute dispatch loop; add the same skip so reviews of a done or superseded goal are never re-spawned. Test: tests/test_daemon.py::test_respawn_skips_stale_review.\nKeep the T-0363, T-0393, T-0396 and T-0401 tests green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0401",
+    "T-0403"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows f25d62f, a553af1, f7df4d7, 3164bed and ec54196 below your commit",
+    "tests/test_daemon.py::test_respawn_skips_task_claimed_between_snapshot_and_lock and ::test_respawn_skips_stale_review pass",
+    "tests/test_daemon.py::test_dispatch_respawns_requeued_review_once, ::test_dispatch_respawns_unclaimed_spec_review_after_delay, ::test_respawn_ignores_unrelated_pipeline_keys, ::test_respawn_age_uses_task_events_not_global_page, ::test_respawn_counts_claude_fallback_executors still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "fix_round_for": "T-0401",
+    "task_class": "reliability"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0405",
+  "codex_thread": "01a0beeb-909e-7332-aae6-77f160543dcc",
+  "result": {
+    "summary": "Summary: fixed review respawn locking/staleness checks and added both regressions. Committed `9b058ab`.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py` (36 insertions, 2 deletions).\n\nFailures-only output:\n```text\nscripts/tests_green.sh: No such file or directory\nscripts/failures_only.sh: No such file or directory\n```\n\n`.claude/hooks/tests-green.sh` exited 0; all seven specified daemon tests passed.",
+    "executed_by": "codex:terra",
+    "thread": "01a0beeb-909e-7332-aae6-77f160543dcc",
+    "usage": {
+      "input_tokens": 547779,
+      "cached_input_tokens": 511488,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6698,
+      "reasoning_output_tokens": 3326
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789909502.6681411,
+      "pipeline": {
+        "dispatched_at": 1789909502.668087
+      }
+    },
+    {
+      "ts": 1789909504.111634,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0405",
+      "claimed_at": 1789909504.111257
+    },
+    {
+      "ts": 1789909504.113167,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1789909840.592651,
+      "codex_thread": "01a0beeb-909e-7332-aae6-77f160543dcc"
+    },
+    {
+      "ts": 1789909840.595639,
+      "status": "done",
+      "result": {
+        "summary": "Summary: fixed review respawn locking/staleness checks and added both regressions. Committed `9b058ab`.\n\nFiles changed: `orchestrator/daemon.py`, `tests/test_daemon.py` (36 insertions, 2 deletions).\n\nFailures-only output:\n```text\nscripts/tests_green.sh: No such file or directory\nscripts/failures_only.sh: No such file or directory\n```\n\n`.claude/hooks/tests-green.sh` exited 0; all seven specified daemon tests passed.",
+        "executed_by": "codex:terra",
+        "thread": "01a0beeb-909e-7332-aae6-77f160543dcc",
+        "usage": {
+          "input_tokens": 547779,
+          "cached_input_tokens": 511488,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6698,
+          "reasoning_output_tokens": 3326
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789909946.235702,
+      "pipeline": {
+        "dispatched_at": 1789909502.668087,
+        "gated_at": 1789909946.235574,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789910187.7999701,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789910196.085133,
+      "pipeline": {
+        "dispatched_at": 1789909502.668087,
+        "gated_at": 1789909946.235574,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789910196.085023
+      }
+    },
+    {
+      "ts": 1789910278.487031,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "sha": "9b058ab12f9c858a715864faf8122ebba83a45ed"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789909502.668087,
+    "gated_at": 1789909946.235574,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789910196.085023
+  },
+  "claimed_at": 1789909504.111257,
+  "rounds": 0,
+  "executor": "terra",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0353",
+  "sha": "9b058ab12f9c858a715864faf8122ebba83a45ed"
+}

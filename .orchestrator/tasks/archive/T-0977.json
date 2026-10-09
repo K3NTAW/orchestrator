@@ -1,0 +1,218 @@
+{
+  "id": "T-0977",
+  "created_at": 1790126122.8970492,
+  "parent": "T-0861",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S10: evidence-driven skill promotion and demotion, freshness marking, version-scoped scores, and the P36 evaluation suite; nothing promotes on one run",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P17, P18, P22, P23, P30, P36, P37 stage 10, P38. Depends on T-0938 (skill_scorecard marginal/verdicts), T-0939 (active routing + refusal), T-0964 (specialists + conflicts), T-0954 (learned drafts in quarantine), T-0971 (Jev skill routing). Facts: skills_registry holds states with history and content-hash versions; promotion.py has FEATURES, CRITERIA (min_samples 20) and per-feature collect() branches; skill_scorecard.marginal returns verdicts valuable/neutral/costly/harmful with n; the context program's context_eval.py is the model for a deterministic eval suite; discovery/learned records live in discovered.json with the inspect gate.\nDo:\n1. orchestrator/skill_promotion.py (new): `evaluate_skill(id, root, cfg)` reads marginal() for the skill's version only (P22: scores are keyed by (id, version); a new version starts with n = 0 and never inherits), applies P17: testing \u2192 shadow requires the P7 validation tests for that skill to pass (validation.status tested) and inspect max_severity below block; shadow \u2192 active requires n \u2265 min_samples, verdict valuable or neutral with a measurable efficiency gain (accepted tokens or cost down, or fix rounds down) and no security finding; active \u2192 demoted (P18) when verdict harmful, or costly over \u2265 min_samples, or repeated irrelevant activation (selected but unused in \u2265 70% of \u2265 20 spawns), or a conflict with a newer active skill recorded by specialists, or stale (P23); demoted \u2192 shadow when a later version's evidence clears. Every transition goes through skills_registry.transition with the evidence summary as reason (observable, reversible via rollback). `orchestrator skills promote --dry-run` prints recommendations; without --dry-run applies them (the CLI is the only writer; no daemon auto-apply in this stage).\n2. Freshness (P23): each skill's declared dependencies (frontmatter `depends_on:` list of paths/globs/tool ids; for builtins fill from their scripts and referenced modules) are hashed at sync; when a dependency's content hash changes, the record gets `stale: true` with the changed dependency in history and `skills list` shows it; a stale active skill is demoted to shadow by evaluate_skill until re-validated (its validation tests pass again on the new head).\n3. P30 economy metrics complete: skill_scorecard adds skill_reuse_rate (spawns whose selected skills were all used / spawns with a selection) and reports skill_tokens_per_accepted_task, skill_overhead_ratio, skill_utility (marginal quality delta per 1k skill tokens), skill_recovery_rate together in `scorecard --skills`; `scorecard --economy` gains the skills block with these five.\n4. P36 evaluation suite: orchestrator/skill_eval.py (new) with deterministic fixtures (no models, no network) covering Routing (irrelevant skill excluded; obvious skill deterministically selected; ambiguous resolved by a fake Jev; minimal set only; unavailable skill handled), Lifecycle (external starts quarantined; quarantined cannot reach candidates or packets; testing never mutates skills/ or .claude/skills; shadow leaves exposure and packet bytes unchanged; promotion needs evidence; demotion works; rollback works), Security (a malicious draft with hidden instructions is blocked by inspect; an external skill with a script cannot leave quarantine without override; secret-looking content is redacted in drafts; external endpoints outside allowed_domains are flagged), Compaction (P6 headings present; token count not higher than before; output contract preserved), Specialists (composition, unrelated skills excluded, conflicts detected, required tools exposed), Scorecard (usage attribution; model and workflow grouping; marginal value; insufficient evidence safe), Learned (repeated behaviour creates a candidate; one-off cannot; candidate enters quarantine; activation needs evaluation). `orchestrator skill-eval` prints a table and exits 1 on any failure; results persist to STATE/skill_eval.json; skill_promotion refuses any promotion to active while the last suite run is missing, older than 7 days or failed.\n5. docs/skill-intelligence/11-promotion.md and 12-evaluation.md (\u226470 lines each): rules, thresholds, what the suite covers, revert paths.\nTests (unittest): tests/test_skill_promotion.py::test_new_version_starts_without_inherited_score, ::test_shadow_to_active_requires_samples_and_efficiency, ::test_demotion_on_harmful_or_costly_or_irrelevant_activation, ::test_stale_dependency_marks_and_demotes_until_revalidated, ::test_promotion_refused_without_recent_passing_suite, ::test_rollback_restores_previous_state; tests/test_skill_eval.py::test_suite_covers_all_p36_groups_and_passes, ::test_cli_exit_code_and_persisted_result. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.",
+  "inputs": [
+    "T-0972"
+  ],
+  "acceptance": [
+    "tests/test_skill_promotion.py::test_new_version_starts_without_inherited_score passes",
+    "tests/test_skill_promotion.py::test_shadow_to_active_requires_samples_and_efficiency passes",
+    "tests/test_skill_promotion.py::test_demotion_on_harmful_or_costly_or_irrelevant_activation passes",
+    "tests/test_skill_promotion.py::test_stale_dependency_marks_and_demotes_until_revalidated passes",
+    "tests/test_skill_promotion.py::test_promotion_refused_without_recent_passing_suite passes",
+    "tests/test_skill_promotion.py::test_rollback_restores_previous_state passes",
+    "tests/test_skill_eval.py::test_suite_covers_all_p36_groups_and_passes passes",
+    "tests/test_skill_eval.py::test_cli_exit_code_and_persisted_result passes",
+    "`uv run orchestrator skill-eval` exits 0; `uv run orchestrator skills promote --dry-run` runs; docs/skill-intelligence/11-promotion.md and 12-evaluation.md exist; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/skill_promotion.py",
+    "orchestrator/skill_eval.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/promotion.py",
+    "orchestrator/cli.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_skill_promotion.py",
+    "tests/test_skill_eval.py",
+    "docs/skill-intelligence/11-promotion.md",
+    "docs/skill-intelligence/12-evaluation.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0977",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/skill_scorecard.py",
+        "issue": "Spec assumes (P22) that scores are 'keyed by (id, version)' and that evaluate_skill can call marginal() 'for the skill's version only', but marginal()/usage_rows() (skill_scorecard.py:93-246) key everything by skill id alone \u2014 no skill version is ever recorded per usage (traced through context_router.py:985-992 -> decision_log.outcome -> run rows consumed at skill_scorecard.py:98-99,142,186,211). Implemented naively, evaluate_skill will aggregate n/verdict across ALL historical versions of a skill, which is the literal opposite of the contractual behaviour under test in test_new_version_starts_without_inherited_score (a new version must start at n=0 and never inherit). This is a silent-fallback risk: the unit test can be made to pass with a synthetic fixture that includes a version field, while the real evaluate_skill path in production silently never version-scopes anything.",
+        "severity": "high",
+        "line": 202
+      },
+      {
+        "path": "orchestrator/skill_promotion.py",
+        "issue": "No file in scope records skill version per usage, so there is no straightforward way to filter usage_rows by version without either (a) adding a new telemetry field written from context_router.py \u2014 a file outside scope/not listed in the Do section \u2014 or (b) bounding usage_rows by timestamp against the version-change 'at' entries already present in skills_registry history (skills_registry.py:230-239). The spec doesn't specify which approach to take, leaving the insertion point ambiguous for both promotion (n>=min_samples) and demotion ('repeated irrelevant activation ... in >=70% of >=20 spawns', which has the identical unversioned-aggregation problem via skill_scorecard.py:369-381).",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": ".orchestrator/roadmap-skills.md",
+        "issue": "The spec's 'existing tests' table claims tests/test_skills_registry.py and tests/test_skill_scorecard.py are 'missing', but both already exist in the repo (tests/test_skills_registry.py, tests/test_skill_scorecard.py). Since neither is in this task's scope or acceptance list this doesn't block execution, but it signals the spec's repo-shape scan is stale and other 'missing' claims in the table should be re-verified before trusting them.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify explicitly how skill_promotion.evaluate_skill should version-scope marginal(): bound usage_rows to the time window between a version's registry-history 'at' timestamp and the next transition (or now) using existing skills_registry history, rather than adding a new telemetry field in context_router.py (out of scope). State this so the executor doesn't expand scope or fake version-scoping just to satisfy the test.",
+      "Add one sentence clarifying where the 'irrelevant activation' (selected-but-unused in >=70% of >=20 spawns) count is version-scoped the same way, since skill_scorecard.py's by_role_skill exposure/use tracking (lines 369-381) is also unversioned today.",
+      "Drop or correct the 'existing tests: missing' claims for tests/test_skills_registry.py and tests/test_skill_scorecard.py in the spec table."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790126125.703861,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0977",
+      "claimed_at": 1790126125.703666
+    },
+    {
+      "ts": 1790126125.7049038,
+      "account": "B"
+    },
+    {
+      "ts": 1790126126.7550762,
+      "pid": 88620,
+      "account": "B"
+    },
+    {
+      "ts": 1790126289.601234,
+      "status": "failed",
+      "reason": "review returned no parseable verdict",
+      "resume_hint": {
+        "raw": "Review complete. The blocking issue is the version-keyed scoring premise (skill_scorecard has no version dimension at all today), which undermines the core promotion mechanism in item 1 and the `test_new_version_starts_without_inherited_score` acceptance test. Verdict: request_changes."
+      }
+    },
+    {
+      "ts": 1790127960.224489,
+      "status": "queued",
+      "hold_reason": null,
+      "reason": "Planner 15:00: no parseable verdict on the first run; re-spawned by hand"
+    },
+    {
+      "ts": 1790127961.5465002,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0977",
+      "claimed_at": 1790127961.546239
+    },
+    {
+      "ts": 1790127961.547711,
+      "account": "B"
+    },
+    {
+      "ts": 1790127962.0324202,
+      "pid": 96253,
+      "account": "B"
+    },
+    {
+      "ts": 1790128105.641217,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/skill_scorecard.py",
+            "issue": "Spec assumes (P22) that scores are 'keyed by (id, version)' and that evaluate_skill can call marginal() 'for the skill's version only', but marginal()/usage_rows() (skill_scorecard.py:93-246) key everything by skill id alone \u2014 no skill version is ever recorded per usage (traced through context_router.py:985-992 -> decision_log.outcome -> run rows consumed at skill_scorecard.py:98-99,142,186,211). Implemented naively, evaluate_skill will aggregate n/verdict across ALL historical versions of a skill, which is the literal opposite of the contractual behaviour under test in test_new_version_starts_without_inherited_score (a new version must start at n=0 and never inherit). This is a silent-fallback risk: the unit test can be made to pass with a synthetic fixture that includes a version field, while the real evaluate_skill path in production silently never version-scopes anything.",
+            "severity": "high",
+            "line": 202
+          },
+          {
+            "path": "orchestrator/skill_promotion.py",
+            "issue": "No file in scope records skill version per usage, so there is no straightforward way to filter usage_rows by version without either (a) adding a new telemetry field written from context_router.py \u2014 a file outside scope/not listed in the Do section \u2014 or (b) bounding usage_rows by timestamp against the version-change 'at' entries already present in skills_registry history (skills_registry.py:230-239). The spec doesn't specify which approach to take, leaving the insertion point ambiguous for both promotion (n>=min_samples) and demotion ('repeated irrelevant activation ... in >=70% of >=20 spawns', which has the identical unversioned-aggregation problem via skill_scorecard.py:369-381).",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": ".orchestrator/roadmap-skills.md",
+            "issue": "The spec's 'existing tests' table claims tests/test_skills_registry.py and tests/test_skill_scorecard.py are 'missing', but both already exist in the repo (tests/test_skills_registry.py, tests/test_skill_scorecard.py). Since neither is in this task's scope or acceptance list this doesn't block execution, but it signals the spec's repo-shape scan is stale and other 'missing' claims in the table should be re-verified before trusting them.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify explicitly how skill_promotion.evaluate_skill should version-scope marginal(): bound usage_rows to the time window between a version's registry-history 'at' timestamp and the next transition (or now) using existing skills_registry history, rather than adding a new telemetry field in context_router.py (out of scope). State this so the executor doesn't expand scope or fake version-scoping just to satisfy the test.",
+          "Add one sentence clarifying where the 'irrelevant activation' (selected-but-unused in >=70% of >=20 spawns) count is version-scoped the same way, since skill_scorecard.py's by_role_skill exposure/use tracking (lines 369-381) is also unversioned today.",
+          "Drop or correct the 'existing tests: missing' claims for tests/test_skills_registry.py and tests/test_skill_scorecard.py in the spec table."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790128105.6431959,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/skill_scorecard.py",
+          "issue": "Spec assumes (P22) that scores are 'keyed by (id, version)' and that evaluate_skill can call marginal() 'for the skill's version only', but marginal()/usage_rows() (skill_scorecard.py:93-246) key everything by skill id alone \u2014 no skill version is ever recorded per usage (traced through context_router.py:985-992 -> decision_log.outcome -> run rows consumed at skill_scorecard.py:98-99,142,186,211). Implemented naively, evaluate_skill will aggregate n/verdict across ALL historical versions of a skill, which is the literal opposite of the contractual behaviour under test in test_new_version_starts_without_inherited_score (a new version must start at n=0 and never inherit). This is a silent-fallback risk: the unit test can be made to pass with a synthetic fixture that includes a version field, while the real evaluate_skill path in production silently never version-scopes anything.",
+          "severity": "high",
+          "line": 202
+        },
+        {
+          "path": "orchestrator/skill_promotion.py",
+          "issue": "No file in scope records skill version per usage, so there is no straightforward way to filter usage_rows by version without either (a) adding a new telemetry field written from context_router.py \u2014 a file outside scope/not listed in the Do section \u2014 or (b) bounding usage_rows by timestamp against the version-change 'at' entries already present in skills_registry history (skills_registry.py:230-239). The spec doesn't specify which approach to take, leaving the insertion point ambiguous for both promotion (n>=min_samples) and demotion ('repeated irrelevant activation ... in >=70% of >=20 spawns', which has the identical unversioned-aggregation problem via skill_scorecard.py:369-381).",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": ".orchestrator/roadmap-skills.md",
+          "issue": "The spec's 'existing tests' table claims tests/test_skills_registry.py and tests/test_skill_scorecard.py are 'missing', but both already exist in the repo (tests/test_skills_registry.py, tests/test_skill_scorecard.py). Since neither is in this task's scope or acceptance list this doesn't block execution, but it signals the spec's repo-shape scan is stale and other 'missing' claims in the table should be re-verified before trusting them.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790127961.546239,
+  "account": "B",
+  "pid": 96253,
+  "reason": "Planner 15:00: no parseable verdict on the first run; re-spawned by hand",
+  "resume_hint": {
+    "raw": "Review complete. The blocking issue is the version-keyed scoring premise (skill_scorecard has no version dimension at all today), which undermines the core promotion mechanism in item 1 and the `test_new_version_starts_without_inherited_score` acceptance test. Verdict: request_changes."
+  },
+  "hold_reason": null,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/skill_scorecard.py",
+      "issue": "Spec assumes (P22) that scores are 'keyed by (id, version)' and that evaluate_skill can call marginal() 'for the skill's version only', but marginal()/usage_rows() (skill_scorecard.py:93-246) key everything by skill id alone \u2014 no skill version is ever recorded per usage (traced through context_router.py:985-992 -> decision_log.outcome -> run rows consumed at skill_scorecard.py:98-99,142,186,211). Implemented naively, evaluate_skill will aggregate n/verdict across ALL historical versions of a skill, which is the literal opposite of the contractual behaviour under test in test_new_version_starts_without_inherited_score (a new version must start at n=0 and never inherit). This is a silent-fallback risk: the unit test can be made to pass with a synthetic fixture that includes a version field, while the real evaluate_skill path in production silently never version-scopes anything.",
+      "severity": "high",
+      "line": 202
+    },
+    {
+      "path": "orchestrator/skill_promotion.py",
+      "issue": "No file in scope records skill version per usage, so there is no straightforward way to filter usage_rows by version without either (a) adding a new telemetry field written from context_router.py \u2014 a file outside scope/not listed in the Do section \u2014 or (b) bounding usage_rows by timestamp against the version-change 'at' entries already present in skills_registry history (skills_registry.py:230-239). The spec doesn't specify which approach to take, leaving the insertion point ambiguous for both promotion (n>=min_samples) and demotion ('repeated irrelevant activation ... in >=70% of >=20 spawns', which has the identical unversioned-aggregation problem via skill_scorecard.py:369-381).",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": ".orchestrator/roadmap-skills.md",
+      "issue": "The spec's 'existing tests' table claims tests/test_skills_registry.py and tests/test_skill_scorecard.py are 'missing', but both already exist in the repo (tests/test_skills_registry.py, tests/test_skill_scorecard.py). Since neither is in this task's scope or acceptance list this doesn't block execution, but it signals the spec's repo-shape scan is stale and other 'missing' claims in the table should be re-verified before trusting them.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

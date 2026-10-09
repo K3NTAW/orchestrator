@@ -1,4 +1,6 @@
 import _harness
+import _fake_claude
+from _fake_claude import setUpModule, tearDownModule  # every spawn here fakes the claude CLI at an absolute path
 from datetime import date
 import json
 import os
@@ -157,7 +159,7 @@ class EnvPolicy(unittest.TestCase):
             stack.enter_context(mock.patch.object(spawn, "trust_workspace"))
             stack.enter_context(mock.patch.object(spawn, "secrets_for_role", return_value={}))
             stack.enter_context(mock.patch.object(spawn, "resolve_secrets", return_value={"SERVICE_TOKEN": "green"}))
-            stack.enter_context(mock.patch.object(spawn.shutil, "which", return_value="claude"))
+            stack.enter_context(_fake_claude.patch())
             stack.enter_context(mock.patch.object(spawn, "worker_registry"))
             stack.enter_context(mock.patch.object(executor, "worker_registry"))
             popen = stack.enter_context(mock.patch.object(spawn.subprocess, "Popen", side_effect=RuntimeError("stop")))

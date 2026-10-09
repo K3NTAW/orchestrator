@@ -1,0 +1,517 @@
+{
+  "id": "T-1181",
+  "created_at": 1790168442.515771,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S2b memory_scorecard and memory_eval: retrieval precision, downstream use, utility per token, and the P34 memory eval cases (P5, P34 memory)",
+  "spec": "Create orchestrator/memory_scorecard.py: read decision_log rows of kind memory_retrieval and the bus outcome of their subject tasks. Per task: records_retrieved (candidates), records_presented (selected in active, legacy_ids in shadow), memory_tokens, downstream_use = share of presented records whose files or components appear in the task's changed paths (gitutil.changed_paths when a worktree exists, else the result's files list) or whose id/title words appear in the result summary, first_pass (merged without a fix round: no task with constraints.fix_round_for equal to it), fix_rounds count, repeated_retrieval (same record presented to the same lineage more than once), irrelevant = presented and not used. Aggregate per mode and per 7 days: precision (used/presented), utility_per_token (used records / memory_tokens * 1000), first_pass rate for tasks with memory vs without. CLI `orchestrator scorecard --memory [--days n] [--json]`. Create orchestrator/memory_eval.py with the P34 memory cases as deterministic checks over a temp root seeded from fixtures: current decision found in HOT, older decision found in WARM by search, historical provenance (superseded decision) found in COLD by search with tier cold, an irrelevant record excluded from a task's tiered sections, compaction preserves knowledge (every record still findable after compact). run(root) -> {cases: [{name, passed, detail}], passed, total}; persist to .orchestrator/memory_eval.json like context_eval does; CLI `orchestrator memory-eval [--json]`. Docs: docs/hermes-hardening/08-memory-scorecard.md.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [
+    "T-1152"
+  ],
+  "acceptance": [
+    "tests/test_memory_scorecard.py::test_precision_and_downstream_use_from_rows_and_outcomes",
+    "tests/test_memory_scorecard.py::test_repeated_and_irrelevant_counted",
+    "tests/test_memory_eval.py::test_all_five_cases_pass_on_fixture_root",
+    "tests/test_cli.py::test_scorecard_memory_and_memory_eval_cli",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/memory_scorecard.py",
+    "orchestrator/memory_eval.py",
+    "orchestrator/cli.py",
+    "tests/test_memory_scorecard.py",
+    "tests/test_memory_eval.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/08-memory-scorecard.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1181",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/memory_scorecard.py",
+        "issue": "Spec says read decision_log rows of kind memory_retrieval. T-1151 (the dependency) writes these rows with kind=\"retrieval\" (orchestrator/spawn.py:811), and decision_log.py's CONTEXT_KINDS only contains \"retrieval\" \u2014 there is no memory_retrieval kind anywhere in the codebase. Implemented literally, the scorecard filters on a kind that never occurs and silently returns zero candidates/presented/tokens for every task.",
+        "severity": "high",
+        "line": 811
+      },
+      {
+        "path": "orchestrator/memory_scorecard.py",
+        "issue": "downstream_use fallback is specified as \"gitutil.changed_paths when a worktree exists, else the result's files list\", but no task result in this repo ever sets a files key (zero hits for result.get(\"files\") across orchestrator/ and tests/). The only guaranteed per-task file list is task.get(\"scope\") (TaskCreated hook enforces it). Once a worktree is gone (the normal state after merge), changed_paths returns None and the fallback silently evaluates to an empty list, permanently biasing downstream_use/precision toward 0 for any merged task the scorecard evaluates later, e.g. the 7-day rollup.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/memory_scorecard.py",
+        "issue": "memory_tokens source is unspecified while records_presented explicitly disambiguates by mode (selected in active, legacy_ids in shadow). The retrieval row's extra carries two different counts, tokens_legacy and tokens_tiered, that differ substantially by design (T-1151's own shadow-comparison table: 502 vs 236 tokens for one task). Without the same mode-conditional rule, utility_per_token becomes incomparable across modes depending on which count an executor picks.",
+        "severity": "med",
+        "line": 816
+      }
+    ],
+    "suggested_spec_changes": [
+      "Change 'decision_log rows of kind memory_retrieval' to 'decision_log rows of kind retrieval (T-1151's memory-retrieval evidence kind)'.",
+      "Change the downstream_use fallback to 'gitutil.changed_paths when a worktree exists, else task.get(\"scope\")' \u2014 drop 'the result's files list', which has no corresponding field anywhere in the task/result schema.",
+      "Specify memory_tokens the same way as records_presented: extra.tokens_tiered for active-mode rows, extra.tokens_legacy for shadow-mode rows, so utility_per_token is computed consistently per mode."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790168444.829798,
+      "packet_meta": {
+        "chars": 3946,
+        "est_tokens": 986,
+        "presented_tokens": 986,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ac8e2504a5c2d2f64c8163f4300419a344d2a28c686d7aa264744d57525d1ede"
+          },
+          "spec": {
+            "chars": 2524,
+            "est_tokens": 631,
+            "sha256": "7983e0deef1031d9ef9eb6a7eb095d92cca8804096214aa70b1665fc9ea43d11"
+          },
+          "acceptance": {
+            "chars": 348,
+            "est_tokens": 87,
+            "sha256": "c5ffa82fd2f156815591df5a6152b0f1e18c895790d106424e2f5494c7868f4d"
+          },
+          "scope": {
+            "chars": 224,
+            "est_tokens": 56,
+            "sha256": "2c3e436f1e6d9bf0865f009f25691888a4ab784d6826b674385b33232012a230"
+          },
+          "depends_on": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "66539792f9b9119df182db72e31ad1dea3d295da366f7d326ce9815a37f46c24"
+          },
+          "existing tests": {
+            "chars": 516,
+            "est_tokens": 129,
+            "sha256": "a2cf524cabbd9bbfe7018d827236ba50dfcae3baf320937b56223b5eaf28d4e9"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "39a01f7d4aad",
+        "version": "39a01f7d4aad",
+        "candidate_known": false,
+        "base": "8f6ebefa6057",
+        "sources": "task@T-1152 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790168447.22804,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1181",
+      "claimed_at": 1790168447.227678
+    },
+    {
+      "ts": 1790168447.2299361,
+      "account": "A"
+    },
+    {
+      "ts": 1790168448.863293,
+      "pid": 28517,
+      "account": "A"
+    },
+    {
+      "ts": 1790168660.112309,
+      "packet_meta": {
+        "chars": 3946,
+        "est_tokens": 986,
+        "presented_tokens": 986,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ac8e2504a5c2d2f64c8163f4300419a344d2a28c686d7aa264744d57525d1ede"
+          },
+          "spec": {
+            "chars": 2524,
+            "est_tokens": 631,
+            "sha256": "7983e0deef1031d9ef9eb6a7eb095d92cca8804096214aa70b1665fc9ea43d11"
+          },
+          "acceptance": {
+            "chars": 348,
+            "est_tokens": 87,
+            "sha256": "c5ffa82fd2f156815591df5a6152b0f1e18c895790d106424e2f5494c7868f4d"
+          },
+          "scope": {
+            "chars": 224,
+            "est_tokens": 56,
+            "sha256": "2c3e436f1e6d9bf0865f009f25691888a4ab784d6826b674385b33232012a230"
+          },
+          "depends_on": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "66539792f9b9119df182db72e31ad1dea3d295da366f7d326ce9815a37f46c24"
+          },
+          "existing tests": {
+            "chars": 516,
+            "est_tokens": 129,
+            "sha256": "a2cf524cabbd9bbfe7018d827236ba50dfcae3baf320937b56223b5eaf28d4e9"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "39a01f7d4aad",
+        "version": "39a01f7d4aad",
+        "candidate_known": false,
+        "base": "8f6ebefa6057",
+        "sources": "task@T-1152 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "56041295-9724-4977-bd6a-d1f655821975"
+      }
+    },
+    {
+      "ts": 1790168660.140158,
+      "packet_meta": {
+        "chars": 3946,
+        "est_tokens": 986,
+        "presented_tokens": 986,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "ac8e2504a5c2d2f64c8163f4300419a344d2a28c686d7aa264744d57525d1ede"
+          },
+          "spec": {
+            "chars": 2524,
+            "est_tokens": 631,
+            "sha256": "7983e0deef1031d9ef9eb6a7eb095d92cca8804096214aa70b1665fc9ea43d11"
+          },
+          "acceptance": {
+            "chars": 348,
+            "est_tokens": 87,
+            "sha256": "c5ffa82fd2f156815591df5a6152b0f1e18c895790d106424e2f5494c7868f4d"
+          },
+          "scope": {
+            "chars": 224,
+            "est_tokens": 56,
+            "sha256": "2c3e436f1e6d9bf0865f009f25691888a4ab784d6826b674385b33232012a230"
+          },
+          "depends_on": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "66539792f9b9119df182db72e31ad1dea3d295da366f7d326ce9815a37f46c24"
+          },
+          "existing tests": {
+            "chars": 516,
+            "est_tokens": 129,
+            "sha256": "a2cf524cabbd9bbfe7018d827236ba50dfcae3baf320937b56223b5eaf28d4e9"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "39a01f7d4aad",
+        "version": "39a01f7d4aad",
+        "candidate_known": false,
+        "base": "8f6ebefa6057",
+        "sources": "task@T-1152 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "56041295-9724-4977-bd6a-d1f655821975",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790168660.145143,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/memory_scorecard.py",
+            "issue": "Spec says read decision_log rows of kind memory_retrieval. T-1151 (the dependency) writes these rows with kind=\"retrieval\" (orchestrator/spawn.py:811), and decision_log.py's CONTEXT_KINDS only contains \"retrieval\" \u2014 there is no memory_retrieval kind anywhere in the codebase. Implemented literally, the scorecard filters on a kind that never occurs and silently returns zero candidates/presented/tokens for every task.",
+            "severity": "high",
+            "line": 811
+          },
+          {
+            "path": "orchestrator/memory_scorecard.py",
+            "issue": "downstream_use fallback is specified as \"gitutil.changed_paths when a worktree exists, else the result's files list\", but no task result in this repo ever sets a files key (zero hits for result.get(\"files\") across orchestrator/ and tests/). The only guaranteed per-task file list is task.get(\"scope\") (TaskCreated hook enforces it). Once a worktree is gone (the normal state after merge), changed_paths returns None and the fallback silently evaluates to an empty list, permanently biasing downstream_use/precision toward 0 for any merged task the scorecard evaluates later, e.g. the 7-day rollup.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/memory_scorecard.py",
+            "issue": "memory_tokens source is unspecified while records_presented explicitly disambiguates by mode (selected in active, legacy_ids in shadow). The retrieval row's extra carries two different counts, tokens_legacy and tokens_tiered, that differ substantially by design (T-1151's own shadow-comparison table: 502 vs 236 tokens for one task). Without the same mode-conditional rule, utility_per_token becomes incomparable across modes depending on which count an executor picks.",
+            "severity": "med",
+            "line": 816
+          }
+        ],
+        "suggested_spec_changes": [
+          "Change 'decision_log rows of kind memory_retrieval' to 'decision_log rows of kind retrieval (T-1151's memory-retrieval evidence kind)'.",
+          "Change the downstream_use fallback to 'gitutil.changed_paths when a worktree exists, else task.get(\"scope\")' \u2014 drop 'the result's files list', which has no corresponding field anywhere in the task/result schema.",
+          "Specify memory_tokens the same way as records_presented: extra.tokens_tiered for active-mode rows, extra.tokens_legacy for shadow-mode rows, so utility_per_token is computed consistently per mode."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790168660.146189,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/memory_scorecard.py",
+          "issue": "Spec says read decision_log rows of kind memory_retrieval. T-1151 (the dependency) writes these rows with kind=\"retrieval\" (orchestrator/spawn.py:811), and decision_log.py's CONTEXT_KINDS only contains \"retrieval\" \u2014 there is no memory_retrieval kind anywhere in the codebase. Implemented literally, the scorecard filters on a kind that never occurs and silently returns zero candidates/presented/tokens for every task.",
+          "severity": "high",
+          "line": 811
+        },
+        {
+          "path": "orchestrator/memory_scorecard.py",
+          "issue": "downstream_use fallback is specified as \"gitutil.changed_paths when a worktree exists, else the result's files list\", but no task result in this repo ever sets a files key (zero hits for result.get(\"files\") across orchestrator/ and tests/). The only guaranteed per-task file list is task.get(\"scope\") (TaskCreated hook enforces it). Once a worktree is gone (the normal state after merge), changed_paths returns None and the fallback silently evaluates to an empty list, permanently biasing downstream_use/precision toward 0 for any merged task the scorecard evaluates later, e.g. the 7-day rollup.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/memory_scorecard.py",
+          "issue": "memory_tokens source is unspecified while records_presented explicitly disambiguates by mode (selected in active, legacy_ids in shadow). The retrieval row's extra carries two different counts, tokens_legacy and tokens_tiered, that differ substantially by design (T-1151's own shadow-comparison table: 502 vs 236 tokens for one task). Without the same mode-conditional rule, utility_per_token becomes incomparable across modes depending on which count an executor picks.",
+          "severity": "med",
+          "line": 816
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 3946,
+    "est_tokens": 986,
+    "presented_tokens": 986,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "ac8e2504a5c2d2f64c8163f4300419a344d2a28c686d7aa264744d57525d1ede"
+      },
+      "spec": {
+        "chars": 2524,
+        "est_tokens": 631,
+        "sha256": "7983e0deef1031d9ef9eb6a7eb095d92cca8804096214aa70b1665fc9ea43d11"
+      },
+      "acceptance": {
+        "chars": 348,
+        "est_tokens": 87,
+        "sha256": "c5ffa82fd2f156815591df5a6152b0f1e18c895790d106424e2f5494c7868f4d"
+      },
+      "scope": {
+        "chars": 224,
+        "est_tokens": 56,
+        "sha256": "2c3e436f1e6d9bf0865f009f25691888a4ab784d6826b674385b33232012a230"
+      },
+      "depends_on": {
+        "chars": 235,
+        "est_tokens": 58,
+        "sha256": "66539792f9b9119df182db72e31ad1dea3d295da366f7d326ce9815a37f46c24"
+      },
+      "existing tests": {
+        "chars": 516,
+        "est_tokens": 129,
+        "sha256": "a2cf524cabbd9bbfe7018d827236ba50dfcae3baf320937b56223b5eaf28d4e9"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "39a01f7d4aad",
+    "version": "39a01f7d4aad",
+    "candidate_known": false,
+    "base": "8f6ebefa6057",
+    "sources": "task@T-1152 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "56041295-9724-4977-bd6a-d1f655821975",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790168447.227678,
+  "account": "A",
+  "pid": 28517,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/memory_scorecard.py",
+      "issue": "Spec says read decision_log rows of kind memory_retrieval. T-1151 (the dependency) writes these rows with kind=\"retrieval\" (orchestrator/spawn.py:811), and decision_log.py's CONTEXT_KINDS only contains \"retrieval\" \u2014 there is no memory_retrieval kind anywhere in the codebase. Implemented literally, the scorecard filters on a kind that never occurs and silently returns zero candidates/presented/tokens for every task.",
+      "severity": "high",
+      "line": 811
+    },
+    {
+      "path": "orchestrator/memory_scorecard.py",
+      "issue": "downstream_use fallback is specified as \"gitutil.changed_paths when a worktree exists, else the result's files list\", but no task result in this repo ever sets a files key (zero hits for result.get(\"files\") across orchestrator/ and tests/). The only guaranteed per-task file list is task.get(\"scope\") (TaskCreated hook enforces it). Once a worktree is gone (the normal state after merge), changed_paths returns None and the fallback silently evaluates to an empty list, permanently biasing downstream_use/precision toward 0 for any merged task the scorecard evaluates later, e.g. the 7-day rollup.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/memory_scorecard.py",
+      "issue": "memory_tokens source is unspecified while records_presented explicitly disambiguates by mode (selected in active, legacy_ids in shadow). The retrieval row's extra carries two different counts, tokens_legacy and tokens_tiered, that differ substantially by design (T-1151's own shadow-comparison table: 502 vs 236 tokens for one task). Without the same mode-conditional rule, utility_per_token becomes incomparable across modes depending on which count an executor picks.",
+      "severity": "med",
+      "line": 816
+    }
+  ]
+}

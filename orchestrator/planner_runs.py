@@ -27,12 +27,18 @@ from pathlib import Path
 from . import ROOT, STATE, bus, goals, handover, jev, spawn, decision, failures, gitutil, notify
 from . import planner_taxonomy, planner_router, planner_telemetry, planner_shadow, jev_planner
 from . import planner_packet, scout_evidence
-from .pool import Pool
+from .pool import Pool, planner_setting, config as pool_config
 
 _BLOCKING_STATUSES = ("running", "claimed", "exited_ok", "gave_up")
 _STALE_CLAIM_S = 120
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 _JEV_TIMEOUT_S = 3.0
+# Declared so jev_triage never takes ask()'s undeclared-site path, whose synchronous notify (osascript on darwin)
+# sat between run()'s claim and its launch.
+jev.declare_boundary("triage", fields=("kind", "task_title", "spec", "hold_reason", "review_comments",
+                                       "depends_on", "attempts"),
+                     max_chars=jev.DEFAULT_MAX_STATE_CHARS, raw_source_allowed=False,
+                     notes="Shadow triage in run(); spec 1500 chars, up to 10 review comments.")
 
 
 def _fenced(label, value, limit=None):
@@ -62,10 +68,14 @@ def decision_packet(goal_id, kind, payload, repo_path=ROOT):
         goal, ctx = {"id": goal_id}, {}
     task = _decision_task(goal_id, kind, payload)
     classification = planner_taxonomy.classify(point, ctx, goal=goal, task=task)
-    return planner_packet.build(
+    text = planner_packet.build(
         _packet_sections([(point, ctx, None, classification)]), goal=goal,
         scout_findings=_scout_findings(goal_id), memory_hits=_memory_hits(goal),
         cap_chars=_packet_cap(repo_path))["text"]
+    own = Path(repo_path) / ".orchestrator" / f"plan-{goal_id}.md"
+    if own.exists():
+        text += f"\nPlan file: .orchestrator/plan-{goal_id}.md (read and write this goal's plan here, not plan.md)"
+    return text
 
 # next_action options offered to Jev for a decision-point shadow triage (D3, T-0217). scouts_done gets its own
 # set (there is no held task/review to react to yet); held and closable share the fix_round/respec/escalate/noop
@@ -187,11 +197,206 @@ def hold_fingerprint(task):
     return hashlib.sha256(encoded).hexdigest()[:12]
 
 
+def _failed_key(t):
+    """task_id, a literal "failed" and the newest status=failed event time: a re-queued task that fails again is a
+    new decision. Same split(":", 1)[0] task-id convention as _held_key."""
+    failed_ts = [e["ts"] for e in t.get("events", []) if e.get("status") == "failed"]
+    if not failed_ts:
+        return None
+    return f"{t['id']}:failed:{max(failed_ts)!r}"
+
+
+def _is_failed_key(payload_key):
+    return payload_key.split(":", 2)[1:2] == ["failed"]
+
+
+def _superseded(t, all_tasks):
+    """A failed task some live task already handles (fix round, respec) or one marked superseded_by."""
+    if t.get("superseded_by"):
+        return True
+    return any(x.get("status") != "failed" and x["id"] != t["id"] and t["id"] in (
+        (x.get("constraints") or {}).get("fix_round_for"), (x.get("constraints") or {}).get("respec_for"))
+        for x in all_tasks)
+
+
+def _worktree_note(t):
+    """One line on a failed task's worktree: commits ahead of base and whether the tree is dirty. None without one."""
+    worktree = t.get("worktree")
+    if not worktree or not Path(worktree).is_dir():
+        return None
+    try:
+        base = gitutil._resolve_base(worktree, t.get("parent"))
+        if not base:
+            return None
+        ahead = gitutil._git_in(worktree, "rev-list", "--count", f"{base}..HEAD")
+        dirty = gitutil._git_in(worktree, "status", "--porcelain")
+    except OSError:
+        return None
+    if ahead.returncode != 0 or dirty.returncode != 0:
+        return None
+    tree = "dirty" if dirty.stdout.strip() else "clean"
+    return f"worktree: {ahead.stdout.strip()} commits ahead of base, {tree} tree"
+
+
+# Roadmap checklist lines in .orchestrator/roadmap.md: "- [ ] <goal text>" (not filed yet) and
+# "- [x] <goal text> (T-xxxx)". Every other line is context.
+_ROADMAP_LINE = re.compile(r"^\s*[-*]\s+\[( |x|X)\]\s+(.+?)\s*$")
+_ROADMAP_ID = re.compile(r"\s*\(T-\d+\)\s*$")
+_NEXT_GOAL_ROADMAP_CHARS = 3000
+_NEXT_GOAL_RETRO_CHARS = 2000
+
+
+def roadmap_key(text):
+    """Stable key of a roadmap item: first 12 hex of sha1 of the stripped goal text, checkbox and a trailing
+    "(T-xxxx)" removed, so the key survives ticking the line."""
+    m = _ROADMAP_LINE.match(text)
+    text = m.group(2) if m else text
+    text = _ROADMAP_ID.sub("", text).strip()
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
+def _roadmap_items():
+    """(unchecked, checked) checklist lines of .orchestrator/roadmap.md, or None without a roadmap file."""
+    path = STATE / "roadmap.md"
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    unchecked, checked = [], []
+    for line in text.splitlines():
+        m = _ROADMAP_LINE.match(line)
+        if m:
+            (unchecked if m.group(1) == " " else checked).append(line.strip())
+    return unchecked, checked
+
+
+def _roadmap_packet_text():
+    """All unchecked lines first, each with its roadmap key, then up to 20 checked lines for context."""
+    items = _roadmap_items()
+    if items is None:
+        return ""
+    unchecked, checked = items
+    lines = [f"{line}  [roadmap_key:{roadmap_key(line)}]" for line in unchecked] + checked[:20]
+    return "\n".join(lines)[:_NEXT_GOAL_ROADMAP_CHARS]
+
+
+def _plan_file(goal_id):
+    """The goal's own plan file (goals.plan_file) when it exists, else the shared plan.md."""
+    own = STATE / f"plan-{goal_id}.md"
+    return own if own.exists() else STATE / "plan.md"
+
+
+def _next_goal_retrospective(goal_id):
+    """Memory entries naming the closed goal, plus plan.md's "no learnings" marker, as raw text (data)."""
+    pattern = re.compile(rf"\bgoal:\s*{re.escape(goal_id)}\b")
+    blocks = []
+    for path in sorted((STATE / "memory").glob("*.md")):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        blocks += [b.strip() for b in re.split(r"\n\s*\n", text) if pattern.search(b)]
+    plan = _plan_file(goal_id)
+    if plan.exists():
+        blocks += [line.strip() for line in plan.read_text().splitlines() if f"no learnings — goal: {goal_id}" in line]
+    return "\n\n".join(blocks)[:_NEXT_GOAL_RETRO_CHARS]
+
+
+def _is_goal(t):
+    return (t.get("role") == "triage" or bool((t.get("constraints") or {}).get("goal"))) and not t.get("parent")
+
+
+def _open_goals(all_tasks, exclude=None):
+    return [t["id"] for t in all_tasks if _is_goal(t) and t["id"] != exclude
+            and not (t.get("result") or {}).get("goal_closed") and t.get("status") not in ("done", "failed")]
+
+
+def _next_goal_enabled_at():
+    """First sighting of [planner].next_goal enabled writes enabled_at; only goals closed later produce a point."""
+    path = STATE / "next_goal_state.json"
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and isinstance(data.get("enabled_at"), (int, float)):
+            return data["enabled_at"]
+    except (OSError, json.JSONDecodeError):
+        pass
+    enabled_at = time.time()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"enabled_at": enabled_at}))
+    return enabled_at
+
+
+def _next_goal_closed(goal, ship_enabled):
+    if not (goal.get("result") or {}).get("goal_closed"):
+        return False
+    if ship_enabled:
+        return ((goal.get("pipeline") or {}).get("ship") or {}).get("state") == "shipped"
+    return True
+
+
+def _goal_closed_time(goal):
+    """pipeline.closed_at, else the time of the event that posted result.goal_closed (a model close), else 0."""
+    closed = (goal.get("pipeline") or {}).get("closed_at")
+    if closed:
+        return closed
+    for e in goal.get("events") or []:
+        if isinstance(e, dict) and isinstance(e.get("result"), dict) and e["result"].get("goal_closed"):
+            return e.get("ts") or 0
+    return 0
+
+
+def _stamp_closed_at(all_tasks):
+    """Stamp pipeline.closed_at on every closed goal that lacks it: only routine_close stamps it, so a goal the
+    Planner model closed through bus_post_result would otherwise never carry one. Uses the goal_closed event time.
+    Call under bus.locked()."""
+    for goal in all_tasks:
+        if not _is_goal(goal) or not (goal.get("result") or {}).get("goal_closed"):
+            continue
+        pipeline = dict(goal.get("pipeline") or {})
+        if pipeline.get("closed_at"):
+            continue
+        pipeline["closed_at"] = _goal_closed_time(goal) or time.time()
+        bus.update(goal["id"], pipeline=pipeline)
+
+
+def _next_goal_points(all_tasks, records):
+    """At most one next_goal point: the earliest goal closed after enabled_at that has no blocking record, only
+    while no other goal is open, no next_goal decision is in flight, the roadmap has an unchecked item and the
+    rolling 24h launch count is under [planner].next_goal_max_per_day."""
+    try:
+        cfg = pool_config()
+    except (OSError, tomllib.TOMLDecodeError):
+        cfg = {}
+    if not planner_setting("next_goal", cfg):
+        # Off resets enabled_at, so goals closed while off never become eligible after re-enabling.
+        (STATE / "next_goal_state.json").unlink(missing_ok=True)
+        return
+    enabled_at = _next_goal_enabled_at()
+    items = _roadmap_items()
+    if not items or not items[0]:
+        return
+    if _open_goals(all_tasks):
+        return
+    mine = [r for r in records if r.get("kind") == "next_goal"]
+    if any(r.get("status") in ("claimed", "running") for r in mine):
+        return
+    day_ago = time.time() - 86400
+    launched = sum(1 for r in mine if r.get("status") != "skipped" and (r.get("started_at") or 0) >= day_ago)
+    if launched >= int(planner_setting("next_goal_max_per_day", cfg)):
+        return
+    ship_enabled = bool((cfg.get("ship") or {}).get("enabled"))
+    closed = [g for g in all_tasks if _is_goal(g) and _next_goal_closed(g, ship_enabled)
+              and _goal_closed_time(g) > enabled_at
+              and not _blocked(g["id"], "next_goal", g["id"], records)]
+    for goal in sorted(closed, key=lambda g: (_goal_closed_time(g), g["id"]))[:1]:
+        yield goal["id"], "next_goal", goal["id"]
+
+
 def decision_points():
     """Yield (goal_id, kind, payload_key) for every currently-unblocked decision: scouts_done (a goal has scout
     children, all done or failed, and no execute child yet -- the specs haven't been split off), held (each held
-    execute child of a goal), closable (a goal's execute children are all merged and nothing is left queued or
-    running)."""
+    execute child of a goal), closable (a goal's non-superseded execute children are all merged, there is at least
+    one, and nothing is left queued or running)."""
     all_tasks = bus.read()
     children_by_parent = {}
     for t in all_tasks:
@@ -238,10 +443,24 @@ def decision_points():
             if not _blocked(goal_id, "held", key, records):
                 yield goal_id, "held", key
 
-        if executes and all(c.get("merged_into") for c in executes) and \
+        # A failed execute child (e.g. executor timeout) never re-queues itself; its dependents would sit queued.
+        # Same "held" kind so the decision Planner can re-queue it, write a fix round or escalate.
+        for c in executes:
+            if c["status"] != "failed" or _superseded(c, all_tasks):
+                continue
+            key = _failed_key(c)
+            if key is not None and not _blocked(goal_id, "held", key, records):
+                yield goal_id, "held", key
+
+        # A superseded execute child (e.g. a re-gate round whose target merged another way) never merges; it must
+        # not hold the goal open. failed still blocks so a real failure reaches the Planner.
+        live = [c for c in executes if c["status"] != "superseded"]
+        if live and all(c.get("merged_into") for c in live) and \
                 not any(ch["status"] in ("queued", "running") for ch in children):
             if not _blocked(goal_id, "closable", goal_id, records):
                 yield goal_id, "closable", goal_id
+
+    yield from _next_goal_points(all_tasks, records)
 
 
 def _session_attached():
@@ -291,7 +510,8 @@ def _claim(goal_id, kind, payload_key, attempts, route=None):
              evidence=list(route.evidence) if route is not None else [goal_id, payload_key],
              cheaper_steps=list(route.cheaper_steps) if route is not None else [],
              decision_requested={"held": "write or approve a fix round", "scouts_done": "write specs",
-                                 "closable": "close the goal"}.get(kind, "make the requested decision"))
+                                 "closable": "close the goal",
+                                 "next_goal": "file the next roadmap goal"}.get(kind, "make the requested decision"))
     for field in ("usage_logged", "tokens", "usd", "session_id", "telemetry_before",
                   "materiality_logged", "materiality", "shadow_logged", "shadow_log",
                   "shadow_pid", "shadow_pid_start", "shadow_agreement"):
@@ -444,7 +664,7 @@ def jev_triage(kind, task, attempts=0):
     started = time.monotonic()
     result = jev.ask(state, {"next_action": {"type": "choice",
                      "instructions": "Given this decision-point state, what should the Planner do next?",
-                     "criteria": options}}, timeout_s=_JEV_TIMEOUT_S)
+                     "criteria": options}}, site="triage", timeout_s=_JEV_TIMEOUT_S)
     latency_ms = (time.monotonic() - started) * 1000
     if result is None:
         return None
@@ -636,7 +856,7 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
         # A held task never leaves status "held" by itself (CLAUDE.md: the Planner clears a hold by writing a
         # new task, never by editing the held one) -- so "no longer held" only fires once the task is gone
         # (id reused/purged) or the daemon requeued it some other way; the real signal is the fix-round task.
-        if t is None or t["status"] != "held":
+        if t is None or t["status"] != ("failed" if _is_failed_key(payload_key) else "held"):
             return True
         started_at = r.get("started_at", 0)
         for other in tasks_by_id.values():
@@ -651,6 +871,19 @@ def _condition_resolved(r, tasks_by_id, children_by_parent):
         # needed -- any bus event it posted on the held task or its goal after launch (a result, a status
         # change) counts as that conclusion, so reconcile() scores exited_ok rather than exited_early/gave_up.
         return _bus_event_after(started_at, task_id, goal_id)
+    if kind == "next_goal":
+        # Filed (a goal carrying a roadmap_key created after launch) or a recorded reason on the closed goal.
+        started_at = r.get("started_at", 0)
+        for t in tasks_by_id.values():
+            if (t.get("constraints") or {}).get("roadmap_key"):
+                fts = _first_event_ts(t["id"])
+                if fts is not None and fts > started_at:
+                    return True
+        plan = _plan_file(goal_id)
+        try:
+            return f"next_goal {goal_id}: no ready item" in plan.read_text() and plan.stat().st_mtime > started_at
+        except OSError:
+            return False
     return True
 
 
@@ -733,6 +966,7 @@ def reconcile():
     gave_up = []
     now = time.time()
     with bus.locked():
+        _stamp_closed_at(all_tasks)
         records = _load_records()
         changed = False
         for r in records:
@@ -1051,7 +1285,7 @@ def build_ctx(point, pool=None):
     cfg = pool.cfg
     goal = bus.get(point["goal_id"])
     task = _decision_task(point["goal_id"], point["kind"], point["payload_key"]) or goal
-    children = [t for t in bus.read() if t.get("parent") == goal["id"]]
+    children = bus.read(parent=goal["id"])
     scouts = [t for t in children if t.get("role") == "scout"]
     blocked = [t["id"] for t in scouts if t.get("status") in ("held", "failed")
                or (t.get("result") or {}).get("blocked")]
@@ -1101,6 +1335,10 @@ def build_ctx(point, pool=None):
                                         for glob in review.get("security_paths", [])),
                    semantic_trigger=semantic or any(fnmatch.fnmatch(path, glob) for path in [*scope, str(goal.get("spec") or "")]
                                                     for glob in review.get("semantic_paths", [])))
+    elif point["kind"] == "next_goal":
+        items = _roadmap_items()
+        ctx.update(roadmap_unchecked=len(items[0]) if items else 0,
+                   open_goals=_open_goals(bus.read(), exclude=goal["id"]))
     elif point["kind"] == "closable":
         executes = [t for t in children if t["role"] == "execute"]
         ctx.update(all_children_merged=bool(executes) and all(t["status"] == "done" and t.get("merged_into") for t in executes),
@@ -1119,15 +1357,25 @@ def _packet_sections(sections):
             failure_text = (task.get("resume_hint") or {}).get("failures")
             if failure_text is None:
                 failure_text = (task.get("result") or {}).get("failures")
+            if point["kind"] == "held" and _is_failed_key(point["payload_key"]):
+                note = _worktree_note(task)
+                if note:
+                    failure_text = f"{note}\n{failure_text}" if failure_text else note
             for dep in task.get("depends_on") or []:
                 try:
                     status = bus.get(dep)["status"]
                 except KeyError:
                     status = "missing"
                 dependencies.append({"id": dep, "status": status})
-        result.append({"point": point, "ctx": ctx, "route": route, "classification": classification,
-                       "task": task, "reviews": comments, "failures": failure_text,
-                       "depends_on_statuses": dependencies})
+        section = {"point": point, "ctx": ctx, "route": route, "classification": classification,
+                   "task": task, "reviews": comments, "failures": failure_text,
+                   "depends_on_statuses": dependencies}
+        if point["kind"] == "next_goal":
+            section["next_goal"] = {
+                "closed_title": (task or {}).get("title"), "closed_result": (task or {}).get("result"),
+                "retrospective": _next_goal_retrospective(point["goal_id"]),
+                "roadmap": _roadmap_packet_text(), "open_goals": _open_goals(bus.read(), exclude=point["goal_id"])}
+        result.append(section)
     return result
 
 
@@ -1506,7 +1754,7 @@ def _retrospective(goal_id):
     for path in memory.glob("*.md"):
         if re.search(rf"\bgoal:\s*{re.escape(goal_id)}\b", path.read_text()):
             return
-    plan = STATE / "plan.md"
+    plan = _plan_file(goal_id)
     text = plan.read_text() if plan.exists() else ""
     marker = f"no learnings — goal: {goal_id}"
     if marker not in text:
@@ -1596,10 +1844,13 @@ def tick(pool=None):
         return
     groups = {}
     enabled = decision.routes_enabled(config)
+    fix_rounds_for = None
     for raw in list(decision_points()):
         point = _point(raw)
-        if point["kind"] == "held" and any(t.get("status") != "failed" and
-                (t.get("constraints") or {}).get("fix_round_for") == point["task_id"] for t in bus.read()):
+        if point["kind"] == "held" and fix_rounds_for is None:
+            fix_rounds_for = {(t.get("constraints") or {}).get("fix_round_for")
+                              for t in bus.read() if t.get("status") != "failed"}
+        if point["kind"] == "held" and point["task_id"] in fix_rounds_for:
             _telemetry_skip(point, "tick", "fix_round_in_flight")
             continue
         ctx = build_ctx(point, pool)

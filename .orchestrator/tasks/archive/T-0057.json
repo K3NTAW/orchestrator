@@ -1,0 +1,94 @@
+{
+  "id": "T-0057",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "review: B1: pool.toml [[executors]] table + Pool.pick_executor(role, complexity) + per-executor state",
+  "spec": "Why: one hard-coded Codex model (pool.toml [codex] model=gpt-6-astra; executor.py:81) cannot balance work across GPT-6 Astra, GPT-5.6 Luna/Terra/Sol (ids confirmed in the Codex models cache: gpt-6-astra, gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol) or hold a slot for 6.x ids. Scout T-0012 mapped the readers; blast radius order: Pool.codex_available/Codex dataclass (pool.py:103-121, 43-47) \u2192 Pool.pick (pool.py:76) \u2192 pool_state.json keying (pool.py:63-72) \u2192 model resolution (executor.py:81, spawn.py:124) \u2192 log_run.\n\nWhat (\u22645 files: .orchestrator/pool.toml, orchestrator/pool.py, tests/test_orchestrator.py; do NOT touch executor.py or spawn.py in this task):\n1. .orchestrator/pool.toml \u2014 add:\n```\n[[executors]]\nid = \"astra\";  provider = \"codex\"; model = \"gpt-6-astra\";   roles = [\"execute\"]; complexity_min = 1; complexity_max = 10; max_parallel = 2; daily_budget_tasks = 40; quota_group = \"chatgpt\"; weight = 1.0; enabled = true\n[[executors]]\nid = \"luna\";   provider = \"codex\"; model = \"gpt-5.6-luna\";  roles = [\"execute\"]; complexity_min = 1; complexity_max = 6;  max_parallel = 2; daily_budget_tasks = 40; quota_group = \"chatgpt\"; weight = 1.0; enabled = true\n[[executors]]\nid = \"terra\";  provider = \"codex\"; model = \"gpt-5.6-terra\"; roles = [\"execute\"]; complexity_min = 1; complexity_max = 6;  max_parallel = 2; daily_budget_tasks = 40; quota_group = \"chatgpt\"; weight = 1.0; enabled = true\n[[executors]]\nid = \"sol\";    provider = \"codex\"; model = \"gpt-5.6-sol\";   roles = [\"execute\"]; complexity_min = 1; complexity_max = 6;  max_parallel = 2; daily_budget_tasks = 40; quota_group = \"chatgpt\"; weight = 1.0; enabled = true\n[[executors]]\nid = \"luna6\";  provider = \"codex\"; model = \"gpt-6-luna\";    roles = [\"execute\"]; complexity_min = 1; complexity_max = 10; max_parallel = 2; daily_budget_tasks = 40; quota_group = \"chatgpt\"; weight = 1.0; enabled = false   # enable when the id appears in models_cache.json\n```\n(same disabled placeholders for terra6/sol6). Keep [codex] with home, on_exhausted, dangerous_full_access, and keep `model = \"gpt-6-astra\"` as the legacy default so executor.py keeps working until B2. Remove the dead key pace_reserve (no readers, T-0012). Add a comment: \"quota_group: a usage-limit hit on one member cools the whole group; limit scope per account vs per model is unconfirmed (2026-09-17)\".\n2. orchestrator/pool.py \u2014 (a) `@dataclass Executor` with the fields above plus runtime state cooldown_until: float=0, day_tasks: int=0, running: int=0, day: str=\"\"; (b) Pool loads `cfg[\"executors\"]` into `self.executors: dict[id, Executor]`; when the table is absent, synthesize one executor \"astra\" from [codex] so old configs and tests keep working; (c) state persistence: pool_state.json gains `\"executors\": {id: {cooldown_until, day_tasks, running, day}}`, saved/loaded next to accounts and codex; missing entries default; (d) `def pick_executor(self, role: str, complexity: int, scores: dict | None = None) -> Executor | None`: candidates = enabled \u2227 role in roles \u2227 complexity_min \u2264 complexity \u2264 complexity_max \u2227 not cooling \u2227 running < max_parallel \u2227 day_tasks < daily_budget_tasks; rank by weight \u00d7 scores.get(id, 1.0), ties broken by fewest day_tasks then id; return None when empty; (e) `def cooldown_executor(self, ex_id, secs, reason=\"\")`: sets cooldown on that executor AND every enabled executor sharing its quota_group; (f) `codex_available()` returns True iff pick_executor(\"execute\", 1) finds a codex-provider executor (keep the method name; callers unchanged); (g) `status()[\"executors\"]` = list of {id, model, enabled, cooling_s, running, day_tasks}; keep the existing `codex` block computed from the legacy/astra executor so cli/tests keep passing.\n3. tests/test_orchestrator.py \u2014 add class `Executors`: (a) pick_executor(\"execute\", 3) returns one of astra/luna/terra/sol and never a disabled or out-of-range one (complexity 8 \u2192 only astra); (b) cooldown_executor(\"luna\", 600) cools astra/terra/sol too (same quota_group) and pick_executor returns None for complexity 8 while cooling; (c) scores={\"terra\": 3.0} makes terra win at complexity 3; (d) state round-trips through pool_state.json (save then a fresh Pool() sees the cooldown). Use the TMP pool.toml copy (the test module copies REPO's pool.toml at import, so the new table is present).\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"pool: [[executors]] table, pick_executor(role, complexity, scores), quota-group cooldowns\" with a revert-path body.",
+  "inputs": [
+    "T-0016"
+  ],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 including the new Executors class",
+    "uv run orchestrator status prints an executors list with 7 entries, 4 enabled",
+    "Pool().pick_executor('execute', 8).id == 'astra' and pick_executor('execute', 3) in {astra,luna,terra,sol}",
+    "existing PoolSel and Executor tests unchanged and green",
+    "git diff --stat shows only .orchestrator/pool.toml, orchestrator/pool.py, tests/test_orchestrator.py"
+  ],
+  "scope": [
+    ".orchestrator/pool.toml",
+    "orchestrator/pool.py",
+    "tests/test_orchestrator.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0057",
+  "codex_thread": null,
+  "result": {
+    "summary": "stale: created by the first daemon --once smoke run for already-merged work (T-0016 merged via fix round T-0025). Superseded; the daemon now skips closed goals and ancestor-merged tasks (T-0063).",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789674069.99207,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0057",
+      "claimed_at": 1789674069.991679
+    },
+    {
+      "ts": 1789674070.0197482,
+      "pid": 43661,
+      "account": "A"
+    },
+    {
+      "ts": 1789674081.465046,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/test_orchestrator.py",
+            "line": 0,
+            "issue": "Diff is empty \u2014 no Executors class, pool.toml entries, pick_executor implementation, or new tests were added. All acceptance criteria fail.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789674081.466618,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789678766.360718,
+      "status": "failed",
+      "result": {
+        "summary": "stale: created by the first daemon --once smoke run for already-merged work (T-0016 merged via fix round T-0025). Superseded; the daemon now skips closed goals and ancestor-merged tasks (T-0063).",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789674069.991679,
+  "pid": 43661,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

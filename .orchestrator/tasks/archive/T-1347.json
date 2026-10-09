@@ -1,0 +1,1463 @@
+{
+  "id": "T-1347",
+  "created_at": 1790191605.2289531,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S1 v5: executor_identity resolves any executor field to provider/model; review rule compares models with None guard",
+  "spec": "Respec of T-1344 after spec review T-1345. Goal T-1334: [[executors]] provider-agnostic; S2 (depends on this) wires dispatch. S1 and S2 reach main together in one goal PR; the Planner adds the first provider=\"claude\" row to pool.toml only after both merge. Rollback: git revert (no persisted state, no pool.toml field).\n\n1. orchestrator/pool.py: factor the row source out of Pool._read_executors (pool.py:157) into executor_rows(cfg) -> list[dict]: cfg[\"executors\"] (a list of dicts keyed by \"id\") or, when absent/empty, the synthesized LEGACY_EXECUTOR_ID row exactly as today; Pool._read_executors uses it (duplicate ids: last wins, as today). Module function executor_identity(field, cfg) -> {\"provider\": \"codex\"|\"claude\"|None, \"model\": str|None}: row whose \"id\" == field in executor_rows(cfg) -> its provider/model; \"claude:<tier>\" (legacy, spawn.py:1564) -> \"claude\", model cfg.get(\"models\",{}).get(tier) only if tier in (\"haiku\",\"sonnet\",\"opus\") and a str, else None; None/unknown -> both None. No Pool state, no disk. Pool.executor_identity(field), Pool.is_claude_executor(field) delegate with self.cfg.\n2. pool.py eligible_executors (pool.py:522): claude rows pass every existing check (enabled, roles, cooling, band, roll_day, max_parallel, daily_budget_tasks) and also need headroom on any execute-affinity account: self.pick(\"execute\") at most once per call, lazily, only when a claude row reaches that check; never for codex-only configs (so pick_executor and codex_available never call pick either). Eligibility reserves nothing; S2's dispatch re-picks the account and holds when none is left. codex_available (pool.py:590): True iff some eligible row has provider \"codex\" (with codex-only rows identical to today: pick_executor returns an eligible row whenever one exists).\n3. orchestrator/daemon.py: extend line 13 to `from .pool import Pool, fallback_tier, executor_identity, config as pool_config`; add `import tomllib`.\n4. daemon.review_tier(t, cfg=None) (daemon.py:1070), _security_review_tier(t, cfg=None) (daemon.py:1136): legacy branches first, unchanged: review_tier startswith(\"claude:sonnet\") -> \"opus\", startswith(\"claude:opus\") -> \"sonnet\"; _security_review_tier exact f\"claude:{tier}\" -> _other_tier(tier). executor field None -> default, no config read. Otherwise one try: cfg = pool_config() if cfg is None; ident = executor_identity(field, cfg); swap to _other_tier(default) only if ident[\"provider\"] == \"claude\" and ident[\"model\"] is a str equal to cfg[\"models\"].get(default); else default. except (KeyError, TypeError, AttributeError, ValueError, OSError, tomllib.TOMLDecodeError) as exc: print(f\"review_tier: lookup failed ({exc}); failing closed to {other}\", file=sys.stderr); return other (other = _other_tier(default)).\n5. daemon._open_reviews(t, n_reviews, review_reason, cfg=None) (daemon.py:1212; tier selection daemon.py:1228-1244): when cfg is None, load pool_config() once at the top inside the same try/except (failure -> cfg stays None and each tier call fails closed); pass cfg to every review_tier/_security_review_tier call. daemon.py:1241 becomes: legacy startswith(\"claude:\") or (cfg is not None and executor_identity(t.get(\"executor\"), cfg)[\"provider\"] == \"claude\"); second review for a Claude executor stays on review_tier(t, cfg). Callers: gate(pool) daemon.py:1432 and sweep_leases(pool) daemon.py:1625 pass cfg=pool.cfg; _merge_reviewed_one daemon.py:1524 passes nothing.\n\nDecided, not in S1 (do not add): running_claude_workers (daemon.py:470), spawn.py:1508, executed_by (daemon.py:392), docstring daemon.py:1348, capacity.py:54, executor.py:279/:487 are S2 or unchanged (row-routed runs still claim \"claude:<acct>\"). Model-id aliasing (dated vs undated ids) is out of scope: distinct strings are distinct models. No guard test against enabling a claude row early (the goal PR ships S1+S2 together). No pool.toml byte test.\nTests: one method per scenario as named in acceptance; baselines are hard-coded expected values; cfg dicts and accounts (with \"execute\" affinity) built in-test; patched globals restored. No new dependencies.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py::ExecutorIdentity::test_identity_row_legacy_unknown: claude row id, codex row id, 'claude:opus', 'claude:success_floor', unknown id and None resolve as specified; with no [[executors]] table the synthesized legacy row resolves to provider codex",
+    "tests/test_pool.py::ExecutorIdentity::test_claude_row_needs_account_headroom: claude row excluded when every execute-affinity account is cooling, included with headroom, excluded at max_parallel; pick called at most once per eligible_executors call",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_only_never_calls_pick: codex-only cfg -> eligible_executors, pick_executor and codex_available make zero Pool.pick calls and return hard-coded expected values with and without task",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_available_true_beside_heavier_claude_row",
+    "tests/test_daemon.py::ReviewModelRule::test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)",
+    "tests/test_daemon.py::ReviewModelRule::test_claude_row_on_opus_model_reviewed_by_sonnet (including SECURITY_REVIEW_TIER patched to 'opus')",
+    "tests/test_daemon.py::ReviewModelRule::test_codex_none_unknown_and_modelless_keep_default (None makes no pool_config call)",
+    "tests/test_daemon.py::ReviewModelRule::test_legacy_claude_tiers_unchanged_without_models_table",
+    "tests/test_daemon.py::ReviewModelRule::test_lookup_failure_fails_closed (executor_identity raising KeyError and pool_config raising OSError -> other tier plus the stderr line)",
+    "tests/test_daemon.py::ReviewModelRule::test_open_reviews_loads_config_at_most_once (cfg=None -> pool_config called <= 1 time; cfg passed -> 0 times; codex-only tiers match hard-coded values)",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1344",
+    "read_scope": [
+      "orchestrator/spawn.py",
+      "orchestrator/executor.py",
+      "orchestrator/capacity.py",
+      "orchestrator/scorecard.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "pool.executor_rows(cfg) -> list[dict]; pool.executor_identity(field, cfg) -> {'provider': 'codex'|'claude'|None, 'model': str|None}; Pool.executor_identity(field), Pool.is_claude_executor(field); daemon imports executor_identity and config as pool_config from .pool; daemon.review_tier(t, cfg=None), daemon._security_review_tier(t, cfg=None), daemon._open_reviews(t, n_reviews, review_reason, cfg=None). S2 sets a claude-row task's executor == tier == row id, keeps assigned_to 'claude:<acct>', re-picks the account at dispatch and holds when none is left, and teaches capacity.py about claude rows."
+  },
+  "status": "superseded",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1347",
+  "codex_thread": "01a0cfbf-7732-7811-84d6-c25b5caaff56",
+  "result": {
+    "summary": "Implemented executor identity, Claude headroom checks, and model-aware review routing.\nGate: exit 0, 1,504 tests passed; worktree clean.\nCommit: `39257054621b73dcb9177ec16f42c494d238ae8c`\n\n```text\n orchestrator/daemon.py | 57\n orchestrator/pool.py   | 52\n tests/test_daemon.py   | 86\n tests/test_pool.py     | 72\n 4 files changed, 242 insertions(+), 25 deletions(-)\n```\n\nFailures-only test output: empty.",
+    "executed_by": "codex:astra",
+    "thread": "01a0cfbf-7732-7811-84d6-c25b5caaff56",
+    "usage": {
+      "input_tokens": 746721,
+      "cached_input_tokens": 706432,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6711,
+      "reasoning_output_tokens": 912,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790191630.3661172,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078
+      }
+    },
+    {
+      "ts": 1790191630.475198,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146
+      }
+    },
+    {
+      "ts": 1790191630.4832,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055
+      }
+    },
+    {
+      "ts": 1790191684.504522,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "Executor.running is counted from bus tasks whose executor equals the row id (pool.py:~168). The spec says row-routed runs still claim 'claude:<acct>', so a claude row's running count stays 0. That makes the max_parallel check a no-op, and the 'excluded at max_parallel' acceptance test only passes if it sets ex.running by hand. Nothing shows the check works end to end before S2 lands.",
+          "severity": "med",
+          "line": 168
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "A claude row with no model, or a model that doesn't match cfg['models'][default], silently keeps the default tier. Executor and reviewer can then be the same model, which is the self-review this rule exists to prevent. The spec fails closed on lookup errors but not on this case. The test name 'modelless_keep_default' pins the silent behaviour.",
+          "severity": "med",
+          "line": 1136
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "If pool_config() fails in _open_reviews, cfg stays None. Every codex-executed task then fails closed to 'opus' and prints a stderr line, even though nothing is wrong with the codex path. The number>0 branch (daemon.py:1241) skips the Claude check when cfg is None, and the review then becomes _other_tier(existing[0]['tier']). The two paths can end up inconsistent during a config outage.",
+          "severity": "low",
+          "line": 1241
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "_open_reviews loads pool_config() at the top even when t['executor'] is None or a legacy 'claude:' value. That adds a config read per call where review_tier itself makes none, and it is what puts the fail-closed path in reach of unrelated tasks.",
+          "severity": "low",
+          "line": 1212
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "codex_available changes meaning: it used to be 'the top-ranked pick is codex' and becomes 'some eligible row is codex'. mcp.py:155, daemon.py:1876 and Pool.status call it. The spec only checks hard-coded values for codex-only and one mixed case. Callers that use it to decide whether Codex can take the task now may get a different answer than pick_executor gives.",
+          "severity": "low",
+          "line": 590
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "executor_identity does not say which row wins when ids are duplicated. _read_executors keeps the last, but a first-match lookup over executor_rows(cfg) would return the first. This is a case where the review tier depends on which row is read.",
+          "severity": "low",
+          "line": 157
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "issue": "Acceptance ids carry parenthetical text, for example 'test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)'. The gate that extracts test ids may not strip it, and the spec conditional says ids must match exactly.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790191710.343015,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947
+      }
+    },
+    {
+      "ts": 1790191710.34546,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947
+      }
+    },
+    {
+      "ts": 1790191715.5351622,
+      "packet_meta": {
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 8354,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790191715.537621,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642
+      }
+    },
+    {
+      "ts": 1790191819.1878679,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790191819.187213
+        }
+      }
+    },
+    {
+      "ts": 1790191825.659323,
+      "packet_meta": {
+        "chars": 7475,
+        "est_tokens": 1868,
+        "presented_tokens": 1868,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "4ae3756dd01f6a9d4e0a31e9ebaabc9b5d86c47448990e6de92dd0c5bbc9642f"
+          },
+          "objective": {
+            "chars": 4230,
+            "est_tokens": 1057,
+            "sha256": "1e336992b4ff214f30ade915c1061d093af2bf9fc6b9ca88f5015efd0ccdc631"
+          },
+          "acceptance": {
+            "chars": 1773,
+            "est_tokens": 443,
+            "sha256": "4d171828a1d78dbddbb23834858a348958955365be4ef2f34675090d6b344894"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "da445f2b3b9027fb421678fd2046501e647d323f24b1892f2e4a0d688a298504"
+          },
+          "write_scope": {
+            "chars": 107,
+            "est_tokens": 26,
+            "sha256": "0f40cf83483605d77c7fe775ecc269cfe4f29b0265a0856a677a4180d045a505"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 910,
+            "est_tokens": 227,
+            "sha256": "0cd10c986cc62bbebefc3f7c8ad5de8b98b50ae43d83c0e80cb6d7d83e7c9b74"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "e71888a4a07e",
+        "version": "e71888a4a07e",
+        "candidate_known": true,
+        "base": "737c7a53bf76",
+        "sources": "pool.toml@cfb8259b656d gotchas@7723a038b4da memory@notes over cap by 2675 chars: acceptance kept whole routed=active",
+        "policy_version": "cfb8259b656d",
+        "gotchas": "7723a038b4da",
+        "candidate_tokens": 4149,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 15663,
+        "routed_reduction_ratio": 0.9287832068311196,
+        "routed_hidden": 0,
+        "routed_ambiguous": 27,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "f8e7acaaf60f",
+          "f55c33589784",
+          "5d6300f92f93",
+          "41a4b25f0f8c",
+          "bc481fe17420",
+          "1765546e17ad",
+          "3b0ec17beb98",
+          "47e8ae93111e",
+          "1cd803dfc275",
+          "20c4be568526",
+          "057d0945f7d4",
+          "8b52aca0d9bd",
+          "3092f221f17c",
+          "756f1dfd726a",
+          "0906ebbd2ce1",
+          "63cfdc9eda9b",
+          "0ac7a7072148",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "2ccea77faf96",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d39ac091b005",
+          "d0b9e72fe363",
+          "041199286363",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "02553a5d3b5b",
+          "dd0b9a4085f1",
+          "1b74ac5c6786",
+          "26924c8f2afa",
+          "93d53e104ccd",
+          "60c24622b0d3",
+          "9df19e03e113",
+          "11ec1cfa02da",
+          "302f1498ff2f",
+          "e78959934947",
+          "27c57b67c155",
+          "7ad90a88baa1",
+          "f12b1f2e6291",
+          "3fbe9c47d963",
+          "cd86562d3424",
+          "541861cee70f",
+          "e52f278c63b8",
+          "34b700a2ed01",
+          "e68eebafbf7b",
+          "3f9836ea16c9",
+          "8e04abf8e0e9",
+          "7abf75b2b5d5",
+          "d30dda42d532",
+          "127be111dd45",
+          "4380d763ea89",
+          "d9dd1ccec856",
+          "d3346bd14122",
+          "d043eb995612",
+          "3e194b33197e",
+          "2586c817d520",
+          "3037c6d26ebe",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "271ca802fd19",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "9e12df8d5fe6",
+          "3b9528e468c2"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 8354,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1790191825.660635,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1347",
+      "claimed_at": 1790191825.660492
+    },
+    {
+      "ts": 1790191825.661545,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790192140.067234,
+      "codex_thread": "01a0cfbf-7732-7811-84d6-c25b5caaff56",
+      "codex_thread_head": "39257054621b73dcb9177ec16f42c494d238ae8c"
+    },
+    {
+      "ts": 1790192140.070587,
+      "packet_meta": {
+        "chars": 7475,
+        "est_tokens": 1868,
+        "presented_tokens": 1868,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "4ae3756dd01f6a9d4e0a31e9ebaabc9b5d86c47448990e6de92dd0c5bbc9642f"
+          },
+          "objective": {
+            "chars": 4230,
+            "est_tokens": 1057,
+            "sha256": "1e336992b4ff214f30ade915c1061d093af2bf9fc6b9ca88f5015efd0ccdc631"
+          },
+          "acceptance": {
+            "chars": 1773,
+            "est_tokens": 443,
+            "sha256": "4d171828a1d78dbddbb23834858a348958955365be4ef2f34675090d6b344894"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "da445f2b3b9027fb421678fd2046501e647d323f24b1892f2e4a0d688a298504"
+          },
+          "write_scope": {
+            "chars": 107,
+            "est_tokens": 26,
+            "sha256": "0f40cf83483605d77c7fe775ecc269cfe4f29b0265a0856a677a4180d045a505"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 910,
+            "est_tokens": 227,
+            "sha256": "0cd10c986cc62bbebefc3f7c8ad5de8b98b50ae43d83c0e80cb6d7d83e7c9b74"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "e71888a4a07e",
+        "version": "e71888a4a07e",
+        "candidate_known": true,
+        "base": "737c7a53bf76",
+        "sources": "pool.toml@cfb8259b656d gotchas@7723a038b4da memory@notes over cap by 2675 chars: acceptance kept whole routed=active",
+        "policy_version": "cfb8259b656d",
+        "gotchas": "7723a038b4da",
+        "candidate_tokens": 4149,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 15663,
+        "routed_reduction_ratio": 0.9287832068311196,
+        "routed_hidden": 0,
+        "routed_ambiguous": 27,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "f8e7acaaf60f",
+          "f55c33589784",
+          "5d6300f92f93",
+          "41a4b25f0f8c",
+          "bc481fe17420",
+          "1765546e17ad",
+          "3b0ec17beb98",
+          "47e8ae93111e",
+          "1cd803dfc275",
+          "20c4be568526",
+          "057d0945f7d4",
+          "8b52aca0d9bd",
+          "3092f221f17c",
+          "756f1dfd726a",
+          "0906ebbd2ce1",
+          "63cfdc9eda9b",
+          "0ac7a7072148",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "2ccea77faf96",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "5b872ee10528",
+          "667ed6b21b31",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "d500754708e5",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "d39ac091b005",
+          "d0b9e72fe363",
+          "041199286363",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "02553a5d3b5b",
+          "dd0b9a4085f1",
+          "1b74ac5c6786",
+          "26924c8f2afa",
+          "93d53e104ccd",
+          "60c24622b0d3",
+          "9df19e03e113",
+          "11ec1cfa02da",
+          "302f1498ff2f",
+          "e78959934947",
+          "27c57b67c155",
+          "7ad90a88baa1",
+          "f12b1f2e6291",
+          "3fbe9c47d963",
+          "cd86562d3424",
+          "541861cee70f",
+          "e52f278c63b8",
+          "34b700a2ed01",
+          "e68eebafbf7b",
+          "3f9836ea16c9",
+          "8e04abf8e0e9",
+          "7abf75b2b5d5",
+          "d30dda42d532",
+          "127be111dd45",
+          "4380d763ea89",
+          "d9dd1ccec856",
+          "d3346bd14122",
+          "d043eb995612",
+          "3e194b33197e",
+          "2586c817d520",
+          "3037c6d26ebe",
+          "e146114ba8ec",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "271ca802fd19",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8",
+          "985ffb7f01b9",
+          "9e12df8d5fe6",
+          "3b9528e468c2"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 8354,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790191819.187213
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790192140.337354,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790191819.187213
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "9136671ac13d2481f15c290f0af78192772a03ab",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0848214285714286
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790192140.3406348,
+      "status": "done",
+      "result": {
+        "summary": "Implemented executor identity, Claude headroom checks, and model-aware review routing.\nGate: exit 0, 1,504 tests passed; worktree clean.\nCommit: `39257054621b73dcb9177ec16f42c494d238ae8c`\n\n```text\n orchestrator/daemon.py | 57\n orchestrator/pool.py   | 52\n tests/test_daemon.py   | 86\n tests/test_pool.py     | 72\n 4 files changed, 242 insertions(+), 25 deletions(-)\n```\n\nFailures-only test output: empty.",
+        "executed_by": "codex:astra",
+        "thread": "01a0cfbf-7732-7811-84d6-c25b5caaff56",
+        "usage": {
+          "input_tokens": 746721,
+          "cached_input_tokens": 706432,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6711,
+          "reasoning_output_tokens": 912,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790192177.397019,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790191819.187213
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "9136671ac13d2481f15c290f0af78192772a03ab",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0848214285714286
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790192177.590639,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790191819.187213
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "9136671ac13d2481f15c290f0af78192772a03ab",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0848214285714286
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790192177.5904589,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ]
+        ]
+      }
+    },
+    {
+      "ts": 1790192178.042461,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ]
+        ],
+        "rejected_ids": [
+          "(missing:",
+          "test",
+          "not",
+          "defined)"
+        ]
+      }
+    },
+    {
+      "ts": 1790192178.186312,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+          "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_pool.py",
+            "ExecutorIdentity"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ],
+          [
+            "tests/test_daemon.py",
+            "ReviewModelRule"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_pool.py::ExecutorIdentity",
+              "tests/test_pool.py::ExecutorIdentity",
+              "tests/test_pool.py::ExecutorIdentity",
+              "tests/test_pool.py::ExecutorIdentity",
+              "tests/test_daemon.py::ReviewModelRule",
+              "tests/test_daemon.py::ReviewModelRule",
+              "tests/test_daemon.py::ReviewModelRule",
+              "tests/test_daemon.py::ReviewModelRule",
+              "tests/test_daemon.py::ReviewModelRule",
+              "tests/test_daemon.py::ReviewModelRule"
+            ],
+            "returncode": 1,
+            "output": "leNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.000s\n\nFAILED (errors=10)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1790192178.1882298,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790191819.187213
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "9136671ac13d2481f15c290f0af78192772a03ab",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0848214285714286
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790192177.5904589,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1790192178.304335,
+      "pipeline": {
+        "first_ready_at": 1790191630.366078,
+        "spec_review_at": 1790191630.475146,
+        "spec_review_at_lease": 1790192530.475146,
+        "spec_review_at_done": 1790191630.483055,
+        "dispatched_at": 1790191710.342947,
+        "dispatched_at_lease": 1790192610.342947,
+        "dispatched_at_done": 1790191715.53642,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790191819.187213
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "sol",
+          "key": "9136671ac13d2481f15c290f0af78192772a03ab",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0848214285714286
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790192177.5904589,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1790192177.590639"
+      }
+    },
+    {
+      "ts": 1790192413.725644,
+      "status": "superseded",
+      "hold_reason": "respec T-1352: code green (tests-green OK 1504 at 3925705); acceptance used Class::test ids the gate cannot parse"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790191630.366078,
+    "spec_review_at": 1790191630.475146,
+    "spec_review_at_lease": 1790192530.475146,
+    "spec_review_at_done": 1790191630.483055,
+    "dispatched_at": 1790191710.342947,
+    "dispatched_at_lease": 1790192610.342947,
+    "dispatched_at_done": 1790191715.53642,
+    "handoff": {
+      "baseline": "astra",
+      "selected": "astra",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790191819.187213
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "sol",
+      "key": "9136671ac13d2481f15c290f0af78192772a03ab",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0848214285714286
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790192177.5904589,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_hold_key": "1790192177.590639"
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "Executor.running is counted from bus tasks whose executor equals the row id (pool.py:~168). The spec says row-routed runs still claim 'claude:<acct>', so a claude row's running count stays 0. That makes the max_parallel check a no-op, and the 'excluded at max_parallel' acceptance test only passes if it sets ex.running by hand. Nothing shows the check works end to end before S2 lands.",
+      "severity": "med",
+      "line": 168
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "A claude row with no model, or a model that doesn't match cfg['models'][default], silently keeps the default tier. Executor and reviewer can then be the same model, which is the self-review this rule exists to prevent. The spec fails closed on lookup errors but not on this case. The test name 'modelless_keep_default' pins the silent behaviour.",
+      "severity": "med",
+      "line": 1136
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "If pool_config() fails in _open_reviews, cfg stays None. Every codex-executed task then fails closed to 'opus' and prints a stderr line, even though nothing is wrong with the codex path. The number>0 branch (daemon.py:1241) skips the Claude check when cfg is None, and the review then becomes _other_tier(existing[0]['tier']). The two paths can end up inconsistent during a config outage.",
+      "severity": "low",
+      "line": 1241
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "_open_reviews loads pool_config() at the top even when t['executor'] is None or a legacy 'claude:' value. That adds a config read per call where review_tier itself makes none, and it is what puts the fail-closed path in reach of unrelated tasks.",
+      "severity": "low",
+      "line": 1212
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "codex_available changes meaning: it used to be 'the top-ranked pick is codex' and becomes 'some eligible row is codex'. mcp.py:155, daemon.py:1876 and Pool.status call it. The spec only checks hard-coded values for codex-only and one mixed case. Callers that use it to decide whether Codex can take the task now may get a different answer than pick_executor gives.",
+      "severity": "low",
+      "line": 590
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "executor_identity does not say which row wins when ids are duplicated. _read_executors keeps the last, but a first-match lookup over executor_rows(cfg) would return the first. This is a case where the review tier depends on which row is read.",
+      "severity": "low",
+      "line": 157
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "issue": "Acceptance ids carry parenthetical text, for example 'test_claude_row_on_sonnet_model_reviewed_by_opus (review_tier and _security_review_tier)'. The gate that extracts test ids may not strip it, and the spec conditional says ids must match exactly.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "packet_meta": {
+    "chars": 7475,
+    "est_tokens": 1868,
+    "presented_tokens": 1868,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "4ae3756dd01f6a9d4e0a31e9ebaabc9b5d86c47448990e6de92dd0c5bbc9642f"
+      },
+      "objective": {
+        "chars": 4230,
+        "est_tokens": 1057,
+        "sha256": "1e336992b4ff214f30ade915c1061d093af2bf9fc6b9ca88f5015efd0ccdc631"
+      },
+      "acceptance": {
+        "chars": 1773,
+        "est_tokens": 443,
+        "sha256": "4d171828a1d78dbddbb23834858a348958955365be4ef2f34675090d6b344894"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "da445f2b3b9027fb421678fd2046501e647d323f24b1892f2e4a0d688a298504"
+      },
+      "write_scope": {
+        "chars": 107,
+        "est_tokens": 26,
+        "sha256": "0f40cf83483605d77c7fe775ecc269cfe4f29b0265a0856a677a4180d045a505"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 910,
+        "est_tokens": 227,
+        "sha256": "0cd10c986cc62bbebefc3f7c8ad5de8b98b50ae43d83c0e80cb6d7d83e7c9b74"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "e71888a4a07e",
+    "version": "e71888a4a07e",
+    "candidate_known": true,
+    "base": "737c7a53bf76",
+    "sources": "pool.toml@cfb8259b656d gotchas@7723a038b4da memory@notes over cap by 2675 chars: acceptance kept whole routed=active",
+    "policy_version": "cfb8259b656d",
+    "gotchas": "7723a038b4da",
+    "candidate_tokens": 4149,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 15663,
+    "routed_reduction_ratio": 0.9287832068311196,
+    "routed_hidden": 0,
+    "routed_ambiguous": 27,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "f8e7acaaf60f",
+      "f55c33589784",
+      "5d6300f92f93",
+      "41a4b25f0f8c",
+      "bc481fe17420",
+      "1765546e17ad",
+      "3b0ec17beb98",
+      "47e8ae93111e",
+      "1cd803dfc275",
+      "20c4be568526",
+      "057d0945f7d4",
+      "8b52aca0d9bd",
+      "3092f221f17c",
+      "756f1dfd726a",
+      "0906ebbd2ce1",
+      "63cfdc9eda9b",
+      "0ac7a7072148",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "2ccea77faf96",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "718b545b1eca",
+      "5b872ee10528",
+      "667ed6b21b31",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "b676757c3fa9",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "a595cbbe1665",
+      "d500754708e5",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "d39ac091b005",
+      "d0b9e72fe363",
+      "041199286363",
+      "acfaa314d8bc",
+      "df7350a0e379",
+      "4e7c92225364",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "02553a5d3b5b",
+      "dd0b9a4085f1",
+      "1b74ac5c6786",
+      "26924c8f2afa",
+      "93d53e104ccd",
+      "60c24622b0d3",
+      "9df19e03e113",
+      "11ec1cfa02da",
+      "302f1498ff2f",
+      "e78959934947",
+      "27c57b67c155",
+      "7ad90a88baa1",
+      "f12b1f2e6291",
+      "3fbe9c47d963",
+      "cd86562d3424",
+      "541861cee70f",
+      "e52f278c63b8",
+      "34b700a2ed01",
+      "e68eebafbf7b",
+      "3f9836ea16c9",
+      "8e04abf8e0e9",
+      "7abf75b2b5d5",
+      "d30dda42d532",
+      "127be111dd45",
+      "4380d763ea89",
+      "d9dd1ccec856",
+      "d3346bd14122",
+      "d043eb995612",
+      "3e194b33197e",
+      "2586c817d520",
+      "3037c6d26ebe",
+      "e146114ba8ec",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "271ca802fd19",
+      "e175a2554b06",
+      "575022ff3493",
+      "cc3f3bcac15a",
+      "ae61acc3156e",
+      "a48883e9da6e",
+      "a98276b73bf8",
+      "985ffb7f01b9",
+      "9e12df8d5fe6",
+      "3b9528e468c2"
+    ],
+    "prefix_sha": "ca8679e33dc1",
+    "prefix_chars": 725,
+    "suffix_chars": 8354,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "active",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790191825.660492,
+  "rounds": 0,
+  "executor": "astra",
+  "codex_thread_head": "39257054621b73dcb9177ec16f42c494d238ae8c",
+  "hold_reason": "respec T-1352: code green (tests-green OK 1504 at 3925705); acceptance used Class::test ids the gate cannot parse",
+  "resume_hint": {
+    "failures": [
+      "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+      "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+      "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+      "FAILED tests/test_pool.py::ExecutorIdentity (missing: test not defined)",
+      "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+      "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+      "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+      "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+      "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)",
+      "FAILED tests/test_daemon.py::ReviewModelRule (missing: test not defined)"
+    ],
+    "missing_tests": [
+      [
+        "tests/test_pool.py",
+        "ExecutorIdentity"
+      ],
+      [
+        "tests/test_pool.py",
+        "ExecutorIdentity"
+      ],
+      [
+        "tests/test_pool.py",
+        "ExecutorIdentity"
+      ],
+      [
+        "tests/test_pool.py",
+        "ExecutorIdentity"
+      ],
+      [
+        "tests/test_daemon.py",
+        "ReviewModelRule"
+      ],
+      [
+        "tests/test_daemon.py",
+        "ReviewModelRule"
+      ],
+      [
+        "tests/test_daemon.py",
+        "ReviewModelRule"
+      ],
+      [
+        "tests/test_daemon.py",
+        "ReviewModelRule"
+      ],
+      [
+        "tests/test_daemon.py",
+        "ReviewModelRule"
+      ],
+      [
+        "tests/test_daemon.py",
+        "ReviewModelRule"
+      ]
+    ],
+    "flaky_runs": [
+      {
+        "ids": [
+          "tests/test_pool.py::ExecutorIdentity",
+          "tests/test_pool.py::ExecutorIdentity",
+          "tests/test_pool.py::ExecutorIdentity",
+          "tests/test_pool.py::ExecutorIdentity",
+          "tests/test_daemon.py::ReviewModelRule",
+          "tests/test_daemon.py::ReviewModelRule",
+          "tests/test_daemon.py::ReviewModelRule",
+          "tests/test_daemon.py::ReviewModelRule",
+          "tests/test_daemon.py::ReviewModelRule",
+          "tests/test_daemon.py::ReviewModelRule"
+        ],
+        "returncode": 1,
+        "output": "leNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_daemon (unittest.loader._FailedTest.test_daemon)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_daemon\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1347/tests/test_daemon.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.000s\n\nFAILED (errors=10)\n"
+      }
+    ]
+  }
+}

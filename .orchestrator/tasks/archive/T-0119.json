@@ -1,0 +1,118 @@
+{
+  "id": "T-0119",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-O7b: `orchestrator handover` \u2014 write the restart checkpoint into plan.md from bus state so a Planner can resume on another account with one command",
+  "spec": "Why: when the Planner session dies at a subscription limit, the next session on the other account resumes from .orchestrator/plan.md and the bus; today the checkpoint is only as fresh as the Planner's last manual write. Implement orchestrator/handover.py write(reason: str) -> Path: under the bus lock, replace (or append when absent) a section `## Auto-handover <ISO timestamp, Europe/Zurich> \u2014 <reason>` at the end of plan.md containing: open goals (parentless triage tasks not done) with title; per goal the child tasks grouped by status (queued with depends_on, running with executor and started time, held with hold_reason and resume_hint keys, done-not-merged, merged with sha); the worktrees that exist under wt/; the last 5 events from bus.events; and the sentence \"Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.\" Keep the section under 120 lines by truncating lists with \"\u2026 and N more\". cli.py: `handover [--reason TEXT]` (default reason \"manual\"). Idempotent: a second call replaces the section, it never duplicates it, and the rest of plan.md is byte-identical. Also: daemon.tick() calls handover.write(\"daemon tick\") at most once every 15 minutes (a timestamp in pool_state), so the checkpoint is never older than that even when the Planner is gone. Tests in tests/test_handover.py with the harness fixtures: section content per status group, truncation, idempotent replace preserving the rest of the file, daemon throttle (two ticks within 15 min write once). README.md: two lines under Run it.\n(Recreated from T-0108: re-pointed at the recreated C-O7a)",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_handover.py: writes_section_with_status_groups, truncates_long_lists, replaces_section_idempotently_and_preserves_rest, daemon_throttles_to_15_min; all green",
+    "`uv run orchestrator handover --reason test` appends exactly one Auto-handover section to .orchestrator/plan.md in a scratch root and a second run leaves one section",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/handover.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_handover.py",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0118"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1800,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_handover.py",
+    "recreated_from": "T-0108"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0119",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0119`.\n\n## Summary\nImplemented `orchestrator/handover.py` with `write(reason) -> Path`: under the bus lock it replaces (or appends) a `## Auto-handover <ISO Europe/Zurich timestamp> \u2014 <reason>` section at the end of `plan.md`, listing open goals (parentless `triage` tasks not done), each goal's child tasks grouped by status (queued/depends_on, running/executor+started, held/hold_reason+resume_hint keys, done-not-merged, merged/sha), worktrees under `wt/`, the last 5 bus events, and the fixed \"Resume: ...\" sentence \u2014 with per-list and section-wide truncation to stay under 120 lines while always preserving the resume sentence. `cli.py` gained `handover [--reason TEXT]` (default `manual`). `daemon.py` gained `maybe_handover()`, called from `tick()`, throttled to once per 15 minutes via a `handover_last_at` timestamp merged directly into `pool_state.json` (not through `Pool.save()`, which only knows its own fields and would drop the key). README got two lines under \"Run it\".\n\n**Files changed:** `orchestrator/handover.py` (new), `orchestrator/daemon.py`, `orchestrator/cli.py`, `tests/test_handover.py` (new), `README.md`.\n\n**Test output:** `uv run python -m unittest discover -q tests` \u2192 211 tests, all green (only pre-existing sqlite `ResourceWarning` noise, unrelated). `.claude/hooks/tests-green.sh` (the actual gate script; `scripts/tests_green.sh` doesn't exist in this repo) exits 0. Manual CLI check in a scratch `ORCH_ROOT` confirmed a second `orchestrator handover` call leaves exactly one `## Auto-handover` heading.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789754016.912349,
+      "pipeline": {
+        "gated_at": 1789754016.912292,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789754037.127379,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789754037.130295,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0119",
+      "claimed_at": 1789754037.130191
+    },
+    {
+      "ts": 1789754037.138286,
+      "pid": 89684,
+      "account": "B"
+    },
+    {
+      "ts": 1789754464.024817,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0119`.\n\n## Summary\nImplemented `orchestrator/handover.py` with `write(reason) -> Path`: under the bus lock it replaces (or appends) a `## Auto-handover <ISO Europe/Zurich timestamp> \u2014 <reason>` section at the end of `plan.md`, listing open goals (parentless `triage` tasks not done), each goal's child tasks grouped by status (queued/depends_on, running/executor+started, held/hold_reason+resume_hint keys, done-not-merged, merged/sha), worktrees under `wt/`, the last 5 bus events, and the fixed \"Resume: ...\" sentence \u2014 with per-list and section-wide truncation to stay under 120 lines while always preserving the resume sentence. `cli.py` gained `handover [--reason TEXT]` (default `manual`). `daemon.py` gained `maybe_handover()`, called from `tick()`, throttled to once per 15 minutes via a `handover_last_at` timestamp merged directly into `pool_state.json` (not through `Pool.save()`, which only knows its own fields and would drop the key). README got two lines under \"Run it\".\n\n**Files changed:** `orchestrator/handover.py` (new), `orchestrator/daemon.py`, `orchestrator/cli.py`, `tests/test_handover.py` (new), `README.md`.\n\n**Test output:** `uv run python -m unittest discover -q tests` \u2192 211 tests, all green (only pre-existing sqlite `ResourceWarning` noise, unrelated). `.claude/hooks/tests-green.sh` (the actual gate script; `scripts/tests_green.sh` doesn't exist in this repo) exits 0. Manual CLI check in a scratch `ORCH_ROOT` confirmed a second `orchestrator handover` call leaves exactly one `## Auto-handover` heading.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789754690.956973,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789754699.6546948,
+      "pipeline": {
+        "gated_at": 1789754016.912292,
+        "gated_by": "planner-pre-stamp: gate and review by hand",
+        "review_held_at": 1789754699.6546261
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789755457.8514528,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "hold_reason": null,
+      "merged_via": "T-0179 (rebased fix round)"
+    }
+  ],
+  "pipeline": {
+    "gated_at": 1789754016.912292,
+    "gated_by": "planner-pre-stamp: gate and review by hand",
+    "review_held_at": 1789754699.6546261
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789754037.130191,
+  "pid": 89684,
+  "account": "B",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0073",
+  "merged_via": "T-0179 (rebased fix round)"
+}

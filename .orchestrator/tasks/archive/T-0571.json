@@ -1,0 +1,505 @@
+{
+  "id": "T-0571",
+  "created_at": 1789970955.049692,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 5,
+  "title": "R13: orchestrator/promotion.py \u2014 shadow-first promotion framework: feature registry, evidence collection and evidence-based recommendation off/shadow/active (brief P15)",
+  "spec": "Why: several features have off/shadow/active modes ([jev.routing].mode, [scheduler].mode, upcoming jev scheduling, allocation, strategy, speculation) but promotion is a human judgement with no standard criteria; the brief (P15) requires explicit evaluation criteria and a rule that insufficient evidence means stay shadow.\nWhat: new pure module orchestrator/promotion.py.\n- FEATURES: ordered dict of feature -> {\"table\": pool.toml table path, \"key\": \"mode\", \"modes\": (\"off\",\"shadow\",\"active\"), \"default\": ..., \"evidence\": provider name}: jev_routing ([jev.routing] default shadow), scheduler ([scheduler] default shadow), jev_sched ([scheduler] key jev_mode default shadow), allocation ([allocation] default shadow), strategy ([strategy] default shadow), speculation ([speculation] default off).\n- current_mode(feature, cfg) reads the pool config dict with the default; unknown values report the default and flag \"invalid_config\".\n- CRITERIA defaults: min_samples 20; non-inferiority tolerances: first_pass_delta >= -0.02, fix_rounds_delta <= +0.05, gate_success_delta >= -0.02, review_findings_delta >= -0.10 (relative), security_ok must be True; improvement required in at least one of accepted_cost_delta < 0, accepted_tokens_delta < 0, latency_delta < 0. cfg overrides under [promotion].\n- evaluate(feature, evidence, cfg=None) -> {\"feature\", \"mode\", \"n\", \"recommendation\": stay|promote|demote, \"reasons\": [..], \"criteria\": dict used}. n < min_samples -> stay (\"insufficient_evidence\"); any quality tolerance violated while active -> demote, while shadow -> stay (\"quality_regression:<metric>\"); Jev disagreement rate or raw token reduction alone never promotes (reasons state which criteria were missing). Promotion never changes config: it only recommends.\n- collect(feature, root=STATE) -> evidence dict from existing telemetry, best effort: jev_routing from runs rows role jev_route (n, agreement rate) joined to task outcomes (first-pass via pipeline.lineage_fix_rounds, merged); scheduler from runs/sched/waves.jsonl (n, applied count) and stale rows; other features return {\"n\": 0} until their telemetry exists. Missing files -> n 0.\n- report(cfg=None, root=STATE) -> list of evaluate results for every feature; format_report(rows) -> text lines.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_promotion.py::test_insufficient_evidence_stays_shadow \u2014 n below min_samples yields recommendation stay with reason insufficient_evidence even when every delta improves",
+    "tests/test_promotion.py::test_token_reduction_alone_does_not_promote \u2014 n 50, accepted_tokens_delta -0.3 but first_pass_delta -0.1 yields stay with reason quality_regression:first_pass",
+    "tests/test_promotion.py::test_non_inferior_quality_with_cost_improvement_promotes \u2014 n 50, all quality deltas within tolerance, accepted_cost_delta -0.15 yields promote",
+    "tests/test_promotion.py::test_active_feature_with_regression_demotes \u2014 mode active and gate_success_delta -0.1 yields demote",
+    "tests/test_promotion.py::test_registry_defaults_and_invalid_config \u2014 current_mode returns defaults for every feature on an empty config, speculation default off, and an invalid mode string flags invalid_config; collect on an empty root returns n 0 for every feature"
+  ],
+  "scope": [
+    "orchestrator/promotion.py",
+    "tests/test_promotion.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "straightforward",
+    "read_scope": [
+      "orchestrator/jev_route.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/baseline.py",
+      "orchestrator/scorecard.py",
+      ".orchestrator/pool.toml",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "FEATURES registry with table/key/default per feature; current_mode(feature, cfg); evaluate(feature, evidence, cfg=None) -> {feature, mode, n, recommendation stay|promote|demote, reasons, criteria}; evidence keys: n, accepted_cost_delta, accepted_tokens_delta, first_pass_delta, fix_rounds_delta, gate_success_delta, review_findings_delta, security_ok, latency_delta, jev_disagreement_rate; collect(feature, root) -> evidence; report(cfg, root); never writes config"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0571",
+  "codex_thread": "01a0c295-ba54-7ba3-8f94-816d1332106a",
+  "result": {
+    "summary": "Implemented and committed the shadow-first promotion framework.\n\n- Gate: `tests-green: OK 822`\n- Commit: `daf894a65e0ee3eeb6f085c943030d36bdff5474`\n- Files changed:\n  - `orchestrator/promotion.py`\n  - `tests/test_promotion.py`\n- Failures-only output: empty\n\nUsed `implement-spec` to keep changes scoped and verify before committing.",
+    "executed_by": "codex:luna",
+    "thread": "01a0c295-ba54-7ba3-8f94-816d1332106a",
+    "usage": {
+      "input_tokens": 574153,
+      "cached_input_tokens": 521728,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6430,
+      "reasoning_output_tokens": 1590,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789970981.325119,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084
+      }
+    },
+    {
+      "ts": 1789970981.326371,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302
+      }
+    },
+    {
+      "ts": 1789970982.0566201,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475
+      }
+    },
+    {
+      "ts": 1789970987.57,
+      "packet_meta": {
+        "chars": 4860,
+        "est_tokens": 1215,
+        "hash": "845d12ef775b",
+        "version": "845d12ef775b",
+        "base": "8c6e2aecf245",
+        "sources": "pool.toml@dd1847e523fe gotchas@89a2a75b7b2c memory@notes over cap by 60 chars: acceptance kept whole",
+        "policy_version": "dd1847e523fe",
+        "gotchas": "89a2a75b7b2c"
+      }
+    },
+    {
+      "ts": 1789970987.57199,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0571",
+      "claimed_at": 1789970987.571799
+    },
+    {
+      "ts": 1789970987.5729358,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1789971302.792641,
+      "codex_thread": "01a0c295-ba54-7ba3-8f94-816d1332106a",
+      "codex_thread_head": "daf894a65e0ee3eeb6f085c943030d36bdff5474"
+    },
+    {
+      "ts": 1789971302.796414,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475,
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+        }
+      }
+    },
+    {
+      "ts": 1789971302.798526,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed the shadow-first promotion framework.\n\n- Gate: `tests-green: OK 822`\n- Commit: `daf894a65e0ee3eeb6f085c943030d36bdff5474`\n- Files changed:\n  - `orchestrator/promotion.py`\n  - `tests/test_promotion.py`\n- Failures-only output: empty\n\nUsed `implement-spec` to keep changes scoped and verify before committing.",
+        "executed_by": "codex:luna",
+        "thread": "01a0c295-ba54-7ba3-8f94-816d1332106a",
+        "usage": {
+          "input_tokens": 574153,
+          "cached_input_tokens": 521728,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6430,
+          "reasoning_output_tokens": 1590,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789971516.752725,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475,
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789971516.8674161,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475,
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971516.8671749,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_promotion.py::test_insufficient_evidence_stays_shadow (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_token_reduction_alone_does_not_promote (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_non_inferior_quality_with_cost_improvement_promotes (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_active_feature_with_regression_demotes (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_registry_defaults_and_invalid_config (missing: test not collected by unittest, define it inside a TestCase)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_promotion.py",
+            "test_insufficient_evidence_stays_shadow"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_token_reduction_alone_does_not_promote"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_non_inferior_quality_with_cost_improvement_promotes"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_active_feature_with_regression_demotes"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_registry_defaults_and_invalid_config"
+          ]
+        ]
+      }
+    },
+    {
+      "ts": 1789971517.671751,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_promotion.py::test_insufficient_evidence_stays_shadow (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_token_reduction_alone_does_not_promote (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_non_inferior_quality_with_cost_improvement_promotes (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_active_feature_with_regression_demotes (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_registry_defaults_and_invalid_config (missing: test not collected by unittest, define it inside a TestCase)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_promotion.py",
+            "test_insufficient_evidence_stays_shadow"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_token_reduction_alone_does_not_promote"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_non_inferior_quality_with_cost_improvement_promotes"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_active_feature_with_regression_demotes"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_registry_defaults_and_invalid_config"
+          ]
+        ],
+        "rejected_ids": [
+          "(missing:",
+          "test",
+          "not",
+          "collected",
+          "by",
+          "unittest,",
+          "define",
+          "it",
+          "inside",
+          "a",
+          "TestCase)"
+        ]
+      }
+    },
+    {
+      "ts": 1789971517.769469,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_promotion.py::test_insufficient_evidence_stays_shadow (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_token_reduction_alone_does_not_promote (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_non_inferior_quality_with_cost_improvement_promotes (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_active_feature_with_regression_demotes (missing: test not collected by unittest, define it inside a TestCase)",
+          "FAILED tests/test_promotion.py::test_registry_defaults_and_invalid_config (missing: test not collected by unittest, define it inside a TestCase)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_promotion.py",
+            "test_insufficient_evidence_stays_shadow"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_token_reduction_alone_does_not_promote"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_non_inferior_quality_with_cost_improvement_promotes"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_active_feature_with_regression_demotes"
+          ],
+          [
+            "tests/test_promotion.py",
+            "test_registry_defaults_and_invalid_config"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_promotion.py::test_insufficient_evidence_stays_shadow",
+              "tests/test_promotion.py::test_token_reduction_alone_does_not_promote",
+              "tests/test_promotion.py::test_non_inferior_quality_with_cost_improvement_promotes",
+              "tests/test_promotion.py::test_active_feature_with_regression_demotes",
+              "tests/test_promotion.py::test_registry_defaults_and_invalid_config"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nTraceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/__main__.py\", line 18, in <module>\n    main(module=None)\n    ~~~~^^^^^^^^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/main.py\", line 103, in __init__\n    self.parseArgs(argv)\n    ~~~~~~~~~~~~~~^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/main.py\", line 142, in parseArgs\n    self.createTests()\n    ~~~~~~~~~~~~~~~~^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/main.py\", line 153, in createTests\n    self.test = self.testLoader.loadTestsFromNames(self.testNames,\n                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^\n                                                   self.module)\n                                                   ^^^^^^^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 207, in loadTestsFromNames\n    suites = [self.loadTestsFromName(name, module) for name in names]\n              ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 198, in loadTestsFromName\n    raise TypeError(\"calling %s returned %s, not a test\" %\n                    (obj, test))\nTypeError: calling <function test_insufficient_evidence_stays_shadow at 0x10a5b5760> returned None, not a test\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1789971517.771143,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475,
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971516.8671749,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1789971517.815613,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475,
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971516.8671749,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789971516.8674161"
+      }
+    },
+    {
+      "ts": 1789971699.9166248,
+      "codex_thread": "01a0c295-ba54-7ba3-8f94-816d1332106a",
+      "codex_thread_head": "212d7fa59479c04611d54f085ba5f3a6e4379f84"
+    },
+    {
+      "ts": 1789971699.9198651,
+      "rounds": 1
+    },
+    {
+      "ts": 1789971796.036753,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475,
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971516.8671749,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789971516.8674161",
+        "first_green_at": 1789971796.0338361,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1789971862.8883011,
+      "packet_meta": {
+        "chars": 4860,
+        "est_tokens": 1215,
+        "hash": "845d12ef775b",
+        "version": "845d12ef775b",
+        "base": "8c6e2aecf245",
+        "sources": "pool.toml@dd1847e523fe gotchas@89a2a75b7b2c memory@notes over cap by 60 chars: acceptance kept whole",
+        "policy_version": "dd1847e523fe",
+        "gotchas": "89a2a75b7b2c"
+      }
+    },
+    {
+      "ts": 1789971952.892255,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "merged_via": "fix round T-0591 212d7fa59479c04611d54f085ba5f3a6e4379f84",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1789970981.325084,
+        "dispatched_at": 1789970981.3263302,
+        "dispatched_at_lease": 1789971881.3263302,
+        "dispatched_at_done": 1789970982.056475,
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971516.8671749,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789971516.8674161",
+        "first_green_at": 1789971796.0338361,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1789971952.8905458
+      }
+    },
+    {
+      "ts": 1789971985.560401,
+      "codex_thread": "01a0c295-ba54-7ba3-8f94-816d1332106a",
+      "codex_thread_head": "5a5a002ca7a2e30de562919b7491c8df3114dcbb"
+    },
+    {
+      "ts": 1789971985.563914,
+      "rounds": 2
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789970981.325084,
+    "dispatched_at": 1789970981.3263302,
+    "dispatched_at_lease": 1789971881.3263302,
+    "dispatched_at_done": 1789970982.056475,
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "efc2e2791f7ad3c8f12d477214a110618018b8f7"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789971516.8671749,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_hold_key": "1789971516.8674161",
+    "first_green_at": 1789971796.0338361,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1789971952.8905458
+  },
+  "packet_meta": {
+    "chars": 4860,
+    "est_tokens": 1215,
+    "hash": "845d12ef775b",
+    "version": "845d12ef775b",
+    "base": "8c6e2aecf245",
+    "sources": "pool.toml@dd1847e523fe gotchas@89a2a75b7b2c memory@notes over cap by 60 chars: acceptance kept whole",
+    "policy_version": "dd1847e523fe",
+    "gotchas": "89a2a75b7b2c"
+  },
+  "claimed_at": 1789970987.571799,
+  "rounds": 2,
+  "executor": "luna",
+  "codex_thread_head": "5a5a002ca7a2e30de562919b7491c8df3114dcbb",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": [
+      "FAILED tests/test_promotion.py::test_insufficient_evidence_stays_shadow (missing: test not collected by unittest, define it inside a TestCase)",
+      "FAILED tests/test_promotion.py::test_token_reduction_alone_does_not_promote (missing: test not collected by unittest, define it inside a TestCase)",
+      "FAILED tests/test_promotion.py::test_non_inferior_quality_with_cost_improvement_promotes (missing: test not collected by unittest, define it inside a TestCase)",
+      "FAILED tests/test_promotion.py::test_active_feature_with_regression_demotes (missing: test not collected by unittest, define it inside a TestCase)",
+      "FAILED tests/test_promotion.py::test_registry_defaults_and_invalid_config (missing: test not collected by unittest, define it inside a TestCase)"
+    ],
+    "missing_tests": [
+      [
+        "tests/test_promotion.py",
+        "test_insufficient_evidence_stays_shadow"
+      ],
+      [
+        "tests/test_promotion.py",
+        "test_token_reduction_alone_does_not_promote"
+      ],
+      [
+        "tests/test_promotion.py",
+        "test_non_inferior_quality_with_cost_improvement_promotes"
+      ],
+      [
+        "tests/test_promotion.py",
+        "test_active_feature_with_regression_demotes"
+      ],
+      [
+        "tests/test_promotion.py",
+        "test_registry_defaults_and_invalid_config"
+      ]
+    ],
+    "flaky_runs": [
+      {
+        "ids": [
+          "tests/test_promotion.py::test_insufficient_evidence_stays_shadow",
+          "tests/test_promotion.py::test_token_reduction_alone_does_not_promote",
+          "tests/test_promotion.py::test_non_inferior_quality_with_cost_improvement_promotes",
+          "tests/test_promotion.py::test_active_feature_with_regression_demotes",
+          "tests/test_promotion.py::test_registry_defaults_and_invalid_config"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nTraceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/__main__.py\", line 18, in <module>\n    main(module=None)\n    ~~~~^^^^^^^^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/main.py\", line 103, in __init__\n    self.parseArgs(argv)\n    ~~~~~~~~~~~~~~^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/main.py\", line 142, in parseArgs\n    self.createTests()\n    ~~~~~~~~~~~~~~~~^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/main.py\", line 153, in createTests\n    self.test = self.testLoader.loadTestsFromNames(self.testNames,\n                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^\n                                                   self.module)\n                                                   ^^^^^^^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 207, in loadTestsFromNames\n    suites = [self.loadTestsFromName(name, module) for name in names]\n              ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 198, in loadTestsFromName\n    raise TypeError(\"calling %s returned %s, not a test\" %\n                    (obj, test))\nTypeError: calling <function test_insufficient_evidence_stays_shadow at 0x10a5b5760> returned None, not a test\n"
+      }
+    ]
+  },
+  "merged_into": "goal/T-0561",
+  "merged_via": "fix round T-0591 212d7fa59479c04611d54f085ba5f3a6e4379f84"
+}

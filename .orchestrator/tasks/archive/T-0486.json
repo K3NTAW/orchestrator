@@ -1,0 +1,106 @@
+{
+  "id": "T-0486",
+  "parent": "T-0445",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P3 fix round 1: the route classification cache stores one entry per content key (not a single global slot) with per-entry TTL and pruning under the lock, so interleaved tasks of different shapes hit their own entries; [jev.routing] moves next to [jev] in pool.toml (review T-0484)",
+  "spec": "Fix round for T-0471 (P3) on task/T-0471 at 5e6e7a5, addressing review T-0484 (two findings). Work only in your own worktree and commit only on your own branch (git branch --show-current must print your task id); never write into another worktree.\n1. orchestrator/jev_route.py cache (around line 36, _cache_paths): .orchestrator/runs/jev/route_cache.json holds a dict keyed by the content key (sha1 over spec, acceptance, scope, complexity, task_class) -> {signals, confidence, saved_at, task}; reads and writes under the existing lock; a lookup hits only its own key when saved_at is within [jev.routing].cache_ttl_s; expired entries are pruned on write; the file is capped at [jev.routing].cache_max_entries (default 500) by dropping the oldest. Concurrent classify() calls for different tasks never evict each other. Test: test_cache_holds_entries_per_key_for_interleaved_tasks (task A miss, task B miss, task A hit, task B hit: exactly two jev.ask calls), test_cache_prunes_expired_and_caps_entries.\n2. .orchestrator/pool.toml: move the [jev.routing] table (with its comments) directly after the [jev] table and before any [secrets.*] table; values unchanged (mode = \"shadow\", cache_ttl_s = 86400) plus cache_max_entries = 500. Test: test_pool_toml_jev_routing_table_follows_jev (parse the file, assert key order or a simple line-index check).\nKeep every T-0471 test and existing tests green; full .claude/hooks/tests-green.sh exit 0; commit in your worktree with the task id including every named test; report sha and failures only.",
+  "inputs": [
+    "T-0485"
+  ],
+  "acceptance": [
+    "tests/test_jev_route.py::test_cache_holds_entries_per_key_for_interleaved_tasks, test_cache_prunes_expired_and_caps_entries, test_pool_toml_jev_routing_table_follows_jev pass",
+    "route_cache.json is a per-key dict with TTL and a size cap; [jev.routing] sits directly after [jev] in pool.toml with cache_max_entries = 500",
+    "all T-0471 tests and existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree; the commit is on this task's own branch"
+  ],
+  "scope": [
+    "orchestrator/jev_route.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_route.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0486",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/jev_route.py",
+        "line": 1,
+        "issue": "This diff is a no-op against the current branch: `git diff HEAD -- .orchestrator/pool.toml orchestrator/jev_route.py tests/test_jev_route.py` is empty, and orchestrator/jev_route.py / tests/test_jev_route.py already exist verbatim at HEAD (commit 416b97f 'T-0485 fix per-key Jev route cache', on top of 5e6e7a5 'T-0471 add Jev shadow executor routing'). The 'new file mode 100644' hunks reproduce the cumulative content of those two already-merged commits. There is no new commit for T-0486 on this branch at all (HEAD is still 416b97f, the T-0485 commit) and git status is clean, so none of the acceptance criteria's required work has actually been done here \u2014 the executor submitted a stale/duplicate diff rather than any T-0486-specific change.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/jev_route.py",
+        "line": 74,
+        "issue": "In _cache_write, `sorted(rows.items(), ...)[-max_entries:]` is a no-op cap when max_entries == 0 (Python slicing treats `[-0:]` as the full list), so cache_max_entries = 0 would not disable caching as an operator might expect. Not exercised by any acceptance test but worth a guard if 0 is a supported config value.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789936087.328382,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0486",
+      "claimed_at": 1789936087.327978
+    },
+    {
+      "ts": 1789936087.3299499,
+      "account": "B"
+    },
+    {
+      "ts": 1789936087.370826,
+      "pid": 88808,
+      "account": "B"
+    },
+    {
+      "ts": 1789936285.5022788,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/jev_route.py",
+            "line": 1,
+            "issue": "This diff is a no-op against the current branch: `git diff HEAD -- .orchestrator/pool.toml orchestrator/jev_route.py tests/test_jev_route.py` is empty, and orchestrator/jev_route.py / tests/test_jev_route.py already exist verbatim at HEAD (commit 416b97f 'T-0485 fix per-key Jev route cache', on top of 5e6e7a5 'T-0471 add Jev shadow executor routing'). The 'new file mode 100644' hunks reproduce the cumulative content of those two already-merged commits. There is no new commit for T-0486 on this branch at all (HEAD is still 416b97f, the T-0485 commit) and git status is clean, so none of the acceptance criteria's required work has actually been done here \u2014 the executor submitted a stale/duplicate diff rather than any T-0486-specific change.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/jev_route.py",
+            "line": 74,
+            "issue": "In _cache_write, `sorted(rows.items(), ...)[-max_entries:]` is a no-op cap when max_entries == 0 (Python slicing treats `[-0:]` as the full list), so cache_max_entries = 0 would not disable caching as an operator might expect. Not exercised by any acceptance test but worth a guard if 0 is a supported config value.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789936285.50441,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789936087.327978,
+  "account": "B",
+  "pid": 88808,
+  "review_verdict": "request_changes"
+}

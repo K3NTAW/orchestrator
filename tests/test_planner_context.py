@@ -8,6 +8,162 @@ from orchestrator.pool import encode_project_dir
 
 
 class PlannerContext(unittest.TestCase):
+    HEADER = ("Session compacted; continue in place. Planner mode: goals go through "
+              "Skill(orchestrate); never edit source; see CLAUDE.md.")
+    FOOTER = ("Full state: .orchestrator/plan.md; history: "
+              ".orchestrator/plan-log.md (do not read by default).")
+
+    def setUp(self):
+        patcher = mock.patch.object(planner_context.subprocess, "Popen")
+        self.popen = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_compact_brief_now_section(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / ".orchestrator" / "plan.md"
+            plan.parent.mkdir()
+            plan.write_text("# Plan\nold context\n## Now\ncurrent goal\n### Detail\nnext step\n## Other\nhistory\n")
+            expected = f"{self.HEADER}\n## Now\ncurrent goal\n### Detail\nnext step\n\n{self.FOOTER}"
+            self.assertEqual(planner_context.compact_brief(root), expected)
+            with mock.patch.object(cli, "ROOT", root), \
+                    mock.patch.object(sys, "argv", ["orchestrator", "planner-context", "--brief"]), \
+                    contextlib.redirect_stdout(output := io.StringIO()):
+                cli.main()
+            self.assertEqual(output.getvalue(), expected + "\n")
+            plan.write_text("# Plan\n## Now\ncurrent goal")
+            self.assertEqual(planner_context.compact_brief(root),
+                             f"{self.HEADER}\n## Now\ncurrent goal\n{self.FOOTER}")
+
+    def test_compact_brief_fallback_and_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / ".orchestrator" / "plan.md"
+            plan.parent.mkdir()
+            missing = f"{self.HEADER}\nplan.md missing; run the resume skill."
+            self.assertEqual(planner_context.compact_brief(root), missing)
+            plan.write_text("# Plan\nshort")
+            self.assertEqual(planner_context.compact_brief(root),
+                             f"{self.HEADER}\n# Plan\nshort\n{self.FOOTER}")
+            plan.write_text("# Plan\nfirst line\n" + "long line" * 20)
+            self.assertEqual(planner_context.compact_brief(root, limit=25),
+                             f"{self.HEADER}\n# Plan\nfirst line\n[cut; read .orchestrator/plan.md]\n{self.FOOTER}")
+            with mock.patch.object(Path, "read_text", side_effect=PermissionError):
+                self.assertEqual(planner_context.compact_brief(root), missing)
+
+    def _started(self, tokens, session_id="S"):
+        return (f"Context {tokens} tokens: handover started (auto) to write the checkpoint: "
+                f"uv run orchestrator handover --reason context --session-id {session_id}; "
+                "keep working, the session compacts in place (auto-compact or /compact).")
+
+    def test_hook_runs_handover_once_per_band(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_dir = Path(directory) / "repo", Path(directory) / "config"
+            cfg = {"planner": {"handover_context_tokens": 100000}}
+            self._prompt_transcript(config_dir, root, 120000, 12)
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, session_id="S"),
+                             self._started(120000))
+            self.assertEqual(self.popen.call_count, 1)
+            args, kwargs = self.popen.call_args
+            self.assertEqual(args[0], ["uv", "run", "orchestrator", "handover", "--reason", "context",
+                                       "--session-id", "S"])
+            self.assertTrue(kwargs["start_new_session"])
+            self.assertEqual(kwargs["cwd"], str(root))
+            self.assertTrue(Path(kwargs["stdout"].name).name.startswith("handover-"))
+            self.assertEqual(Path(kwargs["stdout"].name).parent, root / ".orchestrator/runs")
+            for tokens in (150000, 199999):
+                self._prompt_transcript(config_dir, root, tokens, 12)
+                self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
+            self.assertEqual(self.popen.call_count, 1)
+            self._prompt_transcript(config_dir, root, 200000, 12)
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, session_id="S"),
+                             self._started(200000))
+            self.assertEqual(self.popen.call_count, 2)
+            self._prompt_transcript(config_dir, root, 320000, 12)
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, session_id="S"),
+                             self._started(320000))
+            self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
+            self.assertEqual(self.popen.call_count, 3)
+            state = json.loads((root / ".orchestrator/handover_state.json").read_text())
+            self.assertEqual(state["auto_handover_bands"], {"S": 2})
+
+    def test_hook_silent_below_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_dir = Path(directory) / "repo", Path(directory) / "config"
+            cfg = {"planner": {"handover_context_tokens": 100000}}
+            self._prompt_transcript(config_dir, root, 99999, 12)
+            self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
+            self.popen.assert_not_called()
+            self.assertFalse((root / ".orchestrator/handover_state.json").exists())
+
+    def test_hook_silent_after_handover_in_same_band(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_dir = Path(directory) / "repo", Path(directory) / "config"
+            cfg = {"planner": {"handover_context_tokens": 100000}}
+            state = root / ".orchestrator/handover_state.json"
+            state.parent.mkdir(parents=True)
+            state.write_text(json.dumps({"snapshot_hash": "h", "auto_handover_bands": {"S": 0}}))
+            transcript = self._prompt_transcript(config_dir, root, 180000, 12)
+            for _ in range(3):
+                self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
+            self.popen.assert_not_called()
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, transcript=transcript,
+                                                          session_id="other"), self._started(180000, "other"))
+            data = json.loads(state.read_text())
+            self.assertEqual(data, {"snapshot_hash": "h", "auto_handover_bands": {"S": 0, "other": 0}})
+
+    def test_hook_reports_failure_without_raising(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_dir = Path(directory) / "repo", Path(directory) / "config"
+            cfg = {"planner": {"handover_context_tokens": 100000}}
+            self._prompt_transcript(config_dir, root, 150000, 12)
+            self.popen.side_effect = FileNotFoundError("no uv\non PATH")
+            message = planner_context.hook_message(cfg, config_dir, root, session_id="S")
+            self.assertEqual(message, "Context 150000 tokens: auto handover failed (FileNotFoundError: no uv on PATH).")
+            self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
+            self.assertEqual(self.popen.call_count, 1)
+
+    def test_plan_size_nag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_dir = Path(directory) / "repo", Path(directory) / "config"
+            plan = root / ".orchestrator/plan.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("é" * 21)
+            cfg = {"planner": {"handover_context_tokens": 100, "plan_max_chars": 20}}
+            nag = "plan.md is 21 chars (max 20): move history to .orchestrator/plan-log.md and keep ## Now current."
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root), nag)
+            self._prompt_transcript(config_dir, root, 50, 12)
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, session_id="S"), nag)
+            self._prompt_transcript(config_dir, root, 200, 1)
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root, session_id="S"), nag)
+            self._prompt_transcript(config_dir, root, 200, 12)
+            lines = planner_context.hook_message(cfg, config_dir, root, session_id="S").splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn(nag, lines)
+            self.assertIn(self._started(200), lines)
+            cfg["planner"]["handover_context_tokens"] = 0
+            self.assertEqual(planner_context.hook_message(cfg, config_dir, root), nag)
+            cfg["planner"]["plan_max_chars"] = 0
+            self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))
+            plan.write_text("x" * 12000)
+            self.assertIsNone(planner_context.hook_message({}, config_dir, root))
+            plan.write_text("x" * 12001)
+            self.assertIn("12001 chars (max 12000)", planner_context.hook_message({}, config_dir, root))
+
+    def test_plan_size_nag_ignores_auto_handover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, config_dir = Path(directory) / "repo", Path(directory) / "config"
+            plan = root / ".orchestrator/plan.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text(
+                "short plan\n\n"
+                "## Auto-handover old\n" + "x" * 100 + "\n"
+                "<!-- end auto-handover -->\n"
+            )
+            cfg = {"planner": {"handover_context_tokens": 0, "plan_max_chars": 20}}
+
+            self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))
+
     def _prompt_transcript(self, config_dir, root, tokens, turns):
         path = config_dir / "projects" / encode_project_dir(str(root)) / "S.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,36 +183,24 @@ class PlannerContext(unittest.TestCase):
             self.assertEqual(planner_context.user_turns(transcript.parent / "missing"), 0)
             for kwargs in ({"transcript": transcript, "session_id": "S"}, {"session_id": "S"}):
                 self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, **kwargs))
-            self.assertIn("hand over now", planner_context.hook_message(cfg, config_dir, root))
+            self.assertIn("write the checkpoint", planner_context.hook_message(cfg, config_dir, root))
             self._prompt_transcript(config_dir, root, 200, 12)
             self.assertEqual(planner_context.user_turns(transcript), 12)
             message = planner_context.hook_message(cfg, config_dir, root, transcript=transcript, session_id="S")
-            self.assertIn("hand over now", message)
-            self.assertIn("--session-id S", message)
+            self.assertEqual(message, self._started(200))
+            self.assertIn("S", self.popen.call_args[0][0])
 
     def test_hook_message_short_line_after_handover_for_this_session(self):
-        from orchestrator import handover
         with tempfile.TemporaryDirectory() as directory:
             config_dir, root = Path(directory) / "config", Path(directory) / "repo"
             cfg = {"planner": {"handover_context_tokens": 100}}
-            tokens_at = 1000
-            transcript = self._prompt_transcript(config_dir, root, tokens_at + 1000, 12)
-            with mock.patch.object(handover, "STATE", root / ".orchestrator"), \
-                    mock.patch.object(handover.bus, "read", return_value=[]), \
-                    mock.patch.object(handover, "_last_events", return_value=[]), \
-                    mock.patch.object(handover, "_render_section", return_value="## Auto-handover test"), \
-                    mock.patch.object(handover.time, "time", return_value=1700000000):
-                handover.write("context", session_id="S", tokens_at=tokens_at)
-            record = json.loads((root / ".orchestrator/checkpoint/handover-session.json").read_text())
-            self.assertEqual(record, {"session_id": "S", "ts": 1700000000,
-                                      "reason": "context", "tokens_at": tokens_at})
+            transcript = self._prompt_transcript(config_dir, root, 2000, 12)
             message = planner_context.hook_message(cfg, config_dir, root, session_id="S")
-            self.assertRegex(message, r"^handover written \d{2}:\d{2}; restart with f orch$")
-            self.assertNotIn("hand over now", message)
-            self.assertIn("hand over now", planner_context.hook_message(
+            self.assertEqual(message, self._started(2000))
+            self.assertEqual(len(message.splitlines()), 1)
+            self.assertIsNone(planner_context.hook_message(cfg, config_dir, root, session_id="S"))
+            self.assertEqual(self._started(2000, "other"), planner_context.hook_message(
                 cfg, config_dir, root, transcript=transcript, session_id="other"))
-            self._prompt_transcript(config_dir, root, tokens_at + 30000, 12)
-            self.assertIn("hand over now", planner_context.hook_message(cfg, config_dir, root, session_id="S"))
 
     def test_default_threshold_when_key_absent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -66,8 +210,7 @@ class PlannerContext(unittest.TestCase):
                     self._prompt_transcript(config_dir, root, tokens, 12)
                     message = planner_context.hook_message({}, config_dir, root, session_id="S")
                     if tokens > 300000:
-                        self.assertIn("threshold 300000", message)
-                        self.assertIn("hand over now", message)
+                        self.assertEqual(self._started(tokens), message)
                     else:
                         self.assertIsNone(message)
                     self.assertIsNone(planner_context.hook_message(
@@ -132,7 +275,9 @@ class PlannerContext(unittest.TestCase):
             self._transcript(config_dir, root, "session.jsonl", {"input_tokens": 99}, time.time())
             self.assertIsNone(planner_context.hook_message(cfg, config_dir, root))
             self._transcript(config_dir, root, "session.jsonl", {"input_tokens": 100}, time.time())
-            expected = "Planner context is 100 tokens (threshold 100); hand over now: uv run orchestrator handover --reason context"
+            expected = ("Planner context is 100 tokens (threshold 100); write the checkpoint: "
+                        "uv run orchestrator handover --reason context; then keep working, "
+                        "the session compacts in place (auto-compact or /compact).")
             self.assertEqual(expected, planner_context.hook_message(cfg, config_dir, root))
             with mock.patch.object(cli, "ROOT", root), \
                     mock.patch.object(cli, "pool_config", return_value=cfg), \

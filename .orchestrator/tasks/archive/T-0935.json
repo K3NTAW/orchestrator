@@ -1,0 +1,197 @@
+{
+  "id": "T-0935",
+  "created_at": 1790117082.9511528,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S5: active skill routing for trusted builtin skills: selected compact skills are presented in the worker packet (Level 2), static exposure is switched off for Claude workers, recovery reads are measured; gated by [skills] mode and a safety refusal (v2)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P8 step 7, P10, P12 (skills part), P30 recovery (P37 stage 5). Depends on T-0913 (skill_router.select, [skills] mode, skill_selection rows, skills_selected in packet meta) and T-0894 (skills_used detection). Facts (Planner grep): Claude workers are launched by spawn.run_claude as `claude -p <prompt> --model ... --allowedTools ... [--disallowedTools ...]` with CLAUDE_CONFIG_DIR per account (spawn.py ~781-795); the CLI offers `--disable-slash-commands` (\"Disable all skills\") and `--plugin-dir`; worktrees carry the repo's committed .claude/skills symlinks, which is today's static exposure; skills with scripts are invoked through `bash skills/<role>/<name>/scripts/...`, which the allowlists already permit (Bash(bash skills/*)); Codex executors get implement-spec through AGENTS.md; skills_registry.render(id, 2) gives the compact body.\nDo:\n1. Presentation: when [skills] mode == \"active\", the worker packet gains a section \"## skills\" carrying, for each selected skill, a header line \"### <id> (v<version>)\" and its Level 2 rendering; the section sits after the role instructions and before the task contract sections; for Codex executors the same section goes into the execute packet (implement-spec always selected for executors, so Codex sees the compact body in the packet as well as via AGENTS.md). Ambiguous candidates are listed as one Level 0 line each under \"### available on request\" so a worker can Read skills/<id>/SKILL.md when it needs one.\n2. Exposure: in active mode Claude workers are launched with `--disable-slash-commands` so the static .claude/skills descriptions no longer load; nothing in .claude/skills, the repo or the worktree changes. In shadow and off the launch is byte-identical to today (test asserts the argv).\n3. Telemetry: skill_tokens_presented_l2 in packet meta and run context; the skill_selection decision row's selected = presented ids, mode = active; skills_used detection (S1b) extended: a Read of skills/<role>/<name>/SKILL.md by the worker, or a bash invocation of that skill's script, counts as a use; a use of a skill that was not presented counts as a skill_recovery (S3 metric).\n4. Safety refusal: active is refused (falls back to shadow with one notify line) when skill_scorecard shows fewer than 30 shadow selection rows for the role over the last 7 days, or a skill_recovery_rate above [skills] max_recovery (new key, default 0.10) for that role. Planner role is never switched (the interactive Planner keeps its own skills).\n5. docs/skill-intelligence/06-active-routing.md (\u226460 lines): mechanism, the refusal rules, how to read the recovery rate, revert path ([skills] mode shadow restores static exposure on the next spawn).\nTests (unittest): tests/test_spawn.py::test_active_skills_section_carries_level2_of_selected_only, ::test_active_launch_adds_disable_slash_commands_and_shadow_does_not, ::test_active_refused_without_shadow_evidence_or_with_high_recovery, ::test_skill_use_detected_from_read_of_skill_file_and_script_invocation; tests/test_skill_scorecard.py::test_presented_tokens_and_recovery_from_active_rows. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 06:25) after spec review T-0930 (request_changes), binding on top of v1:\n- Placement: the \"## skills\" section is the FIRST section of the packet body built by spawn._packet_body / review_packet (before objective), so it needs no prompt-template change; prompts/*.md stay out of scope. The packet header (packet_run_meta) records the section like any other (chars, tokens, hash).\n- Budget: the skills section counts against the 4800-char packet budget and is protected like acceptance (never trimmed by the generic loop); it has its own cap: presented Level 2 text \u2264 2400 chars; when exceeded, the lowest-ranked non-mandatory selected skill is demoted to Level 1, then dropped, until it fits, and the demotion is recorded in the skill_selection row (\"demoted\": ids).\n- Remove the stage-3 notify strings (\"skill routing active is shadow-only until Stage 5\") and their latch in spawn._skill_routing and executor._route_skills; active now means the behaviour in this spec, and the only remaining notify is the safety refusal message.\n- Evidence for the refusal rule: add role to every skill_selection decision row (both call sites); skill_scorecard.selection_rows(root, role, since_s) counts shadow/active rows for that role from the decision log over the window; the refusal uses that function (fewer than 30 rows in 7 days) plus skill_scorecard's recovery rate for the role.\n- Drop the Planner exemption sentence: no Planner launch site calls skill_router today (planner_shadow.py builds its own packets), so the rule is simply that only roles routed through spawn.run_worker and the Codex dispatch path are affected.\n- Tests: tests/test_spawn.py::test_skills_section_is_first_packet_section_and_capped (a selected set whose Level 2 exceeds 2400 chars demotes the lowest non-mandatory skill to Level 1 and records it), tests/test_skill_scorecard.py::test_selection_rows_by_role_and_window.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_spawn.py::test_active_skills_section_carries_level2_of_selected_only passes",
+    "tests/test_spawn.py::test_active_launch_adds_disable_slash_commands_and_shadow_does_not passes",
+    "tests/test_spawn.py::test_active_refused_without_shadow_evidence_or_with_high_recovery passes",
+    "tests/test_spawn.py::test_skill_use_detected_from_read_of_skill_file_and_script_invocation passes",
+    "tests/test_skill_scorecard.py::test_presented_tokens_and_recovery_from_active_rows passes",
+    "docs/skill-intelligence/06-active-routing.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_skills_section_is_first_packet_section_and_capped passes",
+    "tests/test_skill_scorecard.py::test_selection_rows_by_role_and_window passes"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/skill_router.py",
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/bus.py",
+    ".orchestrator/pool.toml",
+    "tests/test_spawn.py",
+    "tests/test_skill_scorecard.py",
+    "docs/skill-intelligence/06-active-routing.md"
+  ],
+  "depends_on": [
+    "T-0913",
+    "T-0894"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790117173.986788,
+      "pipeline": {
+        "first_ready_at": 1790117173.986732
+      }
+    },
+    {
+      "ts": 1790117174.047946,
+      "pipeline": {
+        "first_ready_at": 1790117173.986732,
+        "spec_review_at": 1790117174.047903,
+        "spec_review_at_lease": 1790118074.047903
+      }
+    },
+    {
+      "ts": 1790117174.054176,
+      "pipeline": {
+        "first_ready_at": 1790117173.986732,
+        "spec_review_at": 1790117174.047903,
+        "spec_review_at_lease": 1790118074.047903,
+        "spec_review_at_done": 1790117174.054049
+      }
+    },
+    {
+      "ts": 1790117367.193231,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "skill_router.select()/_skill_routing runs in dispatch() at spawn.py:1071-1079, strictly AFTER role_packet = packet(t, packet_worktree) / review_packet(t, src) already built the body at spawn.py:1041-1057. SPEC v2 requires the '## skills' section to be the FIRST section of the body built by _packet_body/review_packet, which means selection must happen BEFORE the body is constructed. The spec calls this 'no prompt-template change' but doesn't call out this control-flow inversion, so an implementer will either duplicate the skill_router.select()+decision_log.record call (double-counting skill_selection rows, corrupting the 7-day row count skill_scorecard.selection_rows needs for the safety refusal) or end up with a section that doesn't match the telemetry it's supposed to mirror.",
+          "severity": "high",
+          "line": 1057
+        },
+        {
+          "path": "orchestrator/executor.py",
+          "issue": "SPEC v2 says to add role to 'every skill_selection decision row (both call sites)', but there are four decision_log.record(\"skill_selection\", ...) call sites, not two: spawn.py _skill_exposure (L28) and _skill_routing (L45), executor.py _route_skills (L33) and the stage1-static branch (L414). Two of these already put role inside the nested deterministic dict, two omit it entirely. Following the spec literally leaves inconsistent rows and breaks skill_scorecard.selection_rows(root, role, since_s), which needs one reliable place to read role from.",
+          "severity": "high",
+          "line": 33
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "_skill_routing/_route_skills (and the MANDATORY dict) compute skills_selected for every role including scout, spec_review and challenge, but SPEC v2 restricts the presented '## skills' section to _packet_body and review_packet only (i.e. execute and review roles). scout_packet, spec_review_packet and challenge's plain render() are out of scope, so those roles will record selected/presented skill telemetry (skill_tokens_presented_l2, selected=presented invariant in item 3) for a section that was never actually placed in their packet.",
+          "severity": "med",
+          "line": 1079
+        },
+        {
+          "path": "orchestrator/skill_scorecard.py",
+          "issue": "The safety refusal combines a time-windowed row count (selection_rows: fewer than 30 rows in the last 7 days) with skill_recovery_rate from build()'s by_role dict, which aggregates over the entire run history with no time window at all. A stale recovery spike from months ago could block active mode indefinitely even after real improvement (or the reverse), and the spec doesn't ask for a windowed recovery calculation to match the windowed row count.",
+          "severity": "med",
+          "line": 54
+        },
+        {
+          "path": "tests/test_skill_scorecard.py",
+          "issue": "The spec's 'existing tests' table lists tests/test_skill_scorecard.py as missing, but the file already exists with one SkillScorecardTests class. Not a functional risk, but the new test_selection_rows_by_role_and_window and test_presented_tokens_and_recovery_from_active_rows should be added as methods on the existing class rather than a new file/class.",
+          "severity": "low",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "ts": 1790117392.481771,
+      "pipeline": {
+        "first_ready_at": 1790117173.986732,
+        "spec_review_at": 1790117174.047903,
+        "spec_review_at_lease": 1790118074.047903,
+        "spec_review_at_done": 1790117174.054049,
+        "spec_review_held_at": 1790117392.4817128
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790117393.7574039,
+      "pipeline": {
+        "first_ready_at": 1790117173.986732,
+        "spec_review_at": 1790117174.047903,
+        "spec_review_at_lease": 1790118074.047903,
+        "spec_review_at_done": 1790117174.054049,
+        "spec_review_held_at": 1790117392.4817128,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790117394.1278431,
+      "pipeline": {
+        "first_ready_at": 1790117173.986732,
+        "spec_review_at": 1790117174.047903,
+        "spec_review_at_lease": 1790118074.047903,
+        "spec_review_at_done": 1790117174.054049,
+        "spec_review_held_at": 1790117392.4817128,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790117392.481771": true
+        }
+      }
+    },
+    {
+      "ts": 1790117398.239229,
+      "status": "failed",
+      "reason": "superseded 07:10 by T-0939 (v3, Planner-approved)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790117173.986732,
+    "spec_review_at": 1790117174.047903,
+    "spec_review_at_lease": 1790118074.047903,
+    "spec_review_at_done": 1790117174.054049,
+    "spec_review_held_at": 1790117392.4817128,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790117392.481771": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "skill_router.select()/_skill_routing runs in dispatch() at spawn.py:1071-1079, strictly AFTER role_packet = packet(t, packet_worktree) / review_packet(t, src) already built the body at spawn.py:1041-1057. SPEC v2 requires the '## skills' section to be the FIRST section of the body built by _packet_body/review_packet, which means selection must happen BEFORE the body is constructed. The spec calls this 'no prompt-template change' but doesn't call out this control-flow inversion, so an implementer will either duplicate the skill_router.select()+decision_log.record call (double-counting skill_selection rows, corrupting the 7-day row count skill_scorecard.selection_rows needs for the safety refusal) or end up with a section that doesn't match the telemetry it's supposed to mirror.",
+      "severity": "high",
+      "line": 1057
+    },
+    {
+      "path": "orchestrator/executor.py",
+      "issue": "SPEC v2 says to add role to 'every skill_selection decision row (both call sites)', but there are four decision_log.record(\"skill_selection\", ...) call sites, not two: spawn.py _skill_exposure (L28) and _skill_routing (L45), executor.py _route_skills (L33) and the stage1-static branch (L414). Two of these already put role inside the nested deterministic dict, two omit it entirely. Following the spec literally leaves inconsistent rows and breaks skill_scorecard.selection_rows(root, role, since_s), which needs one reliable place to read role from.",
+      "severity": "high",
+      "line": 33
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "_skill_routing/_route_skills (and the MANDATORY dict) compute skills_selected for every role including scout, spec_review and challenge, but SPEC v2 restricts the presented '## skills' section to _packet_body and review_packet only (i.e. execute and review roles). scout_packet, spec_review_packet and challenge's plain render() are out of scope, so those roles will record selected/presented skill telemetry (skill_tokens_presented_l2, selected=presented invariant in item 3) for a section that was never actually placed in their packet.",
+      "severity": "med",
+      "line": 1079
+    },
+    {
+      "path": "orchestrator/skill_scorecard.py",
+      "issue": "The safety refusal combines a time-windowed row count (selection_rows: fewer than 30 rows in the last 7 days) with skill_recovery_rate from build()'s by_role dict, which aggregates over the entire run history with no time window at all. A stale recovery spike from months ago could block active mode indefinitely even after real improvement (or the reverse), and the spec doesn't ask for a windowed recovery calculation to match the windowed row count.",
+      "severity": "med",
+      "line": 54
+    },
+    {
+      "path": "tests/test_skill_scorecard.py",
+      "issue": "The spec's 'existing tests' table lists tests/test_skill_scorecard.py as missing, but the file already exists with one SkillScorecardTests class. Not a functional risk, but the new test_selection_rows_by_role_and_window and test_presented_tokens_and_recovery_from_active_rows should be added as methods on the existing class rather than a new file/class.",
+      "severity": "low",
+      "line": 1
+    }
+  ],
+  "hold_reason": "spec_review request_changes",
+  "reason": "superseded 07:10 by T-0939 (v3, Planner-approved)"
+}

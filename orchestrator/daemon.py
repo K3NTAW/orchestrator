@@ -3,13 +3,13 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import fcntl, fnmatch, hashlib, inspect, json, os, re, subprocess, sys, threading, time, urllib.request
+import contextvars, fcntl, fnmatch, functools, hashlib, inspect, json, os, re, signal, subprocess, sys, threading, time, urllib.request, uuid
 import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
 from . import (STATE, acceptance, bus, critical_path, decision, executor, handover, jev_route, merge,
-               planner_runs, spawn, strategy, worker_control)
-from . import capacity, concurrency, decision_log, duration, jev_sched, merge_pressure
+               planner_runs, ship, spawn, strategy, worker_control)
+from . import capacity, concurrency, decision_log, duration, jev_sched, machine, merge_pressure
 from . import stale as stale_evidence
 from .pool import Pool, fallback_tier, executor_identity, config as pool_config
 from . import failures, gate as gate_runner, gitutil, interference, schedlog, notify as notifications
@@ -75,11 +75,44 @@ LOCK_PATH = STATE / "daemon.lock"
 HANDOVER_INTERVAL_S = 15 * 60
 HANDOVER_STATE = STATE / "handover_state.json"
 STAGE_LEASE_S = 900
-LEASED_STAGES = {"dispatched_at", "spec_review_at", "gated_at", "merged_at"}
+LEASED_STAGES = {"dispatched_at", "spec_review_at", "gated_at", "merged_at", "gate_started_at"}
+# Live gates: gate() starts gate.run_gate on a worker thread and _reap_gates() applies the result on a later
+# tick. pipeline.gate_started_at(+_lease, gate_run_id) marks a gate in flight; gated_at still means "finished".
+GATE_MARKER_KEYS = ("gate_started_at", "gate_started_at_lease", "gate_run_id")
+TICK_GATE_WAIT_S = 2.0   # how long one tick waits for the gates it just started before moving on
+_LIVE_GATES = {}         # task id -> {"task_id", "worktree", "run_id", "started_at", "thread"}
+_GATE_RESULTS = {}       # task id -> {"run_id", "result" | "error"}, finished and waiting for _reap_gates()
+_LIVE_MERGES = {}        # task id -> merge worker thread; merge.merge runs its own full gate (_merge_then)
+_MERGE_RESULTS = {}      # task id -> {"then", "on_error", "result" | "error"}, applied by _reap_merges()
+_LIVE_GATES_LOCK = threading.Lock()
+_GATE_WAIT_S = contextvars.ContextVar("gate_wait_s", default=None)  # None: gate() blocks; tick() sets a bound
 
 
 def is_goal(t):
     return bool((t.get("constraints") or {}).get("goal"))
+
+
+_HAND_FIX_ROUND = re.compile(r"^fix round\b.*?\bfor held (T-\d+)\b", re.I)
+
+
+def _fix_parent(task):
+    """The task a fix round repairs: constraints.fix_round_for, else the held task a hand-filed round names in its
+    title ("fix round 1 (...) for held T-0597 ..."), when that task is an unmerged execute task in the same goal.
+    The Planner files such rounds through bus_create_task without the constraint, and the merge walk must still
+    reach the root they repair."""
+    target = (task.get("constraints") or {}).get("fix_round_for")
+    if target:
+        return target
+    match = _HAND_FIX_ROUND.match(task.get("title") or "")
+    if not match or match.group(1) == task.get("id"):
+        return None
+    try:
+        named = bus.get(match.group(1))
+    except KeyError:
+        return None
+    if named.get("role") == "execute" and named.get("parent") == task.get("parent") and not named.get("merged_into"):
+        return named["id"]
+    return None
 
 
 
@@ -336,6 +369,8 @@ def stamp(tid, stage, pipeline_fields=None, **fields):
         pipeline = dict(t.get("pipeline") or {})
         if pipeline.get(stage):
             return False
+        if t.get("merged_into") and fields.get("status") == "held":
+            return False  # a late gate or review result never re-holds a task its fix-round chain already merged
         now = time.time()
         pipeline[stage] = now
         if stage in LEASED_STAGES and fields.get("status") != "held":
@@ -600,6 +635,27 @@ def hold_render_error(task_id, exc):
     notify(f"{task_id}: render_error: {exc}")
 
 
+_LIVE_DISPATCH = {}  # task id -> in-process dispatch calls still running (reply workers nest a fresh dispatch)
+_LIVE_DISPATCH_LOCK = threading.Lock()
+
+
+def _track_dispatch(fn):
+    @functools.wraps(fn)
+    def tracked(task_id, *args, **kwargs):
+        with _LIVE_DISPATCH_LOCK:
+            _LIVE_DISPATCH[task_id] = _LIVE_DISPATCH.get(task_id, 0) + 1
+        try:
+            return fn(task_id, *args, **kwargs)
+        finally:
+            with _LIVE_DISPATCH_LOCK:
+                if _LIVE_DISPATCH.get(task_id, 0) > 1:
+                    _LIVE_DISPATCH[task_id] -= 1
+                else:
+                    _LIVE_DISPATCH.pop(task_id, None)
+    return tracked
+
+
+@_track_dispatch
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
     epoch = worker_control.launch_epoch(task_id)
     routing = None
@@ -706,6 +762,7 @@ def _dispatch_fresh_fix(task_id, reason):
                      spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet))
 
 
+@_track_dispatch
 def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
     try:
         r = executor.reply(parent_id, delta, fix_round_task_id=task_id, plan=plan)
@@ -831,8 +888,98 @@ def _dispatch_deferrals(result, capacity_reason):
             for item in result["deferred"]}
 
 
+ORPHAN_MARGIN_S = 300
+
+
+def _worker_alive(t):
+    """True when any pid recorded for this task (on the task itself or in the worker registry) is still running."""
+    try:
+        registered = (worker_registry.get(t["id"]) or {}).get("pid")
+    except Exception:
+        registered = None
+    return any(pid and alive(pid) for pid in (t.get("pid"), registered))
+
+
+STALE_STAMP_GRACE_S = 120
+def _dispatch_live(t):
+    """True when a worker may still own this task's dispatch stamp: an in-process dispatch thread, a live pid on
+    the task, or a non-terminal worker_registry entry whose pid (if any) is alive. A registry entry with no pid
+    yet counts as live: the executor writes it just before Popen."""
+    with _LIVE_DISPATCH_LOCK:
+        if t["id"] in _LIVE_DISPATCH:
+            return True
+    if t.get("pid") and alive(t["pid"]):
+        return True
+    try:
+        doc = worker_registry.get(t["id"])
+    except Exception:
+        return True  # unreadable registry: leave the stamp alone
+    if not doc or doc.get("status") in worker_registry.TERMINAL:
+        return False
+    return not doc.get("pid") or alive(doc["pid"])
+
+
+def _stale_dispatch_stamp(t):
+    pipeline = t.get("pipeline") or {}
+    return (t.get("status") == "queued" and bool(pipeline.get("dispatched_at"))
+            and not pipeline.get("gated_at") and not _dispatch_live(t))
+
+
+def clear_stale_dispatch_stamps(pool, now=None):
+    """A queued task keeps pipeline.dispatched_at when its worker died before claiming it (daemon restart:
+    T-0676 on 2026-10-09, T-0617/T-0618 on 2026-10-08). dispatch() skips any stamped task, and the lease sweep
+    never fires once dispatched_at_done is set, so it would sit forever. After [dispatch].stale_stamp_grace_s
+    with no live worker the stamps are cleared so the next dispatch() picks it up. Returns the cleared ids."""
+    now = now or time.time()
+    grace = (pool.cfg.get("dispatch") or {}).get("stale_stamp_grace_s", STALE_STAMP_GRACE_S)
+    cleared = []
+    for t in bus.read(status="queued", role="execute"):
+        stamped = (t.get("pipeline") or {}).get("dispatched_at")
+        if is_goal(t) or not stamped or now - stamped <= grace or not _stale_dispatch_stamp(t):
+            continue
+        with bus.locked():
+            current = bus.get(t["id"])
+            if (current.get("pipeline") or {}).get("dispatched_at") != stamped or not _stale_dispatch_stamp(current):
+                continue
+            clear_stage(t["id"], "dispatched_at", reason="stale dispatch stamp cleared (worker gone)")
+        cleared.append(t["id"])
+    return cleared
+
+
+def reap_orphaned_reviews(now=None):
+    """A review or spec_review left running with no live worker past constraints.timeout_s + ORPHAN_MARGIN_S is
+    marked failed so the retry paths respawn it (2026-10-07: spec reviews T-0302/T-0303 sat running with no
+    claim and no run row for 8 h because their spawn_async worker never started). respawn_max still caps
+    retries; a task whose worker is alive is never touched. Returns the reaped ids."""
+    now = now or time.time()
+    reaped = []
+    for t in bus.read(status="running"):
+        if t.get("role") not in ("review", "spec_review"):
+            continue
+        started = t.get("claimed_at") or t.get("created_at") or 0
+        timeout = (t.get("constraints") or {}).get("timeout_s") or 900
+        if not started or now - started <= timeout + ORPHAN_MARGIN_S or _worker_alive(t):
+            continue
+        with bus.locked():
+            current = bus.get(t["id"])
+            if current.get("status") != "running" or _worker_alive(current):
+                continue
+            bus.update(t["id"], status="failed", hold_reason="orphaned: no worker", pid=None)
+        reaped.append(t["id"])
+        notify(f"{t['id']}: {t['role']} orphaned: no worker after {int(now - started)}s; marked failed")
+    return reaped
+
+
 def dispatch(pool):
     """queued execute tasks whose dependencies are merged: hand to the executor, or route through spec review first."""
+    try:
+        reap_orphaned_reviews()
+    except Exception as e:
+        print(f"[daemon] reap_orphaned_reviews failed: {e}", file=sys.stderr)
+    try:
+        clear_stale_dispatch_stamps(pool)
+    except Exception as e:
+        print(f"[daemon] clear_stale_dispatch_stamps failed: {e}", file=sys.stderr)
     depth_tick = harness_depth.begin_tick(pool, notify, root=bus.STATE)
     scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)
@@ -974,8 +1121,9 @@ def dispatch(pool):
                 entry["reason"] = "fallback_no_tier"
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if t["id"] not in selected or slots <= 0:
-                entry["reason"] = deferred.get(t["id"], "other" if
-                    (t.get("pipeline") or {}).get("dispatched_at") else capacity_reason)
+                entry["reason"] = deferred.get(t["id"], capacity_reason if
+                    not (t.get("pipeline") or {}).get("dispatched_at") else
+                    "stale_dispatch_stamp" if _stale_dispatch_stamp(t) else "other")
                 continue
             if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
                 if depth is not None:
@@ -1050,7 +1198,7 @@ def dispatch(pool):
                 entry["reason"] = "spec_review_changes"
                 notify(f"{t['id']}: spec review asked for changes; re-spec it")
         else:
-            children = [r for r in bus.read(role="spec_review") if r["inputs"][:1] == [t["id"]]]
+            children = bus.children(t["id"], role="spec_review")
             live = [r for r in children if r.get("status") not in ("failed", "superseded")]
             failed = [r for r in children if r.get("status") in ("failed", "superseded")]
             retry = bool(children and not live)
@@ -1319,8 +1467,34 @@ def _dirty_scope_paths(worktree, scope):
     return sorted(dirty)
 
 
-def _open_reviews(t, n_reviews, review_reason, cfg=None):
-    """Create exactly the missing review children and issue their workers."""
+def _lineage_base(t, head):
+    """(base sha, unresolved) for a fix-round lineage review: merge-base(goal/<parent> if it exists else
+    origin/main, head). A broken chain (missing ancestor, cycle, root without worktree) or a failed merge-base
+    falls back to the whole branch against origin/main, never to the fix-only diff."""
+    wt = t["worktree"]
+    try:
+        chain = spawn.fix_chain(t)
+        if not chain[-1].get("worktree"):
+            raise LookupError(f"lineage root {chain[-1]['id']} has no worktree")
+        parent = t.get("parent")
+        ref = (f"goal/{parent}" if parent and _git_in(wt, "rev-parse", "--verify", f"goal/{parent}").returncode == 0
+               else "origin/main")
+        r = _git_in(wt, "merge-base", ref, head)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip(), False
+    except LookupError:
+        pass
+    for ref in ("origin/main", "main"):
+        r = _git_in(wt, "merge-base", ref, head)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip(), True
+    r = _git_in(wt, "rev-list", "--max-parents=0", head)
+    return ((r.stdout.split() or [None])[0] if r.returncode == 0 else None), True
+
+
+def _open_reviews(t, n_reviews, review_reason, cfg=None, lineage=None):
+    """Create exactly the missing review children and issue their workers. A fix-round task (or lineage=True)
+    gets lineage reviews: stamped with the base..head range of everything that will land."""
     lookup_error = None
     if cfg is None:
         try:
@@ -1330,7 +1504,7 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
     # Carry a failed read into tier selection without retrying configuration I/O.
     review_cfg = lookup_error if lookup_error is not None else cfg
     t = bus.get(t["id"])
-    existing = [x for x in bus.read(role="review") if x["inputs"][:1] == [t["id"]]]
+    existing = bus.children(t["id"], role="review")
     security = (review_reason in ("diff_unavailable", "security_paths_empty") or
                 review_reason.startswith("security_paths:") or review_reason.startswith("semantic_"))
     reviewed_sha = None
@@ -1343,6 +1517,19 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
         pipeline["reviewed_sha"] = reviewed_sha
         bus.update(t["id"], pipeline=pipeline)
         existing = [x for x in existing if x.get("reviewed_sha") == reviewed_sha]
+    if lineage is None:
+        lineage = bool((t.get("constraints") or {}).get("fix_round_for"))
+    stamps = {}
+    if reviewed_sha:
+        stamps["reviewed_sha"] = reviewed_sha
+    if lineage:
+        existing = [x for x in existing if x.get("lineage")]
+        stamps["lineage"] = True
+        review_base, unresolved = _lineage_base(t, reviewed_sha) if reviewed_sha else (None, True)
+        if review_base:
+            stamps.update(review_base=review_base, pipeline={"review_range": f"{review_base}..{reviewed_sha}"})
+        if unresolved:
+            stamps["lineage_unresolved"] = True
     while len(existing) < n_reviews:
         number = len(existing)
         spec = t["spec"]
@@ -1367,8 +1554,8 @@ def _open_reviews(t, n_reviews, review_reason, cfg=None):
         r = bus.create_task(f"review: {t['title']}", spec, t["acceptance"], effective_scope(t), role="review",
                             inputs=[t["id"]], parent=t.get("parent"), complexity=complexity, tier=tier,
                             constraints=constraints)
-        if reviewed_sha:
-            bus.update(r["id"], reviewed_sha=reviewed_sha)
+        if stamps:
+            r = bus.update(r["id"], **stamps)
         spawn_async(spawn.run_worker, r["id"])
         existing.append(r)
     return existing
@@ -1456,7 +1643,8 @@ def _hold_stale_high(task):
     if not _stale_high_flag(task, evidence, active=False, now=time.time()):
         return False
     stamp(task["id"], "gated_at", status="held", hold_reason="stale_high")
-    bus.update(task["id"], status="held", hold_reason="stale_high")
+    if not bus.get(task["id"]).get("merged_into"):
+        bus.update(task["id"], status="held", hold_reason="stale_high")
     return True
 
 
@@ -1476,103 +1664,287 @@ def gate(pool):
     The successful gate stamp also freezes
     pipeline.reviews_expected/review_reason so a later change to [review] can't change how many approvals
     merge_reviewed() waits for on a task already past this stage. Filters run cheap-first, already_merged()
-    (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call."""
+    (which shells out to git) last, so a task the other checks would skip anyway never pays for a git call.
+    Only gate.run_gate leaves the calling thread (_start_gate/_gate_worker); its result is applied by
+    _reap_gates() on the tick. Called from tick() it waits at most TICK_GATE_WAIT_S for the gates it started;
+    called directly it waits for each gate, so results land before it returns."""
+    wait_s = _GATE_WAIT_S.get()
+    _reap_gates(pool)
+    started = []
     for t in bus.read(status="done", role="execute"):
-        if is_goal(t) or stale(t) or (t.get("pipeline") or {}).get("gated_at") or t.get("merged_into"):
+        pipeline = t.get("pipeline") or {}
+        if (is_goal(t) or stale(t) or pipeline.get("gated_at") or pipeline.get("gate_started_at")
+                or t.get("merged_into")):
             continue
-        with bus.locked():
-            t = bus.get(t["id"])
-            pipeline = dict(t.get("pipeline") or {})
-            pipeline["gate_attempts"] = pipeline.get("gate_attempts", 0) + 1
-            bus.update(t["id"], pipeline=pipeline)
+        with _LIVE_GATES_LOCK:
+            if t["id"] in _LIVE_GATES or t["id"] in _GATE_RESULTS:
+                continue
+        t = bus.get(t["id"])
+        pipeline = dict(t.get("pipeline") or {})
+        attempt = {"gate_attempts": pipeline.get("gate_attempts", 0) + 1}
         worktree = t.get("worktree")
         if worktree and not Path(worktree).exists():
-            if stamp(t["id"], "gated_at", status="held", hold_reason="worktree missing"):
+            if stamp(t["id"], "gated_at", pipeline_fields=attempt, status="held", hold_reason="worktree missing"):
                 notify(f"{t['id']}: worktree missing; held")
             continue
         if not worktree or not Path(worktree).is_dir():
             continue
-        if worktree:
-            dirty = _dirty_scope_paths(worktree, effective_scope(t))
-            if dirty:
-                if stamp(t["id"], "gated_at", status="held", hold_reason="executor did not commit",
-                         resume_hint={"dirty": dirty}):
-                    notify(f"{t['id']}: worktree has uncommitted scope changes; held")
-                continue
-            if already_merged(t):
-                continue
-            missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
-            files = acceptance.missing_test_files(worktree, t.get("acceptance") or [], changed_paths(t))
-            if missing or files:
-                if _hold_stale_high(t):
-                    continue
-                failures = [
-                    f"FAILED {path}::{name} (missing: "
-                    f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
-                    for entry in missing for path, name in [entry]
-                ]
-                failures.extend(
-                    f"FAILED {path} (missing: test file not in task diff)" for path in files
-                )
-                gate_reds = pipeline.get("gate_reds", 0) + 1
-                if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
-                         status="held", hold_reason="gate_red",
-                         resume_hint={"failures": failures, "missing_tests": missing,
-                                     "missing_test_files": files}):
-                    print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
-                continue
-        result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t["id"], cfg=pool.cfg)
-        if _hold_stale_high(t):
+        dirty = _dirty_scope_paths(worktree, effective_scope(t))
+        if dirty:
+            if stamp(t["id"], "gated_at", pipeline_fields=attempt, status="held",
+                     hold_reason="executor did not commit", resume_hint={"dirty": dirty}):
+                notify(f"{t['id']}: worktree has uncommitted scope changes; held")
             continue
-        if result["timed_out"]:
-            if stamp(t["id"], "gated_at",
-                     pipeline_fields={"infra_failure": "gate_timeout",
-                                      "gate_timeouts": pipeline.get("gate_timeouts", 0) + result["timeouts"]},
-                     status="held", hold_reason="gate_timeout",
-                     resume_hint={"gate_timeout_s": gate.settings(pool.cfg)["timeout_s"],
-                                  "output_tail": (result["stdout"] + result["stderr"])[-4000:]}):
-                notify(f"{t['id']}: gate timed out twice; held as infra failure")
+        if already_merged(t):
             continue
-        if result["returncode"]:
+        missing = acceptance.missing_tests(worktree, t.get("acceptance") or [])
+        files = acceptance.missing_test_files(worktree, t.get("acceptance") or [], changed_paths(t))
+        if missing or files:
+            if _hold_stale_high(t):
+                continue
+            failures = [
+                f"FAILED {path}::{name} (missing: "
+                f"{'test not collected by unittest, define it inside a TestCase' if getattr(entry, 'reason', None) == 'not_collected' else 'test not defined'})"
+                for entry in missing for path, name in [entry]
+            ]
+            failures.extend(
+                f"FAILED {path} (missing: test file not in task diff)" for path in files
+            )
             gate_reds = pipeline.get("gate_reds", 0) + 1
-            if stamp(t["id"], "gated_at", pipeline_fields={"gate_reds": gate_reds},
+            if stamp(t["id"], "gated_at", pipeline_fields={**attempt, "gate_reds": gate_reds},
                      status="held", hold_reason="gate_red",
-                     resume_hint={"failures": result["stderr"][-4000:]}):
-                notify(f"{t['id']}: tests red at the gate; held")
+                     resume_hint={"failures": failures, "missing_tests": missing,
+                                  "missing_test_files": files}):
+                print(f"[daemon] {t['id']}: acceptance tests missing; held", file=sys.stderr)
             continue
-        n_reviews, review_reason = _review_plan(t)
-        now = time.time()
-        green_fields = {"first_green_at": pipeline.get("first_green_at", now),
-                        "gate_reds": pipeline.get("gate_reds", 0),
-                        "reviews_expected": n_reviews, "review_reason": review_reason}
-        target_ref = f"goal/{t['parent']}" if t.get("parent") else "integration"
-        target_sha = _git_in(worktree, "rev-parse", target_ref)
-        head_sha = _git_in(worktree, "rev-parse", "HEAD")
-        if target_sha.returncode == 0:
-            green_fields["gated_target_sha"] = target_sha.stdout.strip()
-        if head_sha.returncode == 0:
-            green_fields["gated_head"] = head_sha.stdout.strip()
+        run = _start_gate(t, worktree, pool)
+        if run is None:
+            continue  # cap full or worktree busy: retried next tick, not counted as an attempt
+        if wait_s is None:
+            run["thread"].join()  # direct callers (CLI, tests) keep the synchronous gate
+            _reap_gates(pool)
+        else:
+            started.append(run)
+    if started:
+        deadline = time.monotonic() + wait_s
+        for run in started:
+            run["thread"].join(max(0.0, deadline - time.monotonic()))
+        _reap_gates(pool)
+
+
+def _start_gate(t, worktree, pool):
+    """Reserve a live-gate slot, stamp the in-flight marker and start gate.run_gate on a worker thread. Returns
+    None, with nothing stamped, when [gate].max_parallel is full or another gate already runs in this worktree."""
+    tid = t["id"]
+    key = str(Path(worktree).resolve())
+    cap = gate_runner.settings(pool.cfg)["max_parallel"]
+    run = {"task_id": tid, "worktree": key, "run_id": uuid.uuid4().hex, "started_at": time.time(), "thread": None}
+    with _LIVE_GATES_LOCK:
+        if (tid in _LIVE_GATES or len(_LIVE_GATES) >= cap
+                or any(entry["worktree"] == key for entry in _LIVE_GATES.values())):
+            return None
+        _LIVE_GATES[tid] = run
+    claimed = False
+    try:
         with bus.locked():
-            if not stamp(t["id"], "gated_at", pipeline_fields=green_fields):
-                continue
-            lineage_root = root(t)
-            if lineage_root["id"] != t["id"]:
-                root_pipeline = dict(lineage_root.get("pipeline") or {})
-                root_pipeline.setdefault("first_green_at", now)
-                root_pipeline["lineage_fix_rounds"] = root_pipeline.get("lineage_fix_rounds", 0) + 1
-                bus.update(lineage_root["id"], pipeline=root_pipeline)
+            current = bus.get(tid)
+            pipeline = dict(current.get("pipeline") or {})
+            if not (pipeline.get("gated_at") or pipeline.get("gate_started_at") or current.get("merged_into")
+                    or current.get("status") != "done"):
+                now = time.time()
+                pipeline.update(gate_started_at=now, gate_started_at_lease=now + STAGE_LEASE_S,
+                                gate_run_id=run["run_id"], gate_attempts=pipeline.get("gate_attempts", 0) + 1)
+                bus.update(tid, pipeline=pipeline)
+                claimed = True
+    finally:
+        if not claimed:
+            with _LIVE_GATES_LOCK:
+                _LIVE_GATES.pop(tid, None)
+    if not claimed:
+        return None
+    thread = threading.Thread(target=_gate_worker, name=f"gate-{tid}", daemon=True,
+                              args=(run, gate.run_gate, worktree, merge.TESTS_GREEN, pool.cfg))
+    run["thread"] = thread
+    try:
+        thread.start()
+    except Exception:
+        with _LIVE_GATES_LOCK:
+            _LIVE_GATES.pop(tid, None)
+        clear_stage(tid, "gate_started_at", clear_pipeline_keys=GATE_MARKER_KEYS)
+        raise
+    return run
+
+
+def _gate_worker(run, runner, worktree, script, cfg):
+    """Background half of a gate: only the test subprocess. Everything that touches the bus runs in _reap_gates."""
+    outcome = {"error": RuntimeError("gate worker exited without a result")}
+    try:
+        outcome = {"result": runner(worktree, script=script, task_id=run["task_id"], cfg=cfg)}
+    except Exception as e:
+        outcome = {"error": e}
+    finally:
+        with _LIVE_GATES_LOCK:
+            _GATE_RESULTS[run["task_id"]] = {"run_id": run["run_id"], **outcome}
+            if _LIVE_GATES.get(run["task_id"]) is run:
+                del _LIVE_GATES[run["task_id"]]
+
+
+def _reap_gates(pool):
+    """Apply every finished gate and background merge result on the tick thread."""
+    _reap_merges()
+    with _LIVE_GATES_LOCK:
+        finished = list(_GATE_RESULTS.items())
+        _GATE_RESULTS.clear()
+    for tid, done in finished:
+        if isinstance(done.get("error"), gate_runner.Aborted):
+            continue  # killed on shutdown; the marker is cleared when the next daemon starts
         try:
-            evidence, _ = _record_stale_check(t)
-            if _load_scheduler_cfg(pool)["stale_rebase"] and evidence["risk"] == "high":
-                if _stale_rebase(t, evidence):
-                    continue
-            if n_reviews == 0:
-                report_merge(t["id"], merge.merge(t["id"]))
-            else:
-                _open_reviews(t, n_reviews, review_reason, cfg=pool.cfg)
-            complete(t["id"], "gated_at")
+            _apply_gate_result(pool, tid, done)
         except Exception as e:
-            hold_failed(t["id"], "gated_error", "gate", e)
+            print(f"[daemon] gate result for {tid} failed: {e}", file=sys.stderr)
+
+
+def _apply_gate_result(pool, tid, done):
+    with bus.locked():
+        try:
+            t = bus.get(tid)
+        except KeyError:
+            return
+        pipeline = dict(t.get("pipeline") or {})
+        if pipeline.get("gate_run_id") != done["run_id"]:
+            return  # a swept or superseded run: its result belongs to nobody
+        for key in GATE_MARKER_KEYS:
+            pipeline.pop(key, None)
+        bus.update(tid, pipeline=pipeline)
+        t = bus.get(tid)
+    if "error" in done:
+        hold_failed(tid, "gated_error", "gate", done["error"])
+        return
+    result = done["result"]
+    if t.get("merged_into"):
+        return  # a fix round in its chain merged while this gate ran; its late result is moot
+    if _hold_stale_high(t):
+        return
+    if result["timed_out"]:
+        if stamp(tid, "gated_at",
+                 pipeline_fields={"infra_failure": "gate_timeout",
+                                  "gate_timeouts": pipeline.get("gate_timeouts", 0) + result["timeouts"]},
+                 status="held", hold_reason="gate_timeout",
+                 resume_hint={"gate_timeout_s": gate.settings(pool.cfg)["timeout_s"],
+                              "output_tail": (result["stdout"] + result["stderr"])[-4000:]}):
+            notify(f"{tid}: gate timed out twice; held as infra failure")
+        return
+    if result["returncode"]:
+        gate_reds = pipeline.get("gate_reds", 0) + 1
+        if stamp(tid, "gated_at", pipeline_fields={"gate_reds": gate_reds},
+                 status="held", hold_reason="gate_red",
+                 resume_hint={"failures": result["stderr"][-4000:]}):
+            notify(f"{tid}: tests red at the gate; held")
+        return
+    n_reviews, review_reason = _review_plan(t)
+    now = time.time()
+    green_fields = {"first_green_at": pipeline.get("first_green_at", now),
+                    "gate_reds": pipeline.get("gate_reds", 0),
+                    "reviews_expected": n_reviews, "review_reason": review_reason}
+    worktree = t.get("worktree")
+    target_ref = f"goal/{t['parent']}" if t.get("parent") else "integration"
+    target_sha = _git_in(worktree, "rev-parse", target_ref)
+    head_sha = _git_in(worktree, "rev-parse", "HEAD")
+    if target_sha.returncode == 0:
+        green_fields["gated_target_sha"] = target_sha.stdout.strip()
+    if head_sha.returncode == 0:
+        green_fields["gated_head"] = head_sha.stdout.strip()
+    with bus.locked():
+        if not stamp(tid, "gated_at", pipeline_fields=green_fields):
+            return
+        lineage_root = root(t)
+        if lineage_root["id"] != tid:
+            root_pipeline = dict(lineage_root.get("pipeline") or {})
+            root_pipeline.setdefault("first_green_at", now)
+            root_pipeline["lineage_fix_rounds"] = root_pipeline.get("lineage_fix_rounds", 0) + 1
+            bus.update(lineage_root["id"], pipeline=root_pipeline)
+    try:
+        evidence, _ = _record_stale_check(t)
+        if _load_scheduler_cfg(pool)["stale_rebase"] and evidence["risk"] == "high":
+            if _stale_rebase(t, evidence):
+                return
+        if n_reviews == 0:
+            def merged(r):
+                report_merge(tid, r)
+                complete(tid, "gated_at")
+            _merge_then(tid, merged, lambda e: hold_failed(tid, "gated_error", "gate", e))
+            return
+        _open_reviews(t, n_reviews, review_reason, cfg=pool.cfg)
+        complete(tid, "gated_at")
+    except Exception as e:
+        hold_failed(tid, "gated_error", "gate", e)
+
+
+def _merge_then(tid, then, on_error):
+    """merge.merge rebases and runs the full tests-green gate under the global merge lock, which takes as long
+    as any gate. Called directly (no tick bound) it runs inline. Inside tick() it runs on a worker thread so the
+    tick keeps its interval: the tick waits at most TICK_GATE_WAIT_S, and _reap_gates() applies then(result)
+    (or on_error(exc)) on the tick thread once the merge finishes. A task already merging is not merged twice."""
+    wait_s = _GATE_WAIT_S.get()
+    if wait_s is None:
+        try:
+            then(merge.merge(tid))
+        except Exception as e:
+            on_error(e)
+        return
+    with _LIVE_GATES_LOCK:
+        if tid in _LIVE_MERGES or tid in _MERGE_RESULTS:
+            return
+        _LIVE_MERGES[tid] = None
+
+    def work():
+        outcome = {"error": RuntimeError("merge worker exited without a result")}
+        try:
+            outcome = {"result": merge.merge(tid)}
+        except Exception as e:
+            outcome = {"error": e}
+        finally:
+            with _LIVE_GATES_LOCK:
+                _MERGE_RESULTS[tid] = {**outcome, "then": then, "on_error": on_error}
+                _LIVE_MERGES.pop(tid, None)
+
+    thread = threading.Thread(target=work, name=f"merge-{tid}", daemon=True)
+    with _LIVE_GATES_LOCK:
+        _LIVE_MERGES[tid] = thread
+    try:
+        thread.start()
+    except Exception as e:
+        with _LIVE_GATES_LOCK:
+            _LIVE_MERGES.pop(tid, None)
+        on_error(e)
+        return
+    thread.join(wait_s)
+    _reap_merges()
+
+
+def _merge_live(tid):
+    with _LIVE_GATES_LOCK:
+        return tid in _LIVE_MERGES or tid in _MERGE_RESULTS
+
+
+def _reap_merges():
+    """Apply every finished background merge on the tick thread."""
+    with _LIVE_GATES_LOCK:
+        finished = list(_MERGE_RESULTS.items())
+        _MERGE_RESULTS.clear()
+    for tid, done in finished:
+        if isinstance(done.get("error"), gate_runner.Aborted):
+            continue  # killed on shutdown: the next daemon merges it again
+        try:
+            if "error" in done:
+                done["on_error"](done["error"])
+            else:
+                done["then"](done["result"])
+        except Exception as e:
+            try:
+                done["on_error"](e)
+            except Exception as e2:
+                print(f"[daemon] merge result for {tid} failed: {e2}", file=sys.stderr)
 
 
 # Keep the long-standing daemon.gate(pool) entry point while exposing the bounded-runner
@@ -1597,31 +1969,40 @@ def report_merge(task_id, r):
             pass
     if r.get("status") == "merged":
         merged_at = time.time()
-        task = bus.get(task_id)
-        fix_id = task_id
-        verdicts = {}
-        ancestor_ids = []
-        current = task
-        while (current.get("constraints") or {}).get("fix_round_for"):
-            ancestor_id = current["constraints"]["fix_round_for"]
-            ancestor_ids.append(ancestor_id)
-            current = bus.get(ancestor_id)
-        for ancestor_id in ancestor_ids:
-            verdicts[ancestor_id] = landed(ancestor_id, r["target"])
+        # landed() shells out to git: decide every ancestor before taking the bus lock.
+        current, ancestor_ids, seen = bus.get(task_id), [], {task_id}
+        while (parent_id := _fix_parent(current)) and parent_id not in seen:
+            try:
+                current = bus.get(parent_id)
+            except KeyError:
+                break
+            seen.add(parent_id)
+            ancestor_ids.append(parent_id)
+        verdicts = {ancestor_id: landed(ancestor_id, r["target"]) for ancestor_id in ancestor_ids}
+        ancestor_stamps = {}
         with bus.locked():
             current = bus.get(task_id)
             task_pipeline = dict(current.get("pipeline") or {})
             task_pipeline.setdefault("accepted_at", merged_at)
-            ancestor_stamps = {}
-            if (current.get("constraints") or {}).get("fix_round_for"):
-                while (current.get("constraints") or {}).get("fix_round_for"):
-                    ancestor = bus.get(current["constraints"]["fix_round_for"])
+            bus.update(task_id, pipeline=task_pipeline)
+            chain, seen = [], {task_id}
+            while (parent_id := _fix_parent(current)) and parent_id not in seen:
+                try:
+                    current = bus.get(parent_id)
+                except KeyError:
+                    break
+                seen.add(parent_id)
+                chain.append(current)
+            if chain:
+                fix_id = task_id
+                root_pipeline = dict(chain[-1].get("pipeline") or {})
+                root_pipeline.setdefault("accepted_at", merged_at)
+                for ancestor in chain:
                     if ancestor.get("merged_into") or ancestor["id"] not in verdicts:
                         # The chain may have changed while git ran; absence is not negative evidence.
                         ancestor_stamps[ancestor["id"]] = "skipped"
-                        current = ancestor
                         continue
-                    if not verdicts.get(ancestor["id"], False):
+                    if not verdicts[ancestor["id"]]:
                         prior_hint = ancestor.get("resume_hint")
                         bus.update(ancestor["id"], status="held",
                                    hold_reason=f"unlanded_after_fix_round: {fix_id}",
@@ -1634,18 +2015,13 @@ def report_merge(task_id, r):
                         break
                     fields = {"status": "done", "merged_into": r["target"],
                               "merged_via": f"fix round {fix_id} {r['sha']}", "hold_reason": None}
-                    if not (ancestor.get("constraints") or {}).get("fix_round_for"):
-                        pipeline = dict(ancestor.get("pipeline") or {})
-                        pipeline.setdefault("accepted_at", merged_at)
-                        fields["pipeline"] = pipeline
+                    if ancestor is chain[-1]:
+                        fields["pipeline"] = root_pipeline
                     bus.update(ancestor["id"], **fields)
                     ancestor_stamps[ancestor["id"]] = "merged"
-                    current = ancestor
                 task_pipeline["ancestor_stamps"] = ancestor_stamps
                 bus.update(task_id, pipeline=task_pipeline, status="done", merged_into=r["target"],
                            merged_via=f"fix round {fix_id} {r['sha']}", hold_reason=None)
-            else:
-                bus.update(task_id, pipeline=task_pipeline)
         unlanded = next((ancestor_id for ancestor_id, stamp in ancestor_stamps.items()
                          if stamp == "unlanded"), None)
         if r.get("gate") == "reused_green":
@@ -1694,7 +2070,7 @@ def _merge_reviewed_one(t):
         return
     if already_merged(t):
         return
-    all_reviews = [r for r in bus.read(role="review") if r["inputs"][:1] == [t["id"]]]
+    all_reviews = bus.children(t["id"], role="review")
     pipeline = dict(t.get("pipeline") or {})
     reviewed_sha = pipeline.get("reviewed_sha")
     if reviewed_sha and t.get("worktree"):
@@ -1709,6 +2085,20 @@ def _merge_reviewed_one(t):
     reviews = [r for r in all_reviews if not reviewed_sha or r.get("reviewed_sha") == reviewed_sha]
     if not reviews:
         return  # gate() creates them; nothing to act on yet
+    if (t.get("constraints") or {}).get("fix_round_for"):
+        # A fix round's approval counts only from a review whose packet covered the whole lineage; a fix-only
+        # approval is ignored, but its request_changes still holds.
+        lineage_reviews = [r for r in reviews if r.get("lineage")]
+        fix_only_rejections = [r for r in reviews if not r.get("lineage") and r["status"] == "done"
+                               and _review_verdict(r, t, False) not in (None, "approve")]
+        if not lineage_reviews and not fix_only_rejections:
+            expected = max(int(pipeline.get("reviews_expected") or 0), 1)
+            pipeline.update(reviews_expected=expected)
+            bus.update(t["id"], pipeline=pipeline)
+            opened = _open_reviews(bus.get(t["id"]), expected, pipeline.get("review_reason", "lineage"), lineage=True)
+            notify(f"{t['id']}: fix-only approval ignored; lineage review {opened[0]['id']} opened")
+            return
+        reviews = lineage_reviews + fix_only_rejections
     single = len(reviews) == 1
     approved, rejected, pending, stuck, unknown = [], [], [], [], []
     for r in reviews:
@@ -1736,17 +2126,18 @@ def _merge_reviewed_one(t):
         # retrying it every tick would just rebuild the same conflict; stamping here means a task with two
         # reviews attempts the merge exactly once no matter which review finishes last
         if stamp(t["id"], "merged_at"):
-            try:
-                result = report_merge(t["id"], merge.merge(t["id"]))
-                complete(t["id"], "merged_at")
+            tid = t["id"]
+
+            def merged(r):
+                result = report_merge(tid, r)
+                complete(tid, "merged_at")
                 if result.get("status") != "merged":
                     if result.get("status") == "tests_red":
-                        clear_stage(t["id"], "merged_at")
-                    fresh = bus.get(t["id"])
+                        clear_stage(tid, "merged_at")
+                    fresh = bus.get(tid)
                     if fresh.get("status") != "held":
-                        bus.update(t["id"], status="held", hold_reason=f"merge {result.get('status')}")
-            except Exception as e:
-                hold_failed(t["id"], "merged_error", "merge", e)
+                        bus.update(tid, status="held", hold_reason=f"merge {result.get('status')}")
+            _merge_then(tid, merged, lambda e: hold_failed(tid, "merged_error", "merge", e))
         return
     if len(approved) + len(pending) >= needed:
         return  # a still-live sibling could yet supply the missing approval(s); keep waiting
@@ -1779,11 +2170,13 @@ def sweep_leases(pool):
                 if not lease or pipeline.get(f"{stage}_done") or lease > now:
                     continue
                 tid = t["id"]
+                if stage in ("gated_at", "merged_at") and _merge_live(tid):
+                    continue  # its merge (and that merge's gate) still runs on a worker thread
                 if stage == "dispatched_at":
                     if status == "queued":
                         clear_stage(tid, stage)
                 elif stage == "spec_review_at":
-                    children = [r for r in bus.read(role="spec_review") if r["inputs"][:1] == [tid]]
+                    children = bus.children(tid, role="spec_review")
                     if children and children[0]["status"] == "queued" and not children[0].get("claimed_at"):
                         spawn_async(spawn.run_worker, children[0]["id"])
                         complete(tid, stage)
@@ -1791,22 +2184,38 @@ def sweep_leases(pool):
                         clear_stage(tid, stage)
                     else:
                         clear_stage(tid, stage)
+                elif stage == "gate_started_at":
+                    with _LIVE_GATES_LOCK:
+                        live = any((entries.get(tid) or {}).get("run_id") == pipeline.get("gate_run_id")
+                                   for entries in (_LIVE_GATES, _GATE_RESULTS))
+                    if live:  # gates outlive STAGE_LEASE_S; the worker still owns this run
+                        with bus.locked():
+                            current = dict(bus.get(tid).get("pipeline") or {})
+                            if current.get("gate_run_id") == pipeline.get("gate_run_id"):
+                                current["gate_started_at_lease"] = now + STAGE_LEASE_S
+                                bus.update(tid, pipeline=current)
+                    else:  # no worker owns it (daemon restarted): drop the marker so gate() re-gates
+                        clear_stage(tid, stage, clear_pipeline_keys=GATE_MARKER_KEYS)
                 elif stage == "gated_at":
                     if already_merged(t):
                         complete(tid, stage, merged_into=_merged_target(t))
                         continue
-                    expected = pipeline["reviews_expected"]
+                    expected = pipeline.get("reviews_expected")
+                    if expected is None:
+                        expected = reviews_expected(t)
                     if expected == 0:
-                        report_merge(tid, merge.merge(tid))
-                        complete(tid, stage)
+                        def merged(r, tid=tid, stage=stage):
+                            report_merge(tid, r)
+                            complete(tid, stage)
+                        _merge_then(tid, merged, lambda e, tid=tid: hold_failed(tid, "gated_error", "gate", e))
                         continue
-                    children = [r for r in bus.read(role="review") if r["inputs"][:1] == [tid]]
+                    children = bus.children(tid, role="review")
                     if len(children) >= expected:
                         for child in children:
                             if child["status"] == "queued" and not child.get("claimed_at"):
                                 spawn_async(spawn.run_worker, child["id"])
                     else:
-                        _open_reviews(t, expected, pipeline["review_reason"], cfg=pool.cfg)
+                        _open_reviews(t, expected, pipeline.get("review_reason", "always"), cfg=pool.cfg)
                     complete(tid, stage)
                 else:  # merged_at
                     if already_merged(t):
@@ -2003,52 +2412,90 @@ def steering_tick(pool, *, depth_tick=None):
     _steering_decisions(pool, running, tasks, ranked, time.time(), recent_by_task, critical_ids)
 
 
+SLOW_STAGE_S = 5.0
+SLOW_TICK_S = 30.0
+# Stages that can say why they were slow: a second line `[daemon] slow stage <name> causes: ...` follows.
+SLOW_STAGE_CAUSES = {"worker_registry": lambda: worker_registry.reconcile_causes()}
+
+
+def _timed(name, fn, *args, **kwargs):
+    """Run one tick stage; log `[daemon] slow stage <name> <s>s` when it takes over SLOW_STAGE_S."""
+    started = time.monotonic()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed > SLOW_STAGE_S:
+            print(f"[daemon] slow stage {name} {elapsed:.1f}s", file=sys.stderr)
+            causes = SLOW_STAGE_CAUSES.get(name)
+            if causes is not None:
+                try:
+                    print(f"[daemon] slow stage {name} causes: {causes()}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[daemon] slow stage {name} causes unavailable: {e}", file=sys.stderr)
+
+
 def tick(pool=None, stop_event=None):
+    """One pass. The bus is read once into a snapshot (bus.snapshot) that every bus.read inside the tick filters;
+    writes go through bus.update and land in the snapshot too. Old closed tasks are archived from that snapshot."""
+    started = time.monotonic()
+    try:
+        with bus.snapshot() as snap:
+            try:
+                _timed("archive", bus.archive, list(snap.by_id.values()))
+            except Exception as e:
+                print(f"[daemon] archive failed: {e}", file=sys.stderr)
+            token = _GATE_WAIT_S.set(TICK_GATE_WAIT_S)
+            try:
+                _tick(pool, stop_event)
+            finally:
+                _GATE_WAIT_S.reset(token)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed > SLOW_TICK_S:
+            print(f"[daemon] slow tick {elapsed:.1f}s", file=sys.stderr)
+
+
+def _tick(pool=None, stop_event=None):
     pool = pool or Pool()
     try:
-        pool.tally_planner()
+        _timed("tally_planner", pool.tally_planner)
     except Exception as e:
         print(f"[daemon] tally_planner failed: {e}", file=sys.stderr)
     _load_review_cfg(pool)
     try:
-        sweep_leases(pool)
+        _timed("sweep_leases", sweep_leases, pool)
     except Exception as e:
         print(f"[daemon] sweep_leases failed: {e}", file=sys.stderr)
-    for t in bus.read(status="running"):
-        if stop_event and stop_event.is_set():
-            break
-        if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
-            try:
-                reconcile_dead(t, pool)
-            except Exception as e:
-                print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
-                continue
-    worker_registry.reconcile(alive)
+    _timed("reconcile", _reconcile_running, pool, stop_event)
+    _timed("worker_registry", worker_registry.reconcile, alive)
     try:
         if pool.cfg.get("memory", {}).get("mode", "shadow") != "off" and not memory_hot.fresh(STATE.parent):
-            memory_hot.build(STATE.parent)
+            _timed("memory_hot", memory_hot.build, STATE.parent)
     except Exception:
         print("[daemon] warning: HOT memory refresh failed", file=sys.stderr)
     for stage in (dispatch, steering_tick, gate, merge_reviewed):
         if stop_event and stop_event.is_set():
             return
+        name = getattr(stage, "__name__", repr(stage))
         try:
             if stage is steering_tick:
-                stage(pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
+                _timed(name, stage, pool, depth_tick=getattr(pool, "harness_depth_tick", {}))
             else:
-                stage(pool)
+                _timed(name, stage, pool)
         except Exception as e:
-            print(f"[daemon] {stage.__name__} failed: {e}", file=sys.stderr)
+            print(f"[daemon] {name} failed: {e}", file=sys.stderr)
     try:
-        auto_fix_round(pool)
+        _timed("auto_fix_round", auto_fix_round, pool)
     except Exception as e:
         print(f"[daemon] auto_fix_round failed: {e}", file=sys.stderr)
     if pool.cfg.get("planner", {}).get("autonomous", False):
         try:
-            planner_runs.reconcile()
-            planner_runs.tick(pool)
+            _timed("planner_runs.reconcile", planner_runs.reconcile)
+            _timed("planner_runs.tick", planner_runs.tick, pool)
         except Exception as e:
             print(f"[daemon] planner_runs failed: {e}", file=sys.stderr)
+    _timed("ship_tick", ship_tick, pool, stop_event)
     m = pool.both_cooling_minutes()
     cooling = m > 30
     if pool.notification_transition("cooling", cooling) and cooling:
@@ -2063,18 +2510,52 @@ def tick(pool=None, stop_event=None):
     maybe_handover("daemon tick")
 
 
-def acquire_lock():
+def _reconcile_running(pool, stop_event=None):
+    for t in bus.read(status="running"):
+        if stop_event and stop_event.is_set():
+            break
+        if t.get("pid") and not alive(t["pid"]) and time.time() - t.get("claimed_at", 0) > 60:
+            try:
+                reconcile_dead(t, pool)
+            except Exception as e:
+                print(f"[daemon] reconcile {t['id']} failed: {e}", file=sys.stderr)
+                continue
+
+
+def acquire_lock(kind="cli"):
     """Non-blocking single-instance lock on STATE/daemon.lock. Returns the open file handle (keep it referenced
     for the daemon's lifetime; closing it or letting it get garbage-collected releases the flock), or None when
-    another daemon already holds it."""
+    another daemon already holds it. kind: "cli" (`orchestrator daemon`) or "mcp" (the autostart thread)."""
     STATE.mkdir(parents=True, exist_ok=True)
-    fh = open(LOCK_PATH, "w")
+    # "a+", not "w": a contender that loses the flock must not truncate the holder's pid line.
+    fh = open(LOCK_PATH, "a+")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         fh.close()
         return None
+    # The watchdog reads "<pid> <kind> <start time>" to tell a live daemon from a dead one or a reused pid
+    # without probing the flock.
+    start = machine.process_start(os.getpid())
+    marker = f"{os.getpid()} {kind}" + (f" {start}" if start else "")
+    fh.seek(0); fh.truncate(); fh.write(marker + "\n"); fh.flush()
+    try:
+        machine.register_repo(STATE.parent)
+    except OSError as e:
+        print(f"[daemon] machine registry update failed: {e}", file=sys.stderr)
     return fh
+
+
+def ship_tick(pool, stop_event):
+    """--once (no stop_event) never ships: a full gate can block for hours. The loop runs ship in a non-daemon
+    thread it joins on shutdown."""
+    if stop_event is None or stop_event.is_set():
+        return None
+    try:
+        return ship.tick(pool, stop_event=stop_event, inline=False)
+    except Exception as e:
+        print(f"[daemon] ship failed: {e}", file=sys.stderr)
+        return None
 
 
 def _loop(interval, stop_event):
@@ -2095,6 +2576,7 @@ def _loop(interval, stop_event):
         except Exception as e:
             print(f"[daemon] tick failed: {e}", file=sys.stderr)
         if stop_event.wait(interval):
+            ship.join_threads()
             return
 
 
@@ -2106,7 +2588,7 @@ def start_background(cfg, env=os.environ):
         return None
     if env.get("ORCH_DAEMON") == "0":
         return None
-    lock = acquire_lock()
+    lock = acquire_lock("mcp")
     if lock is None:
         return None
     interval = (cfg.get("daemon") or {}).get("interval_s", 30)
@@ -2114,9 +2596,11 @@ def start_background(cfg, env=os.environ):
 
     def run():
         try:
+            adopt_orphaned_gates()
             _loop(interval, stop_event)
         finally:
             try:
+                terminate_own_gates()
                 fcntl.flock(lock, fcntl.LOCK_UN)
             finally:
                 lock.close()
@@ -2138,17 +2622,93 @@ def stop_background(thread, timeout=5):
     executor.join_fallback_threads(timeout)
 
 
+SHIP_JOIN_TIMEOUT_S = 60
+
+
+def adopt_orphaned_gates():
+    """Daemon start, lock held: kill the gate process groups a dead daemon left behind (gate.reap_orphans) and
+    drop in-flight gate markers no thread of this process owns, so gate() re-gates them now instead of after
+    STAGE_LEASE_S. Returns the killed registry entries."""
+    try:
+        killed = gate_runner.reap_orphans()
+    except Exception as e:
+        print(f"[daemon] orphaned gate sweep failed: {e}", file=sys.stderr)
+        killed = []
+    try:
+        for t in bus.read(status="done", role="execute"):
+            run_id = (t.get("pipeline") or {}).get("gate_run_id")
+            if not (t.get("pipeline") or {}).get("gate_started_at"):
+                continue
+            with _LIVE_GATES_LOCK:
+                live = any((entries.get(t["id"]) or {}).get("run_id") == run_id
+                           for entries in (_LIVE_GATES, _GATE_RESULTS))
+            if not live:
+                clear_stage(t["id"], "gate_started_at", clear_pipeline_keys=GATE_MARKER_KEYS)
+    except Exception as e:
+        print(f"[daemon] gate marker cleanup failed: {e}", file=sys.stderr)
+    return killed
+
+
+def terminate_own_gates():
+    """Daemon shutdown: kill every gate process group this daemon started so none runs on as an orphan."""
+    try:
+        killed = gate_runner.terminate_own()
+    except Exception as e:
+        print(f"[daemon] gate shutdown failed: {e}", file=sys.stderr)
+        return []
+    if killed:
+        print(f"[daemon] terminated {len(killed)} running gate(s) on shutdown", file=sys.stderr)
+    return killed
+
+
+def _drain_gates(pool):
+    """--once: wait for the gates and merges this tick left on worker threads and apply their results inline,
+    so a one-shot run never exits with a gate still running."""
+    while True:
+        with _LIVE_GATES_LOCK:
+            threads = [run.get("thread") for run in _LIVE_GATES.values()] + list(_LIVE_MERGES.values())
+            pending = bool(_GATE_RESULTS or _MERGE_RESULTS)
+        threads = [thread for thread in threads if thread is not None]
+        if not threads and not pending:
+            return
+        for thread in threads:
+            thread.join()
+        _reap_gates(pool)
+
+
+def _sigterm(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main(interval=30, once=False):
     if once:
-        tick(Pool())
+        pool = Pool()
+        try:
+            tick(pool)
+            _drain_gates(pool)
+        finally:
+            terminate_own_gates()
         return
     lock = acquire_lock()
     if lock is None:
         print("[daemon] another instance already holds the lock; exiting", file=sys.stderr)
         sys.exit(1)
+    stop_event = threading.Event()
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGTERM, _sigterm)  # run the finally below: kill own gates, drop the lock
     try:
-        _loop(interval, threading.Event())
+        adopt_orphaned_gates()
+        _loop(interval, stop_event)
     finally:
+        # Ctrl-C skips _loop's join: stop the non-daemon ship thread before another daemon can take the lock.
+        stop_event.set()
+        terminate_own_gates()
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+        ship.join_threads(SHIP_JOIN_TIMEOUT_S)
+        if any(t.is_alive() for t in ship._THREADS):
+            print(f"[daemon] ship thread still running after {SHIP_JOIN_TIMEOUT_S}s; releasing lock", file=sys.stderr)
         executor.join_fallback_threads()
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()

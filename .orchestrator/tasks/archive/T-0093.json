@@ -1,0 +1,160 @@
+{
+  "id": "T-0093",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model): C-O6 daemon fallback slots and review tier (T-0083)",
+  "spec": "Review the diff of T-0083 (branch task/T-0083, worktree wt/T-0083) against its acceptance. Executed by claude:sonnet as the Codex fallback, so this review is on opus. Check: free_slots returns Claude capacity only under on_exhausted=fallback_claude and only when every Codex executor is cooling or disabled; it subtracts running claude executes and never goes negative; under hold policy it stays 0; gate() picks opus for a claude:sonnet executor, sonnet for claude:opus, default otherwise; the daemon --once dispatch test really stamps dispatched_at through the fallback path with executor.start patched or a fake Codex cooldown; existing tests untouched; no behaviour change for Codex dispatch when Codex is available. Verdict approve or request_changes with path:line findings.",
+  "inputs": [
+    "T-0083"
+  ],
+  "acceptance": [
+    "Verdict posted with path:line findings",
+    "Each acceptance criterion of T-0083 marked met or not met with evidence"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0093",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 104,
+        "issue": "Fallback capacity is unlocked by `codex_slots == 0`, which is not the same condition as \"every Codex executor is cooling\" that the docstring (daemon.py:98) and the review spec state. The sum is also 0 when every enabled Codex row is healthy but saturated (running == max_parallel), and when all rows are disabled. Verified on this worktree: with the committed pool.toml, setting ex.running = ex.max_parallel on all four enabled rows and no cooldown gives free_slots() == 4, while pool.pick_executor(\"execute\", 3) returns None -> executor.start() -> _exhausted() -> Claude fallback. Net effect: whenever Codex is merely busy for a tick, queued tasks are diverted to Claude accounts and Claude budget instead of waiting ~30 s for a Codex slot to free. Gate the fallback branch on all enabled execute executors being cooling/disabled (e.g. `not any(ex.enabled and \"execute\" in ex.roles and not ex.cooling() for ...)`), not on the sum being zero.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 108,
+        "issue": "Complexity >= 9 regression: pool.fallback_tier(9) is None (pool.py:279), so a spec-approved complexity-9 execute task that this branch now makes dispatchable goes executor.start -> pick_executor -> None -> _exhausted -> bus.update(status=\"held\", \"no Claude fallback for complexity 9\") (executor.py:113-116). Before the change free_slots() was 0 while Codex cooled, so the task simply stayed queued and dispatched on its own once Codex returned. Nothing re-queues a held task (tick() only requeues running tasks with a dead pid, daemon.py:246-248), so this now costs a Planner unhold per high-complexity task in the queue. Exclude tasks whose fallback_tier is None from the fallback slot accounting, or skip dispatch for them while Codex is cooling.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 106,
+        "issue": "In-flight fallback dispatches are not counted, so the cap can be exceeded across ticks. dispatch() hands work to a background thread (daemon.py:152, spawn_async); spawn.run_worker sets executor=\"claude:<tier>\" at spawn.py:222 while status is still \"queued\", and only bus.claim at spawn.py:229 (after ensure_worktree, which shells out to `git worktree add`) flips status to \"running\". A task in that window matches neither status=\"running\" nor the executor filter, so a tick 30 s later (daemon interval_s = 30) sees running_claude = 0 and dispatches another full max_parallel_claude_workers batch. Count queued-but-dispatched tasks too (pipeline.dispatched_at stamped and not yet gated), or have executor.start mark the claim before the worktree work.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 108,
+        "issue": "limits.max_parallel_claude_workers is used nowhere else in the repo (grep: only daemon.py:108 and the two new tests), and its name covers all Claude workers, but only role=\"execute\" tasks are subtracted. With 4 Claude scouts/reviews/spec_reviews running (each a `claude` subprocess spawned by spawn.run_worker), this still reports 4 free execute slots, so the daemon can drive 8 concurrent Claude workers against a configured ceiling of 4. Either count every running Claude-role task, or rename/scope the limit in pool.toml so the ceiling it expresses is the one enforced.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 104,
+        "issue": "Unguarded cfg indexing: pool.cfg[\"codex\"][\"on_exhausted\"] and pool.cfg[\"limits\"][\"max_parallel_claude_workers\"]. pool._read_executors (pool.py:102-107) and tests/test_pool.py:86 establish that a cfg missing tables is a supported shape, and the same module uses cfg.get(\"codex\", {}) defensively there. With a pool.toml lacking [codex] or [limits], free_slots raises KeyError inside dispatch(), which tick() swallows with a stderr print (daemon.py:250-253) \u2014 dispatch then silently never runs again, with no held task and no notify to show why. Use .get with the current defaults.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 167,
+        "issue": "review_tier fixes the model half of the fallback review rule but the account half is still dead, so \"other account, different model\" (executor.py:117) is only half true. spawn.run_worker:199-203 computes avoid from bus.get(inputs[0]).get(\"account\"), and no code path ever writes an \"account\" field \u2014 bus.claim stores assigned_to=\"claude:<acct id>\" (spawn.py:229, bus.py:130). avoid is therefore always None and pool.pick(\"review\") can return the same account that executed the task. Pre-existing, but it is the other half of the rule this task cites; parse the account from assigned_to, or set an explicit account field at claim time.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 98,
+        "issue": "Acceptance evidence for T-0083. (1) MET \u2014 all six named tests exist (test_daemon.py:98,104,110,175,181,187) and `python -m unittest tests.test_daemon -v` runs 30 tests OK. (2) MET \u2014 test_daemon_once_dispatches_under_fallback_when_codex_cooling (line 120) uses the committed pool.toml via P.Pool(), cools the whole chatgpt quota group through cooldown_executor(\"astra\", 600), and asserts pipeline.dispatched_at on a complexity-3 task; executor.start is the setUp recorder, which the review spec explicitly permits. (3) MET \u2014 the diff to tests/test_daemon.py is additive only (no existing assertion touched) and `python -m unittest discover -q tests` is green: 111 tests, OK. The request_changes verdict rests on behaviour outside the criteria, not on an unmet criterion.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789733918.7116952,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0093",
+      "claimed_at": 1789733918.711304
+    },
+    {
+      "ts": 1789733918.749653,
+      "pid": 40702,
+      "account": "A"
+    },
+    {
+      "ts": 1789734154.451471,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 104,
+            "issue": "Fallback capacity is unlocked by `codex_slots == 0`, which is not the same condition as \"every Codex executor is cooling\" that the docstring (daemon.py:98) and the review spec state. The sum is also 0 when every enabled Codex row is healthy but saturated (running == max_parallel), and when all rows are disabled. Verified on this worktree: with the committed pool.toml, setting ex.running = ex.max_parallel on all four enabled rows and no cooldown gives free_slots() == 4, while pool.pick_executor(\"execute\", 3) returns None -> executor.start() -> _exhausted() -> Claude fallback. Net effect: whenever Codex is merely busy for a tick, queued tasks are diverted to Claude accounts and Claude budget instead of waiting ~30 s for a Codex slot to free. Gate the fallback branch on all enabled execute executors being cooling/disabled (e.g. `not any(ex.enabled and \"execute\" in ex.roles and not ex.cooling() for ...)`), not on the sum being zero.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 108,
+            "issue": "Complexity >= 9 regression: pool.fallback_tier(9) is None (pool.py:279), so a spec-approved complexity-9 execute task that this branch now makes dispatchable goes executor.start -> pick_executor -> None -> _exhausted -> bus.update(status=\"held\", \"no Claude fallback for complexity 9\") (executor.py:113-116). Before the change free_slots() was 0 while Codex cooled, so the task simply stayed queued and dispatched on its own once Codex returned. Nothing re-queues a held task (tick() only requeues running tasks with a dead pid, daemon.py:246-248), so this now costs a Planner unhold per high-complexity task in the queue. Exclude tasks whose fallback_tier is None from the fallback slot accounting, or skip dispatch for them while Codex is cooling.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 106,
+            "issue": "In-flight fallback dispatches are not counted, so the cap can be exceeded across ticks. dispatch() hands work to a background thread (daemon.py:152, spawn_async); spawn.run_worker sets executor=\"claude:<tier>\" at spawn.py:222 while status is still \"queued\", and only bus.claim at spawn.py:229 (after ensure_worktree, which shells out to `git worktree add`) flips status to \"running\". A task in that window matches neither status=\"running\" nor the executor filter, so a tick 30 s later (daemon interval_s = 30) sees running_claude = 0 and dispatches another full max_parallel_claude_workers batch. Count queued-but-dispatched tasks too (pipeline.dispatched_at stamped and not yet gated), or have executor.start mark the claim before the worktree work.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 108,
+            "issue": "limits.max_parallel_claude_workers is used nowhere else in the repo (grep: only daemon.py:108 and the two new tests), and its name covers all Claude workers, but only role=\"execute\" tasks are subtracted. With 4 Claude scouts/reviews/spec_reviews running (each a `claude` subprocess spawned by spawn.run_worker), this still reports 4 free execute slots, so the daemon can drive 8 concurrent Claude workers against a configured ceiling of 4. Either count every running Claude-role task, or rename/scope the limit in pool.toml so the ceiling it expresses is the one enforced.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 104,
+            "issue": "Unguarded cfg indexing: pool.cfg[\"codex\"][\"on_exhausted\"] and pool.cfg[\"limits\"][\"max_parallel_claude_workers\"]. pool._read_executors (pool.py:102-107) and tests/test_pool.py:86 establish that a cfg missing tables is a supported shape, and the same module uses cfg.get(\"codex\", {}) defensively there. With a pool.toml lacking [codex] or [limits], free_slots raises KeyError inside dispatch(), which tick() swallows with a stderr print (daemon.py:250-253) \u2014 dispatch then silently never runs again, with no held task and no notify to show why. Use .get with the current defaults.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 167,
+            "issue": "review_tier fixes the model half of the fallback review rule but the account half is still dead, so \"other account, different model\" (executor.py:117) is only half true. spawn.run_worker:199-203 computes avoid from bus.get(inputs[0]).get(\"account\"), and no code path ever writes an \"account\" field \u2014 bus.claim stores assigned_to=\"claude:<acct id>\" (spawn.py:229, bus.py:130). avoid is therefore always None and pool.pick(\"review\") can return the same account that executed the task. Pre-existing, but it is the other half of the rule this task cites; parse the account from assigned_to, or set an explicit account field at claim time.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 98,
+            "issue": "Acceptance evidence for T-0083. (1) MET \u2014 all six named tests exist (test_daemon.py:98,104,110,175,181,187) and `python -m unittest tests.test_daemon -v` runs 30 tests OK. (2) MET \u2014 test_daemon_once_dispatches_under_fallback_when_codex_cooling (line 120) uses the committed pool.toml via P.Pool(), cools the whole chatgpt quota group through cooldown_executor(\"astra\", 600), and asserts pipeline.dispatched_at on a complexity-3 task; executor.start is the setUp recorder, which the review spec explicitly permits. (3) MET \u2014 the diff to tests/test_daemon.py is additive only (no existing assertion touched) and `python -m unittest discover -q tests` is green: 111 tests, OK. The request_changes verdict rests on behaviour outside the criteria, not on an unmet criterion.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789734154.454825,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789733918.711304,
+  "pid": 40702,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

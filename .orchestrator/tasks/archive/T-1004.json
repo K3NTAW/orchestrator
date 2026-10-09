@@ -1,0 +1,182 @@
+{
+  "id": "T-1004",
+  "created_at": 1790154004.520464,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S1a memory_store: structured WARM/COLD memory index (SQLite + FTS5) with reversible migration from the Markdown memory files and filtered search (P1-P3)",
+  "spec": "Create orchestrator/memory_store.py. Record dataclass fields: id (stable: sha1 of kind+date+title, first 12 hex), kind (one of decision, gotcha, architecture, model_note, retrospective, strategy, skill_outcome), title, date (ISO yyyy-mm-dd), repo, components (list), files (list of repo-relative paths mentioned), tags (list), provenance (markdown|planner|daemon|worker), outcome, revert_path, superseded_by, source_task, source_goal, tier (hot|warm|cold), body, sha (content hash).\nStore: .orchestrator/memory/index.sqlite with table records (all fields, json-encoded lists) and an FTS5 external-content table records_fts over title, body, tags, components, files; feature-detect FTS5 at open (create a probe virtual table in memory); if unavailable fall back to LIKE search and record a warning in the returned metadata; never crash.\nMigration migrate(root): parse .orchestrator/memory/decisions.md, gotchas.md, architecture.md and model-notes.md. Entries are the existing dated blocks (look at the real files: entries begin with a dash or heading that starts with an ISO date or contain one in the first line; group continuation lines until the next dated entry). Extract: date, title (first sentence, max 160 chars), body, task ids (T-dddd pattern) into source_task and source_goal (goal ids are tasks whose title starts with GOAL:, look them up via bus.get when present), files (paths matching orchestrator/*.py, tests/*.py, .claude/**, .orchestrator/** patterns in the text), components (module basenames of those files), revert_path (text after 'Revert path:' or 'revert path' up to end of sentence, when present), superseded_by (when the text says superseded by T-dddd), tags (kind plus words like security, gate, daemon, jev, skills, memory, cache found in the text). Migration never modifies the Markdown files (they stay as the COLD archive and the provenance); it is idempotent (same ids on rerun) and reversible: rebuild(root) drops and recreates the index from the Markdown files alone. add(record, root) inserts or updates one record by id and appends nothing to Markdown (writers of Markdown stay as they are today). tier defaults: warm for everything migrated; cold when superseded_by is set or the date is older than 30 days and the kind is retrospective or model_note; hot is never assigned by this task (stage 2 does).\nsearch(query, *, kind=None, component=None, file=None, task_class=None, model=None, date_from=None, date_to=None, tag=None, tier=None, limit=20) returns records ordered by FTS rank then date desc; filters are AND; query may be empty (filters only); task_class and model match tags. All queries parameterized.\nCLI in orchestrator/cli.py: `orchestrator memory migrate`, `memory rebuild`, `memory search <query> [--kind ...] [--component ...] [--file ...] [--tag ...] [--since yyyy-mm-dd] [--tier ...] [--limit n] [--json]`, `memory show <id>`. Text output is one line per hit: id, date, kind, title.\nDocs: docs/hermes-hardening/01-memory-store.md (schema, migration rules, reversibility, CLI, measured record counts after migrating this repository's real memory files). The migration must run successfully against this repository's real .orchestrator/memory files (report counts per kind in the result).\nSpec review T-0998 folded in: (1) Record.source_tasks is a list (every T-dddd id in the entry's tasks label and body, deduplicated, ordered) and source_goal comes from the explicit 'goal: T-dddd' label that decisions.md entries carry on their 'type:' line (format seen in the real file: 'type: decision \u00b7 goal: T-0043 \u00b7 tasks: T-0044, T-0045'); fall back to the first id whose bus task exists and has a title starting with GOAL: only when no goal label exists; never raise when a task id is unknown to the bus. The migration test also asserts content completeness: an entry with several task ids keeps all of them. (2) The index .orchestrator/memory/index.sqlite (and its -wal/-shm files) is a derived artifact: add it to .gitignore next to bus.sqlite and to the ignore set in orchestrator/install.py (line 10 area) so it is never committed or copied into worktrees; rebuild recreates it anywhere. (3) search filters that match lists (source_tasks, files, components, tags) use json membership, not substring on the encoded column.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. Read docs/context-economy/00-overview.md only if you need the evidence/decision_log conventions.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_memory_store.py::test_migrate_parses_real_memory_files_idempotently (runs migrate twice on a copy of the repository's memory files; same record ids and counts, Markdown untouched)",
+    "tests/test_memory_store.py::test_search_fts_and_filters (text query plus kind/component/file/tag/date filters AND together; empty query with filters works)",
+    "tests/test_memory_store.py::test_rebuild_is_reversible (add a record, rebuild, the record is gone and the migrated set is back)",
+    "tests/test_memory_store.py::test_fts_fallback_when_unavailable (monkeypatched probe failure falls back to LIKE with a warning in metadata)",
+    "tests/test_cli.py::test_memory_search_cli (memory migrate then memory search --json returns hits)",
+    "tests/test_memory_store.py::test_migration_keeps_every_task_id_and_goal_label (an entry with a goal label and several task ids migrates with source_goal from the label and the full source_tasks list; unknown ids never raise)",
+    "tests/test_install.py::test_memory_index_is_ignored (install ignore set and .gitignore cover index.sqlite and its wal/shm files)",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/memory_store.py",
+    "orchestrator/cli.py",
+    "tests/test_memory_store.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/01-memory-store.md",
+    "orchestrator/install.py",
+    ".gitignore",
+    "tests/test_install.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790154021.401459,
+      "pipeline": {
+        "first_ready_at": 1790154021.401417
+      }
+    },
+    {
+      "ts": 1790154021.474786,
+      "pipeline": {
+        "first_ready_at": 1790154021.401417,
+        "spec_review_at": 1790154021.47473,
+        "spec_review_at_lease": 1790154921.47473
+      }
+    },
+    {
+      "ts": 1790154021.482077,
+      "pipeline": {
+        "first_ready_at": 1790154021.401417,
+        "spec_review_at": 1790154021.47473,
+        "spec_review_at_lease": 1790154921.47473,
+        "spec_review_at_done": 1790154021.4815109
+      }
+    },
+    {
+      "ts": 1790154151.898805,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/memory_store.py",
+          "issue": "Spec never specifies how the FTS5 external-content table records_fts stays in sync with the records table. SQLite does not auto-populate an external-content FTS5 index on INSERT/UPDATE/DELETE against the content table \u2014 that requires explicit triggers or manual `INSERT INTO records_fts(...)`/`records_fts('delete', ...)` calls on every write. Without this named in the spec, migrate()/add() can easily insert into records while records_fts stays empty, so test_search_fts_and_filters passes only by accident of implementation order, or fails silently (search returns nothing for real data) in a way the 'never crash' requirement won't catch.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "docs/hermes-hardening/01-memory-store.md",
+          "issue": "architecture.md is listed alongside decisions.md/gotchas.md/model-notes.md as a file to run the generic 'dated block' parser against, but the real file (.orchestrator/memory/architecture.md) has exactly one date, in a single top header ('repo map 0f550d7 2026-09-22'), followed by ~90 undated '## modulename.py \u2014 description' bullets with bare basenames (no orchestrator/ or tests/ prefix). The described file-matching regex (paths like orchestrator/*.py) won't match those bare names, so components/files will end up empty for every architecture-derived record, and the dated-block heuristic will either produce one giant record swallowing all modules or zero records \u2014 both contradict the intent implied by kind=architecture existing in the enum and by 'measured record counts after migrating this repository's real memory files' being a required doc section.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/memory_store.py",
+          "issue": "gotchas.md contains a real dated entry (2026-09-18, 'kgpt hosts and how to reach them') whose 'type:' line is 'reference', not 'decision'/'gotcha'/'model'/etc. The Record.kind enum in the spec (decision, gotcha, architecture, model_note, retrospective, strategy, skill_outcome) has no 'reference' value. The spec doesn't say whether kind is fixed per source file (gotchas.md always -> kind=gotcha) or parsed from the 'type:' line; if the latter, this real entry breaks the enum contract during migration against real data.",
+          "severity": "medium",
+          "line": 92
+        },
+        {
+          "path": "orchestrator/memory_store.py",
+          "issue": "Spec fold-in says never raise when a task id is unknown to the bus. bus.get(tid) at orchestrator/bus.py:89 raises KeyError (not None-return) when TASKS/T-dddd.json is missing. Worth naming that exact exception in the spec so the migration code catches KeyError specifically rather than a broad except that could mask real bugs.",
+          "severity": "low",
+          "line": 89
+        }
+      ]
+    },
+    {
+      "ts": 1790154173.8576372,
+      "pipeline": {
+        "first_ready_at": 1790154021.401417,
+        "spec_review_at": 1790154021.47473,
+        "spec_review_at_lease": 1790154921.47473,
+        "spec_review_at_done": 1790154021.4815109,
+        "spec_review_held_at": 1790154173.857588
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790154174.8776262,
+      "pipeline": {
+        "first_ready_at": 1790154021.401417,
+        "spec_review_at": 1790154021.47473,
+        "spec_review_at_lease": 1790154921.47473,
+        "spec_review_at_done": 1790154021.4815109,
+        "spec_review_held_at": 1790154173.857588,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790154175.329654,
+      "pipeline": {
+        "first_ready_at": 1790154021.401417,
+        "spec_review_at": 1790154021.47473,
+        "spec_review_at_lease": 1790154921.47473,
+        "spec_review_at_done": 1790154021.4815109,
+        "spec_review_held_at": 1790154173.857588,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790154173.8576372": true
+        }
+      }
+    },
+    {
+      "ts": 1790154299.942492,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 13:40: spec review T-1006 request_changes folded into T-1036"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790154021.401417,
+    "spec_review_at": 1790154021.47473,
+    "spec_review_at_lease": 1790154921.47473,
+    "spec_review_at_done": 1790154021.4815109,
+    "spec_review_held_at": 1790154173.857588,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790154173.8576372": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/memory_store.py",
+      "issue": "Spec never specifies how the FTS5 external-content table records_fts stays in sync with the records table. SQLite does not auto-populate an external-content FTS5 index on INSERT/UPDATE/DELETE against the content table \u2014 that requires explicit triggers or manual `INSERT INTO records_fts(...)`/`records_fts('delete', ...)` calls on every write. Without this named in the spec, migrate()/add() can easily insert into records while records_fts stays empty, so test_search_fts_and_filters passes only by accident of implementation order, or fails silently (search returns nothing for real data) in a way the 'never crash' requirement won't catch.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "docs/hermes-hardening/01-memory-store.md",
+      "issue": "architecture.md is listed alongside decisions.md/gotchas.md/model-notes.md as a file to run the generic 'dated block' parser against, but the real file (.orchestrator/memory/architecture.md) has exactly one date, in a single top header ('repo map 0f550d7 2026-09-22'), followed by ~90 undated '## modulename.py \u2014 description' bullets with bare basenames (no orchestrator/ or tests/ prefix). The described file-matching regex (paths like orchestrator/*.py) won't match those bare names, so components/files will end up empty for every architecture-derived record, and the dated-block heuristic will either produce one giant record swallowing all modules or zero records \u2014 both contradict the intent implied by kind=architecture existing in the enum and by 'measured record counts after migrating this repository's real memory files' being a required doc section.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/memory_store.py",
+      "issue": "gotchas.md contains a real dated entry (2026-09-18, 'kgpt hosts and how to reach them') whose 'type:' line is 'reference', not 'decision'/'gotcha'/'model'/etc. The Record.kind enum in the spec (decision, gotcha, architecture, model_note, retrospective, strategy, skill_outcome) has no 'reference' value. The spec doesn't say whether kind is fixed per source file (gotchas.md always -> kind=gotcha) or parsed from the 'type:' line; if the latter, this real entry breaks the enum contract during migration against real data.",
+      "severity": "medium",
+      "line": 92
+    },
+    {
+      "path": "orchestrator/memory_store.py",
+      "issue": "Spec fold-in says never raise when a task id is unknown to the bus. bus.get(tid) at orchestrator/bus.py:89 raises KeyError (not None-return) when TASKS/T-dddd.json is missing. Worth naming that exact exception in the spec so the migration code catches KeyError specifically rather than a broad except that could mask real bugs.",
+      "severity": "low",
+      "line": 89
+    }
+  ],
+  "hold_reason": null,
+  "reason": "Planner 13:40: spec review T-1006 request_changes folded into T-1036"
+}

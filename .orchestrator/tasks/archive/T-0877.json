@@ -1,0 +1,166 @@
+{
+  "id": "T-0877",
+  "created_at": 1790108084.8923671,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S2: compact the 12 builtin skills to the P6 structure with declared metadata (triggers, task classes, tools, required context, output contract), Level 0/1/2 renderings, and deterministic candidate selection; behaviour preserved, exposure unchanged",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P6, P8 (steps 1-4 only), P10, P26/P27 declarations (P37 stage 2). Depends on T-0863 (skills_registry: SkillRecord, sync, frontmatter keys roles/task_classes/triggers/tools/requires_context/output/security/repo). Facts: skills/<role>/<name>/SKILL.md, 12 files, bodies 450-3900 bytes; scripts under implement-spec, memory, repo-map, test-gap, trace-callers; references under memory and adversarial-review; tests/test_memory_skill.py and tests/test_hooks.py exercise the memory skill scripts; .claude/skills symlinks stay untouched (Stage 5 changes exposure).\nDo:\n1. Rewrite every SKILL.md body into the P6 structure with exactly these headings in this order: Trigger, Objective, Procedure, Tools, Evidence requirements, Output contract, Stop conditions, Failure/recovery. Keep every script invocation, path, guardrail sentence and output format the skill relies on today (the \"behaviour\" to preserve is: same scripts called with the same arguments, same output contract, same stop/commit rules); drop motivational prose, repeated explanation and generic instructions that the role prompts already carry (the executor lists in the result what was removed per skill). Fill the frontmatter with: roles, task_classes (attribution vocabulary: security, architectural, debugging, mechanical, unfamiliar, or \"*\"), triggers (deterministic keyword list plus optional scope globs, e.g. trace-callers: [\"who calls\", \"callers\", \"readers\", \"what breaks\", \"impact\"], test-gap: [\"coverage\", \"untested\", \"missing tests\"], repo-map: [\"architecture\", \"layout\", \"where is\"], adversarial-review: role-only, implement-spec: role-only), tools (Claude Code tool ids and script:<path>), requires_context (evidence source types from orchestrator/evidence.py SOURCE_TYPES, e.g. trace-callers: [\"source_chunk\", \"graph_finding\"]), output (one line), security (internal), repo (orchestrator or \"*\" for generic ones: trace-callers, test-gap, repo-map, adversarial-review, challenge, classify are generic; the planner skills, implement-spec and compact-memory are orchestrator-specific).\n2. Measurement: docs/skill-intelligence/03-compaction.md table per skill: tokens before (l0/l2 from the registry sync at the parent commit) and after, what was removed, what was kept verbatim. Total l2 reduction must be reported; no minimum is imposed (correctness over size).\n3. skills_registry.render(id, level) \u2192 Level 0: \"- <id> \u2014 <description first sentence>\"; Level 1: Trigger + Objective + Output contract sections; Level 2: the full compact body. `skills_registry.candidates(task, role, cfg=None)` (P8 steps 1-4, deterministic only): active-state skills whose roles match the role, whose task_classes include \"*\" or attribution.task_class(task), and whose triggers match the task title/spec/scope (keyword in title+spec lower-cased, or glob on scope); returns [{\"id\", \"matched\": [triggers], \"level\": 1}] ordered by number of matched triggers then id; role-only skills (no triggers) match on role alone. No Jev, no history (Stage 4/9).\n4. Validation harness for P7 (minimal): tests/test_skills_compaction.py::test_every_skill_has_p6_headings_in_order, ::test_scripts_and_paths_referenced_before_are_referenced_after (compare the set of script paths and skills/ paths between git HEAD~ and the working tree per skill), ::test_frontmatter_declares_required_keys, ::test_l2_tokens_not_higher_than_before (per skill, using the registry), ::test_candidates_select_trace_callers_for_who_calls_task_and_not_for_docs_task, ::test_render_levels_nest (level 1 text is contained in level 2; level 0 is one line). Existing tests/test_memory_skill.py and tests/test_hooks.py must stay green (the memory skill's scripts and record/recall contracts are unchanged).\nConstraints: skills/ content only plus the registry module and tests; do not touch .claude/skills, prompts, spawn.py or AGENTS.md. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.",
+  "inputs": [
+    "T-0867"
+  ],
+  "acceptance": [
+    "tests/test_skills_compaction.py::test_every_skill_has_p6_headings_in_order passes",
+    "tests/test_skills_compaction.py::test_scripts_and_paths_referenced_before_are_referenced_after passes",
+    "tests/test_skills_compaction.py::test_frontmatter_declares_required_keys passes",
+    "tests/test_skills_compaction.py::test_l2_tokens_not_higher_than_before passes",
+    "tests/test_skills_compaction.py::test_candidates_select_trace_callers_for_who_calls_task_and_not_for_docs_task passes",
+    "tests/test_skills_compaction.py::test_render_levels_nest passes",
+    "tests/test_memory_skill.py and tests/test_hooks.py stay green; docs/skill-intelligence/03-compaction.md has the before/after table; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "skills/executor/implement-spec/SKILL.md",
+    "skills/planner/memory/SKILL.md",
+    "skills/planner/orchestrate/SKILL.md",
+    "skills/planner/resume/SKILL.md",
+    "skills/planner/write-spec/SKILL.md",
+    "skills/review/adversarial-review/SKILL.md",
+    "skills/review/challenge/SKILL.md",
+    "skills/scout/repo-map/SKILL.md",
+    "skills/scout/test-gap/SKILL.md",
+    "skills/scout/trace-callers/SKILL.md",
+    "skills/triage/classify/SKILL.md",
+    "skills/triage/compact-memory/SKILL.md",
+    "orchestrator/skills_registry.py",
+    "tests/test_skills_compaction.py",
+    "docs/skill-intelligence/03-compaction.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0877",
+  "codex_thread": null,
+  "result": {
+    "summary": "Verified against the packet's acceptance criteria: ran the full test suite via the same invocation tests-green.sh uses (python -m unittest discover -q tests) \u2014 1123 tests pass, including all six tests/test_skills_compaction.py cases and the pre-existing test_hooks.py/test_memory_skill.py suites. Recomputed the before/after L2 token estimates independently (parent-commit skills vs working tree via skills_registry.sync) and they match docs/skill-intelligence/03-compaction.md exactly (3071\u21921541, -1530, 49.8%). Spot-checked frontmatter against the spec's exact vocabulary: task_classes values are all valid attribution classes, repo scoping matches the generic/orchestrator-specific split named in the spec, requires_context values are all valid orchestrator/evidence.py SOURCE_TYPES, and the three worked trigger-list examples (trace-callers, test-gap, repo-map) match verbatim. All 8 P6 headings appear in the specified order in every changed SKILL.md, and script/path references present before the change (verified via git show HEAD~) still appear after. Scope is respected \u2014 no changes outside skills/, orchestrator/skills_registry.py, tests/, and the new doc. No defects found.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "a5b0963c5497",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790108084.893395,
+      "reviewed_sha": "4f12c1de4364b8f1b2ad5ea3beb971649f5a9bdb"
+    },
+    {
+      "ts": 1790108088.5997179,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0877",
+      "claimed_at": 1790108088.599072
+    },
+    {
+      "ts": 1790108088.602674,
+      "account": "B"
+    },
+    {
+      "ts": 1790108089.481075,
+      "pid": 97222,
+      "account": "B"
+    },
+    {
+      "ts": 1790108414.124476,
+      "status": "done",
+      "result": {
+        "summary": "Verified against the packet's acceptance criteria: ran the full test suite via the same invocation tests-green.sh uses (python -m unittest discover -q tests) \u2014 1123 tests pass, including all six tests/test_skills_compaction.py cases and the pre-existing test_hooks.py/test_memory_skill.py suites. Recomputed the before/after L2 token estimates independently (parent-commit skills vs working tree via skills_registry.sync) and they match docs/skill-intelligence/03-compaction.md exactly (3071\u21921541, -1530, 49.8%). Spot-checked frontmatter against the spec's exact vocabulary: task_classes values are all valid attribution classes, repo scoping matches the generic/orchestrator-specific split named in the spec, requires_context values are all valid orchestrator/evidence.py SOURCE_TYPES, and the three worked trigger-list examples (trace-callers, test-gap, repo-map) match verbatim. All 8 P6 headings appear in the specified order in every changed SKILL.md, and script/path references present before the change (verified via git show HEAD~) still appear after. Scope is respected \u2014 no changes outside skills/, orchestrator/skills_registry.py, tests/, and the new doc. No defects found.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "a5b0963c5497",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790108414.126155,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790108414.1891599,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "4f12c1de4364b8f1b2ad5ea3beb971649f5a9bdb",
+        "packet_version": "a5b0963c5497",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "4f12c1de4364b8f1b2ad5ea3beb971649f5a9bdb",
+      "packet_version": "a5b0963c5497",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "4f12c1de4364b8f1b2ad5ea3beb971649f5a9bdb",
+  "claimed_at": 1790108088.599072,
+  "account": "B",
+  "pid": 97222,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "4f12c1de4364b8f1b2ad5ea3beb971649f5a9bdb",
+    "packet_version": "a5b0963c5497",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "a5b0963c5497",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

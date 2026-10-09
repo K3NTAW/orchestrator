@@ -1,0 +1,304 @@
+{
+  "id": "T-0514",
+  "created_at": 1789946361.592843,
+  "parent": "T-0503",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 3,
+  "title": "Fix: review completion must not null the review task's top-level reviewed_sha (review_facts reads it first; spawn never writes None over it)",
+  "spec": "Goal T-0503 hotfix (defect from P6a1 T-0491, live since PR 14 merged 2026-09-21). Base goal/T-0503. Work only in your worktree, commit only on your own branch with the task id in the message, run the full .claude/hooks/tests-green.sh before reporting; report sha and failures only.\nDefect, verified on the bus: daemon._open_reviews creates a review task and sets its top-level field reviewed_sha = the reviewed head (bus.update(r[\"id\"], reviewed_sha=...)); when the review worker finishes, spawn.run_worker (orchestrator/spawn.py:636) does bus.update(review_id, review_facts=facts, **{k: facts[k] for k in (... \"reviewed_sha\" ...)}) where attribution.review_facts (attribution.py:71) computes reviewed_sha = constraints.get(\"reviewed_sha\") or pipeline.get(\"reviewed_sha\") of the REVIEW task, both absent, so the update writes reviewed_sha = None over the stamp (review T-0511 events: 01:13 reviewed_sha 9a41eb6 set at creation, 01:15 reviewed_sha null at completion). daemon._merge_reviewed_one then filters reviews by r.get(\"reviewed_sha\") == pipeline.reviewed_sha, finds none and never merges the approved task; _open_reviews' existing-filter is affected the same way.\n1. attribution.review_facts: reviewed_sha = review_task.get(\"reviewed_sha\") or constraints.get(\"reviewed_sha\") or pipeline.get(\"reviewed_sha\") (top-level field first); the legacy fallback dict keeps None.\n2. spawn.run_worker review completion: never write a None value over an existing top-level field: build the kwargs from facts, drop keys whose value is None when the task already carries a non-None value (at minimum reviewed_sha), keep review_facts complete.\n3. Tests: tests/test_attribution.py test_review_facts_uses_top_level_reviewed_sha; tests/test_spawn.py test_review_completion_keeps_reviewed_sha (a review task created with reviewed_sha set, mocked claude run returning approve, after run_worker the task's reviewed_sha is unchanged and review_facts.reviewed_sha equals it). Existing tests stay green.",
+  "inputs": [],
+  "acceptance": [
+    "after a review worker completes, the review task's top-level reviewed_sha still equals the value stamped at creation and review_facts.reviewed_sha carries the same value",
+    "attribution.review_facts prefers the review task's top-level reviewed_sha over constraints and pipeline and still returns None-safe facts for legacy reviews",
+    "tests test_review_facts_uses_top_level_reviewed_sha and test_review_completion_keeps_reviewed_sha pass and the full .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/attribution.py",
+    "orchestrator/spawn.py",
+    "tests/test_attribution.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 25,
+    "timeout_s": 1200,
+    "task_class": "debugging",
+    "read_scope": [
+      "orchestrator/daemon.py",
+      "orchestrator/bus.py",
+      ".orchestrator/tasks/T-0511.json"
+    ],
+    "interface_contract": "review task top-level reviewed_sha is owned by daemon._open_reviews and read by daemon._merge_reviewed_one; review completion only adds review_facts and non-None facts"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0514",
+  "codex_thread": "01a0c11e-67aa-7510-a05e-7c3f2407ebaa",
+  "result": {
+    "summary": "Summary: Preserved top-level `reviewed_sha` during review completion and added regression coverage for attribution precedence and worker completion.\n\nFiles changed: 4 files, 29 insertions, 3 deletions.\n\nGate: `.claude/hooks/tests-green.sh .` passed \u2014 756 tests.\n\nCommit: `4b325ecd22e83293b0d4c6cb99715f1cadaa8a53`\n\nFailures-only output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0c11e-67aa-7510-a05e-7c3f2407ebaa",
+    "usage": {
+      "input_tokens": 1238221,
+      "cached_input_tokens": 1200768,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 3742,
+      "reasoning_output_tokens": 427,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789946383.297548,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514
+      }
+    },
+    {
+      "ts": 1789946384.731026,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984
+      }
+    },
+    {
+      "ts": 1789946390.1838899,
+      "packet_meta": {
+        "chars": 4942,
+        "est_tokens": 1235,
+        "hash": "2c1c4e7e3a03",
+        "version": "2c1c4e7e3a03",
+        "base": "8fd67c8dd0ad",
+        "sources": "pool.toml@58c877fd1717 gotchas@4da668bb00f1 memory@notes over cap by 142 chars: acceptance kept whole",
+        "policy_version": "58c877fd1717",
+        "gotchas": "4da668bb00f1"
+      }
+    },
+    {
+      "ts": 1789946390.1849148,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0514",
+      "claimed_at": 1789946390.18481
+    },
+    {
+      "ts": 1789946390.185743,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789946634.487068,
+      "codex_thread": "01a0c11e-67aa-7510-a05e-7c3f2407ebaa",
+      "codex_thread_head": "4b325ecd22e83293b0d4c6cb99715f1cadaa8a53"
+    },
+    {
+      "ts": 1789946634.491007,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+        }
+      }
+    },
+    {
+      "ts": 1789946634.493386,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Preserved top-level `reviewed_sha` during review completion and added regression coverage for attribution precedence and worker completion.\n\nFiles changed: 4 files, 29 insertions, 3 deletions.\n\nGate: `.claude/hooks/tests-green.sh .` passed \u2014 756 tests.\n\nCommit: `4b325ecd22e83293b0d4c6cb99715f1cadaa8a53`\n\nFailures-only output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0c11e-67aa-7510-a05e-7c3f2407ebaa",
+        "usage": {
+          "input_tokens": 1238221,
+          "cached_input_tokens": 1200768,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 3742,
+          "reasoning_output_tokens": 427,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789946661.63954,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789946747.357745,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946747.357619,
+        "gated_at_lease": 1789947647.357619,
+        "first_green_at": 1789946747.3569632,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789946747.528264,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946747.357619,
+        "gated_at_lease": 1789947647.357619,
+        "first_green_at": 1789946747.3569632,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "4b325ecd22e83293b0d4c6cb99715f1cadaa8a53"
+      }
+    },
+    {
+      "ts": 1789946747.533289,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946747.357619,
+        "gated_at_lease": 1789947647.357619,
+        "first_green_at": 1789946747.3569632,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "4b325ecd22e83293b0d4c6cb99715f1cadaa8a53",
+        "gated_at_done": 1789946747.5332139
+      }
+    },
+    {
+      "ts": 1789946806.478775,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789946872.24025,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946747.357619,
+        "gated_at_lease": 1789947647.357619,
+        "first_green_at": 1789946747.3569632,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "81f3763d3a412471adac576f4952ee9c79926eda",
+        "gated_at_done": 1789946747.5332139
+      },
+      "status": "done"
+    },
+    {
+      "ts": 1789946872.2808561,
+      "pipeline": {
+        "dispatched_at": 1789946383.297514,
+        "dispatched_at_lease": 1789947283.297514,
+        "dispatched_at_done": 1789946384.730984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789946747.357619,
+        "gated_at_lease": 1789947647.357619,
+        "first_green_at": 1789946747.3569632,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "reviewed_sha": "81f3763d3a412471adac576f4952ee9c79926eda",
+        "gated_at_done": 1789946747.5332139
+      }
+    },
+    {
+      "ts": 1789946936.2527711,
+      "status": "done",
+      "merged_into": "goal/T-0503",
+      "sha": "81f3763d3a412471adac576f4952ee9c79926eda"
+    },
+    {
+      "ts": 1789946965.295594,
+      "review_verdict": "approve"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789946383.297514,
+    "dispatched_at_lease": 1789947283.297514,
+    "dispatched_at_done": 1789946384.730984,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "af8b459f9ef6ef39792477296e621ec1e3f2b81f"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789946747.357619,
+    "gated_at_lease": 1789947647.357619,
+    "first_green_at": 1789946747.3569632,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "reviewed_sha": "81f3763d3a412471adac576f4952ee9c79926eda",
+    "gated_at_done": 1789946747.5332139
+  },
+  "packet_meta": {
+    "chars": 4942,
+    "est_tokens": 1235,
+    "hash": "2c1c4e7e3a03",
+    "version": "2c1c4e7e3a03",
+    "base": "8fd67c8dd0ad",
+    "sources": "pool.toml@58c877fd1717 gotchas@4da668bb00f1 memory@notes over cap by 142 chars: acceptance kept whole",
+    "policy_version": "58c877fd1717",
+    "gotchas": "4da668bb00f1"
+  },
+  "claimed_at": 1789946390.18481,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "4b325ecd22e83293b0d4c6cb99715f1cadaa8a53",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0503",
+  "sha": "81f3763d3a412471adac576f4952ee9c79926eda"
+}

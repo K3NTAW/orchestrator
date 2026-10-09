@@ -11,7 +11,7 @@ from pathlib import Path
 from subprocess import Popen  # distinct from subprocess.run: tests fake this call without disturbing
                                # subprocess.run itself, which internally resolves Popen dynamically too
 
-from . import env_policy
+from . import claude_cli, env_policy
 from .install import install
 from .spawn import trust_workspace, resolve_secrets
 
@@ -263,6 +263,58 @@ def _read_all_tasks(repo_path):
     return out
 
 
+LIVE_GOAL_DONE = ("done", "superseded")
+
+
+def _live_goal_ids(repo_path):
+    """GOAL tasks (top-level triage or constraints.goal) in the target's bus that are not done/superseded."""
+    return [t["id"] for t in _read_all_tasks(repo_path)
+            if not t.get("parent") and (t.get("role") == "triage" or (t.get("constraints") or {}).get("goal"))
+            and t.get("status") not in LIVE_GOAL_DONE]
+
+
+def plan_file(repo_path, goal_id):
+    """The goal's own plan file, so two headless Planners in one repo never overwrite one plan.md."""
+    return Path(repo_path) / ".orchestrator" / f"plan-{goal_id}.md"
+
+
+LIVE_GOALS_START = "<!-- live-goals -->"
+LIVE_GOALS_END = "<!-- /live-goals -->"
+
+
+def _write_plan_files(repo_path, goal_id, goal_text, live_goal_ids):
+    """Create the goal's own plan file and, when more than one goal is live, keep a pointer block at the top of
+    plan.md naming each live goal's plan file. A single live goal leaves plan.md untouched."""
+    own = plan_file(repo_path, goal_id)
+    if not own.exists():
+        own.parent.mkdir(parents=True, exist_ok=True)
+        own.write_text(f"# plan-{goal_id}.md: Planner checkpoint for goal {goal_id}\n\n## Now\n"
+                       f"- goal: {goal_text[:500]}\n- next step: plan\n")
+    if not live_goal_ids:
+        return
+    shared = Path(repo_path) / ".orchestrator" / "plan.md"
+    text = shared.read_text() if shared.exists() else ""
+    if LIVE_GOALS_START in text and LIVE_GOALS_END in text:
+        head, rest = text.split(LIVE_GOALS_START, 1)
+        text = head + rest.split(LIVE_GOALS_END, 1)[1].lstrip("\n")
+    lines = [f"- {g}: .orchestrator/plan-{g}.md" for g in [*live_goal_ids, goal_id]]
+    block = "\n".join([LIVE_GOALS_START, "## Live goals (each Planner reads and writes its own plan file)",
+                        *lines, LIVE_GOALS_END, ""])
+    shared.write_text(block + text)
+
+
+def _record_goal_branch(repo_path, goal_id, live_goal_ids):
+    """Record goal/<id> without switching the repo root's checkout. With another goal live the root stays on its
+    branch (task merges target goal/<parent> through merge.py regardless of what is checked out); the new
+    branch is cut from main when it is missing so merges have a target. A single live goal keeps the existing
+    path: nothing is checked out or created here."""
+    branch = f"goal/{goal_id}"
+    if live_goal_ids and _git(repo_path, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode:
+        base = "main" if not _git(repo_path, "rev-parse", "--verify", "-q", "refs/heads/main").returncode else "HEAD"
+        _git(repo_path, "branch", branch, base)
+    return branch
+
+
 def _preview_cfg(pool_toml):
     """What [claude_accounts]/[models]/[limits] would look like once install() runs: the target's own pool.toml
     when it already has one (install() keeps it, "kept"), otherwise this repo's default pool.toml (install()
@@ -347,9 +399,9 @@ def launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extr
                                    task_id=task_id or "planner-" + uuid.uuid4().hex, root=repo_path)
 
     system_prompt = (repo_path / ".orchestrator" / "prompts" / "planner.md").read_text()
-    argv = ["claude", "-p", prompt, "--model", cfg["models"]["planner"] if model is None else model, "--output-format", "json",
+    argv = claude_cli.command("-p", prompt, "--model", cfg["models"]["planner"] if model is None else model, "--output-format", "json",
             "--max-budget-usd", str(max_budget_usd), "--mcp-config", ".mcp.planner.json", "--strict-mcp-config",
-            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions"]
+            "--append-system-prompt", system_prompt, "--dangerously-skip-permissions")
 
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,6 +474,9 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
             d["install"] = report
         return d
 
+    live_goal_ids = _live_goal_ids(repo_path)
+    checkout_branch = _git(repo_path, "symbolic-ref", "--short", "HEAD").stdout.strip()
+
     goal_id, err = _create_goal_task(repo_path, goal_text)
     if err:
         _release_running_slot(repo_path, reservation_id)
@@ -429,8 +484,17 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
             err["install"] = report
         return err
 
+    live_goal_ids = [g for g in live_goal_ids if g != goal_id]
+    branch = _record_goal_branch(repo_path, goal_id, live_goal_ids)
+    _write_plan_files(repo_path, goal_id, goal_text, live_goal_ids)
+    own_plan = f".orchestrator/plan-{goal_id}.md"
     prompt = ("Skill(orchestrate) with the goal: " + goal_text + "\nThe GOAL task is " + goal_id +
-              "; use it as the parent of every task you create and post the PR url as its result before you finish.")
+              "; use it as the parent of every task you create and post the PR url as its result before you finish."
+              "\nYour plan file is " + own_plan + "; read and write it instead of .orchestrator/plan.md.")
+    if live_goal_ids:
+        prompt += ("\nOther goals are live in this repo (" + ", ".join(live_goal_ids) + "): never switch the repo "
+                   "root's branch (it stays on " + (checkout_branch or "its branch") + "); task merges target "
+                   + branch + " through orchestrator.merge.")
     runs_dir = repo_path / ".orchestrator" / "runs"
     log_path = runs_dir / f"planner-{goal_id}.log"
     try:
@@ -446,10 +510,10 @@ def start(repo_path, goal_text, account_id="A", reinstall=False, requester=None)
 
     _finalize_running_slot(repo_path, reservation_id, {
         "goal_id": goal_id, "text": goal_text, "pid": launched["pid"], "pid_start": launched["pid_start"],
-        "account": account_id, "commit": commit, "status": "running"})
+        "account": account_id, "commit": commit, "status": "running", "branch": branch, "plan_file": own_plan})
 
     return {"launched": True, "goal_id": goal_id, "pid": launched["pid"], "log": launched["log"], "commit": commit,
-            "install": report,
+            "install": report, "branch": branch, "plan_file": own_plan, "checkout": checkout_branch,
             "note": "goal-Planner spend is not counted against any account budget until C-O7a tallies "
                      "transcripts; the daemon may schedule other work on this account meanwhile (accepted gap)"}
 

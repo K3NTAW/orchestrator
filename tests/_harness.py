@@ -7,6 +7,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 TMP = Path(tempfile.mkdtemp(prefix="orch-"))
 os.environ["ORCH_ROOT"] = str(TMP)
+# The machine registry, leases and watchdog state go to a temp dir, never the real ~/.orchestrator-machine.
+MACHINE = Path(tempfile.mkdtemp(prefix="orch-machine-"))
+os.environ["ORCH_MACHINE_DIR"] = str(MACHINE)
 (TMP / ".orchestrator").mkdir()
 for f in ("pool.toml",):
     config = (REPO / ".orchestrator" / f).read_text()
@@ -19,6 +22,9 @@ for f in ("pool.toml",):
             continue
         if section.splitlines()[:1] == ["[planner]"]:
             section = re.sub(r"(?m)^([ \t]*autonomous[ \t]*=[ \t]*).*$", r"\1false", section)
+        if section.splitlines()[:1] == ["[ship]"]:
+            # Unattended merges to main are an operator setting; ship tests pass their own cfg.
+            section = re.sub(r"(?m)^([ \t]*enabled[ \t]*=[ \t]*).*$", r"\1false", section)
         if section.startswith("[[claude_accounts]]") and re.search(r'^id\s*=\s*"B"\s*$', section, re.M):
             # Selection fixtures assume A alone plans; live B planner affinity must not leak into tests.
             section = re.sub(r'(?m)^(role_affinity\s*=\s*\[)"planner",\s*', r'\1', section)

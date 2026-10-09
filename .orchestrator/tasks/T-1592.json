@@ -1,0 +1,1199 @@
+{
+  "id": "T-1592",
+  "created_at": 1791015070.5302908,
+  "parent": "T-1590",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 4,
+  "title": "LS1: compaction brief for the Planner session and hook text that says compact in place, not restart",
+  "spec": "Why: the Planner session should compact in place (Claude Code auto-compact or /compact, also from Remote Control) instead of restarting with `f orch`. After compaction a SessionStart hook with matcher \"compact\" runs and its stdout is injected into context; this task adds what that hook prints and changes the per-prompt hook text.\n\n1. orchestrator/planner_context.py: add `compact_brief(root, limit=4000) -> str`. Read `<root>/.orchestrator/plan.md`. If it has a `## Now` section (heading line exactly starting `## Now`), take that section up to the next line starting `## ` (or EOF); otherwise take the file from the start. Cap that text at `limit` chars (cut at the last newline before the cap and append a line `[cut; read .orchestrator/plan.md]`). Return: line 1 `Session compacted; continue in place. Planner mode: goals go through Skill(orchestrate); never edit source; see CLAUDE.md.`, then the text, then `Full state: .orchestrator/plan.md; history: .orchestrator/plan-log.md (do not read by default).` Missing or unreadable plan.md returns line 1 plus `plan.md missing; run the resume skill.`.\n2. hook_message (planner_context.py:92): the over-threshold text becomes `Planner context is N tokens (threshold T); write the checkpoint: <command>; then keep working, the session compacts in place (auto-compact or /compact).` The after-handover text (line 111) becomes `handover written HH:MM; the session compacts in place (auto-compact or /compact), no restart needed`. Grace, regrow and session-id logic unchanged.\n3. Plan size nag: when `<root>/.orchestrator/plan.md` exceeds `[planner].plan_max_chars` (default 12000; 0 disables), hook_message also returns the line `plan.md is N chars (max M): move history to .orchestrator/plan-log.md and keep ## Now current.` Joined with a newline when both apply; returned alone when only the size applies (independent of the token threshold).\n4. orchestrator/cli.py:192 and :625: `planner-context --brief` prints compact_brief(ROOT).\n5. New .claude/hooks/planner-compact.sh (executable), modelled on .claude/hooks/planner-prompt.sh: reads stdin JSON, exits 0 silently for task workers (`task_id` non-empty) and when ORCH_PLANNER_MODE=0, otherwise runs `uv run orchestrator planner-context --brief` from orch_root under a 5 s perl alarm, prints its stdout, always exits 0 (fail open). Registration in .claude/settings.json is done by the human; do not touch settings.json.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_context.py::PlannerContext::test_compact_brief_now_section passes: a plan.md with '## Now' then '## Other' yields line 1, only the Now section, and the history pointer line",
+    "tests/test_planner_context.py::PlannerContext::test_compact_brief_fallback_and_cap passes: no Now section uses the file start; text longer than limit is cut at a newline with the '[cut; read .orchestrator/plan.md]' line; missing plan.md yields the missing line",
+    "tests/test_planner_context.py::PlannerContext::test_hook_message_compact_in_place passes: over-threshold and after-handover messages contain 'compacts in place' and neither contains 'f orch'",
+    "tests/test_planner_context.py::PlannerContext::test_plan_size_nag passes: plan.md over plan_max_chars returns the nag line below the token threshold; plan_max_chars = 0 disables it",
+    "tests/test_hooks.py::Hooks::test_planner_compact_hook passes: the hook prints the brief for a Planner session, prints nothing for a task worker, and exits 0 when the command fails"
+  ],
+  "scope": [
+    "orchestrator/planner_context.py",
+    "orchestrator/cli.py",
+    ".claude/hooks/planner-compact.sh",
+    "tests/test_planner_context.py",
+    "tests/test_hooks.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "LS1",
+    "goal_branch": "goal/T-1590",
+    "interface_contract": "planner_context.compact_brief(root, limit=4000) -> str; CLI `orchestrator planner-context --brief`; pool.toml [planner].plan_max_chars (int, default 12000, 0 disables); plan.md convention: a '## Now' section holds current state"
+  },
+  "status": "superseded",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1592",
+  "codex_thread": "01a100d5-e57d-7502-8f7c-ecd975521378",
+  "result": {
+    "summary": "Summary: Implemented in-place Planner compaction brief, plan-size nag, CLI `--brief`, and fail-open compact hook. Committed as `3b26f12`.\n\nFiles changed:\n\n- `orchestrator/planner_context.py`\n- `orchestrator/cli.py`\n- `.claude/hooks/planner-compact.sh`\n\nFailures-only test output:\n\n```text\nAcceptance test methods are absent from the checked-in test files; hook test collection also reports missing test_planner_compact_hook.\n```\n\nWorktree is clean.",
+    "executed_by": "codex:luna",
+    "thread": "01a100d5-e57d-7502-8f7c-ecd975521378",
+    "usage": {
+      "input_tokens": 334599,
+      "cached_input_tokens": 301312,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 5536,
+      "reasoning_output_tokens": 2147,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1791015130.757046,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929
+      }
+    },
+    {
+      "ts": 1791015130.759773,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723
+      }
+    },
+    {
+      "ts": 1791015130.760863,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723
+      }
+    },
+    {
+      "ts": 1791015134.9974852,
+      "packet_meta": {
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 6839,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1791015134.9989278,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873
+      }
+    },
+    {
+      "ts": 1791015373.899488,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791015373.899157
+        }
+      }
+    },
+    {
+      "ts": 1791015378.093119,
+      "packet_meta": {
+        "chars": 5960,
+        "est_tokens": 1490,
+        "presented_tokens": 1490,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "2798f7407922de2edc6b239c2511707bbd31e91d40a8b1140f447639bf400c09"
+          },
+          "objective": {
+            "chars": 2548,
+            "est_tokens": 637,
+            "sha256": "10df6b0daef8c9351e1707c4935c73e7e79d987c3f5f37f7a2574c9d16cdeca5"
+          },
+          "acceptance": {
+            "chars": 1029,
+            "est_tokens": 257,
+            "sha256": "5f4faae2ac7919edd4cce43560451aa0c1a7430a797e3a72780e95fe107e31ef"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "b529d6050d5b19c5a4ccdfea891aa2fc5fe907c635feb46efcb94ade3c72d30f"
+          },
+          "write_scope": {
+            "chars": 160,
+            "est_tokens": 40,
+            "sha256": "3299d90e9b1bcdc8b3fc62b1db5e552288fc2370a9aed4332ddfbd367572c3cd"
+          },
+          "read_scope": {
+            "chars": 1357,
+            "est_tokens": 339,
+            "sha256": "dac1299751d9c5714a8383d2adb9dd8456d8cd78ed50ba9f42ae6f55ace18112"
+          },
+          "constraints": {
+            "chars": 426,
+            "est_tokens": 106,
+            "sha256": "ba1383d32346de0de7c60524172d847c20180607abe112da2a2a819f84f76039"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "98edd0417270",
+        "version": "98edd0417270",
+        "candidate_known": true,
+        "base": "408738b4f46e",
+        "sources": "pool.toml@e9b20feac56f gotchas@79cf459a2f7e memory@notes over cap by 1160 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "79cf459a2f7e",
+        "candidate_tokens": 3320,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 12478,
+        "routed_reduction_ratio": 0.9423047877964054,
+        "routed_hidden": 9,
+        "routed_ambiguous": 17,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "862a2beb56a4",
+          "f1e85acf457e",
+          "a3ae1450bdd9",
+          "6b89faa1cc01",
+          "aa6b130c2699",
+          "0f886e89c7ae",
+          "b3c93e9336aa",
+          "7b56f81c7e05",
+          "6e68d9ba6947",
+          "0b12f9fc7eb9",
+          "3890a2f8e70d",
+          "65cb54257cf7",
+          "504365aa02ad",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "622de2bd3ec8",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "e4b388cad1ac",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "0fcd075d9f57",
+          "d39ac091b005",
+          "d0b9e72fe363",
+          "7657bd5d45a9",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "df7350a0e379",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "5f989024a81a",
+          "3dc73d5656ac",
+          "6509266fa0b3",
+          "58b19a4ccdef",
+          "e2600af47fdd",
+          "6c18a4020015",
+          "6859c7817a42",
+          "c62f8019f1a8",
+          "3a54e2d04fce",
+          "36dbb09d8d94",
+          "5226ef749497",
+          "f3e3080e7dd9",
+          "c2ac512bbb9a",
+          "3e1cd1416f4e",
+          "66167a9d370a",
+          "9d73d95dc500",
+          "33ad46b15f23",
+          "50a434910997",
+          "c08f907df340",
+          "715cca912499",
+          "3c14a729f861",
+          "c847b6641abc",
+          "511cdc934f78",
+          "037899c85d98",
+          "183a4dab1913",
+          "2fc393ffc491",
+          "f0cbdd88ea9a",
+          "4293de227e2a",
+          "eac619ac54a7",
+          "6d8b4f31e471",
+          "751626bc19a9",
+          "875f253e613d",
+          "25bb3c70627f",
+          "f2966ffbf040",
+          "e325ae44fe23",
+          "8f938ad31ca7",
+          "0a4a690acab6",
+          "4af89d373a3c",
+          "bb8fee2c5eb2",
+          "e1f55ae2b248",
+          "474e85b1526f",
+          "b41ee295e49a",
+          "cb75a623b571",
+          "86aa301e20ad",
+          "5a8679975caa"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 6839,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 410,
+        "instruction_tokens_modular": 410,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1791015378.0993102,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1592",
+      "claimed_at": 1791015378.097785
+    },
+    {
+      "ts": 1791015378.10658,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1791015452.644876,
+      "codex_thread": "01a100d5-e57d-7502-8f7c-ecd975521378",
+      "codex_thread_head": "3b26f12a7f0b4dea10bf36c18e4989ba253f04f1"
+    },
+    {
+      "ts": 1791015452.6640372,
+      "packet_meta": {
+        "chars": 5960,
+        "est_tokens": 1490,
+        "presented_tokens": 1490,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "2798f7407922de2edc6b239c2511707bbd31e91d40a8b1140f447639bf400c09"
+          },
+          "objective": {
+            "chars": 2548,
+            "est_tokens": 637,
+            "sha256": "10df6b0daef8c9351e1707c4935c73e7e79d987c3f5f37f7a2574c9d16cdeca5"
+          },
+          "acceptance": {
+            "chars": 1029,
+            "est_tokens": 257,
+            "sha256": "5f4faae2ac7919edd4cce43560451aa0c1a7430a797e3a72780e95fe107e31ef"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "b529d6050d5b19c5a4ccdfea891aa2fc5fe907c635feb46efcb94ade3c72d30f"
+          },
+          "write_scope": {
+            "chars": 160,
+            "est_tokens": 40,
+            "sha256": "3299d90e9b1bcdc8b3fc62b1db5e552288fc2370a9aed4332ddfbd367572c3cd"
+          },
+          "read_scope": {
+            "chars": 1357,
+            "est_tokens": 339,
+            "sha256": "dac1299751d9c5714a8383d2adb9dd8456d8cd78ed50ba9f42ae6f55ace18112"
+          },
+          "constraints": {
+            "chars": 426,
+            "est_tokens": 106,
+            "sha256": "ba1383d32346de0de7c60524172d847c20180607abe112da2a2a819f84f76039"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "98edd0417270",
+        "version": "98edd0417270",
+        "candidate_known": true,
+        "base": "408738b4f46e",
+        "sources": "pool.toml@e9b20feac56f gotchas@79cf459a2f7e memory@notes over cap by 1160 chars: acceptance kept whole routed=shadow",
+        "policy_version": "e9b20feac56f",
+        "gotchas": "79cf459a2f7e",
+        "candidate_tokens": 3320,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 12478,
+        "routed_reduction_ratio": 0.9423047877964054,
+        "routed_hidden": 9,
+        "routed_ambiguous": 17,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "862a2beb56a4",
+          "f1e85acf457e",
+          "a3ae1450bdd9",
+          "6b89faa1cc01",
+          "aa6b130c2699",
+          "0f886e89c7ae",
+          "b3c93e9336aa",
+          "7b56f81c7e05",
+          "6e68d9ba6947",
+          "0b12f9fc7eb9",
+          "3890a2f8e70d",
+          "65cb54257cf7",
+          "504365aa02ad",
+          "a9e3c482cf6d",
+          "36fba3c5b5ac",
+          "65c4d2b5db00",
+          "2380174927fc",
+          "ab047a2d7f21",
+          "df10911c0fd4",
+          "270a093d49c3",
+          "9d078ea9fe66",
+          "0768ddd89e7e",
+          "622de2bd3ec8",
+          "2b71081a619f",
+          "e374e3dd1e88",
+          "e4b388cad1ac",
+          "6b0c3088acb2",
+          "b839fab17283",
+          "e42e3e70122c",
+          "a595cbbe1665",
+          "1c510a428e02",
+          "48de25429ecb",
+          "d500754708e5",
+          "0fcd075d9f57",
+          "d39ac091b005",
+          "d0b9e72fe363",
+          "7657bd5d45a9",
+          "00db509188f0",
+          "041199286363",
+          "c4bd4333eab1",
+          "7566baf004f8",
+          "4180c7586cb1",
+          "05df0bc9ef62",
+          "df7350a0e379",
+          "647c5393915d",
+          "63602ead1a37",
+          "e91c30e2df13",
+          "6b6a2d72145e",
+          "cf6515afcb5a",
+          "0f1d68687edd",
+          "3ec2adada116",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "5f989024a81a",
+          "3dc73d5656ac",
+          "6509266fa0b3",
+          "58b19a4ccdef",
+          "e2600af47fdd",
+          "6c18a4020015",
+          "6859c7817a42",
+          "c62f8019f1a8",
+          "3a54e2d04fce",
+          "36dbb09d8d94",
+          "5226ef749497",
+          "f3e3080e7dd9",
+          "c2ac512bbb9a",
+          "3e1cd1416f4e",
+          "66167a9d370a",
+          "9d73d95dc500",
+          "33ad46b15f23",
+          "50a434910997",
+          "c08f907df340",
+          "715cca912499",
+          "3c14a729f861",
+          "c847b6641abc",
+          "511cdc934f78",
+          "037899c85d98",
+          "183a4dab1913",
+          "2fc393ffc491",
+          "f0cbdd88ea9a",
+          "4293de227e2a",
+          "eac619ac54a7",
+          "6d8b4f31e471",
+          "751626bc19a9",
+          "875f253e613d",
+          "25bb3c70627f",
+          "f2966ffbf040",
+          "e325ae44fe23",
+          "8f938ad31ca7",
+          "0a4a690acab6",
+          "4af89d373a3c",
+          "bb8fee2c5eb2",
+          "e1f55ae2b248",
+          "474e85b1526f",
+          "b41ee295e49a",
+          "cb75a623b571",
+          "86aa301e20ad",
+          "5a8679975caa"
+        ],
+        "prefix_sha": "47d8a2fdfe08",
+        "prefix_chars": 764,
+        "suffix_chars": 6839,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 410,
+        "instruction_tokens_modular": 410,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791015373.899157
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1791015455.091378,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791015373.899157
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "cb5443d2803494c74e2315d75e264cd9f656db2f",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1791015455.102817,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented in-place Planner compaction brief, plan-size nag, CLI `--brief`, and fail-open compact hook. Committed as `3b26f12`.\n\nFiles changed:\n\n- `orchestrator/planner_context.py`\n- `orchestrator/cli.py`\n- `.claude/hooks/planner-compact.sh`\n\nFailures-only test output:\n\n```text\nAcceptance test methods are absent from the checked-in test files; hook test collection also reports missing test_planner_compact_hook.\n```\n\nWorktree is clean.",
+        "executed_by": "codex:luna",
+        "thread": "01a100d5-e57d-7502-8f7c-ecd975521378",
+        "usage": {
+          "input_tokens": 334599,
+          "cached_input_tokens": 301312,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 5536,
+          "reasoning_output_tokens": 2147,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1791015631.133051,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791015373.899157
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "cb5443d2803494c74e2315d75e264cd9f656db2f",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1791015631.326798,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791015373.899157
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "cb5443d2803494c74e2315d75e264cd9f656db2f",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791015631.3266182,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_hooks.py::Hooks (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_hooks.py",
+            "Hooks"
+          ]
+        ]
+      }
+    },
+    {
+      "ts": 1791015641.829657,
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+          "FAILED tests/test_hooks.py::Hooks (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_planner_context.py",
+            "PlannerContext"
+          ],
+          [
+            "tests/test_hooks.py",
+            "Hooks"
+          ]
+        ],
+        "flaky_runs": [
+          {
+            "ids": [
+              "tests/test_planner_context.py::PlannerContext",
+              "tests/test_planner_context.py::PlannerContext",
+              "tests/test_planner_context.py::PlannerContext",
+              "tests/test_planner_context.py::PlannerContext",
+              "tests/test_hooks.py::Hooks"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEEE......\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 10 tests in 2.192s\n\nFAILED (errors=4)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1791015641.831604,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791015373.899157
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "cb5443d2803494c74e2315d75e264cd9f656db2f",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791015631.3266182,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1791015643.496293,
+      "pipeline": {
+        "first_ready_at": 1791015130.756929,
+        "dispatched_at": 1791015130.759723,
+        "dispatched_at_lease": 1791016030.759723,
+        "dispatched_at_done": 1791015134.998873,
+        "handoff": {
+          "baseline": "luna",
+          "selected": "luna",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1791015373.899157
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "luna",
+          "hypothetical": "luna",
+          "key": "cb5443d2803494c74e2315d75e264cd9f656db2f",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0,
+            "claude:sonnet": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1791015631.3266182,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_skipped": {
+          "1791015631.326798": true
+        }
+      }
+    },
+    {
+      "ts": 1791015907.823837,
+      "codex_thread": "01a100d5-e57d-7502-8f7c-ecd975521378",
+      "codex_thread_head": "55bfc041aa68fc91712ab4e2b5eec95b2c083437"
+    },
+    {
+      "ts": 1791015908.171436,
+      "rounds": 1
+    },
+    {
+      "ts": 1791016906.5876212,
+      "codex_thread": "01a100d5-e57d-7502-8f7c-ecd975521378",
+      "codex_thread_head": "55bfc041aa68fc91712ab4e2b5eec95b2c083437"
+    },
+    {
+      "ts": 1791016906.9405062,
+      "rounds": 2
+    },
+    {
+      "ts": 1791017961.989759,
+      "status": "superseded",
+      "hold_reason": "superseded: work merged into goal/T-1590 via T-1602"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791015130.756929,
+    "dispatched_at": 1791015130.759723,
+    "dispatched_at_lease": 1791016030.759723,
+    "dispatched_at_done": 1791015134.998873,
+    "handoff": {
+      "baseline": "luna",
+      "selected": "luna",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1791015373.899157
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "luna",
+      "hypothetical": "luna",
+      "key": "cb5443d2803494c74e2315d75e264cd9f656db2f",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0,
+        "claude:sonnet": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1791015631.3266182,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_skipped": {
+      "1791015631.326798": true
+    }
+  },
+  "packet_meta": {
+    "chars": 5960,
+    "est_tokens": 1490,
+    "presented_tokens": 1490,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "2798f7407922de2edc6b239c2511707bbd31e91d40a8b1140f447639bf400c09"
+      },
+      "objective": {
+        "chars": 2548,
+        "est_tokens": 637,
+        "sha256": "10df6b0daef8c9351e1707c4935c73e7e79d987c3f5f37f7a2574c9d16cdeca5"
+      },
+      "acceptance": {
+        "chars": 1029,
+        "est_tokens": 257,
+        "sha256": "5f4faae2ac7919edd4cce43560451aa0c1a7430a797e3a72780e95fe107e31ef"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "b529d6050d5b19c5a4ccdfea891aa2fc5fe907c635feb46efcb94ade3c72d30f"
+      },
+      "write_scope": {
+        "chars": 160,
+        "est_tokens": 40,
+        "sha256": "3299d90e9b1bcdc8b3fc62b1db5e552288fc2370a9aed4332ddfbd367572c3cd"
+      },
+      "read_scope": {
+        "chars": 1357,
+        "est_tokens": 339,
+        "sha256": "dac1299751d9c5714a8383d2adb9dd8456d8cd78ed50ba9f42ae6f55ace18112"
+      },
+      "constraints": {
+        "chars": 426,
+        "est_tokens": 106,
+        "sha256": "ba1383d32346de0de7c60524172d847c20180607abe112da2a2a819f84f76039"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "98edd0417270",
+    "version": "98edd0417270",
+    "candidate_known": true,
+    "base": "408738b4f46e",
+    "sources": "pool.toml@e9b20feac56f gotchas@79cf459a2f7e memory@notes over cap by 1160 chars: acceptance kept whole routed=shadow",
+    "policy_version": "e9b20feac56f",
+    "gotchas": "79cf459a2f7e",
+    "candidate_tokens": 3320,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "shadow",
+    "routed_tokens": 12478,
+    "routed_reduction_ratio": 0.9423047877964054,
+    "routed_hidden": 9,
+    "routed_ambiguous": 17,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "862a2beb56a4",
+      "f1e85acf457e",
+      "a3ae1450bdd9",
+      "6b89faa1cc01",
+      "aa6b130c2699",
+      "0f886e89c7ae",
+      "b3c93e9336aa",
+      "7b56f81c7e05",
+      "6e68d9ba6947",
+      "0b12f9fc7eb9",
+      "3890a2f8e70d",
+      "65cb54257cf7",
+      "504365aa02ad",
+      "a9e3c482cf6d",
+      "36fba3c5b5ac",
+      "65c4d2b5db00",
+      "2380174927fc",
+      "ab047a2d7f21",
+      "df10911c0fd4",
+      "270a093d49c3",
+      "9d078ea9fe66",
+      "0768ddd89e7e",
+      "622de2bd3ec8",
+      "2b71081a619f",
+      "e374e3dd1e88",
+      "e4b388cad1ac",
+      "6b0c3088acb2",
+      "b839fab17283",
+      "e42e3e70122c",
+      "a595cbbe1665",
+      "1c510a428e02",
+      "48de25429ecb",
+      "d500754708e5",
+      "0fcd075d9f57",
+      "d39ac091b005",
+      "d0b9e72fe363",
+      "7657bd5d45a9",
+      "00db509188f0",
+      "041199286363",
+      "c4bd4333eab1",
+      "7566baf004f8",
+      "4180c7586cb1",
+      "05df0bc9ef62",
+      "df7350a0e379",
+      "647c5393915d",
+      "63602ead1a37",
+      "e91c30e2df13",
+      "6b6a2d72145e",
+      "cf6515afcb5a",
+      "0f1d68687edd",
+      "3ec2adada116",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "5f989024a81a",
+      "3dc73d5656ac",
+      "6509266fa0b3",
+      "58b19a4ccdef",
+      "e2600af47fdd",
+      "6c18a4020015",
+      "6859c7817a42",
+      "c62f8019f1a8",
+      "3a54e2d04fce",
+      "36dbb09d8d94",
+      "5226ef749497",
+      "f3e3080e7dd9",
+      "c2ac512bbb9a",
+      "3e1cd1416f4e",
+      "66167a9d370a",
+      "9d73d95dc500",
+      "33ad46b15f23",
+      "50a434910997",
+      "c08f907df340",
+      "715cca912499",
+      "3c14a729f861",
+      "c847b6641abc",
+      "511cdc934f78",
+      "037899c85d98",
+      "183a4dab1913",
+      "2fc393ffc491",
+      "f0cbdd88ea9a",
+      "4293de227e2a",
+      "eac619ac54a7",
+      "6d8b4f31e471",
+      "751626bc19a9",
+      "875f253e613d",
+      "25bb3c70627f",
+      "f2966ffbf040",
+      "e325ae44fe23",
+      "8f938ad31ca7",
+      "0a4a690acab6",
+      "4af89d373a3c",
+      "bb8fee2c5eb2",
+      "e1f55ae2b248",
+      "474e85b1526f",
+      "b41ee295e49a",
+      "cb75a623b571",
+      "86aa301e20ad",
+      "5a8679975caa"
+    ],
+    "prefix_sha": "47d8a2fdfe08",
+    "prefix_chars": 764,
+    "suffix_chars": 6839,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 410,
+    "instruction_tokens_modular": 410,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "active",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1791015378.097785,
+  "rounds": 2,
+  "executor": "luna",
+  "codex_thread_head": "55bfc041aa68fc91712ab4e2b5eec95b2c083437",
+  "hold_reason": "superseded: work merged into goal/T-1590 via T-1602",
+  "resume_hint": {
+    "failures": [
+      "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+      "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+      "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+      "FAILED tests/test_planner_context.py::PlannerContext (missing: test not defined)",
+      "FAILED tests/test_hooks.py::Hooks (missing: test not defined)"
+    ],
+    "missing_tests": [
+      [
+        "tests/test_planner_context.py",
+        "PlannerContext"
+      ],
+      [
+        "tests/test_planner_context.py",
+        "PlannerContext"
+      ],
+      [
+        "tests/test_planner_context.py",
+        "PlannerContext"
+      ],
+      [
+        "tests/test_planner_context.py",
+        "PlannerContext"
+      ],
+      [
+        "tests/test_hooks.py",
+        "Hooks"
+      ]
+    ],
+    "flaky_runs": [
+      {
+        "ids": [
+          "tests/test_planner_context.py::PlannerContext",
+          "tests/test_planner_context.py::PlannerContext",
+          "tests/test_planner_context.py::PlannerContext",
+          "tests/test_planner_context.py::PlannerContext",
+          "tests/test_hooks.py::Hooks"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEEE......\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n======================================================================\nERROR: test_planner_context (unittest.loader._FailedTest.test_planner_context)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_planner_context\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"/Users/k3ntaw/code/orchestrator/wt/T-1592/tests/test_planner_context.py\", line 1, in <module>\n    import _harness\nModuleNotFoundError: No module named '_harness'\n\n\n----------------------------------------------------------------------\nRan 10 tests in 2.192s\n\nFAILED (errors=4)\n"
+      }
+    ]
+  }
+}

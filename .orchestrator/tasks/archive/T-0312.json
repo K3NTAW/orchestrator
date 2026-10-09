@@ -1,0 +1,176 @@
+{
+  "id": "T-0312",
+  "parent": "T-0260",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: G7 v2: the daemon writes routine fix rounds itself and reconciles merged_into (spec review T-0293 folded in: coordinated with the autonomous held decision point, escalation notifies once)",
+  "spec": "Replaces T-0272 after spec review T-0293. G6 v4 (T-0290, merged) added stage leases and clear_stage(); build on the current goal/T-0260 daemon.py. Today a held task waits for the Planner to write a fix-round spec by hand and to mark the original done + merged_into after the fix round merges. Held tasks carry hold_reason and resume_hint (tests-green failures, rebase conflicts); review tasks carry result.comments with path, line, issue, severity; constraints.fix_round_for makes spawn.base_for cut the fix worktree from the held task's branch.\nChange:\n1. daemon.auto_fix_round(pool) runs in tick() after sweep_leases and before planner_runs decisions, for held execute tasks with no non-failed task whose constraints.fix_round_for == id. Routine when: hold_reason is gate_red and resume_hint.failures names at least one FAIL or ERROR test id, or hold_reason starts 'review request_changes' and every comment of that review has a path inside the task scope; and the task has fewer than [daemon].auto_fix_rounds (pool.toml, default 2) automatic rounds (count tasks with fix_round_for == id and constraints.auto_round set). Otherwise escalate: stamp pipeline.auto_fix_skipped_at (stamp()-then-notify convention) and notify once; a second tick does not notify again.\n2. The fix task: title 'fix round <n>: <original title>', spec rendered from a new .orchestrator/prompts/fix-round.md (original id and title, failed acceptance criteria: those mentioning a failing test id, else all; failure text capped 3,000 chars in a fenced block; review comments as path:line issue lines; branch and head sha; keep every original criterion), same scope, complexity, tier and constraints plus fix_round_for and auto_round = n, inputs = [original, review id if any], created under the bus lock with a dedupe key like spec reviews use (one fix task per held_at).\n3. Coordination with planner_runs.py: decision_points() skips a held task when a non-failed task with constraints.fix_round_for == id exists (the daemon or the Planner already acted), so [planner].autonomous = true never launches a Planner for a hold that auto_fix_round handled; test in tests/test_planner_runs.py.\n4. Reconciliation: in gate() direct-merge and merge_reviewed(), after a task with constraints.fix_round_for merges, set the original task status done, merged_into = the same target, merged_via = 'fix round <fix id> <sha>', hold_reason None; walk up if the original was itself a fix round.\n5. README Pipeline: 'Automatic fix rounds' paragraph (routine/escalate rule, round cap, coordination with autonomous decisions); pool.toml [daemon] auto_fix_rounds = 2.\nTests in tests/test_daemon.py: test_auto_fix_round_on_gate_red, test_auto_fix_round_on_review_comments_in_scope, test_no_auto_fix_when_comments_outside_scope, test_no_auto_fix_after_round_cap, test_escalation_notifies_once (notify counted over two ticks), test_fix_round_merge_reconciles_original_chain; tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists.",
+  "inputs": [
+    "T-0296"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_auto_fix_round_on_gate_red, ::test_auto_fix_round_on_review_comments_in_scope, ::test_no_auto_fix_when_comments_outside_scope, ::test_no_auto_fix_after_round_cap, ::test_escalation_notifies_once, ::test_fix_round_merge_reconciles_original_chain pass",
+    "tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists passes",
+    "the generated fix task passes .claude/hooks/require-acceptance.sh and carries constraints.fix_round_for and auto_round",
+    "README and pool.toml document the rule, the cap and the coordination",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/planner_runs.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_planner_runs.py",
+    "README.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0312",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The auto_fix_rounds cap (default 2) is counted only against tasks with constraints.fix_round_for == <the currently held task's id>. Fix-round tasks are ordinary execute tasks that go through the same dispatch/gate/merge_reviewed pipeline, so a fix-round task can itself end up held and become eligible for auto_fix_round again. When that happens, its own round count starts fresh at 0 (children of the fix-round task's id, not the original's), so a chain of fix-round-of-a-fix-round-of-a-fix-round can bypass the cap entirely even though point 4 explicitly anticipates such chains ('walk up if the original was itself a fix round'). None of the listed tests (test_no_auto_fix_after_round_cap) exercise a chained/nested scenario, so this would ship uncaught.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "pipeline.auto_fix_skipped_at is specified as a single stamp()-guarded field ('if pipeline.get(stage): return False'), not scoped to the specific hold instance (held_at/events log), unlike planner_runs._held_at/_held_key's documented workaround for exactly this staleness (its docstring calls out that review_held_at/spec_review_held_at are 'stamped once by daemon.stamp and never refreshed on a later hold of the same task'). A task escalated and notified once will never notify again on any later, unrelated hold of the same task id, silently losing visibility -- the same anti-pattern this codebase already had to work around elsewhere. Point 2's fix-task dedupe key is correctly scoped to held_at ('one fix task per held_at'); the escalation stamp in point 1 is not, which is an internal inconsistency.",
+        "severity": "med",
+        "line": 98
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "'runs in tick() after sweep_leases and before planner_runs decisions' spans two materially different insertion points: immediately after sweep_leases (before dispatch/gate/merge_reviewed run this tick, so newly-held tasks wait a full extra tick) versus after the dispatch/gate/merge_reviewed loop and before the autonomous-Planner block (newly-held tasks get picked up the same tick). The spec doesn't say which, leaving a behavior-affecting choice to the implementer.",
+        "severity": "low",
+        "line": 808
+      }
+    ],
+    "suggested_spec_changes": [
+      "Scope the round cap (and the 'no non-failed fix_round_for task exists' routine gate) to the whole fix-round lineage back to the true root task, not just the immediately held task's id -- e.g. walk constraints.fix_round_for the same way point 4's reconciliation does -- so nested fix-round-of-a-fix-round chains cannot exceed auto_fix_rounds in total across the chain.",
+      "Key the escalation skip/notify (and ideally re-evaluation) to the current hold instance, not an unkeyed pipeline field -- reuse or expose planner_runs._held_at-style identity (events-log held timestamp, falling back to gated_at/review_held_at) so a later, unrelated hold on the same task can still be escalated and notified.",
+      "State explicitly whether auto_fix_round runs before dispatch/gate/merge_reviewed (next-tick latency for same-tick holds) or after them and before the autonomous-planner block (same-tick pickup), since both satisfy 'after sweep_leases and before planner_runs decisions' but behave differently.",
+      "Add a test for a chained fix-round scenario (fix round of a fix round) to verify the round cap holds across the whole lineage, not just against one node."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789849490.840787,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0312",
+      "claimed_at": 1789849490.8404732
+    },
+    {
+      "ts": 1789849490.842197,
+      "account": "B"
+    },
+    {
+      "ts": 1789849490.8494139,
+      "pid": 67870,
+      "account": "B"
+    },
+    {
+      "ts": 1789849752.882993,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The auto_fix_rounds cap (default 2) is counted only against tasks with constraints.fix_round_for == <the currently held task's id>. Fix-round tasks are ordinary execute tasks that go through the same dispatch/gate/merge_reviewed pipeline, so a fix-round task can itself end up held and become eligible for auto_fix_round again. When that happens, its own round count starts fresh at 0 (children of the fix-round task's id, not the original's), so a chain of fix-round-of-a-fix-round-of-a-fix-round can bypass the cap entirely even though point 4 explicitly anticipates such chains ('walk up if the original was itself a fix round'). None of the listed tests (test_no_auto_fix_after_round_cap) exercise a chained/nested scenario, so this would ship uncaught.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "pipeline.auto_fix_skipped_at is specified as a single stamp()-guarded field ('if pipeline.get(stage): return False'), not scoped to the specific hold instance (held_at/events log), unlike planner_runs._held_at/_held_key's documented workaround for exactly this staleness (its docstring calls out that review_held_at/spec_review_held_at are 'stamped once by daemon.stamp and never refreshed on a later hold of the same task'). A task escalated and notified once will never notify again on any later, unrelated hold of the same task id, silently losing visibility -- the same anti-pattern this codebase already had to work around elsewhere. Point 2's fix-task dedupe key is correctly scoped to held_at ('one fix task per held_at'); the escalation stamp in point 1 is not, which is an internal inconsistency.",
+            "severity": "med",
+            "line": 98
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "'runs in tick() after sweep_leases and before planner_runs decisions' spans two materially different insertion points: immediately after sweep_leases (before dispatch/gate/merge_reviewed run this tick, so newly-held tasks wait a full extra tick) versus after the dispatch/gate/merge_reviewed loop and before the autonomous-Planner block (newly-held tasks get picked up the same tick). The spec doesn't say which, leaving a behavior-affecting choice to the implementer.",
+            "severity": "low",
+            "line": 808
+          }
+        ],
+        "suggested_spec_changes": [
+          "Scope the round cap (and the 'no non-failed fix_round_for task exists' routine gate) to the whole fix-round lineage back to the true root task, not just the immediately held task's id -- e.g. walk constraints.fix_round_for the same way point 4's reconciliation does -- so nested fix-round-of-a-fix-round chains cannot exceed auto_fix_rounds in total across the chain.",
+          "Key the escalation skip/notify (and ideally re-evaluation) to the current hold instance, not an unkeyed pipeline field -- reuse or expose planner_runs._held_at-style identity (events-log held timestamp, falling back to gated_at/review_held_at) so a later, unrelated hold on the same task can still be escalated and notified.",
+          "State explicitly whether auto_fix_round runs before dispatch/gate/merge_reviewed (next-tick latency for same-tick holds) or after them and before the autonomous-planner block (same-tick pickup), since both satisfy 'after sweep_leases and before planner_runs decisions' but behave differently.",
+          "Add a test for a chained fix-round scenario (fix round of a fix round) to verify the round cap holds across the whole lineage, not just against one node."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789849752.884522,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The auto_fix_rounds cap (default 2) is counted only against tasks with constraints.fix_round_for == <the currently held task's id>. Fix-round tasks are ordinary execute tasks that go through the same dispatch/gate/merge_reviewed pipeline, so a fix-round task can itself end up held and become eligible for auto_fix_round again. When that happens, its own round count starts fresh at 0 (children of the fix-round task's id, not the original's), so a chain of fix-round-of-a-fix-round-of-a-fix-round can bypass the cap entirely even though point 4 explicitly anticipates such chains ('walk up if the original was itself a fix round'). None of the listed tests (test_no_auto_fix_after_round_cap) exercise a chained/nested scenario, so this would ship uncaught.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "pipeline.auto_fix_skipped_at is specified as a single stamp()-guarded field ('if pipeline.get(stage): return False'), not scoped to the specific hold instance (held_at/events log), unlike planner_runs._held_at/_held_key's documented workaround for exactly this staleness (its docstring calls out that review_held_at/spec_review_held_at are 'stamped once by daemon.stamp and never refreshed on a later hold of the same task'). A task escalated and notified once will never notify again on any later, unrelated hold of the same task id, silently losing visibility -- the same anti-pattern this codebase already had to work around elsewhere. Point 2's fix-task dedupe key is correctly scoped to held_at ('one fix task per held_at'); the escalation stamp in point 1 is not, which is an internal inconsistency.",
+          "severity": "med",
+          "line": 98
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "'runs in tick() after sweep_leases and before planner_runs decisions' spans two materially different insertion points: immediately after sweep_leases (before dispatch/gate/merge_reviewed run this tick, so newly-held tasks wait a full extra tick) versus after the dispatch/gate/merge_reviewed loop and before the autonomous-Planner block (newly-held tasks get picked up the same tick). The spec doesn't say which, leaving a behavior-affecting choice to the implementer.",
+          "severity": "low",
+          "line": 808
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789849490.8404732,
+  "account": "B",
+  "pid": 67870,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The auto_fix_rounds cap (default 2) is counted only against tasks with constraints.fix_round_for == <the currently held task's id>. Fix-round tasks are ordinary execute tasks that go through the same dispatch/gate/merge_reviewed pipeline, so a fix-round task can itself end up held and become eligible for auto_fix_round again. When that happens, its own round count starts fresh at 0 (children of the fix-round task's id, not the original's), so a chain of fix-round-of-a-fix-round-of-a-fix-round can bypass the cap entirely even though point 4 explicitly anticipates such chains ('walk up if the original was itself a fix round'). None of the listed tests (test_no_auto_fix_after_round_cap) exercise a chained/nested scenario, so this would ship uncaught.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "pipeline.auto_fix_skipped_at is specified as a single stamp()-guarded field ('if pipeline.get(stage): return False'), not scoped to the specific hold instance (held_at/events log), unlike planner_runs._held_at/_held_key's documented workaround for exactly this staleness (its docstring calls out that review_held_at/spec_review_held_at are 'stamped once by daemon.stamp and never refreshed on a later hold of the same task'). A task escalated and notified once will never notify again on any later, unrelated hold of the same task id, silently losing visibility -- the same anti-pattern this codebase already had to work around elsewhere. Point 2's fix-task dedupe key is correctly scoped to held_at ('one fix task per held_at'); the escalation stamp in point 1 is not, which is an internal inconsistency.",
+      "severity": "med",
+      "line": 98
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "'runs in tick() after sweep_leases and before planner_runs decisions' spans two materially different insertion points: immediately after sweep_leases (before dispatch/gate/merge_reviewed run this tick, so newly-held tasks wait a full extra tick) versus after the dispatch/gate/merge_reviewed loop and before the autonomous-Planner block (newly-held tasks get picked up the same tick). The spec doesn't say which, leaving a behavior-affecting choice to the implementer.",
+      "severity": "low",
+      "line": 808
+    }
+  ]
+}

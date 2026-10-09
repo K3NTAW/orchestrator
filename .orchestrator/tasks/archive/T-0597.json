@@ -1,0 +1,165 @@
+{
+  "id": "T-0597",
+  "created_at": 1789972324.726413,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R12: orchestrator/decision_log.py \u2014 unified structured decision evidence rows and explain() for routing, scheduling and workflow decisions (brief P14)",
+  "spec": "Why: adaptive decisions are scattered (waves.jsonl, dispatch.jsonl, jev_route runs rows, pipeline.jev_route) with no common shape; a human cannot answer \"why did the orchestrator do this\" for one task without reading several files (brief P14 unified decision observability). No chain-of-thought is stored, only structured evidence.\nWhat: new module orchestrator/decision_log.py built on schedlog (orchestrator/schedlog.py: append/read_with_malformed).\n- record(kind, subject, *, candidates, hard_constraints, deterministic, historical=None, jev=None, selected, rejected=None, reason, confidence=None, n=None, mode=None, extra=None) -> row. Validates kind in KINDS = (\"routing\", \"wave\", \"capacity\", \"concurrency\", \"merge_pressure\", \"stale\", \"jev_sched\", \"allocation\", \"strategy\", \"speculation\", \"scout\", \"review_plan\"); subject is a task or goal id; rejected defaults to candidates minus selected with reason text per item when given as dict; appends via schedlog.append(\"decisions\", row) with ts, kind, subject, and every field; refuses free-text fields over 2000 chars by truncating with a marker (bounded rows).\n- outcome(subject, kind, **fields) -> row appended with kind \"outcome\", linking (subject, kind) and fields such as merged, conflict, fix_rounds, actual_duration_s, first_pass.\n- explain(subject, kinds=None, root=None) -> list of rows newest first for that subject, each decision row paired with its later outcome rows under key \"outcomes\"; tolerant of malformed lines (uses read_with_malformed) and reports malformed count.\n- format_explain(rows) -> human-readable lines: ts (ISO, Europe/Zurich), kind, selected, reason, rejected summary, confidence/n, outcome summary.\n- read_all(root=None, since_ts=None) for scorecards. Root override: schedlog uses STATE/runs/sched; add an optional directory parameter path in decision_log (tests use a temp dir) without changing schedlog's API.",
+  "inputs": [
+    "T-0570"
+  ],
+  "acceptance": [
+    "tests/test_decision_log.py::test_record_writes_structured_row_with_required_fields \u2014 a routing decision row contains ts, kind, subject, candidates, hard_constraints, deterministic, selected, rejected, reason and no chain-of-thought field",
+    "tests/test_decision_log.py::test_explain_pairs_decisions_with_later_outcomes \u2014 record then outcome for the same subject and kind: explain returns the decision with its outcome under outcomes",
+    "tests/test_decision_log.py::test_invalid_kind_is_rejected \u2014 record with kind 'guess' raises ValueError and writes nothing",
+    "tests/test_decision_log.py::test_malformed_lines_are_tolerated_and_counted \u2014 a broken line in decisions.jsonl does not break explain and is counted",
+    "tests/test_decision_log.py::test_format_explain_is_readable \u2014 format_explain output names the selected action, the reason and the rejected alternatives on separate lines"
+  ],
+  "scope": [
+    "orchestrator/decision_log.py",
+    "tests/test_decision_log.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0597",
+  "codex_thread": null,
+  "result": {
+    "summary": "Implementation otherwise matches the spec (KINDS validation, bounded truncation, rejected defaulting, malformed-line tolerance, format_explain output) and all five named acceptance tests pass as written, but explain()'s outcome-pairing logic has a real correctness bug for subjects with repeated decisions of the same kind, which is a normal orchestrator pattern (retries, per-tick capacity/concurrency decisions) and undermines the feature's core purpose.",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/decision_log.py",
+        "line": 164,
+        "issue": "explain() pairs a decision with every later outcome matching (subject, kind) instead of stopping at the next decision of that same kind. For subjects/kinds that recur (e.g. repeated 'routing' re-tries, or per-tick 'capacity'/'concurrency'/'wave' decisions for the same goal), every earlier decision ends up with outcomes that actually belong to a later decision, corrupting the audit trail this module exists to provide. Only the single-decision acceptance test is covered, so this slips through; needs the outcome-scan bounded by the index of the next same-kind decision for that subject.",
+        "severity": "high"
+      }
+    ],
+    "packet_version": "6b7a84dbb741",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789972324.72727,
+      "reviewed_sha": "e2032c277b69e7d0a730f2e1a4d957750602050d"
+    },
+    {
+      "ts": 1789972327.182734,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0597",
+      "claimed_at": 1789972327.1823459
+    },
+    {
+      "ts": 1789972327.183773,
+      "account": "B"
+    },
+    {
+      "ts": 1789972327.629017,
+      "pid": 43840,
+      "account": "B"
+    },
+    {
+      "ts": 1789972444.691006,
+      "status": "done",
+      "result": {
+        "summary": "Implementation otherwise matches the spec (KINDS validation, bounded truncation, rejected defaulting, malformed-line tolerance, format_explain output) and all five named acceptance tests pass as written, but explain()'s outcome-pairing logic has a real correctness bug for subjects with repeated decisions of the same kind, which is a normal orchestrator pattern (retries, per-tick capacity/concurrency decisions) and undermines the feature's core purpose.",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/decision_log.py",
+            "line": 164,
+            "issue": "explain() pairs a decision with every later outcome matching (subject, kind) instead of stopping at the next decision of that same kind. For subjects/kinds that recur (e.g. repeated 'routing' re-tries, or per-tick 'capacity'/'concurrency'/'wave' decisions for the same goal), every earlier decision ends up with outcomes that actually belong to a later decision, corrupting the audit trail this module exists to provide. Only the single-decision acceptance test is covered, so this slips through; needs the outcome-scan bounded by the index of the next same-kind decision for that subject.",
+            "severity": "high"
+          }
+        ],
+        "packet_version": "6b7a84dbb741",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789972444.6920378,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789972444.723128,
+      "review_facts": {
+        "verdict": "request_changes",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 1,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "e2032c277b69e7d0a730f2e1a4d957750602050d",
+        "packet_version": "6b7a84dbb741",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "request_changes",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 1,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "e2032c277b69e7d0a730f2e1a4d957750602050d",
+      "packet_version": "6b7a84dbb741",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "e2032c277b69e7d0a730f2e1a4d957750602050d",
+  "claimed_at": 1789972327.1823459,
+  "account": "B",
+  "pid": 43840,
+  "review_verdict": "request_changes",
+  "review_facts": {
+    "verdict": "request_changes",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 1,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "e2032c277b69e7d0a730f2e1a4d957750602050d",
+    "packet_version": "6b7a84dbb741",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "request_changes",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 1,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "6b7a84dbb741",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

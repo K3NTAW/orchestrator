@@ -27,6 +27,19 @@ def config():
     return tomllib.loads(CFG.read_text())
 
 
+# [planner] keys read through planner_setting(); a missing or unreadable pool.toml yields these defaults.
+PLANNER_DEFAULTS = {"next_goal": False, "next_goal_max_per_day": 3}
+
+
+def planner_setting(name, cfg=None):
+    if cfg is None:
+        try:
+            cfg = config()
+        except (OSError, tomllib.TOMLDecodeError):
+            cfg = {}
+    return (cfg.get("planner") or {}).get(name, PLANNER_DEFAULTS[name])
+
+
 def _load_planner_usage():
     try:
         return json.loads(PLANNER_USAGE.read_text())

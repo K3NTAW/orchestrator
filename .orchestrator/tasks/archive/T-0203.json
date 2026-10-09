@@ -1,0 +1,110 @@
+{
+  "id": "T-0203",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "P2: pool.py planner-usage tally polish from approving review T-0175",
+  "spec": "Low notes from the approving review of C-O7a (planner transcript usage tally in orchestrator/pool.py). Fix all five, behavior otherwise unchanged:\n1. The missing-transcript-dir `continue` skips the window/day rollover save: roll over and save before continuing.\n2. The tally must not end in pool.save() of the whole pool_state blob when only planner_usage.json changed (write only planner_usage.json; pool_state.json untouched).\n3. now= parameter honoured everywhere in the tally and rollover (no time.time() calls when now is given).\n4. Null usage values in a transcript line (input_tokens: null etc.) count as 0 instead of raising.\n5. planner_usage.json carries its anchors: window_started_at and day (ISO date, Europe/Zurich) per account, so a reader can tell which window the counters belong to.\nTests in tests/test_pool.py, one per item.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py gains test_missing_dir_still_rolls_over, test_tally_writes_only_planner_usage, test_tally_honours_now, test_null_usage_counts_zero, test_planner_usage_has_anchors and all pass",
+    "Existing tests/test_pool.py tests unchanged and green",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0203",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nFixed all five low notes from the C-O7a review of `Pool.tally_planner` in `orchestrator/pool.py`:\n\n1. **Missing-dir skip lost rollover**: `a.utilization(self.cap, now)` now runs before the `proj_dir.exists()` check, and the missing-dir branch calls `_save_planner_account(...)` before `continue` so the rollover/anchors persist even when transcripts aren't found.\n2. **Whole-blob save on every tick**: removed the trailing `self.save()` from `tally_planner`. Only `planner_usage.json` is written now; `pool_state.json` is untouched by the tally.\n3. **`now=` not honoured everywhere**: `Account.utilization` gained a `now=` parameter and no longer calls `time.time()`/`date.today()` internally when a value is passed; `tally_planner` and `_save_planner_account` thread `now` through consistently.\n4. **Null usage values crashed**: `usage.get(...) or 0` replaces `usage.get(..., 0)` so explicit `null` fields count as 0 instead of raising on `None // 10` etc.\n5. **Missing anchors**: `planner_usage.json` entries now carry `window_started_at` and `day` (ISO, Europe/Zurich) per account, via a new `TZ = ZoneInfo(\"Europe/Zurich\")` constant.\n\n**Files changed**: `orchestrator/pool.py`, `tests/test_pool.py`.\n\nOne necessary side-adjustment outside the 5 items: `_save_planner_account` gained two new params (`window_started`, `day`) but I made them optional (default to now/Zurich-today) rather than required, because `tests/test_scorecard.py` (out of scope) calls it with the old 4-arg signature \u2014 this keeps that unrelated test green without touching it. I also reordered two lines inside the existing `test_planner_usage_lives_outside_pool_state_and_survives_stale_save` test (moved `self.p.save()` before the `PERSIST` read) since that test previously relied on tally's now-removed `self.save()` to create `pool_state.json`; its assertions and intent are unchanged, just reordered plus one added assertion that tally itself never touches `pool_state.json`.\n\n**Test output**: all green, no failures.\n```\ntests/test_pool.py: 30 tests, OK (added test_missing_dir_still_rolls_over, test_tally_writes_only_planner_usage, test_tally_honours_now, test_null_usage_counts_zero, test_planner_usage_has_anchors)\nFull suite: 275 tests, OK\n.claude/hooks/tests-green.sh: exit 0\n```\n\nCommitted as `5aaa19f` on `task/T-0203`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789810647.8217971,
+      "pipeline": {
+        "dispatched_at": 1789810647.821682
+      }
+    },
+    {
+      "ts": 1789810647.90117,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789810647.907993,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789810649.138913,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0203",
+      "claimed_at": 1789810649.136586
+    },
+    {
+      "ts": 1789810649.143373,
+      "account": "B"
+    },
+    {
+      "ts": 1789810649.1590312,
+      "pid": 73794,
+      "account": "B"
+    },
+    {
+      "ts": 1789811288.329586,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nFixed all five low notes from the C-O7a review of `Pool.tally_planner` in `orchestrator/pool.py`:\n\n1. **Missing-dir skip lost rollover**: `a.utilization(self.cap, now)` now runs before the `proj_dir.exists()` check, and the missing-dir branch calls `_save_planner_account(...)` before `continue` so the rollover/anchors persist even when transcripts aren't found.\n2. **Whole-blob save on every tick**: removed the trailing `self.save()` from `tally_planner`. Only `planner_usage.json` is written now; `pool_state.json` is untouched by the tally.\n3. **`now=` not honoured everywhere**: `Account.utilization` gained a `now=` parameter and no longer calls `time.time()`/`date.today()` internally when a value is passed; `tally_planner` and `_save_planner_account` thread `now` through consistently.\n4. **Null usage values crashed**: `usage.get(...) or 0` replaces `usage.get(..., 0)` so explicit `null` fields count as 0 instead of raising on `None // 10` etc.\n5. **Missing anchors**: `planner_usage.json` entries now carry `window_started_at` and `day` (ISO, Europe/Zurich) per account, via a new `TZ = ZoneInfo(\"Europe/Zurich\")` constant.\n\n**Files changed**: `orchestrator/pool.py`, `tests/test_pool.py`.\n\nOne necessary side-adjustment outside the 5 items: `_save_planner_account` gained two new params (`window_started`, `day`) but I made them optional (default to now/Zurich-today) rather than required, because `tests/test_scorecard.py` (out of scope) calls it with the old 4-arg signature \u2014 this keeps that unrelated test green without touching it. I also reordered two lines inside the existing `test_planner_usage_lives_outside_pool_state_and_survives_stale_save` test (moved `self.p.save()` before the `PERSIST` read) since that test previously relied on tally's now-removed `self.save()` to create `pool_state.json`; its assertions and intent are unchanged, just reordered plus one added assertion that tally itself never touches `pool_state.json`.\n\n**Test output**: all green, no failures.\n```\ntests/test_pool.py: 30 tests, OK (added test_missing_dir_still_rolls_over, test_tally_writes_only_planner_usage, test_tally_honours_now, test_null_usage_counts_zero, test_planner_usage_has_anchors)\nFull suite: 275 tests, OK\n.claude/hooks/tests-green.sh: exit 0\n```\n\nCommitted as `5aaa19f` on `task/T-0203`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789811326.477973,
+      "pipeline": {
+        "dispatched_at": 1789810647.821682,
+        "gated_at": 1789811326.477748
+      }
+    },
+    {
+      "ts": 1789811360.793333,
+      "status": "done",
+      "merged_into": "goal/T-0201",
+      "sha": "0c9b1a08eadcf0df14efcfea33d310a8e021b62a"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789810647.821682,
+    "gated_at": 1789811326.477748
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789810649.136586,
+  "account": "B",
+  "pid": 73794,
+  "merged_into": "goal/T-0201",
+  "sha": "0c9b1a08eadcf0df14efcfea33d310a8e021b62a"
+}

@@ -1,0 +1,203 @@
+{
+  "id": "T-0676",
+  "created_at": 1789998018.0863428,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "Q2: orchestrator/planner_telemetry.py \u2014 per-invocation Planner rows (launch, usage, materiality, skips), per-goal and per-accepted-goal Fable/Opus aggregation, interactive transcript attribution (P1)",
+  "spec": "Why: headless Planner usage is logged only as bus.log_run role planner_decision rows (planner_runs._record_decision_usage, lines 566-620) with no model, decision type or materiality; interactive Fable transcript tokens are pool-wide (Pool.tally_planner -> planner_usage.json, scorecard.planner_footer) with no per-goal share. The brief (P1) needs Planner tokens per material decision and Fable tokens per accepted goal.\nWhat: new module orchestrator/planner_telemetry.py using schedlog.append/read (files runs/sched/planner_invocations.jsonl and runs/sched/planner_skips.jsonl). Rows never contain prompts, transcripts or chain-of-thought; free text fields are capped at 300 chars.\n- record_launch(*, launch_id, goal_id, event, decision_type, kind, payload_keys, model, tier, account, complexity, band, task_class, architectural, route, route_reason, mode, state_version, packet_chars, started_at, reescalation=False, root=None) -> row with phase \"launch\".\n- record_usage(launch_id, *, input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0, usd=None, latency_s=None, outcome, session_id=None, root=None) -> row phase \"usage\"; total_tokens = input + output + cache_read // 10 (the pool formula, pool.py Pool.tally_planner).\n- snapshot(goal_id, root=None) -> {task_id: {\"status\", \"depends_on\", \"hold_reason\", \"fix_round_for\", \"parent\", \"created_at\"}} over the goal's children plus the goal, and plan_hash = sha256 of .orchestrator/plan.md (root parent) or None.\n- materiality(before, after) -> {\"material\": bool, \"new_tasks\": [ids], \"dependencies_changed\": [ids], \"fix_strategy_for\": [held ids that gained a fix_round_for child], \"escalated\": bool (goal or a child now status held/failed with hold_reason containing 'escalat' or a result flag escalate), \"plan_changed\": bool}; material when any list non-empty or plan_changed or escalated. record_materiality(launch_id, before, after, root=None) -> row phase \"materiality\".\n- record_skip(*, goal_id, event, reason, kind=None, payload_key=None, root=None) -> row in planner_skips.\n- read_invocations(root=None) -> list of merged dicts, one per launch_id, later phases overriding earlier fields; malformed lines skipped and counted in the returned list's attribute? No: return (rows, malformed_count) from read_invocations_with_malformed and rows alone from read_invocations.\n- per_goal(goal_id, root=None) -> {\"planner_tokens\", \"fable_tokens\", \"opus_tokens\", \"other_tokens\", \"calls\", \"fable_calls\", \"opus_calls\", \"escalations\" (rows with tier fable and route escalate), \"reescalations\", \"material_decisions\", \"tokens_per_material_decision\" (None when 0 material), \"skips\", \"usd\"}; tier\u2192bucket: tier == \"fable\" -> fable, \"opus\" -> opus, else other.\n- accepted_goal_summary(root=None) -> over scorecard.accepted_goals(root): {\"n_goals\", \"planner_tokens_per_accepted_goal\", \"fable_tokens_per_accepted_goal\", \"fable_calls_per_accepted_goal\", \"fable_share\" (fable/planner tokens), \"planner_tokens_per_material_decision\", \"planner_usd_per_accepted_goal\"}; None values when no goals.\n- interactive_by_goal(root=None, cfg=None, now=None) -> list of {\"goal_id\", \"sessions\", \"tokens\", \"model\", \"model_source\": \"assumed_models_planner\", \"method\": \"session_overlap_approximate\"}: reuse planner_runs._interactive_summary's transcript reading (import and call it; do not duplicate parsing) to get per-session day totals, then attribute each session's tokens to goals whose open interval (goal created_at .. done event ts or now) overlaps the session's assistant-turn timestamps, proportionally by turn count; model is cfg[\"models\"][\"planner\"]. Documented as an approximation in the docstring and in the returned method field.\nRoot handling: every function takes root (STATE default) and uses schedlog with SCHED_DIR patched or a root-relative path \u2014 follow decision_log._using_root (orchestrator/decision_log.py:57-84) so tests can sandbox.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_telemetry.py::test_launch_usage_materiality_merge_by_launch_id \u2014 three phases for one launch_id read back as one row with model, total_tokens (cache_read // 10 formula) and material fields",
+    "tests/test_planner_telemetry.py::test_materiality_detects_new_task_and_dependency_change \u2014 snapshot before/after with a new child and a changed depends_on gives material True and lists both; identical snapshots give material False",
+    "tests/test_planner_telemetry.py::test_per_goal_splits_fable_and_opus_tokens \u2014 two invocations (tier fable, tier opus) and one skip give fable_tokens, opus_tokens, calls 2, skips 1, tokens_per_material_decision computed only over material rows",
+    "tests/test_planner_telemetry.py::test_accepted_goal_summary_per_accepted_goal \u2014 two accepted goals with invocations give fable_tokens_per_accepted_goal and fable_share; no accepted goals gives None values without raising",
+    "tests/test_planner_telemetry.py::test_interactive_by_goal_marks_approximation_and_never_reads_prompts \u2014 with _interactive_summary patched to return two sessions, tokens split across two overlapping goals and every row carries method session_overlap_approximate and model_source assumed_models_planner; malformed jsonl lines are skipped and counted"
+  ],
+  "scope": [
+    "orchestrator/planner_telemetry.py",
+    "tests/test_planner_telemetry.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/planner_runs.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/pool.py",
+      "orchestrator/bus.py",
+      "tests/test_decision_log.py",
+      "tests/test_planner_runs.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Files runs/sched/planner_invocations.jsonl (phases launch|usage|materiality, merged by launch_id, later wins) and runs/sched/planner_skips.jsonl. record_launch(...), record_usage(launch_id, ...), snapshot(goal_id, root), materiality(before, after) -> {material, new_tasks, dependencies_changed, fix_strategy_for, escalated, plan_changed}, record_materiality, record_skip(goal_id, event, reason, kind, payload_key), read_invocations(root) -> [merged rows], per_goal(goal_id, root), accepted_goal_summary(root), interactive_by_goal(root, cfg, now). Row fields: launch_id, goal_id, event, decision_type, kind, payload_keys, model, tier (opus|fable|sonnet|other), account, complexity, band, task_class, architectural, route, route_reason, mode, state_version, packet_chars, started_at, reescalation, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, usd, latency_s, outcome, session_id, material, new_tasks, dependencies_changed, fix_strategy_for, escalated, plan_changed. Q5 (planner_scorecard) reads these rows via schedlog.read('planner_invocations')."
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by Q2 v2 after spec review T-0677 request_changes (fix_round_for read from constraints; result_escalate snapshot field; interactive attribution by day overlap from _interactive_summary day_totals with explicit cutoff/headless; root resolved to STATE before scorecard.accepted_goals; plan.md at root/plan.md)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789998046.6516612,
+      "pipeline": {
+        "first_ready_at": 1789998046.651616
+      }
+    },
+    {
+      "ts": 1789998046.6860301,
+      "pipeline": {
+        "first_ready_at": 1789998046.651616,
+        "spec_review_at": 1789998046.685981,
+        "spec_review_at_lease": 1789998946.685981
+      }
+    },
+    {
+      "ts": 1789998046.691225,
+      "pipeline": {
+        "first_ready_at": 1789998046.651616,
+        "spec_review_at": 1789998046.685981,
+        "spec_review_at_lease": 1789998946.685981,
+        "spec_review_at_done": 1789998046.6910982
+      }
+    },
+    {
+      "ts": 1789998166.400356,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "snapshot()'s field list treats fix_round_for as a direct task field, but every existing caller (strategy.py, scorecard.py, spawn.py, attribution.py, speculation.py, planner_runs.py) reads it from task[\"constraints\"][\"fix_round_for\"], never top-level. If snapshot() does task.get('fix_round_for') it will always be None, silently breaking materiality()'s fix_strategy_for detection (a held task gaining a fix-round child would never register as material) with no error surfaced.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "materiality()'s 'escalated' definition includes 'a result flag escalate', but snapshot()'s own schema ({status, depends_on, hold_reason, fix_round_for, parent, created_at}) has no result field at all -- materiality only ever sees before/after snapshots, so this half of the escalated check has no data to read. Either snapshot() needs a result/result-flag field added, or this clause should be dropped from materiality's contract.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "interactive_by_goal() is specified to reuse planner_runs._interactive_summary and attribute tokens to goals 'proportionally by turn count', but _interactive_summary(root, cfg, cutoff, now, headless) returns only aggregated per-session token totals (sessions: [{account, session, input_tokens, ...}]) and per (day, account) totals summed across all sessions -- no turn count or per-turn timestamp is ever returned, so proportional-by-turn-count attribution cannot be computed from its output without re-parsing the transcripts (which the spec explicitly forbids as duplicate parsing). The spec's own signature interactive_by_goal(root=None, cfg=None, now=None) also drops _interactive_summary's required cutoff and headless arguments without saying how to derive them.",
+          "severity": "high",
+          "line": 794
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "accepted_goal_summary(root=None) is specified to call scorecard.accepted_goals(root) directly, but accepted_goals's own signature is accepted_goals(root=STATE) -- passing root=None through unresolved crashes on root / \"tasks\" (NoneType has no /). Needs an explicit 'root = root if root is not None else STATE' before the call, same as the other functions must do for schedlog/_using_root.",
+          "severity": "med",
+          "line": 615
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "snapshot()'s plan_hash is described as 'sha256 of .orchestrator/plan.md (root parent)', but plan.md actually lives at STATE/plan.md, i.e. directly under root itself (see handover.py: plan = STATE / \"plan.md\"), not under root's parent directory. As worded this will mislead an implementer into hashing ROOT/plan.md (which doesn't exist) instead of root/plan.md.",
+          "severity": "low",
+          "line": 269
+        }
+      ]
+    },
+    {
+      "ts": 1789998171.837329,
+      "pipeline": {
+        "first_ready_at": 1789998046.651616,
+        "spec_review_at": 1789998046.685981,
+        "spec_review_at_lease": 1789998946.685981,
+        "spec_review_at_done": 1789998046.6910982,
+        "spec_review_held_at": 1789998171.837274
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789998173.410151,
+      "pipeline": {
+        "first_ready_at": 1789998046.651616,
+        "spec_review_at": 1789998046.685981,
+        "spec_review_at_lease": 1789998946.685981,
+        "spec_review_at_done": 1789998046.6910982,
+        "spec_review_held_at": 1789998171.837274,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789998173.4540448,
+      "pipeline": {
+        "first_ready_at": 1789998046.651616,
+        "spec_review_at": 1789998046.685981,
+        "spec_review_at_lease": 1789998946.685981,
+        "spec_review_at_done": 1789998046.6910982,
+        "spec_review_held_at": 1789998171.837274,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789998171.837329": true
+        }
+      }
+    },
+    {
+      "ts": 1789998352.7793212,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by Q2 v2 after spec review T-0677 request_changes (fix_round_for read from constraints; result_escalate snapshot field; interactive attribution by day overlap from _interactive_summary day_totals with explicit cutoff/headless; root resolved to STATE before scorecard.accepted_goals; plan.md at root/plan.md)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789998046.651616,
+    "spec_review_at": 1789998046.685981,
+    "spec_review_at_lease": 1789998946.685981,
+    "spec_review_at_done": 1789998046.6910982,
+    "spec_review_held_at": 1789998171.837274,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789998171.837329": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "snapshot()'s field list treats fix_round_for as a direct task field, but every existing caller (strategy.py, scorecard.py, spawn.py, attribution.py, speculation.py, planner_runs.py) reads it from task[\"constraints\"][\"fix_round_for\"], never top-level. If snapshot() does task.get('fix_round_for') it will always be None, silently breaking materiality()'s fix_strategy_for detection (a held task gaining a fix-round child would never register as material) with no error surfaced.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "materiality()'s 'escalated' definition includes 'a result flag escalate', but snapshot()'s own schema ({status, depends_on, hold_reason, fix_round_for, parent, created_at}) has no result field at all -- materiality only ever sees before/after snapshots, so this half of the escalated check has no data to read. Either snapshot() needs a result/result-flag field added, or this clause should be dropped from materiality's contract.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "interactive_by_goal() is specified to reuse planner_runs._interactive_summary and attribute tokens to goals 'proportionally by turn count', but _interactive_summary(root, cfg, cutoff, now, headless) returns only aggregated per-session token totals (sessions: [{account, session, input_tokens, ...}]) and per (day, account) totals summed across all sessions -- no turn count or per-turn timestamp is ever returned, so proportional-by-turn-count attribution cannot be computed from its output without re-parsing the transcripts (which the spec explicitly forbids as duplicate parsing). The spec's own signature interactive_by_goal(root=None, cfg=None, now=None) also drops _interactive_summary's required cutoff and headless arguments without saying how to derive them.",
+      "severity": "high",
+      "line": 794
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "accepted_goal_summary(root=None) is specified to call scorecard.accepted_goals(root) directly, but accepted_goals's own signature is accepted_goals(root=STATE) -- passing root=None through unresolved crashes on root / \"tasks\" (NoneType has no /). Needs an explicit 'root = root if root is not None else STATE' before the call, same as the other functions must do for schedlog/_using_root.",
+      "severity": "med",
+      "line": 615
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "snapshot()'s plan_hash is described as 'sha256 of .orchestrator/plan.md (root parent)', but plan.md actually lives at STATE/plan.md, i.e. directly under root itself (see handover.py: plan = STATE / \"plan.md\"), not under root's parent directory. As worded this will mislead an implementer into hashing ROOT/plan.md (which doesn't exist) instead of root/plan.md.",
+      "severity": "low",
+      "line": 269
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

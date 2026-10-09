@@ -1,0 +1,155 @@
+{
+  "id": "T-0326",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 5,
+  "title": "G7 v4: automatic routine fix rounds (final; spec reviews T-0293, T-0312, T-0321 folded in, further spec review waived after three rounds) \u2014 parent carried, reconciliation in report_merge for all merge paths, defined failure-id extraction, every rejected review checked, hold key from planner_runs._held_at, goal-closed guard",
+  "spec": "Replaces T-0320 (spec review T-0321), T-0296 (T-0312) and T-0272 (T-0293); spec review waived by Planner decision after three rounds, the code review still fires. Build on goal/T-0260 daemon.py after G6 v4 (stage leases, clear_stage, sweep_leases) and planner_runs.py.\nDesign:\n1. Lineage: root(task) walks constraints.fix_round_for up to the task without it; lineage(root) = root plus every task whose root() is that root. auto_fix_round(pool) runs in tick() after the dispatch, gate and merge_reviewed loop and before the autonomous Planner block. It skips tasks whose parent goal is done or stale (same guard dispatch() and gate() use). For each held execute task: skip when any non-failed task in the lineage carries fix_round_for pointing at this task. Routine when (a) hold_reason is gate_red and failing test ids can be extracted from resume_hint.failures with these rules only: pytest lines 'FAILED <nodeid>' and unittest lines 'FAIL: <name> (<module.Class.name>)' or 'ERROR: <name> (...)'; any other runner output escalates; or (b) hold_reason starts 'review request_changes' and every comment of every review of this task whose verdict is request_changes (not only the one named in hold_reason) has a path inside the task scope; and the count of lineage tasks with constraints.auto_round set is below [daemon].auto_fix_rounds (pool.toml, default 2). Otherwise escalate: key = planner_runs._held_at(task) (reuse it, do not reimplement), stamp pipeline.auto_fix_skipped[<key>] under the lock and notify once per key.\n2. The fix task: title 'fix round <n>: <root title>' (n = lineage auto rounds + 1), spec rendered from a new .orchestrator/prompts/fix-round.md (root id and title, held task id, failed acceptance criteria: those mentioning an extracted test id, else all; failure text capped 3,000 chars in a fenced block labelled data; review comments as path:line issue lines from every rejecting review; branch and head sha; keep every original criterion), parent = the held task's parent, same scope, complexity, tier and constraints plus fix_round_for = held id and auto_round = n, inputs = [held task, rejecting review ids], created under the bus lock, one per hold key.\n3. planner_runs.decision_points() skips a held task when any non-failed task with constraints.fix_round_for == its id exists; an escalated hold stays a decision point.\n4. Reconciliation lives in daemon.report_merge(task_id, result): when result.status is merged and the task has fix_round_for, walk the chain to the root setting each ancestor status done, merged_into = target, merged_via = 'fix round <fix id> <sha>', hold_reason None. All three merge.merge call sites (gate direct merge, merge_reviewed, sweep_leases gated_at retry) already go through report_merge or must be changed to.\n5. README Pipeline 'Automatic fix rounds' paragraph (rules, extraction rule, lineage cap, hold key, placement); pool.toml [daemon] auto_fix_rounds = 2.\nTests in tests/test_daemon.py: test_auto_fix_round_on_gate_red_pytest_and_unittest_ids, test_gate_red_unknown_runner_escalates, test_auto_fix_round_on_review_comments_in_scope, test_no_auto_fix_when_any_rejecting_review_has_out_of_scope_comment, test_fix_task_carries_parent, test_lineage_cap_across_chained_fix_rounds, test_escalation_notifies_once_per_hold_key, test_skips_when_goal_done, test_reconciliation_via_sweep_leases_merge, test_fix_round_merge_reconciles_chain; tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists.",
+  "inputs": [
+    "T-0263",
+    "T-0293",
+    "T-0312",
+    "T-0321"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_auto_fix_round_on_gate_red_pytest_and_unittest_ids, ::test_gate_red_unknown_runner_escalates, ::test_auto_fix_round_on_review_comments_in_scope, ::test_no_auto_fix_when_any_rejecting_review_has_out_of_scope_comment, ::test_fix_task_carries_parent, ::test_lineage_cap_across_chained_fix_rounds, ::test_escalation_notifies_once_per_hold_key, ::test_skips_when_goal_done, ::test_reconciliation_via_sweep_leases_merge, ::test_fix_round_merge_reconciles_chain pass",
+    "tests/test_planner_runs.py::test_held_decision_skipped_when_fix_round_exists passes",
+    "the generated fix task passes .claude/hooks/require-acceptance.sh and carries parent, constraints.fix_round_for and auto_round",
+    "README and pool.toml document the rules",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/planner_runs.py",
+    ".orchestrator/prompts/fix-round.md",
+    "tests/test_daemon.py",
+    "tests/test_planner_runs.py",
+    "README.md",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "spec_review_waived": "Planner decision after three rounds (T-0293, T-0312, T-0321), all findings folded in"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0326",
+  "codex_thread": "01a0bb64-8b7e-7c21-b702-2b7e7639a4bb",
+  "result": {
+    "summary": "Codex (luna) committed 8262cd7 in wt/T-0326 over 443feaa: daemon.root/lineage/auto_fix_round (gate_red pytest/unittest id extraction, in-scope review comments, lineage cap [daemon].auto_fix_rounds=2, escalation keyed to planner_runs._held_at, goal-done guard), reconciliation of the fix_round_for chain in report_merge, planner_runs.decision_points skips held tasks with a live fix round, .orchestrator/prompts/fix-round.md, README and pool.toml. Ten tests in tests/test_daemon.py and one in tests/test_planner_runs.py added; tests-green exit 0. Thread 01a0bb64-8b7e-7c21-b702-2b7e7639a4bb resumed via codex_reply after the 22:50 restart; the tool returned the result but did not post it, Planner posted by hand.",
+    "commit": "8262cd73b1873c52460f31ccf15b23fe09841562",
+    "executed_by": "codex:luna",
+    "provenance": [
+      "repo"
+    ],
+    "usage": {
+      "input_tokens": 1805714,
+      "cached_input_tokens": 1637760,
+      "output_tokens": 13979,
+      "reasoning_output_tokens": 2544
+    },
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789850322.332202,
+      "pipeline": {
+        "dispatched_at": 1789850322.332153
+      }
+    },
+    {
+      "ts": 1789850323.573674,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0326",
+      "claimed_at": 1789850323.573378
+    },
+    {
+      "ts": 1789850323.5752802,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1789850631.9819598,
+      "codex_thread": "01a0bb64-8b7e-7c21-b702-2b7e7639a4bb"
+    },
+    {
+      "ts": 1789851392.075849,
+      "codex_thread": "01a0bb64-8b7e-7c21-b702-2b7e7639a4bb"
+    },
+    {
+      "ts": 1789851392.07813,
+      "rounds": 1
+    },
+    {
+      "ts": 1789851498.785722,
+      "status": "done",
+      "result": {
+        "summary": "Codex (luna) committed 8262cd7 in wt/T-0326 over 443feaa: daemon.root/lineage/auto_fix_round (gate_red pytest/unittest id extraction, in-scope review comments, lineage cap [daemon].auto_fix_rounds=2, escalation keyed to planner_runs._held_at, goal-done guard), reconciliation of the fix_round_for chain in report_merge, planner_runs.decision_points skips held tasks with a live fix round, .orchestrator/prompts/fix-round.md, README and pool.toml. Ten tests in tests/test_daemon.py and one in tests/test_planner_runs.py added; tests-green exit 0. Thread 01a0bb64-8b7e-7c21-b702-2b7e7639a4bb resumed via codex_reply after the 22:50 restart; the tool returned the result but did not post it, Planner posted by hand.",
+        "commit": "8262cd73b1873c52460f31ccf15b23fe09841562",
+        "executed_by": "codex:luna",
+        "provenance": [
+          "repo"
+        ],
+        "usage": {
+          "input_tokens": 1805714,
+          "cached_input_tokens": 1637760,
+          "output_tokens": 13979,
+          "reasoning_output_tokens": 2544
+        },
+        "confidence": 0.0
+      }
+    },
+    {
+      "ts": 1789851561.2831712,
+      "pipeline": {
+        "dispatched_at": 1789850322.332153,
+        "gated_at": 1789851561.283088,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789851761.245953,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789851833.731343,
+      "pipeline": {
+        "dispatched_at": 1789850322.332153,
+        "gated_at": 1789851561.283088,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789851833.731273
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0335 (request_changes)"
+    },
+    {
+      "ts": 1789852732.401709,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "merged_via": "fix round T-0337 3767871 (G7 v4 8262cd7 rebased)",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789850322.332153,
+    "gated_at": 1789851561.283088,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789851833.731273
+  },
+  "claimed_at": 1789850323.573378,
+  "rounds": 1,
+  "executor": "luna",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0260",
+  "merged_via": "fix round T-0337 3767871 (G7 v4 8262cd7 rebased)"
+}

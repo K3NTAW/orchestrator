@@ -1,0 +1,155 @@
+{
+  "id": "T-0221",
+  "parent": "T-0201",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "review: E1 v2: review policy \u2014 no code review by default, one cheap review only for security-touching diffs, fail-closed diff, spec review stays (supersedes T-0210 after spec review T-0219)",
+  "spec": "User decision 2026-09-19: code reviews cost 44-45 percent of the last two goals and the human reviews every PR; keep spec review (from complexity 6) and drop code review except when the merged diff touches a security-sensitive path. Change orchestrator/daemon.py (goal/T-0201 version, P4 T-0205 merged) and .orchestrator/pool.toml [review]. Spec review T-0219 risks folded in (items 2, 5, 6).\n1. pool.toml [review] gains code_review = \"security_paths\" (allowed: never | security_paths | always; always = today's D1 behaviour), security_paths = [globs] and security_review_tier = \"sonnet\". Default globs: orchestrator/daemon.py, orchestrator/merge.py, orchestrator/bus.py, orchestrator/executor.py, orchestrator/serve.py, orchestrator/goals.py, orchestrator/spawn.py, orchestrator/pool.py, orchestrator/install.py, orchestrator/planner_runs.py, orchestrator/jev*.py, .claude/hooks/**, .claude/settings.json, .orchestrator/pool.toml, .orchestrator/protected-paths.txt, .mcp*.json, Dockerfile, docker-compose*.yml, pyproject.toml, uv.lock.\n2. New helper changed_paths(t) -> list[str] | None in daemon.py: runs git diff --name-only <base>..HEAD in the worktree, where base is the first of goal/<parent>, origin/main, main that resolves (same fallback order reconcile_dead uses; factor the shared lookup into one helper). Returns None on any failure (non-git worktree, no base, git error). None is fail-CLOSED: treated as a security match with review_reason 'diff_unavailable', so plumbing errors never merge unreviewed work.\n3. gate(): after a green gate, with code_review=never: merge directly (reviews_expected 0) unless orphaned. With security_paths: match changed_paths() against the globs with fnmatch on the repo-relative path (** matches any depth); no match -> merge directly; match or None -> exactly one review on security_review_tier, switched to the other Claude tier when the executor was that same model (never self-review); the review prompt gets the security checklist regardless of complexity. With always: current D1 behaviour untouched. Orphaned results always get exactly one review. Stamp pipeline.review_reason = 'none' | 'security_paths:<first matching glob>' | 'diff_unavailable' | 'always' | 'orphaned' and pipeline.reviews_expected accordingly.\n4. merge_reviewed(): honour reviews_expected 0 (nothing to wait for) and 1. _load_review_cfg(): the three new keys with type checks; an unknown code_review value falls back to \"always\" (safest) and notifies once; security_paths must be a list of strings.\n5. Tests (tests/test_daemon.py): monkeypatch daemon.changed_paths in the new tests, and add an autouse-free fixture helper so the existing gate/review tests that use a plain tempdir worktree set code_review=\"always\" (or patch changed_paths to return a non-security path) and stay green with minimal edits; state in the summary which existing tests were adjusted and why. New tests: c5 non-security diff merges with zero review tasks; diff touching orchestrator/serve.py opens one sonnet review with the checklist; sonnet-executed security diff gets an opus review; changed_paths None -> one review with review_reason diff_unavailable; code_review=always reproduces the two-review test; orphaned still one review; bad code_review value falls back to always.",
+  "inputs": [
+    "T-0220"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_no_review_for_non_security_diff, ::test_one_review_for_security_path, ::test_security_review_never_self_model, ::test_diff_unavailable_fails_closed, ::test_code_review_always_keeps_two_reviews, ::test_orphaned_still_one_review, ::test_bad_code_review_value_falls_back_to_always pass",
+    "pool.toml [review] carries code_review, security_paths (including daemon.py, merge.py, bus.py, executor.py) and security_review_tier with a comment naming the 2026-09-19 decision",
+    "pipeline.review_reason and pipeline.reviews_expected are stamped on every gated task in the tests",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0221",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 53,
+        "issue": "security_paths omits the MCP tool surface while carrying a dead glob. `orchestrator/jev*.py` matches no file in the repo (verified: `ls orchestrator/ | grep -i jev` is empty), and `orchestrator/mcp.py` and `orchestrator/bus_mcp.py` are absent from the list. orchestrator/mcp.py is the Planner's scheduler MCP (spawn_scout, hold_account, merge, executor_fallback); bus_mcp.py is the only channel workers report through and is what .mcp.worker.json launches. With the new default code_review=\"security_paths\", a task whose diff touches only orchestrator/mcp.py yields _matching_security_path() -> None, _review_plan() -> (0, \"none\"), and gate() merges it with zero reviews at any complexity. The allowlist is the entire safety argument for dropping code review, so a hole here is the defect, not a nitpick.",
+        "severity": "high"
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 50,
+        "issue": "The worker prompt templates and skills are not covered. spawn.render() reads `.orchestrator/prompts/<name>.md` (execute.md, review.md, spec-review.md all exist there) and spawn.py:244 points reviewers at `skills/review/adversarial-review/references/security-checklist.md`. Neither `.orchestrator/prompts/**` nor `skills/**` (nor `.claude/skills/**`) is in security_paths. A diff that rewrites .orchestrator/prompts/execute.md or guts the security checklist changes what every executor and reviewer is instructed to do and merges with zero review under the new default.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 374,
+        "issue": "Fail-open on quoted paths. _matching_security_path() fnmatches raw lines from `git diff --name-only`, but git quotes paths containing non-ASCII or special characters by default (core.quotePath=true), emitting e.g. `\".claude/hooks/caf\\303\\251.sh\"` with literal surrounding quotes. The leading `\"` makes the `.claude/hooks/**` glob miss, _review_plan() returns (0, \"none\"), and a hook change merges unreviewed. changed_paths() should pass `-z` (or `-c core.quotePath=false`) and split on NUL. The docstring's fail-closed guarantee only covers the None path, not this one.",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_daemon.py",
+        "line": 428,
+        "issue": "The new git plumbing has no test at all: all four security_paths tests monkeypatch daemon.changed_paths with a lambda, and nothing exercises the real changed_paths() or _matching_security_path(). The functions that actually decide whether a diff is reviewed are the only untested part of the change. A test over a real temp git repo (commit a .claude/hooks file, assert the match; commit a src file, assert no match; a non-git worktree, assert None) is what would have caught the quoting issue above and would pin _resolve_base()'s fallback order.",
+        "severity": "med"
+      },
+      {
+        "path": "CLAUDE.md",
+        "line": 19,
+        "issue": "Step 7 still states the pre-change policy verbatim (\"1-3 hooks only ... 4-6 one sonnet reviewer ... 7-10 two reviews + security checklist\"), which the shipped code_review=\"security_paths\" default no longer implements: a non-security complexity-9 diff now merges with zero reviews. CLAUDE.md is re-read on every Planner message, so this leaves the Planner planning fix rounds and review expectations against a policy the daemon does not run.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 18,
+        "issue": "DEFAULT_SECURITY_PATHS hardcodes this repo's own file names as the library-level fallback. In any other repo whose pool.toml has a [review] table with code_review=\"security_paths\" but no security_paths key, the fallback matches nothing and every diff merges unreviewed while reporting review_reason \"none\" \u2014 indistinguishable from a genuinely non-security diff. An empty/missing security_paths under security_paths mode should either fail closed or notify, not silently allowlist the whole repo.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789813917.515656,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0221",
+      "claimed_at": 1789813917.515189
+    },
+    {
+      "ts": 1789813917.517534,
+      "account": "A"
+    },
+    {
+      "ts": 1789813917.553083,
+      "pid": 6191,
+      "account": "A"
+    },
+    {
+      "ts": 1789814219.6610188,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 53,
+            "issue": "security_paths omits the MCP tool surface while carrying a dead glob. `orchestrator/jev*.py` matches no file in the repo (verified: `ls orchestrator/ | grep -i jev` is empty), and `orchestrator/mcp.py` and `orchestrator/bus_mcp.py` are absent from the list. orchestrator/mcp.py is the Planner's scheduler MCP (spawn_scout, hold_account, merge, executor_fallback); bus_mcp.py is the only channel workers report through and is what .mcp.worker.json launches. With the new default code_review=\"security_paths\", a task whose diff touches only orchestrator/mcp.py yields _matching_security_path() -> None, _review_plan() -> (0, \"none\"), and gate() merges it with zero reviews at any complexity. The allowlist is the entire safety argument for dropping code review, so a hole here is the defect, not a nitpick.",
+            "severity": "high"
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 50,
+            "issue": "The worker prompt templates and skills are not covered. spawn.render() reads `.orchestrator/prompts/<name>.md` (execute.md, review.md, spec-review.md all exist there) and spawn.py:244 points reviewers at `skills/review/adversarial-review/references/security-checklist.md`. Neither `.orchestrator/prompts/**` nor `skills/**` (nor `.claude/skills/**`) is in security_paths. A diff that rewrites .orchestrator/prompts/execute.md or guts the security checklist changes what every executor and reviewer is instructed to do and merges with zero review under the new default.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 374,
+            "issue": "Fail-open on quoted paths. _matching_security_path() fnmatches raw lines from `git diff --name-only`, but git quotes paths containing non-ASCII or special characters by default (core.quotePath=true), emitting e.g. `\".claude/hooks/caf\\303\\251.sh\"` with literal surrounding quotes. The leading `\"` makes the `.claude/hooks/**` glob miss, _review_plan() returns (0, \"none\"), and a hook change merges unreviewed. changed_paths() should pass `-z` (or `-c core.quotePath=false`) and split on NUL. The docstring's fail-closed guarantee only covers the None path, not this one.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_daemon.py",
+            "line": 428,
+            "issue": "The new git plumbing has no test at all: all four security_paths tests monkeypatch daemon.changed_paths with a lambda, and nothing exercises the real changed_paths() or _matching_security_path(). The functions that actually decide whether a diff is reviewed are the only untested part of the change. A test over a real temp git repo (commit a .claude/hooks file, assert the match; commit a src file, assert no match; a non-git worktree, assert None) is what would have caught the quoting issue above and would pin _resolve_base()'s fallback order.",
+            "severity": "med"
+          },
+          {
+            "path": "CLAUDE.md",
+            "line": 19,
+            "issue": "Step 7 still states the pre-change policy verbatim (\"1-3 hooks only ... 4-6 one sonnet reviewer ... 7-10 two reviews + security checklist\"), which the shipped code_review=\"security_paths\" default no longer implements: a non-security complexity-9 diff now merges with zero reviews. CLAUDE.md is re-read on every Planner message, so this leaves the Planner planning fix rounds and review expectations against a policy the daemon does not run.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 18,
+            "issue": "DEFAULT_SECURITY_PATHS hardcodes this repo's own file names as the library-level fallback. In any other repo whose pool.toml has a [review] table with code_review=\"security_paths\" but no security_paths key, the fallback matches nothing and every diff merges unreviewed while reporting review_reason \"none\" \u2014 indistinguishable from a genuinely non-security diff. An empty/missing security_paths under security_paths mode should either fail closed or notify, not silently allowlist the whole repo.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789814219.664802,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789813917.515189,
+  "account": "A",
+  "pid": 6191,
+  "review_verdict": "request_changes"
+}

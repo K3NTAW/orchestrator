@@ -1,0 +1,132 @@
+{
+  "id": "T-0232",
+  "parent": "T-0201",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review: E8: Jev shadow triage of decision points \u2014 log what Jev would decide before any Planner launch, no behaviour change",
+  "spec": "Every decision-point Planner launch (planner_runs.py, D3) is a full headless Fable session. Before spending one, record what a typed Jev decision would have been, so we can measure agreement over a week and later let the daemon skip launches Jev is confident about. Build on E2 (T-0214) and P5 (T-0206). Shadow mode only: nothing in the launch path changes.\n1. orchestrator/planner_runs.py run(): right after the claim and before launch_planner, call jev_triage(kind, task) (fail-open, 3 s cap) and store its result on the ledger row as jev = {choice, probabilities, confidence, latency_ms} or None.\n2. jev_triage(kind, task): state = {kind, task title, spec first 1500 chars, hold_reason, latest review comments (path:line + severity + first 200 chars of issue, max 10), depends_on statuses, attempts}; question 'next_action' of type choice with options fix_round ('write a fix-round task from the review comments'), respec ('the spec itself is wrong; recreate the task'), escalate ('a human must decide: auth, billing, data deletion, or three failed rounds'), noop ('the hold is stale or already superseded; nothing to do'). For kind scouts_done: options synthesize_now / wait_for_more / drop_low_confidence.\n3. reconcile()/records: when the launched Planner finishes, compare its observable outcome (a fix-round task created -> fix_round; task superseded -> respec; status blocked or escalation note -> escalate; nothing -> noop) and store agreement = true|false|None on the row.\n4. `orchestrator scorecard --by goal` is out of scope here; instead planner_runs.py gains summary() returning {decisions, jev_scored, agreement_rate, mean_confidence} printed by `orchestrator planner-runs --summary` (cli.py).\nTests in tests/test_planner_runs.py with jev.ask monkeypatched: ledger row carries jev; None keeps the row valid; agreement computed for each outcome mapping; summary numbers.",
+  "inputs": [
+    "T-0217"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py::test_run_records_jev_shadow_choice, ::test_jev_none_keeps_launch_path, ::test_agreement_mapping, ::test_planner_runs_summary pass",
+    "`uv run orchestrator planner-runs --summary` prints decisions, jev_scored and agreement_rate on an empty ledger without error",
+    "No test asserting launch behaviour changes; launch_planner call count unchanged in existing tests",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/cli.py",
+    "tests/test_planner_runs.py",
+    "tests/test_cli.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0232",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 358,
+        "issue": "_safe_jev_triage() runs before the guards in run()'s try block (_session_attached, pool headroom, _SAFE_KEY), so it fires a real Jev HTTP call on every path that never launches a Planner and then discards the result (skip records store no jev). Per _record_skip's own docstring a skip does not block the next tick's retry, so with an interactive Planner attached every daemon tick re-calls run() for the same decision and burns another Jev request against [jev].daily_budget_tokens, adding up to 3s (jev.ask retries once with 0.5s backoff on 429/529 and applies timeout_s per attempt, so ~6.5s worst case, not the 3s cap the docstring claims) to the tick for zero recorded value. Move the call to just before _record_running(), after the guards.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 231,
+        "issue": "_record_running() sets jev= on retry but never resets r[\"agreement\"], and reconcile()'s claim that scoring happens \"once ... never revisited\" is wrong: an exited_early record is re-run and re-enters the running branch. A row scored agreement=True on attempt 1 whose retry gets jev_result=None keeps agreement=True with jev=None, so summary() counts it in the agreement_rate denominator while excluding it from jev_scored \u2014 the rate is then computed partly over rows that had no shadow choice.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "line": 326,
+        "issue": "jev_triage() only guards key presence (KeyError/TypeError on access), not value types, so a malformed response with \"confidence\": null is stored as-is; summary() then does sum(r[\"jev\"][\"confidence\"] ...) and `orchestrator planner-runs --summary` dies with TypeError on a non-numeric confidence, breaking the CLI on external data in a module whose stated posture is fail-open everywhere.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 172,
+        "issue": "`orchestrator planner-runs` without --summary falls through both branches and prints nothing while exiting 0, which reads as an empty ledger rather than a missing flag. Either make --summary the default output or error on no subflag.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789817686.720373,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0232",
+      "claimed_at": 1789817686.719936
+    },
+    {
+      "ts": 1789817686.7224362,
+      "account": "A"
+    },
+    {
+      "ts": 1789817686.762388,
+      "pid": 1359,
+      "account": "A"
+    },
+    {
+      "ts": 1789817779.232651,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 358,
+            "issue": "_safe_jev_triage() runs before the guards in run()'s try block (_session_attached, pool headroom, _SAFE_KEY), so it fires a real Jev HTTP call on every path that never launches a Planner and then discards the result (skip records store no jev). Per _record_skip's own docstring a skip does not block the next tick's retry, so with an interactive Planner attached every daemon tick re-calls run() for the same decision and burns another Jev request against [jev].daily_budget_tokens, adding up to 3s (jev.ask retries once with 0.5s backoff on 429/529 and applies timeout_s per attempt, so ~6.5s worst case, not the 3s cap the docstring claims) to the tick for zero recorded value. Move the call to just before _record_running(), after the guards.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 231,
+            "issue": "_record_running() sets jev= on retry but never resets r[\"agreement\"], and reconcile()'s claim that scoring happens \"once ... never revisited\" is wrong: an exited_early record is re-run and re-enters the running branch. A row scored agreement=True on attempt 1 whose retry gets jev_result=None keeps agreement=True with jev=None, so summary() counts it in the agreement_rate denominator while excluding it from jev_scored \u2014 the rate is then computed partly over rows that had no shadow choice.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "line": 326,
+            "issue": "jev_triage() only guards key presence (KeyError/TypeError on access), not value types, so a malformed response with \"confidence\": null is stored as-is; summary() then does sum(r[\"jev\"][\"confidence\"] ...) and `orchestrator planner-runs --summary` dies with TypeError on a non-numeric confidence, breaking the CLI on external data in a module whose stated posture is fail-open everywhere.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 172,
+            "issue": "`orchestrator planner-runs` without --summary falls through both branches and prints nothing while exiting 0, which reads as an empty ledger rather than a missing flag. Either make --summary the default output or error on no subflag.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789817779.235308,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789817686.719936,
+  "account": "A",
+  "pid": 1359,
+  "review_verdict": "request_changes"
+}

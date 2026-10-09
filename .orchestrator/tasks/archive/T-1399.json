@@ -1,0 +1,1264 @@
+{
+  "id": "T-1399",
+  "created_at": 1790749890.1781561,
+  "parent": "T-1391",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "Route every gate run through gate.run_gate; timeout holds as gate_timeout infra failure (v2, test seams migrated)",
+  "spec": "What: wire the bounded runner from T-1392 (orchestrator/gate.py, merged on goal/T-1391: settings, run_bounded, run_gate, running_gates) into every gate invocation, and make a final timeout an infrastructure failure instead of gate_red. Replaces T-1393 (held: spec review request_changes); its six findings are resolved below.\nWhy: a hung tests-green (luna xcodebuild 6 h) stalled goals, and killing it by hand marked the task gate_red, so the daemon filed a pointless code fix round.\n\nImport rule: daemon.py, merge.py and failures.py do `from orchestrator import gate` (module import, so tests can patch `daemon.gate.run_gate`, `merge.gate.run_gate`, `failures.gate.run_bounded`). gate.py must not import daemon, merge or failures.\n\nChanges:\n1. daemon.gate (daemon.py:1448): replace `subprocess.run([str(merge.TESTS_GREEN), worktree], ...)` with `result = gate.run_gate(worktree, script=merge.TESTS_GREEN, task_id=t[\"id\"], cfg=pool.cfg)`. Order after the call: first the existing `_hold_stale_high(t)` check (unchanged, still runs on a timeout: finding 5), then `if result[\"timed_out\"]:` stamp(t[\"id\"], \"gated_at\", pipeline_fields={\"infra_failure\": \"gate_timeout\", \"gate_timeouts\": pipeline.get(\"gate_timeouts\", 0) + result[\"timeouts\"]}, status=\"held\", hold_reason=\"gate_timeout\", resume_hint={\"gate_timeout_s\": gate.settings(pool.cfg)[\"timeout_s\"], \"output_tail\": (result[\"stdout\"] + result[\"stderr\"])[-4000:]}), notify(f\"{t['id']}: gate timed out twice; held as infra failure\"), continue. gate_reds is NOT incremented on a timeout. Then the existing red branch using result[\"returncode\"] and result[\"stderr\"], and the green path, unchanged.\n2. merge.merge (merge.py:57): replace the subprocess.run with `result = gate.run_gate(wt, script=TESTS_GREEN, task_id=task_id)` (cfg omitted: gate.settings(None) reads pool.config(); no signature change to merge.merge, finding 6). If result[\"timed_out\"]: bus.update(task_id, status=\"held\", hold_reason=\"gate_timeout\", pipeline={**(task.get(\"pipeline\") or {}), \"infra_failure\": \"gate_timeout\"}, resume_hint={\"output_tail\": (result[\"stdout\"]+result[\"stderr\"])[-4000:]}) and return {\"status\": \"gate_timeout\", \"reason\": \"gate_timeout\"}; the target branch must not move. Red stays status failed / tests_red exactly as today, using result[\"returncode\"] and result[\"stderr\"]. Keep `merge.TESTS_GREEN` as the module attribute tests patch.\n3. Flaky rerun (failures.failure_kind, failures.py:152): replace `subprocess.run(command, cwd=worktree, capture_output=True, text=True, timeout=rerun_timeout)` with `rerun = gate.run_bounded(command, cwd=worktree, timeout_s=rerun_timeout)`. If rerun[\"timed_out\"]: append {\"ids\": ids, \"timed_out\": True, \"timeout_s\": rerun_timeout, \"output\": (rerun[\"stdout\"] + rerun[\"stderr\"])[-2000:]} and classify \"code_defect\", exactly the shape today's TimeoutExpired branch produces. Otherwise use rerun[\"returncode\"], rerun[\"stdout\"], rerun[\"stderr\"] where the CompletedProcess fields were used. The runner probe (failures.py:106, subprocess.run with timeout 60) stays as it is. daemon.auto_fix_round (daemon.py:171) passes rerun_timeout=min(flaky_rerun_timeout_s, gate.settings(pool.cfg)[\"timeout_s\"]).\n4. daemon.auto_fix_round (daemon.py:149): skip a held task whose hold_reason is \"gate_timeout\" or whose pipeline.infra_failure is set, before failure_kind runs: no fix round, no rerun, no probe.\n5. planner_runs.build_ctx (planner_runs.py:1021-1026): AFTER the cooling-source loop that may reassign `infra` (the `for source in [...]` block), add: `pipeline_infra = (task.get(\"pipeline\") or {}).get(\"infra_failure\"); if pipeline_infra: infra = pipeline_infra`. So a gate_timeout hold yields ctx[\"infra_failure_kind\"] == \"gate_timeout\" even when an account is also cooling (finding 4), and decision.route (decision.py:89) returns route \"none\". Do not change decision.py.\n\nTest migration (findings 1-3; these files are in scope, keep every existing test's intent):\n6. tests/test_daemon.py gate_green helper (line 1538): keep the subprocess.run fake for osascript and git passthrough, drop its TESTS_GREEN branch, and additionally `self.swap(daemon.gate, \"run_gate\", fake_gate)` where fake_gate(worktree, *, script, task_id=None, cfg=None) returns {\"returncode\": 0 if green else 1, \"stdout\": \"\", \"stderr\": \"\", \"timed_out\": False, \"attempts\": 1, \"timeouts\": 0}. The direct sites that match argv on [str(merge.TESTS_GREEN)] (around lines 3135, 3145, 3171, 3207, 3228, 3305) migrate the same way: patch daemon.gate.run_gate, record (worktree, script, task_id) per call, and assert on those instead of argv (e.g. line 3145 becomes assertEqual(gate_calls, [(str(self.sandbox), merge.TESTS_GREEN, tid)]); line 3171 asserts no gate call; 3207 asserts one).\n7. tests/test_daemon.py test_flaky_rerun_has_timeout_and_timeout_is_not_flaky (line 1907): keep the subprocess.run swap for the probe (return FakeProc(\"\", 1) for the `-c import pytest` argv; any other argv fails the test), and swap failures.gate.run_bounded with a fake that asserts timeout_s == 17 and returns {\"returncode\": None, \"stdout\": \"hung test\", \"stderr\": \"\", \"timed_out\": True, \"duration_s\": 17.0}. The assertions on failure_kind code_defect and flaky_runs [{\"ids\": [...], \"timed_out\": True, \"timeout_s\": 17, \"output\": \"hung test\"}] stay. test_runner_probe_timeout_does_not_block_or_mark_flaky (line 1767) is unchanged (the probe still uses subprocess.run).\n8. tests/test_merge.py lines 320-331: patch merge.gate.run_gate instead of orchestrator.merge.subprocess.run; assert it was called once with (str(wt)) positional and script=merge.TESTS_GREEN. Other test_merge tests that patch merge.TESTS_GREEN to a real script path keep working because gate.run_gate executes `script` (do not fake them).\n\nNew tests in tests/test_gate_timeout.py (created by T-1392; keep its tests): patch daemon.gate.run_gate / merge.TESTS_GREEN with a real sleeping script and a tiny [gate] timeout_s in the cfg, per the acceptance list. Never treat a timeout as success anywhere. Grep first for exact current names and line numbers; they may have shifted.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_gate_timeout.py::test_daemon_gate_timeout_holds_as_infra_failure passes: daemon.gate on a done task whose gate always times out leaves status held, hold_reason gate_timeout, pipeline.infra_failure gate_timeout, gate_reds unchanged, and the gate was attempted twice",
+    "tests/test_gate_timeout.py::test_gate_timeout_files_no_fix_round passes: auto_fix_round on that held task creates no task and runs no rerun or probe, and planner_runs.build_ctx for it yields infra_failure_kind gate_timeout so decision.route returns route none",
+    "tests/test_gate_timeout.py::test_gate_timeout_ctx_wins_over_cooling_account passes: build_ctx for a gate_timeout task whose account is cooling still yields infra_failure_kind gate_timeout",
+    "tests/test_gate_timeout.py::test_merge_path_honours_timeout passes: merge.merge with TESTS_GREEN pointing at a sleeping script and a tiny timeout returns status gate_timeout, the target branch sha is unchanged, and the task is held gate_timeout with pipeline.infra_failure set",
+    "tests/test_gate_timeout.py::test_flaky_rerun_kills_tree_on_timeout passes: a hung rerun (a script that spawns a sleeping child) in failure_kind is killed with its children and recorded as timed_out, classification unchanged (code_defect)",
+    "tests/test_gate_timeout.py::test_daemon_fast_red_gate_unchanged passes: a fast red gate still holds gate_red with gate_reds incremented and no infra_failure",
+    "tests/test_daemon.py::test_flaky_rerun_has_timeout_and_timeout_is_not_flaky passes with the rerun faked through failures.gate.run_bounded",
+    "existing tests/test_daemon.py, tests/test_merge.py, tests/test_failures.py, tests/test_planner_runs.py pass; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    "orchestrator/failures.py",
+    "orchestrator/planner_runs.py",
+    "tests/test_gate_timeout.py",
+    "tests/test_daemon.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [
+    "T-1392"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 2700,
+    "task_class": "debugging",
+    "route": "full",
+    "respec_for": "T-1393",
+    "read_scope": [
+      "orchestrator/gate.py",
+      "orchestrator/decision.py",
+      "orchestrator/notify.py",
+      "tests/test_failures.py",
+      "tests/test_planner_runs.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "consumes orchestrator/gate.py from T-1392: run_gate(worktree,*,script,task_id=None,cfg=None)->{returncode,stdout,stderr,timed_out,attempts,timeouts}; run_bounded(argv,*,cwd,timeout_s,input=None,kill_grace_s)->{returncode,stdout,stderr,timed_out,duration_s}; settings(cfg)->{timeout_s,cleanup_cmd,cleanup_timeout_s}. Produces hold_reason 'gate_timeout' + pipeline.infra_failure 'gate_timeout'; merge.merge returns {'status':'gate_timeout'}; tests patch daemon.gate.run_gate, merge.gate.run_gate, failures.gate.run_bounded"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1399",
+  "codex_thread": "01a0f109-bb5f-7c31-b11e-067edb27de6d",
+  "result": {
+    "summary": "Summary: Routed daemon, merge, and flaky rerun gates through bounded runners; gate timeouts now become infrastructure holds. Updated planner routing and test seams.\n\nFiles changed: 6 files, 120 insertions, 87 deletions.\n\nGate result: `tests-green: OK 1532 d871298 166s`  \nCommit: `b5c26d0c4b850b34915107afe2093f8669bd2e28`  \nFailures-only test output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0f109-bb5f-7c31-b11e-067edb27de6d",
+    "usage": {
+      "input_tokens": 2181339,
+      "cached_input_tokens": 2114816,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10979,
+      "reasoning_output_tokens": 2070
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790749909.2599192,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873
+      }
+    },
+    {
+      "ts": 1790749909.4506822,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627
+      }
+    },
+    {
+      "ts": 1790749909.458396,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402
+      }
+    },
+    {
+      "ts": 1790750160.4183612,
+      "spec_review_verdict": "approve",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/merge.py",
+          "issue": "Step 2 pseudocode uses `task.get(\"pipeline\")` but merge.merge's local variable is `t` (from `t = bus.get(task_id)`); `task` is undefined in that scope and a literal transcription raises NameError on the first gate timeout during merge.",
+          "severity": "low",
+          "line": 57
+        }
+      ]
+    },
+    {
+      "ts": 1790750186.6251378,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081
+      }
+    },
+    {
+      "ts": 1790750186.626442,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081
+      }
+    },
+    {
+      "ts": 1790750194.76978,
+      "packet_meta": {
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 10287,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790750194.770957,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899
+      }
+    },
+    {
+      "ts": 1790750322.1138382,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        }
+      }
+    },
+    {
+      "ts": 1790750336.984401,
+      "packet_meta": {
+        "chars": 9408,
+        "est_tokens": 2352,
+        "presented_tokens": 2352,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "768a5926c6eaa511fca84fe8fa84224075eb2691b5be8d868255e5984c884c01"
+          },
+          "objective": {
+            "chars": 6196,
+            "est_tokens": 1549,
+            "sha256": "5ff382da7c0a4311dcc2cdb0e53ee81370e1e89f4c183e05f5675c4a7a967ad9"
+          },
+          "acceptance": {
+            "chars": 1710,
+            "est_tokens": 427,
+            "sha256": "c12df363f4bac634f274d67adbdff2eeeb68b6764c4e1685fc83ba884294e6ed"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5c41f1f454ca2ff2f72fbc4b4e0ab93fcc43fa2a02830fc337f856e9b6024be4"
+          },
+          "write_scope": {
+            "chars": 196,
+            "est_tokens": 49,
+            "sha256": "c341300e2b102a7c6bb49f3d68a0645b62bb1a2810fadc7ee72cd4aafa718d15"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 851,
+            "est_tokens": 212,
+            "sha256": "c614e3e853f965014409eeb2463923479bf438d508a00a69cd2ee7b91a2bc45a"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "e0225f4c8852",
+        "version": "e0225f4c8852",
+        "candidate_known": true,
+        "base": "ef1f34621163",
+        "sources": "pool.toml@4d1e6f1bb235 gotchas@ec1fd0db1cb3 memory@notes over cap by 4608 chars: acceptance kept whole routed=active",
+        "policy_version": "4d1e6f1bb235",
+        "gotchas": "ec1fd0db1cb3",
+        "candidate_tokens": 4625,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 20447,
+        "routed_reduction_ratio": 0.9074246660453557,
+        "routed_hidden": 1,
+        "routed_ambiguous": 23,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "f709d3c0e52e",
+          "b76a91742499",
+          "50828c778575",
+          "de7a0c3ee89d",
+          "57f9bf763a17",
+          "0d8579409a45",
+          "ef47be80e1d6",
+          "c786810d3beb",
+          "8635c9cc835b",
+          "f7e783c7a144",
+          "dc6af805d035",
+          "94d9bf957ebb",
+          "4a226dc6afc3",
+          "cf58579c93c0",
+          "a0d0c1503441",
+          "03959966c4a2",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "667ed6b21b31",
+          "2b71081a619f",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "e740210532e5",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "80291b312459",
+          "d39ac091b005",
+          "7657bd5d45a9",
+          "b1df544fdd98",
+          "34b6b61ecc58",
+          "1a7a7f5dc41a",
+          "00db509188f0",
+          "041199286363",
+          "7566baf004f8",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "84b6fb0bf229",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "7e24a50f3b46",
+          "9ca84044724b",
+          "202911b40ae9",
+          "fdceb8433fde",
+          "680306e32cc9",
+          "7a9bb5573fba",
+          "5f9df97c4e2c",
+          "6f81b9e6e064",
+          "b70906066d2f",
+          "470e54bc4728",
+          "a62dd7285431",
+          "354d41d7614a",
+          "420f4ffcd721",
+          "8c79c93415ce",
+          "5d95cd5924ee",
+          "12bcad8b4234",
+          "7384be51d55f",
+          "cfeae2bf4d6f",
+          "40854b350abc",
+          "1ff6f6cd057e",
+          "f0c7eb2b039f",
+          "b03845ad14ac",
+          "ab5eac2e0095",
+          "b913f9ec03ec",
+          "9b1852d975be",
+          "5df3acf559c9",
+          "4ac69865640c",
+          "3cb9b68697b6",
+          "e146114ba8ec",
+          "7d087b6e297c",
+          "6c3686570d84",
+          "62bb42ad80d2",
+          "73edaf240ba4",
+          "347b2365cf0d",
+          "c465910e2b28",
+          "2a874b8ed171",
+          "42758e20cbaf",
+          "d8196cc161e2",
+          "dd248aa70410",
+          "f77f8a2af59d",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 10287,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1790750336.994507,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1399",
+      "claimed_at": 1790750336.991949
+    },
+    {
+      "ts": 1790750337.0020428,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790751425.925102,
+      "codex_thread": "01a0f109-bb5f-7c31-b11e-067edb27de6d",
+      "codex_thread_head": "b5c26d0c4b850b34915107afe2093f8669bd2e28"
+    },
+    {
+      "ts": 1790751425.927265,
+      "packet_meta": {
+        "chars": 9408,
+        "est_tokens": 2352,
+        "presented_tokens": 2352,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "768a5926c6eaa511fca84fe8fa84224075eb2691b5be8d868255e5984c884c01"
+          },
+          "objective": {
+            "chars": 6196,
+            "est_tokens": 1549,
+            "sha256": "5ff382da7c0a4311dcc2cdb0e53ee81370e1e89f4c183e05f5675c4a7a967ad9"
+          },
+          "acceptance": {
+            "chars": 1710,
+            "est_tokens": 427,
+            "sha256": "c12df363f4bac634f274d67adbdff2eeeb68b6764c4e1685fc83ba884294e6ed"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "5c41f1f454ca2ff2f72fbc4b4e0ab93fcc43fa2a02830fc337f856e9b6024be4"
+          },
+          "write_scope": {
+            "chars": 196,
+            "est_tokens": 49,
+            "sha256": "c341300e2b102a7c6bb49f3d68a0645b62bb1a2810fadc7ee72cd4aafa718d15"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 851,
+            "est_tokens": 212,
+            "sha256": "c614e3e853f965014409eeb2463923479bf438d508a00a69cd2ee7b91a2bc45a"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "e0225f4c8852",
+        "version": "e0225f4c8852",
+        "candidate_known": true,
+        "base": "ef1f34621163",
+        "sources": "pool.toml@4d1e6f1bb235 gotchas@ec1fd0db1cb3 memory@notes over cap by 4608 chars: acceptance kept whole routed=active",
+        "policy_version": "4d1e6f1bb235",
+        "gotchas": "ec1fd0db1cb3",
+        "candidate_tokens": 4625,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 20447,
+        "routed_reduction_ratio": 0.9074246660453557,
+        "routed_hidden": 1,
+        "routed_ambiguous": 23,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "f709d3c0e52e",
+          "b76a91742499",
+          "50828c778575",
+          "de7a0c3ee89d",
+          "57f9bf763a17",
+          "0d8579409a45",
+          "ef47be80e1d6",
+          "c786810d3beb",
+          "8635c9cc835b",
+          "f7e783c7a144",
+          "dc6af805d035",
+          "94d9bf957ebb",
+          "4a226dc6afc3",
+          "cf58579c93c0",
+          "a0d0c1503441",
+          "03959966c4a2",
+          "504365aa02ad",
+          "a64c9c5341ef",
+          "65c4d2b5db00",
+          "325d85b6f071",
+          "93c94ac0c027",
+          "0fb2f39963fc",
+          "55d0ebe04a88",
+          "0768ddd89e7e",
+          "573b5b20bfad",
+          "718b545b1eca",
+          "667ed6b21b31",
+          "2b71081a619f",
+          "e4b388cad1ac",
+          "5e22799f1c53",
+          "b676757c3fa9",
+          "84ae4852296a",
+          "e740210532e5",
+          "d2cb7b81717c",
+          "1a80d55206ca",
+          "a595cbbe1665",
+          "1010a8c11bac",
+          "d5139aa32546",
+          "80291b312459",
+          "d39ac091b005",
+          "7657bd5d45a9",
+          "b1df544fdd98",
+          "34b6b61ecc58",
+          "1a7a7f5dc41a",
+          "00db509188f0",
+          "041199286363",
+          "7566baf004f8",
+          "acfaa314d8bc",
+          "df7350a0e379",
+          "84b6fb0bf229",
+          "4e7c92225364",
+          "3a7ed61a955d",
+          "5893a1c64463",
+          "bb680aa235cd",
+          "ce80308dc309",
+          "051786ba0165",
+          "7e24a50f3b46",
+          "9ca84044724b",
+          "202911b40ae9",
+          "fdceb8433fde",
+          "680306e32cc9",
+          "7a9bb5573fba",
+          "5f9df97c4e2c",
+          "6f81b9e6e064",
+          "b70906066d2f",
+          "470e54bc4728",
+          "a62dd7285431",
+          "354d41d7614a",
+          "420f4ffcd721",
+          "8c79c93415ce",
+          "5d95cd5924ee",
+          "12bcad8b4234",
+          "7384be51d55f",
+          "cfeae2bf4d6f",
+          "40854b350abc",
+          "1ff6f6cd057e",
+          "f0c7eb2b039f",
+          "b03845ad14ac",
+          "ab5eac2e0095",
+          "b913f9ec03ec",
+          "9b1852d975be",
+          "5df3acf559c9",
+          "4ac69865640c",
+          "3cb9b68697b6",
+          "e146114ba8ec",
+          "7d087b6e297c",
+          "6c3686570d84",
+          "62bb42ad80d2",
+          "73edaf240ba4",
+          "347b2365cf0d",
+          "c465910e2b28",
+          "2a874b8ed171",
+          "42758e20cbaf",
+          "d8196cc161e2",
+          "dd248aa70410",
+          "f77f8a2af59d",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8"
+        ],
+        "prefix_sha": "ca8679e33dc1",
+        "prefix_chars": 725,
+        "suffix_chars": 10287,
+        "dynamic_sections": [
+          "objective",
+          "acceptance",
+          "base",
+          "write_scope",
+          "read_scope",
+          "constraints",
+          "relevant_tests",
+          "symbols",
+          "gotchas",
+          "decisions",
+          "verify",
+          "evidence",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790751426.2713249,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "659b122748e763378f4b9409414642cb7cc7bc41",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0366071428571428,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790751426.2743459,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Routed daemon, merge, and flaky rerun gates through bounded runners; gate timeouts now become infrastructure holds. Updated planner routing and test seams.\n\nFiles changed: 6 files, 120 insertions, 87 deletions.\n\nGate result: `tests-green: OK 1532 d871298 166s`  \nCommit: `b5c26d0c4b850b34915107afe2093f8669bd2e28`  \nFailures-only test output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0f109-bb5f-7c31-b11e-067edb27de6d",
+        "usage": {
+          "input_tokens": 2181339,
+          "cached_input_tokens": 2114816,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10979,
+          "reasoning_output_tokens": 2070
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790751448.992631,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "659b122748e763378f4b9409414642cb7cc7bc41",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0366071428571428,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790751449.146205,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "659b122748e763378f4b9409414642cb7cc7bc41",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0366071428571428,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790751449.1460328,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": [
+          "FAILED tests/test_gate_timeout.py::test_daemon_gate_timeout_holds_as_infra_failure (missing: test not defined)",
+          "FAILED tests/test_gate_timeout.py::test_gate_timeout_files_no_fix_round (missing: test not defined)",
+          "FAILED tests/test_gate_timeout.py::test_gate_timeout_ctx_wins_over_cooling_account (missing: test not defined)",
+          "FAILED tests/test_gate_timeout.py::test_merge_path_honours_timeout (missing: test not defined)",
+          "FAILED tests/test_gate_timeout.py::test_flaky_rerun_kills_tree_on_timeout (missing: test not defined)",
+          "FAILED tests/test_gate_timeout.py::test_daemon_fast_red_gate_unchanged (missing: test not defined)"
+        ],
+        "missing_tests": [
+          [
+            "tests/test_gate_timeout.py",
+            "test_daemon_gate_timeout_holds_as_infra_failure"
+          ],
+          [
+            "tests/test_gate_timeout.py",
+            "test_gate_timeout_files_no_fix_round"
+          ],
+          [
+            "tests/test_gate_timeout.py",
+            "test_gate_timeout_ctx_wins_over_cooling_account"
+          ],
+          [
+            "tests/test_gate_timeout.py",
+            "test_merge_path_honours_timeout"
+          ],
+          [
+            "tests/test_gate_timeout.py",
+            "test_flaky_rerun_kills_tree_on_timeout"
+          ],
+          [
+            "tests/test_gate_timeout.py",
+            "test_daemon_fast_red_gate_unchanged"
+          ]
+        ]
+      }
+    },
+    {
+      "ts": 1790751450.3750982,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "659b122748e763378f4b9409414642cb7cc7bc41",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0366071428571428,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790751449.1460328,
+        "gate_reds": 1,
+        "failure_kind": "quota"
+      }
+    },
+    {
+      "ts": 1790751893.989884,
+      "codex_thread": "01a0f109-bb5f-7c31-b11e-067edb27de6d",
+      "codex_thread_head": "423057ea90e7359219b222b890ab280ccaf8e559"
+    },
+    {
+      "ts": 1790751894.223107,
+      "rounds": 1
+    },
+    {
+      "ts": 1790752091.915683,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "659b122748e763378f4b9409414642cb7cc7bc41",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0366071428571428,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790751449.1460328,
+        "gate_reds": 1,
+        "failure_kind": "quota",
+        "first_green_at": 1790752091.912711,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790752449.2376199,
+      "status": "done",
+      "merged_into": "goal/T-1391",
+      "merged_via": "fix round T-1401 423057ea90e7359219b222b890ab280ccaf8e559",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790749909.259873,
+        "spec_review_at": 1790749909.450627,
+        "spec_review_at_lease": 1790750809.450627,
+        "spec_review_at_done": 1790749909.4583402,
+        "dispatched_at": 1790750186.625081,
+        "dispatched_at_lease": 1790751086.625081,
+        "dispatched_at_done": 1790750194.770899,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790750322.1134322
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "659b122748e763378f4b9409414642cb7cc7bc41",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0366071428571428,
+            "claude:opus": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790751449.1460328,
+        "gate_reds": 1,
+        "failure_kind": "quota",
+        "first_green_at": 1790752091.912711,
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790752449.235614
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790749909.259873,
+    "spec_review_at": 1790749909.450627,
+    "spec_review_at_lease": 1790750809.450627,
+    "spec_review_at_done": 1790749909.4583402,
+    "dispatched_at": 1790750186.625081,
+    "dispatched_at_lease": 1790751086.625081,
+    "dispatched_at_done": 1790750194.770899,
+    "handoff": {
+      "baseline": "sol",
+      "selected": "sol",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790750322.1134322
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "659b122748e763378f4b9409414642cb7cc7bc41",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0366071428571428,
+        "claude:opus": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790751449.1460328,
+    "gate_reds": 1,
+    "failure_kind": "quota",
+    "first_green_at": 1790752091.912711,
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790752449.235614
+  },
+  "spec_review_verdict": "approve",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/merge.py",
+      "issue": "Step 2 pseudocode uses `task.get(\"pipeline\")` but merge.merge's local variable is `t` (from `t = bus.get(task_id)`); `task` is undefined in that scope and a literal transcription raises NameError on the first gate timeout during merge.",
+      "severity": "low",
+      "line": 57
+    }
+  ],
+  "packet_meta": {
+    "chars": 9408,
+    "est_tokens": 2352,
+    "presented_tokens": 2352,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "768a5926c6eaa511fca84fe8fa84224075eb2691b5be8d868255e5984c884c01"
+      },
+      "objective": {
+        "chars": 6196,
+        "est_tokens": 1549,
+        "sha256": "5ff382da7c0a4311dcc2cdb0e53ee81370e1e89f4c183e05f5675c4a7a967ad9"
+      },
+      "acceptance": {
+        "chars": 1710,
+        "est_tokens": 427,
+        "sha256": "c12df363f4bac634f274d67adbdff2eeeb68b6764c4e1685fc83ba884294e6ed"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "5c41f1f454ca2ff2f72fbc4b4e0ab93fcc43fa2a02830fc337f856e9b6024be4"
+      },
+      "write_scope": {
+        "chars": 196,
+        "est_tokens": 49,
+        "sha256": "c341300e2b102a7c6bb49f3d68a0645b62bb1a2810fadc7ee72cd4aafa718d15"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 851,
+        "est_tokens": 212,
+        "sha256": "c614e3e853f965014409eeb2463923479bf438d508a00a69cd2ee7b91a2bc45a"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "e0225f4c8852",
+    "version": "e0225f4c8852",
+    "candidate_known": true,
+    "base": "ef1f34621163",
+    "sources": "pool.toml@4d1e6f1bb235 gotchas@ec1fd0db1cb3 memory@notes over cap by 4608 chars: acceptance kept whole routed=active",
+    "policy_version": "4d1e6f1bb235",
+    "gotchas": "ec1fd0db1cb3",
+    "candidate_tokens": 4625,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 20447,
+    "routed_reduction_ratio": 0.9074246660453557,
+    "routed_hidden": 1,
+    "routed_ambiguous": 23,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "f709d3c0e52e",
+      "b76a91742499",
+      "50828c778575",
+      "de7a0c3ee89d",
+      "57f9bf763a17",
+      "0d8579409a45",
+      "ef47be80e1d6",
+      "c786810d3beb",
+      "8635c9cc835b",
+      "f7e783c7a144",
+      "dc6af805d035",
+      "94d9bf957ebb",
+      "4a226dc6afc3",
+      "cf58579c93c0",
+      "a0d0c1503441",
+      "03959966c4a2",
+      "504365aa02ad",
+      "a64c9c5341ef",
+      "65c4d2b5db00",
+      "325d85b6f071",
+      "93c94ac0c027",
+      "0fb2f39963fc",
+      "55d0ebe04a88",
+      "0768ddd89e7e",
+      "573b5b20bfad",
+      "718b545b1eca",
+      "667ed6b21b31",
+      "2b71081a619f",
+      "e4b388cad1ac",
+      "5e22799f1c53",
+      "b676757c3fa9",
+      "84ae4852296a",
+      "e740210532e5",
+      "d2cb7b81717c",
+      "1a80d55206ca",
+      "a595cbbe1665",
+      "1010a8c11bac",
+      "d5139aa32546",
+      "80291b312459",
+      "d39ac091b005",
+      "7657bd5d45a9",
+      "b1df544fdd98",
+      "34b6b61ecc58",
+      "1a7a7f5dc41a",
+      "00db509188f0",
+      "041199286363",
+      "7566baf004f8",
+      "acfaa314d8bc",
+      "df7350a0e379",
+      "84b6fb0bf229",
+      "4e7c92225364",
+      "3a7ed61a955d",
+      "5893a1c64463",
+      "bb680aa235cd",
+      "ce80308dc309",
+      "051786ba0165",
+      "7e24a50f3b46",
+      "9ca84044724b",
+      "202911b40ae9",
+      "fdceb8433fde",
+      "680306e32cc9",
+      "7a9bb5573fba",
+      "5f9df97c4e2c",
+      "6f81b9e6e064",
+      "b70906066d2f",
+      "470e54bc4728",
+      "a62dd7285431",
+      "354d41d7614a",
+      "420f4ffcd721",
+      "8c79c93415ce",
+      "5d95cd5924ee",
+      "12bcad8b4234",
+      "7384be51d55f",
+      "cfeae2bf4d6f",
+      "40854b350abc",
+      "1ff6f6cd057e",
+      "f0c7eb2b039f",
+      "b03845ad14ac",
+      "ab5eac2e0095",
+      "b913f9ec03ec",
+      "9b1852d975be",
+      "5df3acf559c9",
+      "4ac69865640c",
+      "3cb9b68697b6",
+      "e146114ba8ec",
+      "7d087b6e297c",
+      "6c3686570d84",
+      "62bb42ad80d2",
+      "73edaf240ba4",
+      "347b2365cf0d",
+      "c465910e2b28",
+      "2a874b8ed171",
+      "42758e20cbaf",
+      "d8196cc161e2",
+      "dd248aa70410",
+      "f77f8a2af59d",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8"
+    ],
+    "prefix_sha": "ca8679e33dc1",
+    "prefix_chars": 725,
+    "suffix_chars": 10287,
+    "dynamic_sections": [
+      "objective",
+      "acceptance",
+      "base",
+      "write_scope",
+      "read_scope",
+      "constraints",
+      "relevant_tests",
+      "symbols",
+      "gotchas",
+      "decisions",
+      "verify",
+      "evidence",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "active",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790750336.991949,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "423057ea90e7359219b222b890ab280ccaf8e559",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": [
+      "FAILED tests/test_gate_timeout.py::test_daemon_gate_timeout_holds_as_infra_failure (missing: test not defined)",
+      "FAILED tests/test_gate_timeout.py::test_gate_timeout_files_no_fix_round (missing: test not defined)",
+      "FAILED tests/test_gate_timeout.py::test_gate_timeout_ctx_wins_over_cooling_account (missing: test not defined)",
+      "FAILED tests/test_gate_timeout.py::test_merge_path_honours_timeout (missing: test not defined)",
+      "FAILED tests/test_gate_timeout.py::test_flaky_rerun_kills_tree_on_timeout (missing: test not defined)",
+      "FAILED tests/test_gate_timeout.py::test_daemon_fast_red_gate_unchanged (missing: test not defined)"
+    ],
+    "missing_tests": [
+      [
+        "tests/test_gate_timeout.py",
+        "test_daemon_gate_timeout_holds_as_infra_failure"
+      ],
+      [
+        "tests/test_gate_timeout.py",
+        "test_gate_timeout_files_no_fix_round"
+      ],
+      [
+        "tests/test_gate_timeout.py",
+        "test_gate_timeout_ctx_wins_over_cooling_account"
+      ],
+      [
+        "tests/test_gate_timeout.py",
+        "test_merge_path_honours_timeout"
+      ],
+      [
+        "tests/test_gate_timeout.py",
+        "test_flaky_rerun_kills_tree_on_timeout"
+      ],
+      [
+        "tests/test_gate_timeout.py",
+        "test_daemon_fast_red_gate_unchanged"
+      ]
+    ]
+  },
+  "merged_into": "goal/T-1391",
+  "merged_via": "fix round T-1401 423057ea90e7359219b222b890ab280ccaf8e559"
+}

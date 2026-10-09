@@ -1,0 +1,152 @@
+{
+  "id": "T-0395",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 2,
+  "title": "H4 fix round 2: the per-goal reservation cap must not treat the per-run hard cap as a goal budget (it refuses the second parallel dispatch of any role); apply a goal-level cap only where a goal budget exists and estimate from recent runs first (gate_red on T-0392)",
+  "spec": "STEP 0: the worktree must contain ade6b74, 530c2ab and c1ba47c (T-0362, T-0392) in git log; never drop or amend them.\nGate red on T-0392, reproduced on a clean external run, two failures: tests/test_daemon.py::Daemon::test_depends_on_gates_dispatch (Lists differ: ['T-0001'] != ['T-0001', 'T-0002'], the second ready task is no longer dispatched) and tests/test_pool.py::Reservations::test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap (unexpectedly None: the allowed case is refused). Cause: c1ba47c reads role_cap from [limits].max_budget_usd[role], which is the per-run hard cap (execute 6.0 USD), and the estimate for a new reservation is that same cap, so goal_spend + live reservations + est exceeds the \"cap\" as soon as a second run of the role starts in the same goal; every parallel dispatch of one role is refused.\nFix: (1) separate the two concepts: per-run cap ([limits].max_budget_usd[role]) is only an estimate ceiling, never a goal cap; the goal-level guard applies only when a goal budget for the role is configured ([review].budget_usd for role review, plus an optional new [limits].goal_budget_usd table, default absent = no goal-level cap). Daily account token budgets keep working as before. (2) Estimate order: median tokens and usd of that role's last 20 run rows when at least 5 exist, else the per-run cap. (3) Rewrite test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap to use a configured goal budget (over refuses, under allows) and add test_two_parallel_execute_dispatches_allowed_without_goal_budget (two reserve calls for role execute in one goal with only per-run caps configured both succeed). test_depends_on_gates_dispatch must pass unchanged.\nKeep the five T-0362 tests and the T-0392 tests green (adjust test_exhausted_hold_releases_dispatch_reservation only if the estimate change requires). Run .claude/hooks/tests-green.sh from the worktree root until it exits 0 (whole suite), then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0392"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows c1ba47c, 530c2ab and ade6b74 below your commit",
+    "tests/test_daemon.py::test_depends_on_gates_dispatch passes unchanged",
+    "tests/test_pool.py::test_goal_role_cap_refuses_when_goal_spend_plus_reservations_exceed_cap and ::test_two_parallel_execute_dispatches_allowed_without_goal_budget pass",
+    "tests/test_pool.py::test_parallel_reservations_cannot_exceed_daily_budget, ::test_expired_lease_with_live_pid_still_counts, ::test_release_reconciles_estimate_with_actual, tests/test_daemon.py::test_budget_refusal_leaves_task_queued_without_repair, ::test_notify_once_per_transition and tests/test_executor.py::test_exhausted_hold_releases_dispatch_reservation still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    ".orchestrator/pool.toml",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "fix_round_for": "T-0392",
+    "task_class": "budget"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0395",
+  "codex_thread": "01a0bed0-1111-7350-8360-0a2857843b50",
+  "result": {
+    "summary": "Summary: Separated per-run estimate ceilings from optional goal-level role caps; added median estimation after five runs and parallel-execute coverage.\n\nFiles changed:\n\n- `.orchestrator/pool.toml`\n- `orchestrator/pool.py`\n- `tests/test_pool.py`\n\nCommit: `aca3bb2`\n\nWhole suite: `.claude/hooks/tests-green.sh` passed \u2014 `562` tests in `89s`.\n\nFailures-only output: empty (no failures). The requested `scripts/tests_green.sh` and `scripts/failures_only.sh` paths do not exist; the repository hook was used.\n\nRequired commits remain below HEAD: `c1ba47c`, `530c2ab`, `ade6b74`.",
+    "executed_by": "codex:sol",
+    "thread": "01a0bed0-1111-7350-8360-0a2857843b50",
+    "usage": {
+      "input_tokens": 667364,
+      "cached_input_tokens": 618240,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 3759,
+      "reasoning_output_tokens": 839
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789907700.377057,
+      "pipeline": {
+        "dispatched_at": 1789907700.377006
+      }
+    },
+    {
+      "ts": 1789907701.808606,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0395",
+      "claimed_at": 1789907701.8082502
+    },
+    {
+      "ts": 1789907701.8098009,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789907867.719265,
+      "codex_thread": "01a0bed0-1111-7350-8360-0a2857843b50"
+    },
+    {
+      "ts": 1789907867.721819,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Separated per-run estimate ceilings from optional goal-level role caps; added median estimation after five runs and parallel-execute coverage.\n\nFiles changed:\n\n- `.orchestrator/pool.toml`\n- `orchestrator/pool.py`\n- `tests/test_pool.py`\n\nCommit: `aca3bb2`\n\nWhole suite: `.claude/hooks/tests-green.sh` passed \u2014 `562` tests in `89s`.\n\nFailures-only output: empty (no failures). The requested `scripts/tests_green.sh` and `scripts/failures_only.sh` paths do not exist; the repository hook was used.\n\nRequired commits remain below HEAD: `c1ba47c`, `530c2ab`, `ade6b74`.",
+        "executed_by": "codex:sol",
+        "thread": "01a0bed0-1111-7350-8360-0a2857843b50",
+        "usage": {
+          "input_tokens": 667364,
+          "cached_input_tokens": 618240,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 3759,
+          "reasoning_output_tokens": 839
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789907968.284432,
+      "pipeline": {
+        "dispatched_at": 1789907700.377006,
+        "gated_at": 1789907968.284323,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789908193.887634,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789908216.3030112,
+      "pipeline": {
+        "dispatched_at": 1789907700.377006,
+        "gated_at": 1789907968.284323,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789908216.302911
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0397 (request_changes)"
+    },
+    {
+      "ts": 1789915459.319138,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "rebase T-0431 df2ae89",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789915618.668536,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0431 df2ae89",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789907700.377006,
+    "gated_at": 1789907968.284323,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789908216.302911
+  },
+  "claimed_at": 1789907701.8082502,
+  "rounds": 0,
+  "executor": "sol",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0431 df2ae89"
+}

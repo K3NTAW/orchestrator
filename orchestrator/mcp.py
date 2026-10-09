@@ -208,11 +208,16 @@ def main():
     in tests) must have zero side effects -- no env var set, no file written, no daemon thread started."""
     register_planner_session()
     atexit.register(deregister_planner_session)
+    thread = None
     try:
-        daemon.start_background(Pool().cfg)
+        thread = daemon.start_background(Pool().cfg)
     except Exception as e:
         print(f"[daemon] autostart failed: {e}", file=sys.stderr)
-    srv.run()
+    try:
+        srv.run()
+    finally:
+        if thread is not None:
+            thread.stop_event.set()  # no new ship thread once the server is gone; a running one stops at its next step
 
 
 if __name__ == "__main__":

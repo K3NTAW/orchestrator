@@ -1,0 +1,206 @@
+{
+  "id": "T-1341",
+  "created_at": 1790191347.862017,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S1 v3: executor_identity resolves any executor field to provider/model; review rule compares models with None guard",
+  "spec": "Respec of T-1338 after spec review T-1340 (request_changes). Goal T-1334: [[executors]] provider-agnostic; S2 wires dispatch. No provider=\"claude\" row exists in pool.toml after S1, so today's routing, dispatch and reviews are unchanged. Additive: no persisted state, no pool.toml field; git revert restores the old review_tier and eligible_executors.\n\n1. orchestrator/pool.py: module function executor_identity(field, cfg) -> {\"provider\": \"codex\"|\"claude\"|None, \"model\": str|None}; cfg only, no Pool state, no disk. Row id -> row provider/model. \"claude:<tier>\" (legacy, spawn.py:1564) -> provider \"claude\"; model = cfg[\"models\"].get(tier) only if tier in (\"haiku\",\"sonnet\",\"opus\") and the value is a str, else None. None/unknown -> both None. Pool.executor_identity(field) and Pool.is_claude_executor(field) delegate with self.cfg.\n2. pool.py eligible_executors (pool.py:522): claude rows still pass every existing check (enabled, roles, cooling, band, roll_day, max_parallel, daily_budget_tasks) and additionally need account headroom. Call self.pick(\"execute\") at most once per eligible_executors call, lazily, only when a claude row reached that check, so codex-only configs never touch account state. codex_available (pool.py:590): True iff some eligible row has provider == \"codex\". For a codex-only config this equals today's result (pick_executor returns an eligible row whenever one exists), with and without task.\n3. orchestrator/daemon.py review_tier(t, cfg=None) (daemon.py:1070) and _security_review_tier(t, cfg=None) (daemon.py:1136); cfg None -> pool_module.config() via the module's existing pool import. Keep each legacy branch exactly as today: review_tier startswith(\"claude:sonnet\") -> \"opus\", startswith(\"claude:opus\") -> \"sonnet\"; _security_review_tier exact f\"claude:{tier}\" -> _other_tier(tier). These run first and do not depend on cfg[\"models\"]. Then: executing model = pool_module.executor_identity(t.get(\"executor\"), cfg)[\"model\"]; swap to _other_tier(default) only when it and cfg[\"models\"].get(default) are both str and equal; otherwise default. Fail closed: wrap only the executor_identity call and the cfg[\"models\"] read in try/except (KeyError, TypeError, AttributeError, ValueError, OSError, tomllib.TOMLDecodeError) and on failure print \"review_tier: lookup failed (<exc>); failing closed to <tier>\" to stderr and return _other_tier(default).\n4. _review_plan (daemon.py:1225): read cfg once, pass it to review_tier and _security_review_tier; replace startswith(\"claude:\") at daemon.py:1241 with executor_identity(..., cfg)[\"provider\"] == \"claude\". The second review for a Claude executor stays on review_tier(t, cfg).\n5. Unchanged on purpose, recorded for S2: running_claude_workers (daemon.py:470) and spawn.py:1508 (row-routed runs still claim \"claude:<acct>\"); capacity.eligible_executors_from_snapshot (capacity.py:54), executor.py:279 and :487, jev_route.py:226, specialist.py:131.\nTests: one method (or subTest) per scenario; patch daemon.SECURITY_REVIEW_TIER and cfg with unittest.mock and restore; the raising case patches pool.executor_identity via mock.patch.object(daemon.pool_module, \"executor_identity\", side_effect=KeyError) (use the name daemon.py actually imports); accounts built in-test with \"execute\" affinity. No new dependencies.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py::ExecutorIdentity::test_row_id_legacy_tier_and_unknown: a provider=claude row id, a codex row id, 'claude:opus', 'claude:success_floor', an unknown id and None resolve to the expected provider/model",
+    "tests/test_pool.py::ExecutorIdentity::test_claude_row_needs_account_headroom: a claude row is excluded when every execute-affinity account is cooling, included when one has headroom, and excluded at max_parallel; pick is called at most once per call and never for a codex-only config",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_available_unchanged_for_codex_only_and_ignores_winning_claude_row: codex-only config gives the same codex_available and pick_executor results as before, with and without task; adding a heavier eligible claude row keeps codex_available True",
+    "tests/test_daemon.py::ReviewModelRule: separate methods for claude row on sonnet model -> review opus and security opus; claude row on opus model -> sonnet, and with SECURITY_REVIEW_TIER 'opus' -> sonnet; codex row -> sonnet; legacy claude:sonnet -> opus even when cfg models lacks sonnet; unknown, None and model-less claude row keep the default; raising lookup -> other tier plus the stderr line",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1338",
+    "read_scope": [
+      "orchestrator/spawn.py",
+      "orchestrator/executor.py",
+      "orchestrator/capacity.py",
+      "orchestrator/scorecard.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "pool.executor_identity(field, cfg) -> {'provider': 'codex'|'claude'|None, 'model': str|None} (cfg-only); Pool.executor_identity(field), Pool.is_claude_executor(field); daemon.review_tier(t, cfg=None), daemon._security_review_tier(t, cfg=None). S2 sets a claude-row task's executor == tier == row id, keeps assigned_to 'claude:<acct>', and teaches capacity.py about claude rows."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790191360.315763,
+      "pipeline": {
+        "first_ready_at": 1790191360.315728
+      }
+    },
+    {
+      "ts": 1790191360.41872,
+      "pipeline": {
+        "first_ready_at": 1790191360.315728,
+        "spec_review_at": 1790191360.418672,
+        "spec_review_at_lease": 1790192260.418672
+      }
+    },
+    {
+      "ts": 1790191360.426235,
+      "pipeline": {
+        "first_ready_at": 1790191360.315728,
+        "spec_review_at": 1790191360.418672,
+        "spec_review_at_lease": 1790192260.418672,
+        "spec_review_at_done": 1790191360.426194
+      }
+    },
+    {
+      "ts": 1790191411.918881,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec says to use `pool_module.executor_identity` and `pool_module.config()` via 'the module's existing pool import'. daemon.py has no `pool_module`. It imports `from .pool import Pool, fallback_tier` (line 13). The name `pool` is used as a Pool instance (`pool.cfg`, line 245). The test's `mock.patch.object(daemon.pool_module, ...)` would hit AttributeError, and the fail-closed test would not test what it claims.",
+          "severity": "high",
+          "line": 13
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "For `cfg=None`, `pool_module.config()` reads and parses pool.toml from disk on every `review_tier` or `_security_review_tier` call. That call sits outside the try/except, which wraps only `executor_identity` and the `cfg['models']` read. A missing or invalid pool.toml (OSError, TOMLDecodeError) would therefore raise out of a review-tier decision instead of failing closed. It also breaks the spec's claim that the legacy branches 'run first and do not depend on cfg'. tomllib is not imported in daemon.py either, so the except tuple needs an import.",
+          "severity": "high",
+          "line": 1070
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec puts the caller change in `_review_plan` at daemon.py:1225 and 1241. `_review_plan` is at line 1145, and it opens no review tasks. The review-tier selection lives in `gate()` at about lines 1228-1244 (1241 is correct). 'Read cfg once' and 'the second review stays on review_tier(t, cfg)' therefore refer to the wrong function. An executor following the spec literally would edit the wrong place.",
+          "severity": "med",
+          "line": 1241
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Hidden coupling outside scope: review_tier and _security_review_tier become provider-aware, but the `startswith('claude:')` checks at daemon.py:472 and spawn.py:1508 stay legacy-only. A row-id executor with provider=claude gets a provider-aware review tier but is not counted in running_claude_workers. The spec records this as deferred, but does not say whether S1 guarantees no such row exists until S2. The 'unchanged' claim rests on that guarantee, and no acceptance test checks it.",
+          "severity": "med",
+          "line": 472
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "For claude rows, `eligible_executors` calls `self.pick('execute')`, which uses `a.utilization()` and mutates the window and day roll. pick_executor and codex_available call `eligible_executors` repeatedly (status, dispatch), so claude rows get an extra account-state read on each call. The 'at most once per call' test covers a single call only. Also, `pick` ignores which account the row would use, so 'headroom' is any execute-affinity account, not the row's own. The spec does not state this.",
+          "severity": "low",
+          "line": 522
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "The acceptance test `test_codex_available_unchanged_...` asserts that codex-only behaviour matches 'before', but the spec gives no baseline mechanism (a recorded expected value or a captured pre-change function). It could pass while checking only self-consistency.",
+          "severity": "low",
+          "line": 590
+        }
+      ]
+    },
+    {
+      "ts": 1790191437.622567,
+      "pipeline": {
+        "first_ready_at": 1790191360.315728,
+        "spec_review_at": 1790191360.418672,
+        "spec_review_at_lease": 1790192260.418672,
+        "spec_review_at_done": 1790191360.426194,
+        "spec_review_held_at": 1790191437.6225128
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790191438.76642,
+      "pipeline": {
+        "first_ready_at": 1790191360.315728,
+        "spec_review_at": 1790191360.418672,
+        "spec_review_at_lease": 1790192260.418672,
+        "spec_review_at_done": 1790191360.426194,
+        "spec_review_held_at": 1790191437.6225128,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790191438.879176,
+      "pipeline": {
+        "first_ready_at": 1790191360.315728,
+        "spec_review_at": 1790191360.418672,
+        "spec_review_at_lease": 1790192260.418672,
+        "spec_review_at_done": 1790191360.426194,
+        "spec_review_held_at": 1790191437.6225128,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790191437.622567": true
+        }
+      }
+    },
+    {
+      "ts": 1790191487.8687098,
+      "status": "superseded",
+      "hold_reason": "respec T-1344 after spec review T-1342 request_changes (import name, _open_reviews)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790191360.315728,
+    "spec_review_at": 1790191360.418672,
+    "spec_review_at_lease": 1790192260.418672,
+    "spec_review_at_done": 1790191360.426194,
+    "spec_review_held_at": 1790191437.6225128,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790191437.622567": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec says to use `pool_module.executor_identity` and `pool_module.config()` via 'the module's existing pool import'. daemon.py has no `pool_module`. It imports `from .pool import Pool, fallback_tier` (line 13). The name `pool` is used as a Pool instance (`pool.cfg`, line 245). The test's `mock.patch.object(daemon.pool_module, ...)` would hit AttributeError, and the fail-closed test would not test what it claims.",
+      "severity": "high",
+      "line": 13
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "For `cfg=None`, `pool_module.config()` reads and parses pool.toml from disk on every `review_tier` or `_security_review_tier` call. That call sits outside the try/except, which wraps only `executor_identity` and the `cfg['models']` read. A missing or invalid pool.toml (OSError, TOMLDecodeError) would therefore raise out of a review-tier decision instead of failing closed. It also breaks the spec's claim that the legacy branches 'run first and do not depend on cfg'. tomllib is not imported in daemon.py either, so the except tuple needs an import.",
+      "severity": "high",
+      "line": 1070
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec puts the caller change in `_review_plan` at daemon.py:1225 and 1241. `_review_plan` is at line 1145, and it opens no review tasks. The review-tier selection lives in `gate()` at about lines 1228-1244 (1241 is correct). 'Read cfg once' and 'the second review stays on review_tier(t, cfg)' therefore refer to the wrong function. An executor following the spec literally would edit the wrong place.",
+      "severity": "med",
+      "line": 1241
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Hidden coupling outside scope: review_tier and _security_review_tier become provider-aware, but the `startswith('claude:')` checks at daemon.py:472 and spawn.py:1508 stay legacy-only. A row-id executor with provider=claude gets a provider-aware review tier but is not counted in running_claude_workers. The spec records this as deferred, but does not say whether S1 guarantees no such row exists until S2. The 'unchanged' claim rests on that guarantee, and no acceptance test checks it.",
+      "severity": "med",
+      "line": 472
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "For claude rows, `eligible_executors` calls `self.pick('execute')`, which uses `a.utilization()` and mutates the window and day roll. pick_executor and codex_available call `eligible_executors` repeatedly (status, dispatch), so claude rows get an extra account-state read on each call. The 'at most once per call' test covers a single call only. Also, `pick` ignores which account the row would use, so 'headroom' is any execute-affinity account, not the row's own. The spec does not state this.",
+      "severity": "low",
+      "line": 522
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "The acceptance test `test_codex_available_unchanged_...` asserts that codex-only behaviour matches 'before', but the spec gives no baseline mechanism (a recorded expected value or a captured pre-change function). It could pass while checking only self-consistency.",
+      "severity": "low",
+      "line": 590
+    }
+  ],
+  "hold_reason": "respec T-1344 after spec review T-1342 request_changes (import name, _open_reviews)"
+}

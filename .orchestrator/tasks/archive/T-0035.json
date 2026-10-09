@@ -1,0 +1,84 @@
+{
+  "id": "T-0035",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "tests-green.sh runs the project's tests under `uv run` inside the target directory when pyproject.toml exists",
+  "spec": "Why: .claude/hooks/tests-green.sh (line with `command -v pytest ... else run python3 -m unittest discover -q tests`) uses whatever python3 is on PATH. Outside the MCP server that is the system Python 3.9 (no tomllib); inside the server it is the MAIN checkout's venv, which lacks dependencies that a task worktree added (T-0023 added scrapling, so merge()'s gate fails with ImportError even though the worktree's own venv is green). Gotchas 2026-09-17 in memory.\n\nWhat (2 files: .claude/hooks/tests-green.sh, tests/test_orchestrator.py). This is a hook file; edit it in this worktree (the protected path is the main checkout only).\n1. In the Python branch: if `command -v uv` succeeds and `pyproject.toml` exists in the target dir, run `uv run --project . python -m unittest discover -q tests` (cwd is already the target dir after the `cd`), preferring `uv run --project . pytest -q -x --no-header -p no:cacheprovider` when `uv run --project . python -c \"import pytest\"` succeeds. Keep the current pytest/python3 fallbacks when uv is absent. Set `UV_NO_SYNC` unset so uv syncs the worktree's venv from its own lockfile on first run (that is desired: a task that adds a dependency must be testable). Keep the failures-only output and loop-guard behaviour unchanged.\n2. tests/test_orchestrator.py Hooks.test_tests_green_failures_only currently runs with PATH=/usr/bin:/bin (no uv) \u2014 keep it. Add one test: a scratch project with pyproject.toml and a test that imports a module only available in a per-project venv is hard to fake, so instead assert the script's chosen runner: run tests-green.sh with an env var `TESTS_GREEN_DRY=1` that makes the script print the runner command line and exit 0 (add this small dry-run switch at the top of the Python branch), and assert it contains `uv run --project .` when uv is on PATH and pyproject.toml exists, and `python3 -m unittest` when PATH lacks uv.\n\nRun `uv run python -m unittest tests/test_orchestrator.py`. Commit: \"tests-green: run under uv inside the target project so worktree dependencies resolve\" with a revert-path body.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 including the new dry-run test",
+    "with uv on PATH, `.claude/hooks/tests-green.sh wt/<some worktree>` run from the main checkout uses that worktree's venv (dry-run shows uv run --project .)",
+    "without uv on PATH the old python3 -m unittest path is used (existing test still passes)",
+    "git diff --stat limited to .claude/hooks/tests-green.sh and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    ".claude/hooks/tests-green.sh",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0035",
+  "codex_thread": null,
+  "result": {
+    "summary": "Working tree clean, commit in place on `task/T-0035`.\n\n## Summary\n\nFixed `.claude/hooks/tests-green.sh` so the Python test-runner branch prefers `uv run --project .` when `uv` is on PATH and the target dir has a `pyproject.toml` \u2014 this makes the gate use the worktree's own venv/lockfile (syncing it on first run) instead of whatever `python3` happens to be on the invoking process's PATH (previously the main checkout's venv when run from inside the MCP server, missing worktree-added deps like T-0023's `scrapling`). Falls back to the prior pytest/python3 behavior when uv is absent. Added a `TESTS_GREEN_DRY=1` switch that prints the chosen runner command and exits 0, used to test runner selection without needing a real per-project venv.\n\n**Files changed:**\n- `.claude/hooks/tests-green.sh` \u2014 uv-aware runner selection + dry-run switch\n- `tests/test_orchestrator.py` \u2014 new `test_tests_green_picks_uv_runner_when_available` test; fixed `MergeQueue.test_rebase_tests_ff_and_conflict`'s scratch `pyproject.toml` (needed a `version` field to be valid for `uv`, since real PATH now triggers the uv branch)\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 `Ran 51 tests in 6.517s / OK` (no failures). `.claude/hooks/tests-green.sh .` run standalone also exits 0.\n\nCommitted as `09ef8d1` on `task/T-0035`. Diff is scoped to exactly the two allowed files.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789661728.809344,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789661728.814411,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0035",
+      "claimed_at": 1789661728.8142998
+    },
+    {
+      "ts": 1789661728.8234591,
+      "pid": 13958,
+      "account": "B"
+    },
+    {
+      "ts": 1789661905.4392698,
+      "status": "done",
+      "result": {
+        "summary": "Working tree clean, commit in place on `task/T-0035`.\n\n## Summary\n\nFixed `.claude/hooks/tests-green.sh` so the Python test-runner branch prefers `uv run --project .` when `uv` is on PATH and the target dir has a `pyproject.toml` \u2014 this makes the gate use the worktree's own venv/lockfile (syncing it on first run) instead of whatever `python3` happens to be on the invoking process's PATH (previously the main checkout's venv when run from inside the MCP server, missing worktree-added deps like T-0023's `scrapling`). Falls back to the prior pytest/python3 behavior when uv is absent. Added a `TESTS_GREEN_DRY=1` switch that prints the chosen runner command and exits 0, used to test runner selection without needing a real per-project venv.\n\n**Files changed:**\n- `.claude/hooks/tests-green.sh` \u2014 uv-aware runner selection + dry-run switch\n- `tests/test_orchestrator.py` \u2014 new `test_tests_green_picks_uv_runner_when_available` test; fixed `MergeQueue.test_rebase_tests_ff_and_conflict`'s scratch `pyproject.toml` (needed a `version` field to be valid for `uv`, since real PATH now triggers the uv branch)\n\n**Test output:** `uv run python -m unittest tests/test_orchestrator.py` \u2192 `Ran 51 tests in 6.517s / OK` (no failures). `.claude/hooks/tests-green.sh .` run standalone also exits 0.\n\nCommitted as `09ef8d1` on `task/T-0035`. Diff is scoped to exactly the two allowed files.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789662041.92241,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "09ef8d13053a93e94ef33b45db1be0f15487f49e"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789661728.8142998,
+  "pid": 13958,
+  "account": "B",
+  "merged_into": "goal/T-0005",
+  "sha": "09ef8d13053a93e94ef33b45db1be0f15487f49e"
+}

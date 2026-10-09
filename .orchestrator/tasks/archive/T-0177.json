@@ -1,0 +1,153 @@
+{
+  "id": "T-0177",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): C-O7b `orchestrator handover` (T-0119, executed by claude:sonnet)",
+  "spec": "Review the T-0119 delta: `git diff f5d2a16 41cf86a` in worktree wt/T-0119 (orchestrator/handover.py new, orchestrator/daemon.py, orchestrator/cli.py, tests/test_handover.py, README.md). Acceptance: (1) handover.write(reason) runs under the bus lock (bus.locked(), not a second flock on the same file: check for the non-reentrant hazard) and replaces or appends exactly one `## Auto-handover <ISO Europe/Zurich timestamp> \u2014 <reason>` section at the end of plan.md, leaving the rest byte-identical (test); (2) section content: open goals (parentless triage not done), children grouped by status with depends_on / executor+started / hold_reason+resume_hint keys / done-not-merged / merged sha, worktrees under wt/, last 5 bus events, the fixed Resume sentence; lists truncated with \"\u2026 and N more\" and the section kept under 120 lines (test); (3) cli `handover [--reason]` default \"manual\"; (4) daemon.tick() calls handover.write(\"daemon tick\") at most once per 15 minutes via a timestamp in pool_state, wrapped so a failure cannot break the tick (test: two ticks within 15 min write once); (5) README two lines under Run it; (6) the four named tests exist and are meaningful; no new dependency. Also check: the writer never truncates or corrupts plan.md on exception (write to a temp file and rename, or at least write only after the new text is fully built); the timestamp really is Europe/Zurich (zoneinfo) and formatted ISO; nothing from task specs or results is dumped wholesale into plan.md (titles and ids only, no result bodies) so the checkpoint cannot become a prompt-injection channel or grow unbounded; interplay with C-O9 (reconcile_dead) and D1 merge_reviewed untouched. Run `uv run python -m unittest tests.test_handover -q` once. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0119"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the six acceptance points confirmed with evidence from the delta",
+    "Atomic write, timezone and content-scope checks explicitly assessed"
+  ],
+  "scope": [
+    "orchestrator/handover.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_handover.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0177",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/handover.py",
+        "line": 41,
+        "issue": "_status_groups() has no bucket for status \"failed\" (bus.STATUSES includes it), so failed children are silently dropped from the snapshot. failed is reached on every merge rebase_conflict / tests_red (merge.py:24,28), fix-loop exhaustion (executor.py:132) and unparseable review verdict (spawn.py:270,295) \u2014 exactly the tasks a resuming Planner must see. Verified: a goal whose only child is status=failed reason=rebase_conflict renders as '### T-0001 GOAL: ship it / - no child tasks'. The section does not just omit the task, it asserts the goal is empty. Add a failed group with reason + resume_hint_keys, or bucket any unknown status into an 'other' line so nothing can vanish.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/handover.py",
+        "line": 154,
+        "issue": "plan.md is rewritten non-atomically: write_text() truncates then writes, so a crash, SIGKILL or ENOSPC mid-write leaves plan.md empty or half-written \u2014 destroying the Planner-authored content above the section, which is the artifact this feature exists to protect. Also bus.locked() only excludes bus writers; the Planner edits plan.md directly with no bus lock, so a Planner save landing between the read at line 149 and this write is silently reverted. Write to a sibling temp file and os.replace() it (atomic within the lock), which fixes the truncation case and narrows the lost-update window to the rename.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 375,
+        "issue": "PERSIST (pool_state.json) is read-modified-written here without the flock that pool._save_planner_account uses for planner_usage.json, from the daemon's main thread, while executor workers spawned by _fire() (daemon.py:210) call pool.save() on background threads (executor.py:56,64,72,106). The re-read at line 373 keeps the window sub-millisecond, so this is not a blocker, but a worker's codex.cooldown_until or running decrement landing in that window is erased \u2014 the daemon then dispatches into a cooling executor. The write is also truncate+write, and Pool._load (pool.py:161-162) json.loads with no except, so a torn read raises. Prefer a separate .orchestrator/handover_state.json or the same flock+truncate pattern as _save_planner_account.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/handover.py",
+        "line": 19,
+        "issue": "_HEADING_RE.search takes the FIRST '## Auto-handover ' at line start and drops everything from there down. plan.md is Planner-authored prose and the heading is now documented in README, so a Planner quoting the format at line start (e.g. inside a fenced block) causes every line below it to be deleted on the next write, with no way to notice. Match the last occurrence (finditer \u2192 last, or rsplit) so damage is bounded to the trailing section.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/handover.py",
+        "line": 114,
+        "issue": "bus.read() is called once per goal inside the loop (each call re-reads every task JSON off disk via get()), all while holding the bus lock. At 12 goals x ~200 tasks that is ~2400 file reads blocking every bus writer (dispatch, update, claim). Read all tasks once before the loop and group by parent.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/handover.py",
+        "line": 90,
+        "issue": "_worktree_names() lists every directory under wt/, including wt/_state (the orchestrator-state mirror worktree created by bus.commit_state) and any stale merged-task worktrees, so the 15-slot list fills with entries a resumer cannot act on. Filter to worktrees of non-merged tasks.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789754528.261968,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0177",
+      "claimed_at": 1789754528.261685
+    },
+    {
+      "ts": 1789754528.2925591,
+      "pid": 19626,
+      "account": "A"
+    },
+    {
+      "ts": 1789754690.9536378,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/handover.py",
+            "line": 41,
+            "issue": "_status_groups() has no bucket for status \"failed\" (bus.STATUSES includes it), so failed children are silently dropped from the snapshot. failed is reached on every merge rebase_conflict / tests_red (merge.py:24,28), fix-loop exhaustion (executor.py:132) and unparseable review verdict (spawn.py:270,295) \u2014 exactly the tasks a resuming Planner must see. Verified: a goal whose only child is status=failed reason=rebase_conflict renders as '### T-0001 GOAL: ship it / - no child tasks'. The section does not just omit the task, it asserts the goal is empty. Add a failed group with reason + resume_hint_keys, or bucket any unknown status into an 'other' line so nothing can vanish.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/handover.py",
+            "line": 154,
+            "issue": "plan.md is rewritten non-atomically: write_text() truncates then writes, so a crash, SIGKILL or ENOSPC mid-write leaves plan.md empty or half-written \u2014 destroying the Planner-authored content above the section, which is the artifact this feature exists to protect. Also bus.locked() only excludes bus writers; the Planner edits plan.md directly with no bus lock, so a Planner save landing between the read at line 149 and this write is silently reverted. Write to a sibling temp file and os.replace() it (atomic within the lock), which fixes the truncation case and narrows the lost-update window to the rename.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 375,
+            "issue": "PERSIST (pool_state.json) is read-modified-written here without the flock that pool._save_planner_account uses for planner_usage.json, from the daemon's main thread, while executor workers spawned by _fire() (daemon.py:210) call pool.save() on background threads (executor.py:56,64,72,106). The re-read at line 373 keeps the window sub-millisecond, so this is not a blocker, but a worker's codex.cooldown_until or running decrement landing in that window is erased \u2014 the daemon then dispatches into a cooling executor. The write is also truncate+write, and Pool._load (pool.py:161-162) json.loads with no except, so a torn read raises. Prefer a separate .orchestrator/handover_state.json or the same flock+truncate pattern as _save_planner_account.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/handover.py",
+            "line": 19,
+            "issue": "_HEADING_RE.search takes the FIRST '## Auto-handover ' at line start and drops everything from there down. plan.md is Planner-authored prose and the heading is now documented in README, so a Planner quoting the format at line start (e.g. inside a fenced block) causes every line below it to be deleted on the next write, with no way to notice. Match the last occurrence (finditer \u2192 last, or rsplit) so damage is bounded to the trailing section.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/handover.py",
+            "line": 114,
+            "issue": "bus.read() is called once per goal inside the loop (each call re-reads every task JSON off disk via get()), all while holding the bus lock. At 12 goals x ~200 tasks that is ~2400 file reads blocking every bus writer (dispatch, update, claim). Read all tasks once before the loop and group by parent.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/handover.py",
+            "line": 90,
+            "issue": "_worktree_names() lists every directory under wt/, including wt/_state (the orchestrator-state mirror worktree created by bus.commit_state) and any stale merged-task worktrees, so the 15-slot list fills with entries a resumer cannot act on. Filter to worktrees of non-merged tasks.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789754690.955667,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789754528.261685,
+  "pid": 19626,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

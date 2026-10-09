@@ -1,0 +1,152 @@
+{
+  "id": "T-0607",
+  "created_at": 1789972888.6143548,
+  "parent": "T-0561",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: R16 v3: orchestrator/stale.py \u2014 complete stale-work evidence with a git adapter for gitutil, freshness bound to the task worktree, and pinned risk reasons (AP P12)",
+  "spec": "Why: daemon.stale_check (orchestrator/daemon.py:1050-1070) compares only moved paths against scope plus changed files and grades none/low/high; brief P7 also requires interface, relevant-test, dependency, graph-relationship and overlapping-merge signals with base, goal head, relevant paths, risk, action and conflict outcome. v3 after spec reviews T-0576 and T-0595.\nWhat: new pure module orchestrator/stale.py; daemon delegation is a later task; today's stale_check keys stay a subset. Tests: this repo runs unittest; every acceptance test id is a `def test_name(self)` method inside a unittest.TestCase subclass in that file; no pytest fixtures.\n- Git: the injectable callable has the shape git(*args, cwd) -> CompletedProcess (default: subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True)). gitutil.moved_paths and gitutil.changed_paths take git(cwd, *args); stale.py wraps with the named adapter _gitutil_git(git) -> lambda cwd, *args: git(*args, cwd=cwd) and passes it as their git= parameter. interference.graph_fresh_for(files, graph, git=_fresh_git) receives _fresh_git = lambda worktree, *args: git(*args, cwd=task['worktree']) so freshness is diffed on the task branch, not ROOT.\n- load_links(root=ROOT) -> {\"files\": {node_id: source_file}, \"links\": [{\"source\", \"target\", \"relation\"}]} from graphify-out/graph.json (nodes[].id/source_file, links[].source/target/relation); None when absent or malformed.\n- evidence(task, *, goal_ref=None, graph_links=None, graph=None, tasks=None, git=None) -> {\"base\": task_ref, \"goal_head\", \"moved_count\", \"stale_paths\", \"signals\": {\"scoped_files_changed\", \"changed_files_moved\", \"tests_changed\", \"interface_changed\": [{\"symbol\", \"file\", \"consumer\"}], \"graph_relationships\": [{\"source_file\", \"target_file\"}], \"dependency_changed\": [ids], \"overlapping_merge\": [ids]}, \"risk\", \"risk_reasons\", \"graph\"}. Worktree only from task['worktree']; goal_ref default goal/<parent> or main.\n  Signals: moved = gitutil.moved_paths(task_ref, goal_ref, cwd=task['worktree'], git=adapter); changed = gitutil.changed_paths(task, git=adapter); scoped_files_changed = moved matching scope patterns (fnmatch); changed_files_moved = moved \u2229 changed; tests_changed = moved paths equal to tests/test_<stem>.py for stems of changed or scoped orchestrator/*.py; interface_changed (needs graph_links and graph): nodes whose source_file is a moved file with a link of any relation to a node whose source_file is a changed or scoped task file, only when graph_fresh_for(moved \u222a task files, graph, git=_fresh_git) is True; graph_relationships = distinct (moved file, task file) pairs behind those links; dependency_changed = depends_on ids whose task record sha is not an ancestor of task_ref (git merge-base --is-ancestor <sha> <task_ref>, rc 1 = not ancestor); overlapping_merge = execute tasks in `tasks` with merged_into == goal_ref whose scope literals or task.get('changed_files', []) intersect the task's changed or scope paths and whose sha is not an ancestor of task_ref (changed_files optional; a later merge task populates it).\n  graph field: 'absent' when graph_links or graph is None; 'stale' when graph_fresh_for is not True; 'skipped' when the graph is present and fresh but no moved path or task path appears as any node's source_file (nothing to compare); 'used' otherwise.\n  Risk and pinned reasons (risk_reasons lists every fired signal in this order): high with any of changed_files_moved, interface_changed, dependency_changed; medium with any of tests_changed, graph_relationships, overlapping_merge; low with scoped_files_changed only; none with []; unknown with ['git_failed'] when gitutil.GitError or the git callable raises.\n- row(task, evidence, action, conflict=None) -> dict for schedlog.append('stale', ...) with task, goal_id, base, goal_head, changed_relevant_paths, risk, risk_reasons, action (recorded|rebased|rebase_conflict|revalidated), conflict paths. Never mutates git; never discards work.",
+  "inputs": [
+    "T-0600"
+  ],
+  "acceptance": [
+    "tests/test_stale.py::test_interface_change_in_moved_file_consumed_by_task_is_high_risk \u2014 graph_links with a link from a node in a moved file to a node in the task's changed file, fresh graph, yields interface_changed non-empty, risk high, risk_reasons containing interface_changed and graph used",
+    "tests/test_stale.py::test_relevant_test_change_is_medium_risk \u2014 tests/test_foo.py moved while the task changed orchestrator/foo.py yields tests_changed, risk medium, risk_reasons ['tests_changed']",
+    "tests/test_stale.py::test_dependency_merged_after_branch_point_is_high_risk \u2014 a depends_on task whose sha is not an ancestor (git callable answers merge-base --is-ancestor with rc 1) yields dependency_changed and risk high",
+    "tests/test_stale.py::test_overlapping_earlier_merge_uses_scope_literals_and_optional_changed_files \u2014 a merged execute task matching by scope literal and one matching only through changed_files both appear in overlapping_merge; risk medium",
+    "tests/test_stale.py::test_git_adapter_and_freshness_use_task_worktree \u2014 every recorded git call carries cwd equal to task['worktree'], including the diff graph_fresh_for issues",
+    "tests/test_stale.py::test_absent_stale_skipped_graph_and_git_failure \u2014 graph_links None yields graph absent with deterministic signals intact; a stale graph yields graph stale and no interface signal; a fresh graph with no matching files yields graph skipped; a git callable raising GitError yields risk unknown and risk_reasons ['git_failed']; row() carries base, goal_head, changed_relevant_paths, risk, risk_reasons, action"
+  ],
+  "scope": [
+    "orchestrator/stale.py",
+    "tests/test_stale.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0607",
+  "codex_thread": null,
+  "result": {
+    "summary": "Verified the full diff (orchestrator/stale.py, tests/test_stale.py) against the packet spec and all 6 named acceptance tests. Git adapter shapes match spec exactly (_gitutil_git wraps for gitutil.moved_paths/changed_paths, fresh_git pins to task['worktree'] not the graph-derived path). Risk tiering, signal computation (scoped/changed/tests/interface/graph_relationships/dependency/overlap), graph state transitions (absent/stale/skipped/used), and the git-failure\u2192unknown path all match spec behavior. Ran `python -m unittest tests.test_stale -v`: all 7 tests pass (6 acceptance + 1 bonus load_links test). Scope is respected (only the two declared files touched). No correctness bugs found; nothing to flag.",
+    "verdict": "approve",
+    "comments": [],
+    "packet_version": "4f3ee16d7e18",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789972888.615426,
+      "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd"
+    },
+    {
+      "ts": 1789972891.788814,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0607",
+      "claimed_at": 1789972891.7884521
+    },
+    {
+      "ts": 1789972891.7900212,
+      "account": "B"
+    },
+    {
+      "ts": 1789972892.233328,
+      "pid": 46514,
+      "account": "B"
+    },
+    {
+      "ts": 1789973066.6321979,
+      "status": "done",
+      "result": {
+        "summary": "Verified the full diff (orchestrator/stale.py, tests/test_stale.py) against the packet spec and all 6 named acceptance tests. Git adapter shapes match spec exactly (_gitutil_git wraps for gitutil.moved_paths/changed_paths, fresh_git pins to task['worktree'] not the graph-derived path). Risk tiering, signal computation (scoped/changed/tests/interface/graph_relationships/dependency/overlap), graph state transitions (absent/stale/skipped/used), and the git-failure\u2192unknown path all match spec behavior. Ran `python -m unittest tests.test_stale -v`: all 7 tests pass (6 acceptance + 1 bonus load_links test). Scope is respected (only the two declared files touched). No correctness bugs found; nothing to flag.",
+        "verdict": "approve",
+        "comments": [],
+        "packet_version": "4f3ee16d7e18",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789973066.633346,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789973066.6694322,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 0,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 0,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+        "packet_version": "4f3ee16d7e18",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 0,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 0,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+      "packet_version": "4f3ee16d7e18",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+  "claimed_at": 1789972891.7884521,
+  "account": "B",
+  "pid": 46514,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 0,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 0,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "a10b6db65c45d540737fdc0d0db09560df3190bd",
+    "packet_version": "4f3ee16d7e18",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 0,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 0,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "4f3ee16d7e18",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,165 @@
+{
+  "id": "T-0718",
+  "created_at": 1790000028.701874,
+  "parent": "T-0674",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Q2 v5: orchestrator/planner_telemetry.py \u2014 per-invocation Planner rows (launch, usage, materiality, skips), per-goal and per-accepted-goal Fable/Opus aggregation, interactive transcript attribution by day overlap (P1)",
+  "spec": "Why: headless Planner usage is logged only as bus.log_run role planner_decision rows (planner_runs._record_decision_usage, lines 566-620) with no model, decision type or materiality; interactive Fable transcript tokens are pool-wide (Pool.tally_planner -> planner_usage.json) with no per-goal share. The brief (P1) needs Planner tokens per material decision and Fable tokens per accepted goal. Four spec review rounds (T-0677, of T-0690, of T-0698, of T-0704) are folded in: constraints.fix_round_for, reserved result.escalate, day-overlap attribution, root resolution, thread-safe root-scoped writes, goal-scoped plan hash anchored on '## ' headings, positional call syntax, goal filter aligned with scorecard.accepted_goals, done timestamp source, fable_share formula. The Planner waived a fifth spec review.\nWhat: new module orchestrator/planner_telemetry.py. Rows never contain prompts, transcripts or chain-of-thought; free text capped at 300 chars. Every function takes root=None and resolves `root = Path(root) if root is not None else STATE` first.\n- Writing: private _append(name, row, root) writes json.dumps(row) + newline to root/\"runs\"/\"sched\"/f\"{name}.jsonl\" (mkdir parents, setdefault ts, \"a\" mode): schedlog's file layout WITHOUT touching schedlog.SCHED_DIR or any module global, so concurrent daemon threads with different roots cannot interleave. Private _read(name, root) -> (rows, malformed_count) parsing line by line (json errors counted, never raised). With root = STATE the files are exactly runs/sched/planner_invocations.jsonl and planner_skips.jsonl, readable by schedlog.read.\n- record_launch(*, launch_id, goal_id, event, decision_type, kind, payload_keys, model, tier, account, complexity, band, task_class, architectural, route, route_reason, mode, state_version, packet_chars, started_at, reescalation=False, root=None) -> row phase \"launch\".\n- record_usage(launch_id, *, input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0, usd=None, latency_s=None, outcome, session_id=None, root=None) -> row phase \"usage\"; total_tokens = input + output + cache_read // 10 (pool formula, Pool.tally_planner).\n- goal_plan_section(goal_id, root=None) -> str|None: in root/plan.md, the text from the first line that starts with '## ' (exactly two hashes then a space; the H1 title line never matches) and contains goal_id as a whole token (regex r'(?<![\\w-])' + re.escape(goal_id) + r'(?![\\w-])'), up to the next line starting with '## ' or EOF; None when plan.md is missing or no such heading exists. snapshot(goal_id, root=None) -> {\"tasks\": {task_id: {\"status\", \"depends_on\", \"hold_reason\", \"fix_round_for\" ((task.get(\"constraints\") or {}).get(\"fix_round_for\")), \"result_escalate\" (bool((task.get(\"result\") or {}).get(\"escalate\")); RESERVED: no producer sets result.escalate today, documented as a forward-compatible hook), \"parent\", \"created_at\"}} over the goal and its children read from root/tasks/*.json, \"plan_hash\": sha256 of goal_plan_section(goal_id) or None}.\n- materiality(before, after) -> {\"material\": bool, \"new_tasks\": [ids in after not in before], \"dependencies_changed\": [ids whose depends_on differ], \"fix_strategy_for\": [ids that gained a child with fix_round_for == id], \"escalated\": bool (a task whose hold_reason newly contains 'escalat', or whose result_escalate turned True, or the goal task itself newly status held/failed; judged from the tasks dicts only), \"plan_changed\": both hashes non-None and different}; material when any list non-empty or plan_changed or escalated. record_materiality(launch_id, before, after, root=None) -> row phase \"materiality\".\n- record_skip(*, goal_id, event, reason, kind=None, payload_key=None, root=None) -> row in planner_skips.\n- read_invocations_with_malformed(root=None) -> (rows merged by launch_id, later phases overriding earlier fields, malformed_count); read_invocations(root=None) -> rows only.\n- per_goal(goal_id, root=None) -> {\"planner_tokens\", \"fable_tokens\", \"opus_tokens\", \"other_tokens\", \"calls\", \"fable_calls\", \"opus_calls\", \"escalations\" (rows with tier fable and route escalate), \"reescalations\", \"material_decisions\", \"tokens_per_material_decision\" (None when 0 material), \"skips\", \"usd\"}; tier buckets fable/opus/other.\n- accepted_goal_summary(root=None) -> over scorecard.accepted_goals(root) with the resolved root: {\"n_goals\", \"planner_tokens_per_accepted_goal\" (sum planner_tokens / n_goals), \"fable_tokens_per_accepted_goal\", \"fable_calls_per_accepted_goal\", \"fable_share\" = sum(fable_tokens over accepted goals) / sum(planner_tokens over accepted goals), None when that denominator is 0, \"planner_tokens_per_material_decision\" (sum planner_tokens / sum material_decisions, None when 0), \"planner_usd_per_accepted_goal\"}; every value None when n_goals is 0.\n- goal_closed_at(goal) -> float|None: the ts of the LAST entry in the goal task's own embedded events list (task[\"events\"]) whose entry.get(\"status\") == \"done\"; None when no such entry (an open goal, or one reopened after done and not yet done again is treated as open).\n- interactive_by_goal(root=None, cfg=None, now=None, days=30) -> list of {\"goal_id\", \"days\": [iso dates], \"tokens\", \"model\", \"model_source\": \"assumed_models_planner\", \"method\": \"day_overlap_approximate\"}: cfg defaults to bus.pool_config(); now defaults to time.time(); call planner_runs._interactive_summary(root, cfg, now - days * 86400, now, []) (all positional, signature at planner_runs.py:794) and use its day_totals; tokens per day via the pool formula; split each day's tokens across goals open during that day (goal = task with role in (\"triage\", \"goal\") and no parent, the same definition scorecard.accepted_goals uses; open interval = created_at .. goal_closed_at(goal) or now) proportionally to the seconds each goal was open within the day (Europe/Zurich day boundaries via pool.TZ); a day with no open goal reports under goal_id None. Approximation documented in docstring and method field.",
+  "inputs": [
+    "T-0708"
+  ],
+  "acceptance": [
+    "tests/test_planner_telemetry.py::test_launch_usage_materiality_merge_by_launch_id \u2014 three phases for one launch_id under a sandbox root read back as one row with model, total_tokens (cache_read // 10 formula) and material fields, and schedlog.SCHED_DIR is unchanged after the writes",
+    "tests/test_planner_telemetry.py::test_materiality_detects_new_task_dependency_change_and_fix_strategy \u2014 snapshots before/after with a new child whose constraints.fix_round_for names a held task and a changed depends_on give material True, list both and name the held id under fix_strategy_for; identical snapshots give material False; result_escalate turning True flips escalated",
+    "tests/test_planner_telemetry.py::test_plan_hash_is_goal_scoped_and_ignores_h1 \u2014 a plan.md whose H1 title mentions T-0001 and holds '## GOAL T-0001' and '## GOAL T-0002' sections: editing the H1 or the T-0002 section leaves T-0001's plan_hash unchanged and plan_changed False; editing the T-0001 section flips plan_changed; a plan.md without a '## ' heading for the goal gives plan_hash None and plan_changed False; T-0001 does not match a heading mentioning T-00010",
+    "tests/test_planner_telemetry.py::test_per_goal_and_accepted_goal_summary \u2014 two invocations (tier fable 300 tokens, tier opus 100 tokens) and one skip give fable_tokens 300, opus_tokens 100, calls 2, skips 1, tokens_per_material_decision over material rows only; two accepted goals give fable_share exactly sum fable / sum planner (0.75 for the fixture) and fable_tokens_per_accepted_goal; no accepted goals gives None values without raising",
+    "tests/test_planner_telemetry.py::test_interactive_by_goal_day_overlap_uses_last_done_event \u2014 with planner_runs._interactive_summary patched to return two day_totals rows, tokens split across two goals (one role triage, one role goal) open on those days proportionally to open seconds where one goal's interval ends at the ts of its last status done event and a goal with no done event runs to now; every row carries method day_overlap_approximate and model_source assumed_models_planner; a malformed invocations line is counted by read_invocations_with_malformed"
+  ],
+  "scope": [
+    "orchestrator/planner_telemetry.py",
+    "tests/test_planner_telemetry.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0718",
+  "codex_thread": null,
+  "result": {
+    "summary": "Ran the 5 named acceptance tests directly (tests/test_planner_telemetry.py) \u2014 all pass. Verified _interactive_summary(root, cfg, cutoff, now, headless) call signature and day_totals keys match orchestrator/planner_runs.py:794-839. Checked materiality/snapshot/goal_closed_at/per_goal/accepted_goal_summary logic against the spec's formulas (total_tokens cache_read//10, fable_share, divide-by-zero guards, reopened-goal handling via goal.get('status')!='done') and found them correctly implemented. _append/_read use a private runs/sched/*.jsonl layout with a path-keyed threading.Lock and never touch schedlog.SCHED_DIR, confirmed by test. Free-text capping via _bounded is applied uniformly. No injection, path-traversal, or unsafe-eval concerns found \u2014 goal_id is only used via re.escape in a regex, never as a path component. One low-severity note: goal_plan_section's regex is stricter than the spec text describes but matches the actual acceptance test's expectations.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "line": 123,
+        "issue": "goal_plan_section requires the literal token 'GOAL' immediately before goal_id (regex r'GOAL\\s+'+goal_id), not the whole-token regex r'(?<![\\w-])'+goal_id+r'(?![\\w-])' described in the spec's 'What' section. Behaviorally this is stricter and actually correct for the acceptance test (it keeps 'T-0055' mentioned only in a dependency note like '## GOAL T-0069 ... (depends on T-0055)' from matching), and all 5 acceptance tests pass, but it diverges from the literal spec text and would reject a goal heading that doesn't use the word 'GOAL' verbatim.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "2a30bc52faea",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790000028.7029262,
+      "reviewed_sha": "d880c79a2a0b1b014827d35155633b4270fcf3eb"
+    },
+    {
+      "ts": 1790000031.359854,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0718",
+      "claimed_at": 1790000031.359465
+    },
+    {
+      "ts": 1790000031.3609412,
+      "account": "B"
+    },
+    {
+      "ts": 1790000031.7662022,
+      "pid": 20156,
+      "account": "B"
+    },
+    {
+      "ts": 1790000147.4147651,
+      "status": "done",
+      "result": {
+        "summary": "Ran the 5 named acceptance tests directly (tests/test_planner_telemetry.py) \u2014 all pass. Verified _interactive_summary(root, cfg, cutoff, now, headless) call signature and day_totals keys match orchestrator/planner_runs.py:794-839. Checked materiality/snapshot/goal_closed_at/per_goal/accepted_goal_summary logic against the spec's formulas (total_tokens cache_read//10, fable_share, divide-by-zero guards, reopened-goal handling via goal.get('status')!='done') and found them correctly implemented. _append/_read use a private runs/sched/*.jsonl layout with a path-keyed threading.Lock and never touch schedlog.SCHED_DIR, confirmed by test. Free-text capping via _bounded is applied uniformly. No injection, path-traversal, or unsafe-eval concerns found \u2014 goal_id is only used via re.escape in a regex, never as a path component. One low-severity note: goal_plan_section's regex is stricter than the spec text describes but matches the actual acceptance test's expectations.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "line": 123,
+            "issue": "goal_plan_section requires the literal token 'GOAL' immediately before goal_id (regex r'GOAL\\s+'+goal_id), not the whole-token regex r'(?<![\\w-])'+goal_id+r'(?![\\w-])' described in the spec's 'What' section. Behaviorally this is stricter and actually correct for the acceptance test (it keeps 'T-0055' mentioned only in a dependency note like '## GOAL T-0069 ... (depends on T-0055)' from matching), and all 5 acceptance tests pass, but it diverges from the literal spec text and would reject a goal heading that doesn't use the word 'GOAL' verbatim.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "2a30bc52faea",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790000147.41596,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790000147.455476,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "d880c79a2a0b1b014827d35155633b4270fcf3eb",
+        "packet_version": "2a30bc52faea",
+        "review_pass_index": 2,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "d880c79a2a0b1b014827d35155633b4270fcf3eb",
+      "packet_version": "2a30bc52faea",
+      "review_pass_index": 2,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "d880c79a2a0b1b014827d35155633b4270fcf3eb",
+  "claimed_at": 1790000031.359465,
+  "account": "B",
+  "pid": 20156,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "d880c79a2a0b1b014827d35155633b4270fcf3eb",
+    "packet_version": "2a30bc52faea",
+    "review_pass_index": 2,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "2a30bc52faea",
+  "review_pass_index": 2,
+  "reviews_expected": 1
+}

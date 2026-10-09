@@ -1,0 +1,96 @@
+{
+  "id": "T-0494",
+  "parent": "T-0489",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: P6a1: review-finding telemetry on every review \u2014 the review run row and the review task result carry verdict, findings_count, findings_by_severity, reviewer_role, checklist_used, reviewed_sha, packet_version and review_pass_index; a read-time helper derives the same fields for historical reviews from their stored comments",
+  "spec": "Phase I P6 (brief, section P6, inlined: do this only with review telemetry available; never remove reviews to reduce tokens; measure whether reduced context affects review findings; security-path requirements stay deterministic). Base goal/T-0489 (cut from goal/T-0445 at 4149f67). Work only in your own worktree and commit only on your own branch. Scout facts (T-0490): reviews are created by daemon._open_reviews (daemon.py:831-868) with reviewed_sha inherited and complexity bumped to SECURITY_CHECKLIST_COMPLEXITY (7) for security reviews; the review result is stored by bus.post_result as fit_result({\"summary\": ..., **result}) where result has verdict and comments [{path, line, issue, severity}] (spawn.py:730-753, 624-630); the review run row is logged by spawn.run_claude with role review, tier, usd, tokens and packet_meta (spawn.py:409-439; packet_meta carries the P1b packet version hash); the security section of review_packet fires on security globs, the semantic regex, complexity >= 7 or review_reason in security_paths, diff_unavailable, security_paths_empty (spawn.py:412-471); the adversarial-review skill contract returns only verdict and comments.\n1. orchestrator/attribution.py: review_facts(review_task) -> dict {verdict, findings_count, findings_by_severity: {high, med, low, other} (severity normalised: high/critical -> high; med/medium -> med; low/info/nit -> low; else other), reviewer_role: constraints.reviewer_role or \"general\", checklist_used: bool (pipeline.review_reason names a security reason or complexity >= 7), reviewed_sha: constraints.reviewed_sha or pipeline.reviewed_sha, packet_version: result.packet_version or the review run row's packet_meta.version when present else None, review_pass_index: 1-based position of this review among the reviews of the same inputs[0] ordered by created_at (or id), reviews_expected: the reviewed task's pipeline.reviews_expected}. Works for every historical review task (fields None when absent, never raises).\n2. spawn.run_worker for role review: after the result is extracted, compute review_facts from the posted result and stamp them on the review task (bus.update(review_id, review_facts=...)) and add the same keys to the run row via bus.log_run kwargs (findings_count, findings_by_severity, reviewer_role, checklist_used, reviewed_sha, packet_version, review_pass_index); the result dict posted also gets packet_version = the packet_meta version used for the prompt.\n3. Tests tests/test_attribution.py: test_review_facts_normalises_severities_and_counts, test_review_facts_handles_missing_fields_on_old_reviews, test_review_facts_pass_index_orders_sibling_reviews; tests/test_spawn.py: test_review_run_row_and_task_carry_review_facts (mocked claude run returning a verdict with three comments; row and task carry the facts, packet_version equals the packet header hash). Existing tests green; full .claude/hooks/tests-green.sh exit 0; commit with the task id including every named test; report sha and failures only.",
+  "inputs": [
+    "T-0491"
+  ],
+  "acceptance": [
+    "tests/test_attribution.py::test_review_facts_normalises_severities_and_counts, test_review_facts_handles_missing_fields_on_old_reviews, test_review_facts_pass_index_orders_sibling_reviews pass",
+    "tests/test_spawn.py::test_review_run_row_and_task_carry_review_facts passes",
+    "every new review run row and review task carry verdict, findings_count, findings_by_severity, reviewer_role, checklist_used, reviewed_sha, packet_version and review_pass_index; historical reviews yield the same fields via attribution.review_facts",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree; the commit is on this task's own branch"
+  ],
+  "scope": [
+    "orchestrator/attribution.py",
+    "orchestrator/spawn.py",
+    "tests/test_attribution.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0494",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/attribution.py",
+        "line": 27,
+        "issue": "Historical packet_version backfill reads runs/<date>.jsonl with json.loads(path.read_text()), but log_run appends one JSON object per line (bus.py:334). Any file with more than one run raises JSONDecodeError, caught by the blanket except and silently skipped, so packet_version stays None for virtually all historical reviews in real data (only the test's single-line file happens to parse). Fix by iterating path.read_text().splitlines() and parsing each line.",
+        "severity": "high"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789940404.011842,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0494",
+      "claimed_at": 1789940404.011615
+    },
+    {
+      "ts": 1789940404.013265,
+      "account": "B"
+    },
+    {
+      "ts": 1789940404.049394,
+      "pid": 76934,
+      "account": "B"
+    },
+    {
+      "ts": 1789940530.456119,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/attribution.py",
+            "line": 27,
+            "issue": "Historical packet_version backfill reads runs/<date>.jsonl with json.loads(path.read_text()), but log_run appends one JSON object per line (bus.py:334). Any file with more than one run raises JSONDecodeError, caught by the blanket except and silently skipped, so packet_version stays None for virtually all historical reviews in real data (only the test's single-line file happens to parse). Fix by iterating path.read_text().splitlines() and parsing each line.",
+            "severity": "high"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789940530.4584231,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789940404.011615,
+  "account": "B",
+  "pid": 76934,
+  "review_verdict": "request_changes"
+}

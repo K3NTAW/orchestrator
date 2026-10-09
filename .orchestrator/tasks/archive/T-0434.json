@@ -1,0 +1,250 @@
+{
+  "id": "T-0434",
+  "parent": "T-0353",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: H3b v2: wire decision routes into the daemon (spec review T-0430 folded in) \u2014 every decision.route ctx field named with its source, routine closable close stamped and idempotent, one per-goal claim scheme replacing per-point records, cursor advanced only after a launch starts, infra backoff, soft premium budget",
+  "spec": "Replaces T-0365 after spec review T-0430. Build on goal/T-0353 (H3a decision.py, H2 launch attribution, H7 failure kinds and signatures, H6 acceptance gate, G7 v4 auto fix rounds, G8 semantic triggers are merged). Handover sections 3 and 4.\n1. Context builder: planner_runs.build_ctx(point) fills every field decision.route reads (orchestrator/decision.py lines 84-148), from these sources, never leaving a required field absent:\n- common: routes = pool.toml [planner.routes]; infra_failure_kind = \"quota\" | \"auth\" | \"unavailable\" when the pool reports a cooldown or usage-limit reason for the account or executor involved, or pipeline.failure_kind is quota or permissions; else None (present, None); premium_launches = count of escalate launches recorded for this goal.\n- held: failing_ids = the ids daemon.auto_fix_round already extracts from resume_hint.failures (pytest FAILED lines, unittest FAIL/ERROR lines, H6 missing-test lines); in_scope_review_comments = the same check auto_fix_round performs (every rejecting review comment path inside the task scope); auto_fix_rounds_used = lineage count of constraints.auto_round; auto_fix_rounds = [daemon].auto_fix_rounds; failure_signature = daemon.failure_signature(task); signature_repeated = signature equals an earlier lineage signature (H7 logic); spec_review_request_changes = number of spec_review tasks with inputs[0] in the task's lineage and verdict request_changes; blocked_scouts = scout ids under the goal with status blocked; touches_auth, touches_migrations, touches_interfaces, touches_data_deletion = a diff-path classifier daemon.touch_areas(task) that maps the changed paths and added lines of the task's diff (daemon.changed_paths and the unified diff helper H7 uses) against four area tables in pool.toml [review.areas] (auth: auth, authz, permission, token, session paths and patterns; migrations: migrations or schema paths and ALTER/CREATE TABLE patterns; interfaces: public API, cli, mcp tool definitions, exported symbols; data_deletion: DROP, DELETE FROM, rm -rf, shutil.rmtree, os.remove patterns), defaults shipped; an unavailable diff sets all four True (fail closed).\n- scouts_done: goal_complexity = the goal task's complexity; scout_count and all_scouts_posted from the goal's scout children; blocked_scouts as above; security_trigger = any goal scope path matches [review].security_paths; semantic_trigger = the goal's spec or scope matches [review].semantic_patterns or semantic_paths (G8 lists).\n- closable: all_children_merged = every execute child of the goal is done with merged_into set (fix rounds included); gate_state = \"green\" | \"red\" | \"unknown\" from a tests-green run on the goal branch head in a fresh worktree (bounded by [limits].timeout_s.execute) or the last merge's recorded gate when the head is unchanged.\nTest: test_ctx_fields_complete_for_each_kind asserts decision.route on a built ctx never returns an unknown reason for held, scouts_done and closable points.\n2. Routing in the daemon: routine holds: no launch, auto_fix_round acts. Routine closable: a deterministic close guarded like every other stage: stamp(goal_id, \"closed_at\") under bus.locked() before any side effect, and each effect idempotent: the retrospective entry is written once (record script with facts from bus state, or the no-new-learning marker), the PR is opened only if the goal has no recorded pr_url and gh pr list shows none for the branch, the GOAL result is posted once; a crash between stamp and effects is reconciled on the next tick by checking each effect's evidence (entry present, PR exists, result present) rather than re-running blindly. investigate: launch on [planner.routes].investigate_tier; escalate: launch on the premium tier. Route, reason, evidence and cheaper_steps go into the claim record (H2 fields). [planner.routes].enabled = false restores the per-point escalation.\n3. One claim scheme: coalesced launches are recorded as kind \"goal\" with payload_key = state_version (sha12 over sorted (task id, status, hold_reason, merged_into, last event seq) of the goal's children); the old per-point (goal_id, kind, payload_key) records remain readable history but new launches for held and scouts_done use the goal record only; _blocked and the gave_up rule apply to the goal record; the module docstring documents the scheme. An identical state_version never launches twice. Unrelated goals never share a packet; a blocked scout or a security hold launches in the same tick as its own point.\n4. Cursor: the per-goal processed-event cursor in planner_runs.json advances only after the launch is recorded as started (claim written and the process spawned); an infra failure leaves the cursor so the retry rebuilds the same packet. Infra failures (auth, quota, service unavailable markers in stderr or exit) set a pool cooldown with reason, do not count toward gave_up, and notify once per transition (H4 helper).\n5. Soft premium budget: exceeding [planner.routes].premium_launches_soft_per_goal still launches and records exception: true with the reason.\nTests in tests/test_planner_runs.py and tests/test_daemon.py: test_ctx_fields_complete_for_each_kind, test_routine_hold_launches_no_model, test_closable_all_merged_closes_without_launch, test_closable_routine_is_idempotent_across_ticks (three ticks: one PR, one result, one entry), test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_burst_of_holds_one_packet_per_goal, test_two_goals_two_packets, test_cursor_advances_only_after_launch_start, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch, test_touch_areas_fail_closed_without_diff. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0433"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py and tests/test_daemon.py: test_ctx_fields_complete_for_each_kind, test_routine_hold_launches_no_model, test_closable_all_merged_closes_without_launch, test_closable_routine_is_idempotent_across_ticks, test_investigate_uses_smaller_tier, test_escalate_uses_premium_tier_with_reason, test_same_state_version_never_relaunches, test_burst_of_holds_one_packet_per_goal, test_two_goals_two_packets, test_cursor_advances_only_after_launch_start, test_auth_failure_cools_account_without_gave_up, test_soft_budget_exceeded_still_launches_with_exception, test_routes_disabled_restores_per_point_launch, test_touch_areas_fail_closed_without_diff pass",
+    "every launch record carries route, reason, evidence, cheaper_steps, state_version and cursor; the routine close stamps closed_at before any side effect",
+    "pool.toml documents [review.areas] defaults and the planner_runs module docstring documents the goal-record claim scheme",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    "orchestrator/goals.py",
+    ".orchestrator/prompts/planner-decision.md",
+    ".orchestrator/pool.toml",
+    "tests/test_planner_runs.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0434",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "build_ctx needs daemon-only helpers (_test_ids, _rejecting_reviews, _path_in_scope, failure_kind, failure_signature, changed_paths, new touch_areas) but planner_runs.py can't import daemon at module scope (daemon already imports planner_runs top-level; existing code defers this import inside run() for exactly this reason). Spec doesn't address the cycle or the reuse-vs-duplicate tradeoff.",
+        "severity": "high",
+        "line": 20
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "New goal-level coalesced claim for 'held' (item 3) collapses per-task held decisions into one record keyed by goal state_version, but the held decision packet/prompt is built around one specific held task's hold_reason/failure text/branch/head_sha. No spec text or test covers two simultaneously-held siblings under one goal with different routes.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "closable's gate_state requires a fresh worktree + full tests-green run (up to 1800s) inside build_ctx, with no stated guarantee this runs only after confirming the point isn't already claimed. state_version excludes gate outcome, so a naive implementation reruns the full suite every daemon tick, blocking the single-threaded tick() that also drives dispatch/gate/merge for every other task.",
+        "severity": "med",
+        "line": 992
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Autonomous 'gh pr create' from the daemon is new unattended external side-effect capability (no existing PR-open helper in scope files) with no specified failure/retry/auth-expiry handling for the window between stamping closed_at and the PR actually landing.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Acceptance line 'every launch record carries ... cursor' conflicts with item 4's definition of cursor as a single per-goal value in planner_runs.json, not a per-record field -- ambiguous and not verifiable as written.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify exactly how build_ctx (in planner_runs.py) is allowed to reach daemon's failure/scope-check logic without a circular top-level import -- e.g. name a shared module for _test_ids/_rejecting_reviews/_path_in_scope/touch_areas, or explicitly authorize a deferred import pattern.",
+      "Add an acceptance test with two simultaneously-held execute children under one goal (one routine-fixable, one escalate-worthy) and state exactly which held task's data the coalesced goal-level launch packet must carry, or require per-task packets even when the claim record is coalesced.",
+      "Require the dedup/blocked check on state_version to happen strictly before any gate_state tests-green run, and state whether that run may block the daemon tick or must be dispatched off-tick like other long-running work.",
+      "Spell out gh pr create failure handling (retry policy, whether a gh failure counts toward gave_up, what happens if closed_at is stamped but PR creation errors) for the closable routine close.",
+      "Clarify whether 'cursor' belongs on each launch record or only in the per-goal planner_runs.json structure, and adjust the acceptance line to match."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789914862.482341,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0434",
+      "claimed_at": 1789914862.482033
+    },
+    {
+      "ts": 1789914862.48328,
+      "account": "B"
+    },
+    {
+      "ts": 1789914862.488883,
+      "pid": 4287,
+      "account": "B"
+    },
+    {
+      "ts": 1789915130.013536,
+      "status": "queued",
+      "pid": null,
+      "reason": "process died; requeued",
+      "pipeline": {}
+    },
+    {
+      "ts": 1789915144.7552059,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0434",
+      "claimed_at": 1789915144.7549949
+    },
+    {
+      "ts": 1789915144.756822,
+      "account": "B"
+    },
+    {
+      "ts": 1789915144.764993,
+      "pid": 9426,
+      "account": "B"
+    },
+    {
+      "ts": 1789915354.728989,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "build_ctx needs daemon-only helpers (_test_ids, _rejecting_reviews, _path_in_scope, failure_kind, failure_signature, changed_paths, new touch_areas) but planner_runs.py can't import daemon at module scope (daemon already imports planner_runs top-level; existing code defers this import inside run() for exactly this reason). Spec doesn't address the cycle or the reuse-vs-duplicate tradeoff.",
+            "severity": "high",
+            "line": 20
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "New goal-level coalesced claim for 'held' (item 3) collapses per-task held decisions into one record keyed by goal state_version, but the held decision packet/prompt is built around one specific held task's hold_reason/failure text/branch/head_sha. No spec text or test covers two simultaneously-held siblings under one goal with different routes.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "closable's gate_state requires a fresh worktree + full tests-green run (up to 1800s) inside build_ctx, with no stated guarantee this runs only after confirming the point isn't already claimed. state_version excludes gate outcome, so a naive implementation reruns the full suite every daemon tick, blocking the single-threaded tick() that also drives dispatch/gate/merge for every other task.",
+            "severity": "med",
+            "line": 992
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Autonomous 'gh pr create' from the daemon is new unattended external side-effect capability (no existing PR-open helper in scope files) with no specified failure/retry/auth-expiry handling for the window between stamping closed_at and the PR actually landing.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Acceptance line 'every launch record carries ... cursor' conflicts with item 4's definition of cursor as a single per-goal value in planner_runs.json, not a per-record field -- ambiguous and not verifiable as written.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify exactly how build_ctx (in planner_runs.py) is allowed to reach daemon's failure/scope-check logic without a circular top-level import -- e.g. name a shared module for _test_ids/_rejecting_reviews/_path_in_scope/touch_areas, or explicitly authorize a deferred import pattern.",
+          "Add an acceptance test with two simultaneously-held execute children under one goal (one routine-fixable, one escalate-worthy) and state exactly which held task's data the coalesced goal-level launch packet must carry, or require per-task packets even when the claim record is coalesced.",
+          "Require the dedup/blocked check on state_version to happen strictly before any gate_state tests-green run, and state whether that run may block the daemon tick or must be dispatched off-tick like other long-running work.",
+          "Spell out gh pr create failure handling (retry policy, whether a gh failure counts toward gave_up, what happens if closed_at is stamped but PR creation errors) for the closable routine close.",
+          "Clarify whether 'cursor' belongs on each launch record or only in the per-goal planner_runs.json structure, and adjust the acceptance line to match."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789915354.732121,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "build_ctx needs daemon-only helpers (_test_ids, _rejecting_reviews, _path_in_scope, failure_kind, failure_signature, changed_paths, new touch_areas) but planner_runs.py can't import daemon at module scope (daemon already imports planner_runs top-level; existing code defers this import inside run() for exactly this reason). Spec doesn't address the cycle or the reuse-vs-duplicate tradeoff.",
+          "severity": "high",
+          "line": 20
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "New goal-level coalesced claim for 'held' (item 3) collapses per-task held decisions into one record keyed by goal state_version, but the held decision packet/prompt is built around one specific held task's hold_reason/failure text/branch/head_sha. No spec text or test covers two simultaneously-held siblings under one goal with different routes.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "closable's gate_state requires a fresh worktree + full tests-green run (up to 1800s) inside build_ctx, with no stated guarantee this runs only after confirming the point isn't already claimed. state_version excludes gate outcome, so a naive implementation reruns the full suite every daemon tick, blocking the single-threaded tick() that also drives dispatch/gate/merge for every other task.",
+          "severity": "med",
+          "line": 992
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Autonomous 'gh pr create' from the daemon is new unattended external side-effect capability (no existing PR-open helper in scope files) with no specified failure/retry/auth-expiry handling for the window between stamping closed_at and the PR actually landing.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Acceptance line 'every launch record carries ... cursor' conflicts with item 4's definition of cursor as a single per-goal value in planner_runs.json, not a per-record field -- ambiguous and not verifiable as written.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789915144.7549949,
+  "account": "B",
+  "pid": 9426,
+  "reason": "process died; requeued",
+  "pipeline": {},
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "build_ctx needs daemon-only helpers (_test_ids, _rejecting_reviews, _path_in_scope, failure_kind, failure_signature, changed_paths, new touch_areas) but planner_runs.py can't import daemon at module scope (daemon already imports planner_runs top-level; existing code defers this import inside run() for exactly this reason). Spec doesn't address the cycle or the reuse-vs-duplicate tradeoff.",
+      "severity": "high",
+      "line": 20
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "New goal-level coalesced claim for 'held' (item 3) collapses per-task held decisions into one record keyed by goal state_version, but the held decision packet/prompt is built around one specific held task's hold_reason/failure text/branch/head_sha. No spec text or test covers two simultaneously-held siblings under one goal with different routes.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "closable's gate_state requires a fresh worktree + full tests-green run (up to 1800s) inside build_ctx, with no stated guarantee this runs only after confirming the point isn't already claimed. state_version excludes gate outcome, so a naive implementation reruns the full suite every daemon tick, blocking the single-threaded tick() that also drives dispatch/gate/merge for every other task.",
+      "severity": "med",
+      "line": 992
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Autonomous 'gh pr create' from the daemon is new unattended external side-effect capability (no existing PR-open helper in scope files) with no specified failure/retry/auth-expiry handling for the window between stamping closed_at and the PR actually landing.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Acceptance line 'every launch record carries ... cursor' conflicts with item 4's definition of cursor as a single per-goal value in planner_runs.json, not a per-record field -- ambiguous and not verifiable as written.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,662 @@
+{
+  "id": "T-1342",
+  "created_at": 1790191360.424052,
+  "parent": "T-1334",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: S1 v3: executor_identity resolves any executor field to provider/model; review rule compares models with None guard",
+  "spec": "Respec of T-1338 after spec review T-1340 (request_changes). Goal T-1334: [[executors]] provider-agnostic; S2 wires dispatch. No provider=\"claude\" row exists in pool.toml after S1, so today's routing, dispatch and reviews are unchanged. Additive: no persisted state, no pool.toml field; git revert restores the old review_tier and eligible_executors.\n\n1. orchestrator/pool.py: module function executor_identity(field, cfg) -> {\"provider\": \"codex\"|\"claude\"|None, \"model\": str|None}; cfg only, no Pool state, no disk. Row id -> row provider/model. \"claude:<tier>\" (legacy, spawn.py:1564) -> provider \"claude\"; model = cfg[\"models\"].get(tier) only if tier in (\"haiku\",\"sonnet\",\"opus\") and the value is a str, else None. None/unknown -> both None. Pool.executor_identity(field) and Pool.is_claude_executor(field) delegate with self.cfg.\n2. pool.py eligible_executors (pool.py:522): claude rows still pass every existing check (enabled, roles, cooling, band, roll_day, max_parallel, daily_budget_tasks) and additionally need account headroom. Call self.pick(\"execute\") at most once per eligible_executors call, lazily, only when a claude row reached that check, so codex-only configs never touch account state. codex_available (pool.py:590): True iff some eligible row has provider == \"codex\". For a codex-only config this equals today's result (pick_executor returns an eligible row whenever one exists), with and without task.\n3. orchestrator/daemon.py review_tier(t, cfg=None) (daemon.py:1070) and _security_review_tier(t, cfg=None) (daemon.py:1136); cfg None -> pool_module.config() via the module's existing pool import. Keep each legacy branch exactly as today: review_tier startswith(\"claude:sonnet\") -> \"opus\", startswith(\"claude:opus\") -> \"sonnet\"; _security_review_tier exact f\"claude:{tier}\" -> _other_tier(tier). These run first and do not depend on cfg[\"models\"]. Then: executing model = pool_module.executor_identity(t.get(\"executor\"), cfg)[\"model\"]; swap to _other_tier(default) only when it and cfg[\"models\"].get(default) are both str and equal; otherwise default. Fail closed: wrap only the executor_identity call and the cfg[\"models\"] read in try/except (KeyError, TypeError, AttributeError, ValueError, OSError, tomllib.TOMLDecodeError) and on failure print \"review_tier: lookup failed (<exc>); failing closed to <tier>\" to stderr and return _other_tier(default).\n4. _review_plan (daemon.py:1225): read cfg once, pass it to review_tier and _security_review_tier; replace startswith(\"claude:\") at daemon.py:1241 with executor_identity(..., cfg)[\"provider\"] == \"claude\". The second review for a Claude executor stays on review_tier(t, cfg).\n5. Unchanged on purpose, recorded for S2: running_claude_workers (daemon.py:470) and spawn.py:1508 (row-routed runs still claim \"claude:<acct>\"); capacity.eligible_executors_from_snapshot (capacity.py:54), executor.py:279 and :487, jev_route.py:226, specialist.py:131.\nTests: one method (or subTest) per scenario; patch daemon.SECURITY_REVIEW_TIER and cfg with unittest.mock and restore; the raising case patches pool.executor_identity via mock.patch.object(daemon.pool_module, \"executor_identity\", side_effect=KeyError) (use the name daemon.py actually imports); accounts built in-test with \"execute\" affinity. No new dependencies.",
+  "inputs": [
+    "T-1341"
+  ],
+  "acceptance": [
+    "tests/test_pool.py::ExecutorIdentity::test_row_id_legacy_tier_and_unknown: a provider=claude row id, a codex row id, 'claude:opus', 'claude:success_floor', an unknown id and None resolve to the expected provider/model",
+    "tests/test_pool.py::ExecutorIdentity::test_claude_row_needs_account_headroom: a claude row is excluded when every execute-affinity account is cooling, included when one has headroom, and excluded at max_parallel; pick is called at most once per call and never for a codex-only config",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_available_unchanged_for_codex_only_and_ignores_winning_claude_row: codex-only config gives the same codex_available and pick_executor results as before, with and without task; adding a heavier eligible claude row keeps codex_available True",
+    "tests/test_daemon.py::ReviewModelRule: separate methods for claude row on sonnet model -> review opus and security opus; claude row on opus model -> sonnet, and with SECURITY_REVIEW_TIER 'opus' -> sonnet; codex row -> sonnet; legacy claude:sonnet -> opus even when cfg models lacks sonnet; unknown, None and model-less claude row keep the default; raising lookup -> other tier plus the stderr line",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1342",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The spec says to use `pool_module.executor_identity` and `pool_module.config()` via 'the module's existing pool import'. daemon.py has no `pool_module`. It imports `from .pool import Pool, fallback_tier` (line 13). The name `pool` is used as a Pool instance (`pool.cfg`, line 245). The test's `mock.patch.object(daemon.pool_module, ...)` would hit AttributeError, and the fail-closed test would not test what it claims.",
+        "severity": "high",
+        "line": 13
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "For `cfg=None`, `pool_module.config()` reads and parses pool.toml from disk on every `review_tier` or `_security_review_tier` call. That call sits outside the try/except, which wraps only `executor_identity` and the `cfg['models']` read. A missing or invalid pool.toml (OSError, TOMLDecodeError) would therefore raise out of a review-tier decision instead of failing closed. It also breaks the spec's claim that the legacy branches 'run first and do not depend on cfg'. tomllib is not imported in daemon.py either, so the except tuple needs an import.",
+        "severity": "high",
+        "line": 1070
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "The spec puts the caller change in `_review_plan` at daemon.py:1225 and 1241. `_review_plan` is at line 1145, and it opens no review tasks. The review-tier selection lives in `gate()` at about lines 1228-1244 (1241 is correct). 'Read cfg once' and 'the second review stays on review_tier(t, cfg)' therefore refer to the wrong function. An executor following the spec literally would edit the wrong place.",
+        "severity": "med",
+        "line": 1241
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "Hidden coupling outside scope: review_tier and _security_review_tier become provider-aware, but the `startswith('claude:')` checks at daemon.py:472 and spawn.py:1508 stay legacy-only. A row-id executor with provider=claude gets a provider-aware review tier but is not counted in running_claude_workers. The spec records this as deferred, but does not say whether S1 guarantees no such row exists until S2. The 'unchanged' claim rests on that guarantee, and no acceptance test checks it.",
+        "severity": "med",
+        "line": 472
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "For claude rows, `eligible_executors` calls `self.pick('execute')`, which uses `a.utilization()` and mutates the window and day roll. pick_executor and codex_available call `eligible_executors` repeatedly (status, dispatch), so claude rows get an extra account-state read on each call. The 'at most once per call' test covers a single call only. Also, `pick` ignores which account the row would use, so 'headroom' is any execute-affinity account, not the row's own. The spec does not state this.",
+        "severity": "low",
+        "line": 522
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "issue": "The acceptance test `test_codex_available_unchanged_...` asserts that codex-only behaviour matches 'before', but the spec gives no baseline mechanism (a recorded expected value or a captured pre-change function). It could pass while checking only self-consistency.",
+        "severity": "low",
+        "line": 590
+      }
+    ],
+    "suggested_spec_changes": [
+      "Fix the import: name the exact import to add in daemon.py (for example `from . import pool as pool_module`, which does not clash with the existing `pool` variable), or use `from .pool import executor_identity, config` and patch `daemon.executor_identity`. Update the test's patch target to match.",
+      "For the default-cfg path, wrap `pool_module.config()` in the same try/except and fail closed, or have the callers always pass cfg (gate() already has `pool.cfg`). Make cfg required for the new logic, and resolve it lazily only after the legacy `claude:` branches. Add `import tomllib` if the except tuple keeps TOMLDecodeError.",
+      "Correct the insertion points: the review-tier selection is in `gate()` (around lines 1228-1244), not `_review_plan` at 1225. Say which function reads cfg once, and use current line numbers.",
+      "Add a test that `gate()` or the review-tier chain still yields the same tiers when cfg has no [[executors]] rows (the S1 no-claude-row guarantee), and one that pool.toml is not re-read per call when cfg is passed.",
+      "State how the codex-only baseline is checked (for example a hard-coded expected value from the pre-change config) so the unchanged-behaviour test is not circular.",
+      "Record the rollback path: revert restores review_tier(t), _security_review_tier(t) and eligible_executors, and no persisted state changes."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790191362.01869,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5768,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790191362.023426,
+      "packet_meta": {
+        "chars": 5029,
+        "est_tokens": 1257,
+        "presented_tokens": 1257,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "cf92312eefb5026de9d559e91324f9c47e1ec9d2eebdb0e601768bcb179a7292"
+          },
+          "spec": {
+            "chars": 3294,
+            "est_tokens": 823,
+            "sha256": "ae5f358c57284a82b56f11428bdc07a3a4bdd2720cc0ce062226054e739a63e1"
+          },
+          "acceptance": {
+            "chars": 1265,
+            "est_tokens": 316,
+            "sha256": "f62eccf9c806088612ce846957c207ca4e9f77f444cf52ddaafdb34063924ebe"
+          },
+          "scope": {
+            "chars": 101,
+            "est_tokens": 25,
+            "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 248,
+            "est_tokens": 62,
+            "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "6e5fea6c7a65",
+        "version": "6e5fea6c7a65",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1341 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5768,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790191364.0805278,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1342",
+      "claimed_at": 1790191364.080107
+    },
+    {
+      "ts": 1790191364.081672,
+      "account": "A"
+    },
+    {
+      "ts": 1790191365.4695292,
+      "pid": 99417,
+      "account": "A"
+    },
+    {
+      "ts": 1790191411.464603,
+      "packet_meta": {
+        "chars": 5029,
+        "est_tokens": 1257,
+        "presented_tokens": 1257,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "cf92312eefb5026de9d559e91324f9c47e1ec9d2eebdb0e601768bcb179a7292"
+          },
+          "spec": {
+            "chars": 3294,
+            "est_tokens": 823,
+            "sha256": "ae5f358c57284a82b56f11428bdc07a3a4bdd2720cc0ce062226054e739a63e1"
+          },
+          "acceptance": {
+            "chars": 1265,
+            "est_tokens": 316,
+            "sha256": "f62eccf9c806088612ce846957c207ca4e9f77f444cf52ddaafdb34063924ebe"
+          },
+          "scope": {
+            "chars": 101,
+            "est_tokens": 25,
+            "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 248,
+            "est_tokens": 62,
+            "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "6e5fea6c7a65",
+        "version": "6e5fea6c7a65",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1341 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5768,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3f465611-5536-45cb-ad7c-fbce53837954"
+      }
+    },
+    {
+      "ts": 1790191411.495589,
+      "packet_meta": {
+        "chars": 5029,
+        "est_tokens": 1257,
+        "presented_tokens": 1257,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "cf92312eefb5026de9d559e91324f9c47e1ec9d2eebdb0e601768bcb179a7292"
+          },
+          "spec": {
+            "chars": 3294,
+            "est_tokens": 823,
+            "sha256": "ae5f358c57284a82b56f11428bdc07a3a4bdd2720cc0ce062226054e739a63e1"
+          },
+          "acceptance": {
+            "chars": 1265,
+            "est_tokens": 316,
+            "sha256": "f62eccf9c806088612ce846957c207ca4e9f77f444cf52ddaafdb34063924ebe"
+          },
+          "scope": {
+            "chars": 101,
+            "est_tokens": 25,
+            "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 248,
+            "est_tokens": 62,
+            "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 13,
+            "est_tokens": 3,
+            "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+          }
+        },
+        "hash": "6e5fea6c7a65",
+        "version": "6e5fea6c7a65",
+        "candidate_known": false,
+        "base": "1571826d4a38",
+        "sources": "task@T-1341 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 5768,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "3f465611-5536-45cb-ad7c-fbce53837954",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790191411.9166899,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The spec says to use `pool_module.executor_identity` and `pool_module.config()` via 'the module's existing pool import'. daemon.py has no `pool_module`. It imports `from .pool import Pool, fallback_tier` (line 13). The name `pool` is used as a Pool instance (`pool.cfg`, line 245). The test's `mock.patch.object(daemon.pool_module, ...)` would hit AttributeError, and the fail-closed test would not test what it claims.",
+            "severity": "high",
+            "line": 13
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "For `cfg=None`, `pool_module.config()` reads and parses pool.toml from disk on every `review_tier` or `_security_review_tier` call. That call sits outside the try/except, which wraps only `executor_identity` and the `cfg['models']` read. A missing or invalid pool.toml (OSError, TOMLDecodeError) would therefore raise out of a review-tier decision instead of failing closed. It also breaks the spec's claim that the legacy branches 'run first and do not depend on cfg'. tomllib is not imported in daemon.py either, so the except tuple needs an import.",
+            "severity": "high",
+            "line": 1070
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "The spec puts the caller change in `_review_plan` at daemon.py:1225 and 1241. `_review_plan` is at line 1145, and it opens no review tasks. The review-tier selection lives in `gate()` at about lines 1228-1244 (1241 is correct). 'Read cfg once' and 'the second review stays on review_tier(t, cfg)' therefore refer to the wrong function. An executor following the spec literally would edit the wrong place.",
+            "severity": "med",
+            "line": 1241
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "Hidden coupling outside scope: review_tier and _security_review_tier become provider-aware, but the `startswith('claude:')` checks at daemon.py:472 and spawn.py:1508 stay legacy-only. A row-id executor with provider=claude gets a provider-aware review tier but is not counted in running_claude_workers. The spec records this as deferred, but does not say whether S1 guarantees no such row exists until S2. The 'unchanged' claim rests on that guarantee, and no acceptance test checks it.",
+            "severity": "med",
+            "line": 472
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "For claude rows, `eligible_executors` calls `self.pick('execute')`, which uses `a.utilization()` and mutates the window and day roll. pick_executor and codex_available call `eligible_executors` repeatedly (status, dispatch), so claude rows get an extra account-state read on each call. The 'at most once per call' test covers a single call only. Also, `pick` ignores which account the row would use, so 'headroom' is any execute-affinity account, not the row's own. The spec does not state this.",
+            "severity": "low",
+            "line": 522
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "issue": "The acceptance test `test_codex_available_unchanged_...` asserts that codex-only behaviour matches 'before', but the spec gives no baseline mechanism (a recorded expected value or a captured pre-change function). It could pass while checking only self-consistency.",
+            "severity": "low",
+            "line": 590
+          }
+        ],
+        "suggested_spec_changes": [
+          "Fix the import: name the exact import to add in daemon.py (for example `from . import pool as pool_module`, which does not clash with the existing `pool` variable), or use `from .pool import executor_identity, config` and patch `daemon.executor_identity`. Update the test's patch target to match.",
+          "For the default-cfg path, wrap `pool_module.config()` in the same try/except and fail closed, or have the callers always pass cfg (gate() already has `pool.cfg`). Make cfg required for the new logic, and resolve it lazily only after the legacy `claude:` branches. Add `import tomllib` if the except tuple keeps TOMLDecodeError.",
+          "Correct the insertion points: the review-tier selection is in `gate()` (around lines 1228-1244), not `_review_plan` at 1225. Say which function reads cfg once, and use current line numbers.",
+          "Add a test that `gate()` or the review-tier chain still yields the same tiers when cfg has no [[executors]] rows (the S1 no-claude-row guarantee), and one that pool.toml is not re-read per call when cfg is passed.",
+          "State how the codex-only baseline is checked (for example a hard-coded expected value from the pre-change config) so the unchanged-behaviour test is not circular.",
+          "Record the rollback path: revert restores review_tier(t), _security_review_tier(t) and eligible_executors, and no persisted state changes."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790191411.9177961,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec says to use `pool_module.executor_identity` and `pool_module.config()` via 'the module's existing pool import'. daemon.py has no `pool_module`. It imports `from .pool import Pool, fallback_tier` (line 13). The name `pool` is used as a Pool instance (`pool.cfg`, line 245). The test's `mock.patch.object(daemon.pool_module, ...)` would hit AttributeError, and the fail-closed test would not test what it claims.",
+          "severity": "high",
+          "line": 13
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "For `cfg=None`, `pool_module.config()` reads and parses pool.toml from disk on every `review_tier` or `_security_review_tier` call. That call sits outside the try/except, which wraps only `executor_identity` and the `cfg['models']` read. A missing or invalid pool.toml (OSError, TOMLDecodeError) would therefore raise out of a review-tier decision instead of failing closed. It also breaks the spec's claim that the legacy branches 'run first and do not depend on cfg'. tomllib is not imported in daemon.py either, so the except tuple needs an import.",
+          "severity": "high",
+          "line": 1070
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "The spec puts the caller change in `_review_plan` at daemon.py:1225 and 1241. `_review_plan` is at line 1145, and it opens no review tasks. The review-tier selection lives in `gate()` at about lines 1228-1244 (1241 is correct). 'Read cfg once' and 'the second review stays on review_tier(t, cfg)' therefore refer to the wrong function. An executor following the spec literally would edit the wrong place.",
+          "severity": "med",
+          "line": 1241
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Hidden coupling outside scope: review_tier and _security_review_tier become provider-aware, but the `startswith('claude:')` checks at daemon.py:472 and spawn.py:1508 stay legacy-only. A row-id executor with provider=claude gets a provider-aware review tier but is not counted in running_claude_workers. The spec records this as deferred, but does not say whether S1 guarantees no such row exists until S2. The 'unchanged' claim rests on that guarantee, and no acceptance test checks it.",
+          "severity": "med",
+          "line": 472
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "For claude rows, `eligible_executors` calls `self.pick('execute')`, which uses `a.utilization()` and mutates the window and day roll. pick_executor and codex_available call `eligible_executors` repeatedly (status, dispatch), so claude rows get an extra account-state read on each call. The 'at most once per call' test covers a single call only. Also, `pick` ignores which account the row would use, so 'headroom' is any execute-affinity account, not the row's own. The spec does not state this.",
+          "severity": "low",
+          "line": 522
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "issue": "The acceptance test `test_codex_available_unchanged_...` asserts that codex-only behaviour matches 'before', but the spec gives no baseline mechanism (a recorded expected value or a captured pre-change function). It could pass while checking only self-consistency.",
+          "severity": "low",
+          "line": 590
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 5029,
+    "est_tokens": 1257,
+    "presented_tokens": 1257,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "cf92312eefb5026de9d559e91324f9c47e1ec9d2eebdb0e601768bcb179a7292"
+      },
+      "spec": {
+        "chars": 3294,
+        "est_tokens": 823,
+        "sha256": "ae5f358c57284a82b56f11428bdc07a3a4bdd2720cc0ce062226054e739a63e1"
+      },
+      "acceptance": {
+        "chars": 1265,
+        "est_tokens": 316,
+        "sha256": "f62eccf9c806088612ce846957c207ca4e9f77f444cf52ddaafdb34063924ebe"
+      },
+      "scope": {
+        "chars": 101,
+        "est_tokens": 25,
+        "sha256": "5ee40216f6cf99a38a3e4fa1fecfab811975e8c3e6304bd579f24315c12ee123"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 248,
+        "est_tokens": 62,
+        "sha256": "a2b1832643b2fe0864837b8b9736dba7b227c0c3a0d9696a718d87dd5624a013"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 13,
+        "est_tokens": 3,
+        "sha256": "551ccd3917552ddb956b62f738677cf54726cd34f6ac37fdf61950d81ae868c3"
+      }
+    },
+    "hash": "6e5fea6c7a65",
+    "version": "6e5fea6c7a65",
+    "candidate_known": false,
+    "base": "1571826d4a38",
+    "sources": "task@T-1341 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 5768,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "3f465611-5536-45cb-ad7c-fbce53837954",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790191364.080107,
+  "account": "A",
+  "pid": 99417,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec says to use `pool_module.executor_identity` and `pool_module.config()` via 'the module's existing pool import'. daemon.py has no `pool_module`. It imports `from .pool import Pool, fallback_tier` (line 13). The name `pool` is used as a Pool instance (`pool.cfg`, line 245). The test's `mock.patch.object(daemon.pool_module, ...)` would hit AttributeError, and the fail-closed test would not test what it claims.",
+      "severity": "high",
+      "line": 13
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "For `cfg=None`, `pool_module.config()` reads and parses pool.toml from disk on every `review_tier` or `_security_review_tier` call. That call sits outside the try/except, which wraps only `executor_identity` and the `cfg['models']` read. A missing or invalid pool.toml (OSError, TOMLDecodeError) would therefore raise out of a review-tier decision instead of failing closed. It also breaks the spec's claim that the legacy branches 'run first and do not depend on cfg'. tomllib is not imported in daemon.py either, so the except tuple needs an import.",
+      "severity": "high",
+      "line": 1070
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "The spec puts the caller change in `_review_plan` at daemon.py:1225 and 1241. `_review_plan` is at line 1145, and it opens no review tasks. The review-tier selection lives in `gate()` at about lines 1228-1244 (1241 is correct). 'Read cfg once' and 'the second review stays on review_tier(t, cfg)' therefore refer to the wrong function. An executor following the spec literally would edit the wrong place.",
+      "severity": "med",
+      "line": 1241
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Hidden coupling outside scope: review_tier and _security_review_tier become provider-aware, but the `startswith('claude:')` checks at daemon.py:472 and spawn.py:1508 stay legacy-only. A row-id executor with provider=claude gets a provider-aware review tier but is not counted in running_claude_workers. The spec records this as deferred, but does not say whether S1 guarantees no such row exists until S2. The 'unchanged' claim rests on that guarantee, and no acceptance test checks it.",
+      "severity": "med",
+      "line": 472
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "For claude rows, `eligible_executors` calls `self.pick('execute')`, which uses `a.utilization()` and mutates the window and day roll. pick_executor and codex_available call `eligible_executors` repeatedly (status, dispatch), so claude rows get an extra account-state read on each call. The 'at most once per call' test covers a single call only. Also, `pick` ignores which account the row would use, so 'headroom' is any execute-affinity account, not the row's own. The spec does not state this.",
+      "severity": "low",
+      "line": 522
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "issue": "The acceptance test `test_codex_available_unchanged_...` asserts that codex-only behaviour matches 'before', but the spec gives no baseline mechanism (a recorded expected value or a captured pre-change function). It could pass while checking only self-consistency.",
+      "severity": "low",
+      "line": 590
+    }
+  ]
+}

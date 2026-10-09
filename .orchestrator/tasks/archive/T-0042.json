@@ -1,0 +1,84 @@
+{
+  "id": "T-0042",
+  "parent": "T-0005",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "Land the bench fail-loud guard and make PoolSel thresholds cap-relative (unblocks the goal branch)",
+  "spec": "Why: (1) commit b680ef5 raised window_cap_tokens to 10M and tests/test_orchestrator.py PoolSel.test_affinity_reserve_cooldown_budget computes token fractions with literals calibrated for 2M, so `pick(\"planner\")` returns None and the whole suite is red on goal/T-0005 \u2014 every merge gate fails until fixed. (2) Task T-0040 implemented the bench.py fail-loud guard (REQUIRED_PARAMS check in fetch_html, error dict in fetch, two tests) but correctly did not commit on a red suite; its diff is saved at /private/tmp/claude-501/-Users-k3ntaw-code-orchestrator/e48eae69-3bd9-497b-846d-c9b34cb895e1/scratchpad/t40-guard.patch.\n\nWhat (2 files: orchestrator/bench.py, tests/test_orchestrator.py; worktree off goal/T-0005):\n1. `git apply <that patch path>`; confirm the Bench tests in it pass.\n2. In PoolSel.test_affinity_reserve_cooldown_budget, replace literal token amounts with fractions of `self.p.cap` (or `P.Pool().cap`) so the assertions hold for any window_cap_tokens: e.g. record(A, int(0.7 * cap)) then assert pick(\"execute\") avoids A (ceiling 1 - reserve = 0.65) while pick(\"planner\") still returns A (ceiling 1.0); keep the cooldown and daily-budget assertions, also cap-relative. Do not change pool.py or pool.toml. If the test already uses cap somewhere, keep its structure and only fix the parts that assume 2M.\n3. Run the full suite: `uv run python -m unittest tests/test_orchestrator.py` must exit 0.\n\nCommit as ONE commit: \"bench: refuse to fetch if scrapling stops exposing impersonate/stealthy_headers/headers; tests: PoolSel thresholds relative to window cap\" with a body naming both causes (re-review T-0039; b680ef5) and the revert path.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 (all tests, including PoolSel and the two new Bench refusal tests)",
+    "fetch_html raises RuntimeError naming the missing parameter when introspection lacks impersonate, stealthy_headers or headers; fetch() returns an error dict and leaves bench.json untouched",
+    "PoolSel.test_affinity_reserve_cooldown_budget contains no literal token count tied to 2M; it derives from the pool cap",
+    "git diff --stat limited to orchestrator/bench.py and tests/test_orchestrator.py"
+  ],
+  "scope": [
+    "orchestrator/bench.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0042",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed as `d84a3d3` on `task/T-0042`.\n\n**Summary**\n1. Applied T-0040's `bench.py` fail-loud guard: `fetch_html` now raises `RuntimeError` naming any missing param (`impersonate`/`stealthy_headers`/`headers`) if scrapling's `Fetcher.get` stops exposing them; `fetch()` catches it and returns `{\"error\": ...}` without touching `bench.json`.\n2. Fixed `PoolSel.test_affinity_reserve_cooldown_budget`: it used to push account A's utilization via `pool.record(A, int(cap*0.7))`, which bumps `window_tokens` and `day_tokens` together. At the new 10M cap, `0.7*cap` (7M) exceeds A's `daily_budget_tokens` (6M, unchanged in pool.toml), so the daily-budget check excluded A from *every* role, not just the reserve-ceiling roles \u2014 `pick(\"planner\")` returned `None` and the suite went red. Fix sets `A.window_tokens` directly (still cap-relative, no literal) so the reserve check is isolated from the unrelated daily-budget check.\n\n**Files changed**\n- `orchestrator/bench.py`\n- `tests/test_orchestrator.py`\n\n**Test output**\n`uv run python -m unittest tests/test_orchestrator.py` \u2192 `Ran 67 tests in 7.604s \u2014 OK`. No failures.\n`.claude/hooks/tests-green.sh` \u2192 exit 0.\n\nNothing left outstanding on this task.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789668638.8472378,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789668638.853051,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0042",
+      "claimed_at": 1789668638.8529909
+    },
+    {
+      "ts": 1789668638.859487,
+      "pid": 21663,
+      "account": "A"
+    },
+    {
+      "ts": 1789668815.942683,
+      "status": "done",
+      "result": {
+        "summary": "Committed as `d84a3d3` on `task/T-0042`.\n\n**Summary**\n1. Applied T-0040's `bench.py` fail-loud guard: `fetch_html` now raises `RuntimeError` naming any missing param (`impersonate`/`stealthy_headers`/`headers`) if scrapling's `Fetcher.get` stops exposing them; `fetch()` catches it and returns `{\"error\": ...}` without touching `bench.json`.\n2. Fixed `PoolSel.test_affinity_reserve_cooldown_budget`: it used to push account A's utilization via `pool.record(A, int(cap*0.7))`, which bumps `window_tokens` and `day_tokens` together. At the new 10M cap, `0.7*cap` (7M) exceeds A's `daily_budget_tokens` (6M, unchanged in pool.toml), so the daily-budget check excluded A from *every* role, not just the reserve-ceiling roles \u2014 `pick(\"planner\")` returned `None` and the suite went red. Fix sets `A.window_tokens` directly (still cap-relative, no literal) so the reserve check is isolated from the unrelated daily-budget check.\n\n**Files changed**\n- `orchestrator/bench.py`\n- `tests/test_orchestrator.py`\n\n**Test output**\n`uv run python -m unittest tests/test_orchestrator.py` \u2192 `Ran 67 tests in 7.604s \u2014 OK`. No failures.\n`.claude/hooks/tests-green.sh` \u2192 exit 0.\n\nNothing left outstanding on this task.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789668845.310276,
+      "status": "done",
+      "merged_into": "goal/T-0005",
+      "sha": "d84a3d3c258000ce708fbc0223df36ea60414737"
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789668638.8529909,
+  "pid": 21663,
+  "account": "A",
+  "merged_into": "goal/T-0005",
+  "sha": "d84a3d3c258000ce708fbc0223df36ea60414737"
+}

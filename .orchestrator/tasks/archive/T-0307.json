@@ -1,0 +1,127 @@
+{
+  "id": "T-0307",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 3,
+  "title": "G2b fix round 2: build the repo map from the merged commit, not ROOT's checked-out tree; drop the fake nested-gate guard; record a failed refresh on the merge result (review T-0305)",
+  "spec": "STEP 0: the worktree must contain 66ff50f \"Fix repomap trimming and merge gate\" over dd8ab79 in git log; never drop them.\nReview T-0305 on T-0302: (high) merge.py calls repomap.build(ROOT) after the fast-forward, but ROOT normally has a different branch checked out than the merge target (update-ref only), so architecture.md is generated from whatever ROOT has on disk and the header sha is ROOT's HEAD, not the merged sha. (med) gate_env sets ORCH_ROOT to the worktree for the tests-green subprocess and a comment claims a recursion guard that does not exist; tests-green.sh reads neither ORCH_TESTS_GREEN nor ORCH_ROOT, and a nested process importing orchestrator would treat the task worktree as the real root. (low) a bare except around the refresh only prints to stderr; the merge result carries no record.\nChange:\n1. repomap.build(root, budget_chars=4000, rev=None): when rev is given, read every orchestrator/*.py blob from that commit with `git show <rev>:<path>` (list via `git ls-tree -r --name-only <rev> -- orchestrator`) instead of the working tree, and put the short sha of rev in the header. merge.merge passes rev=<merged sha> and writes ROOT/.orchestrator/memory/architecture.md from it. Tests: test_build_from_rev_ignores_working_tree (edit a file in the working tree after committing; build(rev=HEAD) shows the committed symbols and the header sha of HEAD).\n2. merge.py gate_env: stop setting ORCH_ROOT for the gate subprocess; delete the comment about a recursion guard; keep the earlier fix (the gate always runs). If test_merge's real-repo merges still recurse without it, make the recursion impossible in the test fixture instead (the scratch repo used by real_repo() must not contain a tests/ directory that imports orchestrator, or tests-green must be pointed at the scratch repo's own runner) and explain in the final message.\n3. On a refresh failure merge.merge returns status 'merged' plus repomap_error = str(e)[:200] on the result dict and prints '[merge] repomap refresh failed' to stderr; daemon.report_merge already notifies with the result, so the field appears in the notification; test: test_merge_reports_repomap_error.\n4. Keep every test in tests/test_repomap.py and tests/test_merge.py green.",
+  "inputs": [
+    "T-0302",
+    "T-0305"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 66ff50f and dd8ab79 below your commit",
+    "tests/test_repomap.py::test_build_from_rev_ignores_working_tree passes; tests/test_merge.py::test_merge_reports_repomap_error passes; all earlier repomap and merge tests still pass",
+    "merge.py no longer sets ORCH_ROOT for the gate subprocess and carries no recursion-guard comment",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree within 10 minutes"
+  ],
+  "scope": [
+    "orchestrator/repomap.py",
+    "orchestrator/merge.py",
+    "tests/test_repomap.py",
+    "tests/test_merge.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1500,
+    "fix_round_for": "T-0302"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0307",
+  "codex_thread": "01a0bb4f-9d7b-7d11-bb56-39c7c35723db",
+  "result": {
+    "summary": "Codex (luna) committed 77c35c0 over 66ff50f and dd8ab79 in wt/T-0307: repomap.build(rev=...) reads orchestrator/*.py blobs from the merged commit and puts its sha in the header; merge.merge passes the merged sha and no longer sets ORCH_ROOT for the gate subprocess (recursion-guard comment removed); a failed refresh is recorded as repomap_error on the merge result. tests-green.sh wt/T-0307 exited 0 in 53 s (Planner). Addresses review T-0305. Carries the G2b chain (T-0267, T-0302). Posted by hand.",
+    "executed_by": "codex:luna",
+    "sha": "77c35c0",
+    "carries": "66ff50f dd8ab79",
+    "confidence": 0.9,
+    "provenance": "repo"
+  },
+  "events": [
+    {
+      "ts": 1789848950.8369122,
+      "pipeline": {
+        "dispatched_at": 1789848950.83687
+      }
+    },
+    {
+      "ts": 1789848951.9333491,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0307",
+      "claimed_at": 1789848951.931722
+    },
+    {
+      "ts": 1789848951.935509,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1789849225.901618,
+      "codex_thread": "01a0bb4f-9d7b-7d11-bb56-39c7c35723db"
+    },
+    {
+      "ts": 1789849455.990874,
+      "status": "done",
+      "result": {
+        "summary": "Codex (luna) committed 77c35c0 over 66ff50f and dd8ab79 in wt/T-0307: repomap.build(rev=...) reads orchestrator/*.py blobs from the merged commit and puts its sha in the header; merge.merge passes the merged sha and no longer sets ORCH_ROOT for the gate subprocess (recursion-guard comment removed); a failed refresh is recorded as repomap_error on the merge result. tests-green.sh wt/T-0307 exited 0 in 53 s (Planner). Addresses review T-0305. Carries the G2b chain (T-0267, T-0302). Posted by hand.",
+        "executed_by": "codex:luna",
+        "sha": "77c35c0",
+        "carries": "66ff50f dd8ab79",
+        "confidence": 0.9,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789849509.194196,
+      "pipeline": {
+        "dispatched_at": 1789848950.83687,
+        "gated_at": 1789849509.194138,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789850196.915089,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789850201.052266,
+      "pipeline": {
+        "dispatched_at": 1789848950.83687,
+        "gated_at": 1789849509.194138,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789850201.052199
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0313 (request_changes)"
+    },
+    {
+      "ts": 1789851498.788471,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "merged_via": "fix round T-0329 aab6312",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789848950.83687,
+    "gated_at": 1789849509.194138,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789850201.052199
+  },
+  "claimed_at": 1789848951.931722,
+  "rounds": 0,
+  "executor": "luna",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0260",
+  "merged_via": "fix round T-0329 aab6312"
+}

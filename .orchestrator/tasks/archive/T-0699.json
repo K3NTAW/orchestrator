@@ -1,0 +1,170 @@
+{
+  "id": "T-0699",
+  "created_at": 1789998675.206655,
+  "parent": "T-0674",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: Q2 v3: orchestrator/planner_telemetry.py \u2014 per-invocation Planner rows (launch, usage, materiality, skips), per-goal and per-accepted-goal Fable/Opus aggregation, interactive transcript attribution by day overlap (P1)",
+  "spec": "Why: headless Planner usage is logged only as bus.log_run role planner_decision rows (planner_runs._record_decision_usage, lines 566-620) with no model, decision type or materiality; interactive Fable transcript tokens are pool-wide (Pool.tally_planner -> planner_usage.json) with no per-goal share. The brief (P1) needs Planner tokens per material decision and Fable tokens per accepted goal. Spec reviews T-0677 and of T-0690 are folded in: constraints.fix_round_for, result_escalate, day-overlap attribution, root resolution, plan.md location, thread-safe root-scoped writes, goal-scoped plan hash, valid call syntax.\nWhat: new module orchestrator/planner_telemetry.py. Rows never contain prompts, transcripts or chain-of-thought; free text capped at 300 chars. Every function takes root=None and resolves `root = Path(root) if root is not None else STATE` first.\n- Writing: a private _append(name, row, root) writes json.dumps(row) + newline to root/\"runs\"/\"sched\"/f\"{name}.jsonl\" (mkdir parents, setdefault ts, \"a\" mode) \u2014 the same file layout schedlog.append uses, but WITHOUT touching schedlog.SCHED_DIR or any module global, so concurrent daemon threads with different roots cannot interleave. Reading: a private _read(name, root) -> (rows, malformed_count) parsing that file line by line (json errors counted, never raised). When root is STATE the files are exactly schedlog's runs/sched/planner_invocations.jsonl and planner_skips.jsonl, readable by schedlog.read too.\n- record_launch(*, launch_id, goal_id, event, decision_type, kind, payload_keys, model, tier, account, complexity, band, task_class, architectural, route, route_reason, mode, state_version, packet_chars, started_at, reescalation=False, root=None) -> row phase \"launch\".\n- record_usage(launch_id, *, input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0, usd=None, latency_s=None, outcome, session_id=None, root=None) -> row phase \"usage\"; total_tokens = input + output + cache_read // 10 (pool formula, Pool.tally_planner).\n- goal_plan_section(goal_id, root=None) -> str|None: the text of root/plan.md from the first heading line (starting with '#') containing goal_id up to the next line starting with '## ' or EOF; None when plan.md is missing or has no such heading. snapshot(goal_id, root=None) -> {\"tasks\": {task_id: {\"status\", \"depends_on\", \"hold_reason\", \"fix_round_for\" ((task.get(\"constraints\") or {}).get(\"fix_round_for\")), \"result_escalate\" (bool((task.get(\"result\") or {}).get(\"escalate\"))), \"parent\", \"created_at\"}} over the goal and its children read from root/tasks/*.json, \"plan_hash\": sha256 of goal_plan_section(goal_id) or None}. Docstring states the hash is goal-scoped so edits to other goals' sections of the shared plan.md never flip it.\n- materiality(before, after) -> {\"material\": bool, \"new_tasks\": [ids in after not in before], \"dependencies_changed\": [ids whose depends_on differ], \"fix_strategy_for\": [ids that gained a child with fix_round_for == id], \"escalated\": bool (a task whose hold_reason newly contains 'escalat', or whose result_escalate turned True, or the goal task itself newly status held/failed \u2014 judged from the tasks dicts only), \"plan_changed\": both hashes non-None and different}; material when any list non-empty or plan_changed or escalated. record_materiality(launch_id, before, after, root=None) -> row phase \"materiality\".\n- record_skip(*, goal_id, event, reason, kind=None, payload_key=None, root=None) -> row in planner_skips.\n- read_invocations_with_malformed(root=None) -> (rows merged by launch_id with later phases overriding earlier fields, malformed_count); read_invocations(root=None) -> rows only.\n- per_goal(goal_id, root=None) -> {\"planner_tokens\", \"fable_tokens\", \"opus_tokens\", \"other_tokens\", \"calls\", \"fable_calls\", \"opus_calls\", \"escalations\" (rows with tier fable and route escalate), \"reescalations\", \"material_decisions\", \"tokens_per_material_decision\" (None when 0 material), \"skips\", \"usd\"}; tier buckets fable/opus/other.\n- accepted_goal_summary(root=None) -> over scorecard.accepted_goals(root) with the resolved root: {\"n_goals\", \"planner_tokens_per_accepted_goal\", \"fable_tokens_per_accepted_goal\", \"fable_calls_per_accepted_goal\", \"fable_share\", \"planner_tokens_per_material_decision\", \"planner_usd_per_accepted_goal\"}; None values when no goals.\n- interactive_by_goal(root=None, cfg=None, now=None, days=30) -> list of {\"goal_id\", \"days\": [iso dates], \"tokens\", \"model\", \"model_source\": \"assumed_models_planner\", \"method\": \"day_overlap_approximate\"}: cfg defaults to bus.pool_config(); now defaults to time.time(); call planner_runs._interactive_summary(root, cfg, now - days * 86400, now, []) (all positional, matching the signature at planner_runs.py:794) and use its day_totals list; tokens per day via the pool formula; split each day's tokens across goals (role triage, no parent) open during that day proportionally to the seconds each goal was open within the day (created_at .. its done event ts or now); a day with no open goal reports under goal_id None. Approximation documented in docstring and method field.",
+  "inputs": [
+    "T-0698"
+  ],
+  "acceptance": [
+    "tests/test_planner_telemetry.py::test_launch_usage_materiality_merge_by_launch_id \u2014 three phases for one launch_id under a sandbox root read back as one row with model, total_tokens (cache_read // 10 formula) and material fields, and schedlog.SCHED_DIR is unchanged after the writes",
+    "tests/test_planner_telemetry.py::test_materiality_detects_new_task_dependency_change_and_fix_strategy \u2014 snapshots before/after with a new child whose constraints.fix_round_for names a held task and a changed depends_on give material True, list both and name the held id under fix_strategy_for; identical snapshots give material False; a result flag escalate flips escalated",
+    "tests/test_planner_telemetry.py::test_plan_hash_is_goal_scoped \u2014 editing another goal's section of a two-goal plan.md leaves this goal's plan_hash unchanged and plan_changed False; editing this goal's own section flips plan_changed; a plan.md without the goal heading gives plan_hash None and plan_changed False",
+    "tests/test_planner_telemetry.py::test_per_goal_and_accepted_goal_summary \u2014 two invocations (tier fable, tier opus) and one skip give fable_tokens, opus_tokens, calls 2, skips 1, tokens_per_material_decision over material rows only; two accepted goals give fable_tokens_per_accepted_goal and fable_share; no accepted goals gives None values without raising",
+    "tests/test_planner_telemetry.py::test_interactive_by_goal_day_overlap_is_marked_approximate \u2014 with planner_runs._interactive_summary patched to return two day_totals rows, tokens split across two goals open on those days proportionally to open seconds, every row carries method day_overlap_approximate and model_source assumed_models_planner, and a malformed invocations line is counted by read_invocations_with_malformed"
+  ],
+  "scope": [
+    "orchestrator/planner_telemetry.py",
+    "tests/test_planner_telemetry.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0699",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "issue": "goal_plan_section matches the first '#' heading containing goal_id, which collides with plan.md's H1 title (house convention always restamps the open goal id there, e.g. current line 1 'OPEN GOAL T-0674 ...'). Section capture then runs only from the title to the next '## ' line, missing the real goal section entirely \u2014 breaks goal-scoped plan_hash/plan_changed, the exact bug this spec's T-0690 fold-in was meant to fix.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "issue": "materiality()/snapshot() read task.result.escalate, but no producer in the codebase ever sets that key (grep confirms). The escalated signal from this source will always be False in production even though the unit test (synthetic snapshot) passes.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_telemetry.py",
+        "issue": "interactive_by_goal filters goals as role=='triage' with no parent, while accepted_goal_summary (via scorecard.accepted_goals) treats role in ('triage','goal') as a goal. Harmless today since role=='goal' is never created, but the two functions disagree on the goal definition.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Anchor goal_plan_section on the heading level actually used for goal sections (e.g. require the line to start with '## GOAL ' or otherwise match the specific goal-heading pattern) instead of any '#'-prefixed line containing goal_id as a substring, and add an acceptance test using a plan.md whose file-level H1 title also mentions the goal id (matching real usage) to lock in the fix.",
+      "Name the actual producer (or state there is none yet) for task.result.escalate so 'escalated' in materiality/snapshot isn't documented as a live signal when it's currently unreachable from production data.",
+      "Align interactive_by_goal's goal filter with scorecard.accepted_goals's role in ('triage','goal') definition, or explicitly note why the two are allowed to diverge."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789998677.41733,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0699",
+      "claimed_at": 1789998677.416932
+    },
+    {
+      "ts": 1789998677.4184651,
+      "account": "B"
+    },
+    {
+      "ts": 1789998677.8273559,
+      "pid": 19720,
+      "account": "B"
+    },
+    {
+      "ts": 1789998824.975477,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "issue": "goal_plan_section matches the first '#' heading containing goal_id, which collides with plan.md's H1 title (house convention always restamps the open goal id there, e.g. current line 1 'OPEN GOAL T-0674 ...'). Section capture then runs only from the title to the next '## ' line, missing the real goal section entirely \u2014 breaks goal-scoped plan_hash/plan_changed, the exact bug this spec's T-0690 fold-in was meant to fix.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "issue": "materiality()/snapshot() read task.result.escalate, but no producer in the codebase ever sets that key (grep confirms). The escalated signal from this source will always be False in production even though the unit test (synthetic snapshot) passes.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_telemetry.py",
+            "issue": "interactive_by_goal filters goals as role=='triage' with no parent, while accepted_goal_summary (via scorecard.accepted_goals) treats role in ('triage','goal') as a goal. Harmless today since role=='goal' is never created, but the two functions disagree on the goal definition.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Anchor goal_plan_section on the heading level actually used for goal sections (e.g. require the line to start with '## GOAL ' or otherwise match the specific goal-heading pattern) instead of any '#'-prefixed line containing goal_id as a substring, and add an acceptance test using a plan.md whose file-level H1 title also mentions the goal id (matching real usage) to lock in the fix.",
+          "Name the actual producer (or state there is none yet) for task.result.escalate so 'escalated' in materiality/snapshot isn't documented as a live signal when it's currently unreachable from production data.",
+          "Align interactive_by_goal's goal filter with scorecard.accepted_goals's role in ('triage','goal') definition, or explicitly note why the two are allowed to diverge."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789998824.977417,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "goal_plan_section matches the first '#' heading containing goal_id, which collides with plan.md's H1 title (house convention always restamps the open goal id there, e.g. current line 1 'OPEN GOAL T-0674 ...'). Section capture then runs only from the title to the next '## ' line, missing the real goal section entirely \u2014 breaks goal-scoped plan_hash/plan_changed, the exact bug this spec's T-0690 fold-in was meant to fix.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "materiality()/snapshot() read task.result.escalate, but no producer in the codebase ever sets that key (grep confirms). The escalated signal from this source will always be False in production even though the unit test (synthetic snapshot) passes.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_telemetry.py",
+          "issue": "interactive_by_goal filters goals as role=='triage' with no parent, while accepted_goal_summary (via scorecard.accepted_goals) treats role in ('triage','goal') as a goal. Harmless today since role=='goal' is never created, but the two functions disagree on the goal definition.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789998677.416932,
+  "account": "B",
+  "pid": 19720,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "goal_plan_section matches the first '#' heading containing goal_id, which collides with plan.md's H1 title (house convention always restamps the open goal id there, e.g. current line 1 'OPEN GOAL T-0674 ...'). Section capture then runs only from the title to the next '## ' line, missing the real goal section entirely \u2014 breaks goal-scoped plan_hash/plan_changed, the exact bug this spec's T-0690 fold-in was meant to fix.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "materiality()/snapshot() read task.result.escalate, but no producer in the codebase ever sets that key (grep confirms). The escalated signal from this source will always be False in production even though the unit test (synthetic snapshot) passes.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_telemetry.py",
+      "issue": "interactive_by_goal filters goals as role=='triage' with no parent, while accepted_goal_summary (via scorecard.accepted_goals) treats role in ('triage','goal') as a goal. Harmless today since role=='goal' is never created, but the two functions disagree on the goal definition.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

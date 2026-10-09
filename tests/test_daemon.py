@@ -356,6 +356,70 @@ class Daemon(unittest.TestCase):
         return [entry["task"] for entry in daemon.schedlog.read("dispatch")[-1]["considered"]
                 if entry["action"] == "dispatched"]
 
+    def stamped_task(self, title, path, age, **fields):
+        now = time.time()
+        pipeline = {"dispatched_at": now - age, "dispatched_at_lease": now - age + 900,
+                    "dispatched_at_done": now - age + 1}
+        return self.scheduler_task(title, path, parent=None, pipeline=pipeline, **fields)
+
+    def test_stale_dispatch_stamp_cleared_after_grace(self):
+        pool = self.scheduler_pool("off", slots=1)
+        fresh = self.stamped_task("worker died just now", "fresh/a.py", 30)
+        dead = self.stamped_task("worker died at restart", "dead/a.py", 200)
+        launched = []
+        with mock.patch.object(daemon.worker_registry, "get", return_value=None), \
+                mock.patch.object(daemon, "spawn_async", side_effect=lambda fn, tid, *a: launched.append(tid)):
+            daemon.dispatch(pool)
+        self.assertEqual(launched, [dead])
+        self.assertEqual(self.scheduler_dispatched(), [dead])
+        self.assertIn("stale dispatch stamp cleared (worker gone)",
+                      [e.get("reason") for e in bus.get(dead)["events"]])
+        self.assertEqual(bus.get(fresh)["pipeline"]["dispatched_at_done"],
+                         bus.get(fresh)["pipeline"]["dispatched_at"] + 1)
+        pool.cfg["dispatch"] = {"stale_stamp_grace_s": 10}
+        with mock.patch.object(daemon.worker_registry, "get", return_value=None):
+            self.assertEqual(daemon.clear_stale_dispatch_stamps(pool), [fresh])
+        self.assertNotIn("dispatched_at", bus.get(fresh)["pipeline"])
+        for tid in (fresh, dead):
+            bus.update(tid, status="done")
+
+    def test_live_worker_stamp_kept(self):
+        pool = self.scheduler_pool("off", slots=0)
+        own_pid = self.stamped_task("pid alive", "live/a.py", 600, pid=os.getpid())
+        registered = self.stamped_task("registry pid alive", "live/b.py", 600)
+        starting = self.stamped_task("registry starting", "live/c.py", 600)
+        in_process = self.stamped_task("dispatch thread", "live/d.py", 600)
+        running = self.stamped_task("running", "live/e.py", 600, status="running")
+        held = self.stamped_task("held", "live/f.py", 600, status="held", hold_reason="budget")
+        docs = {registered: {"status": "running", "pid": os.getpid()},
+                starting: {"status": "starting"}}
+        stamps = lambda tid: {k: v for k, v in bus.get(tid)["pipeline"].items() if k.startswith("dispatched_at")}
+        before = {tid: stamps(tid)
+                  for tid in (own_pid, registered, starting, in_process, running, held)}
+        daemon._LIVE_DISPATCH[in_process] = 1
+        try:
+            with mock.patch.object(daemon.worker_registry, "get", side_effect=lambda tid: docs.get(tid)):
+                self.assertEqual(daemon.clear_stale_dispatch_stamps(pool), [])
+                daemon.dispatch(pool)
+        finally:
+            daemon._LIVE_DISPATCH.pop(in_process, None)
+        for tid, pipeline in before.items():
+            self.assertEqual(stamps(tid), pipeline, tid)
+            bus.update(tid, status="done")
+
+    def test_skip_reason_names_stale_stamp(self):
+        pool = self.scheduler_pool("off", slots=0)
+        dead = self.stamped_task("worker gone, in grace", "skip/a.py", 30)
+        live = self.stamped_task("worker alive", "skip/b.py", 30, pid=os.getpid())
+        with mock.patch.object(daemon.worker_registry, "get", return_value=None):
+            daemon.dispatch(pool)
+        entries = {e["task"]: e for e in daemon.schedlog.read("dispatch")[-1]["considered"]}
+        self.assertEqual(entries[dead]["reason"], "stale_dispatch_stamp")
+        self.assertEqual(entries[live]["reason"], "other")
+        self.assertIn("dispatched_at", bus.get(dead)["pipeline"])
+        for tid in (dead, live):
+            bus.update(tid, status="done")
+
     def test_candidate_order_keeps_queued_before_budget_retries(self):
         for mode in ("off", "shadow"):
             for slots in (1, 2):
@@ -388,7 +452,8 @@ class Daemon(unittest.TestCase):
         candidates = bus.read(status="queued", role="execute")
         self.assertEqual(daemon.eligible(pool, candidates), [first, second])
         self.assertEqual(bus.read(status="queued", role="execute"), candidates)
-        daemon.dispatch(pool)
+        with mock.patch.dict(daemon._LIVE_DISPATCH, {inflight: 1}):  # its worker is still on the way
+            daemon.dispatch(pool)
         wave, = daemon.schedlog.read("waves")
         self.assertEqual(wave["ready"], [first, second])
         self.assertEqual(wave["running"], [inflight])
@@ -730,7 +795,8 @@ class Daemon(unittest.TestCase):
         a = self.scheduler_task("a", "a/file.py")
         b = self.scheduler_task("b", "b/file.py")
         c = self.scheduler_task("c", "c/file.py")
-        daemon.dispatch(pool)
+        with mock.patch.dict(daemon._LIVE_DISPATCH, {running: 1}):
+            daemon.dispatch(pool)
         wave, = daemon.schedlog.read("waves")
         self.assertEqual(wave["running"], [running])
         self.assertEqual(wave["ready"], [a, b, c])
@@ -883,7 +949,8 @@ class Daemon(unittest.TestCase):
         self.assertEqual(entry["action"], "dispatched")
         self.assertEqual(entry["executor"], "claude:sonnet")
         self.assertNotIn("reason", entry)
-        daemon.dispatch(pool)
+        with mock.patch.dict(daemon._LIVE_DISPATCH, {task: 1}):
+            daemon.dispatch(pool)
         self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "other")
 
     def test_dispatch_logs_stale_and_spec_review_changes(self):
@@ -933,6 +1000,62 @@ class Daemon(unittest.TestCase):
         self.assertEqual([review["inputs"] for review in reviews], [[task], [task]])
         entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
         self.assertEqual((entry["action"], entry["reason"]), ("spec_review", "spec_review_retry"))
+
+    def orphan(self, tid, **fields):
+        bus.update(tid, status="running", claimed_by=None, pipeline={},
+                   created_at=time.time() - 900 - daemon.ORPHAN_MARGIN_S - 60, **fields)
+
+    def test_orphaned_spec_review_marked_failed_and_respawned(self):
+        pool = self.dispatch_telemetry()
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        task = self.task("orphaned review", complexity=daemon.SPEC_REVIEW_MIN)
+        daemon.dispatch(pool)
+        first, = bus.read(role="spec_review")
+        self.orphan(first["id"])
+
+        daemon.dispatch(pool)
+
+        reaped = bus.get(first["id"])
+        self.assertEqual((reaped["status"], reaped["hold_reason"]), ("failed", "orphaned: no worker"))
+        reviews = bus.read(role="spec_review")
+        self.assertEqual(len(reviews), 2)
+        self.assertEqual([review["inputs"] for review in reviews], [[task], [task]])
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual((entry["action"], entry["reason"]), ("spec_review", "spec_review_retry"))
+        daemon.dispatch(pool)
+        self.assertEqual(len([m for m in messages if "orphaned" in m]), 1)
+
+    def test_live_spec_review_not_reaped(self):
+        pool = self.dispatch_telemetry()
+        task = self.task("live review", complexity=daemon.SPEC_REVIEW_MIN)
+        daemon.dispatch(pool)
+        first, = bus.read(role="spec_review")
+        self.orphan(first["id"], pid=os.getpid())
+
+        daemon.dispatch(pool)
+
+        self.assertEqual(bus.get(first["id"])["status"], "running")
+        self.assertEqual(len(bus.read(role="spec_review")), 1)
+        entry = daemon.schedlog.read("dispatch")[-1]["considered"][0]
+        self.assertEqual((entry["task"], entry["reason"]), (task, "spec_review_pending"))
+
+    def test_orphaned_review_marked_failed(self):
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        execute = self.task("reviewed work")
+        review = self.task("review: reviewed work", role="review", inputs=[execute])
+        young = self.task("review: young", role="review", inputs=[execute])
+        self.orphan(review)
+        bus.update(young, status="running")
+
+        self.assertEqual(daemon.reap_orphaned_reviews(), [review])
+
+        reaped = bus.get(review)
+        self.assertEqual((reaped["status"], reaped["hold_reason"]), ("failed", "orphaned: no worker"))
+        self.assertEqual(bus.get(young)["status"], "running")
+        self.assertEqual(bus.get(execute)["status"], "queued")
+        self.assertEqual(len(messages), 1)
 
     def test_spec_review_failures_hold_after_respawn_max(self):
         pool = self.dispatch_telemetry()
@@ -2255,6 +2378,52 @@ class Daemon(unittest.TestCase):
             self.assertEqual(task["merged_via"], f"fix round {second} abc12345")
             self.assertIsNone(task["hold_reason"])
 
+    def hand_filed_fix_chain(self):
+        """luna T-0597 <- T-0607 (hand-filed, no fix_round_for constraint) <- T-0608 (fix_round_for T-0607)."""
+        root_id = self.held_for_fix()
+        middle = self.task(f"fix round 1 (section-order test) for held {root_id} staging runbook")
+        bus.update(middle, status="held", hold_reason="gate_red")
+        last = self.task("fix 2", constraints={"fix_round_for": middle})
+        return root_id, middle, last
+
+    def test_two_level_fix_chain_marks_root_merged(self):
+        self.swap(daemon, "notify", lambda message: None)
+        root_id, middle, last = self.hand_filed_fix_chain()
+        daemon.report_merge(last, {"status": "merged", "target": "goal/G", "sha": "19ccbf2c"})
+        for tid in (root_id, middle, last):
+            task = bus.get(tid)
+            self.assertEqual(task["status"], "done")
+            self.assertEqual(task["merged_into"], "goal/G")
+            self.assertEqual(task["merged_via"], f"fix round {last} 19ccbf2c")
+            self.assertIsNone(task["hold_reason"])
+        self.assertIn("accepted_at", bus.get(root_id)["pipeline"])
+        other = bus.create_task("original elsewhere", "spec", ["works"], ["x.py"], role="execute", complexity=2,
+                                parent="T-9999")["id"]
+        bus.update(other, status="held", hold_reason="gate_red")
+        stray = self.task(f"fix round 1 for held {other}")
+        daemon.report_merge(stray, {"status": "merged", "target": "goal/G", "sha": "abc12345"})
+        self.assertEqual(bus.get(other)["status"], "held")
+
+    def test_late_gate_result_does_not_reheld_merged_root(self):
+        self.swap(daemon, "notify", lambda message: None)
+        root_id, middle, last = self.hand_filed_fix_chain()
+        bus.update(root_id, status="done", worktree=str(self.sandbox), hold_reason=None)
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+
+        def late_red(*args, **kwargs):
+            if kwargs.get("task_id") == root_id:
+                daemon.report_merge(last, {"status": "merged", "target": "goal/G", "sha": "19ccbf2c"})
+            return {"returncode": 1, "timed_out": False, "timeouts": 0, "stdout": "", "stderr": "FAILED late"}
+        self.swap(daemon.gate, "run_gate", late_red)
+        daemon.gate(P.Pool())
+        task = bus.get(root_id)
+        self.assertEqual(task["status"], "done")
+        self.assertEqual(task["merged_into"], "goal/G")
+        self.assertIsNone(task["hold_reason"])
+        self.assertFalse(daemon.stamp(root_id, "review_held_at", status="held", hold_reason="late review"))
+        self.assertEqual(bus.get(root_id)["status"], "done")
+
     def settle_started(self, want, seconds=5):
         """dispatch() now runs executor.start on a background thread too; wait for it the same way."""
         deadline = time.time() + seconds
@@ -2842,6 +3011,107 @@ class Daemon(unittest.TestCase):
         self.assertEqual(bus.read(role="review"), [])
         self.assertEqual(messages, [])
 
+    def lineage_fix(self, fix_round_for=None):
+        """Root execute task on task/root plus a fix round on top; returns (fix id, repo, head sha)."""
+        repo = self.real_repo()
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True).stdout.strip()
+        run("branch", "goal/T-0043")
+        self.commit_in(repo, "task/root", "x.py", "ROOT = 1\n")
+        self.commit_in(repo, "task/fix", "tests/test_x.py", "def test_x():\n    assert True\n")
+        head = run("rev-parse", "HEAD")
+        root = self.task("root")
+        bus.update(root, status="done", worktree=str(repo))
+        fix = self.task("fix", constraints={"fix_round_for": fix_round_for or root})
+        bus.update(fix, status="done", worktree=str(repo),
+                   pipeline={"gated_at": time.time(), "reviewed_sha": head, "reviews_expected": 1})
+        return fix, repo, head
+
+    def fix_only_approval(self, fix, head):
+        r = self.task("review fix only", role="review", inputs=[fix])
+        bus.update(r, status="done", review_verdict="approve", reviewed_sha=head)
+        return r
+
+    def test_merge_ignores_fix_only_approval(self):
+        fix, _, head = self.lineage_fix()
+        self.swap(daemon, "notify", lambda *a, **k: None)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        self.assertEqual(self.merged, [])
+        self.assertNotEqual(bus.get(fix)["status"], "held")
+
+    def test_ignored_fix_only_approval_opens_lineage_review(self):
+        fix, _, head = self.lineage_fix()
+        messages = []
+        self.swap(daemon, "notify", messages.append)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        daemon.merge_reviewed(P.Pool())                       # waits; does not open a second one
+        lineage = [r for r in bus.read(role="review") if r.get("lineage")]
+        self.assertEqual(len(lineage), 1)
+        self.assertEqual(lineage[0]["reviewed_sha"], head)
+        self.assertEqual(self.merged, [])
+        self.assertEqual(len([m for m in messages if "fix-only approval ignored" in m]), 1)
+        bus.update(lineage[0]["id"], status="failed")
+        daemon.merge_reviewed(P.Pool())
+        held = bus.get(fix)
+        self.assertEqual(held["status"], "held")
+        self.assertIn(lineage[0]["id"], held["hold_reason"])
+        self.assertEqual(self.merged, [])
+
+    def test_legacy_fix_round_keeps_expected_reviews(self):
+        fix, _, head = self.lineage_fix()
+        pipeline = dict(bus.get(fix)["pipeline"], reviews_expected=2)
+        bus.update(fix, pipeline=pipeline)
+        self.swap(daemon, "notify", lambda *a, **k: None)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        lineage = [r for r in bus.read(role="review") if r.get("lineage") and r["inputs"][:1] == [fix]]
+        self.assertEqual(len(lineage), 2)
+        self.assertEqual(bus.get(fix)["pipeline"]["reviews_expected"], 2)
+        self.assertEqual(self.merged, [])
+
+    def test_lineage_review_approval_merges(self):
+        fix, _, head = self.lineage_fix()
+        self.swap(daemon, "notify", lambda *a, **k: None)
+        self.fix_only_approval(fix, head)
+        daemon.merge_reviewed(P.Pool())
+        lineage = [r for r in bus.read(role="review") if r.get("lineage")]
+        bus.update(lineage[0]["id"], status="done", review_verdict="approve")
+        daemon.merge_reviewed(P.Pool())
+        self.assertEqual(self.merged, [fix])
+
+    def test_stamp_at_open_reviews(self):
+        fix, repo, head = self.lineage_fix()
+        base = subprocess.run(["git", "merge-base", "goal/T-0043", head], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
+        reviews = daemon._open_reviews(bus.get(fix), 1, "semantic_path:changed")
+        review = bus.get(reviews[0]["id"])
+        self.assertTrue(review["lineage"])
+        self.assertEqual(review["review_base"], base)
+        self.assertEqual(review["reviewed_sha"], head)
+        self.assertEqual(review["pipeline"]["review_range"], f"{base}..{head}")
+        self.assertNotIn("lineage_unresolved", review)
+        plain = self.task("plain")
+        bus.update(plain, status="done", worktree=str(repo))
+        plain_review = bus.get(daemon._open_reviews(bus.get(plain), 1, "semantic_path:changed")[0]["id"])
+        self.assertNotIn("lineage", plain_review)
+        self.assertEqual(plain_review["reviewed_sha"], head)
+
+    def test_chain_failure_reviews_whole_branch(self):
+        fix, repo, head = self.lineage_fix(fix_round_for="T-9999")
+        base = subprocess.run(["git", "merge-base", "main", head], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
+        review = bus.get(daemon._open_reviews(bus.get(fix), 1, "semantic_path:changed")[0]["id"])
+        self.assertTrue(review["lineage"])
+        self.assertTrue(review["lineage_unresolved"])
+        self.assertEqual(review["review_base"], base)
+        cfg = {"context_router": {"mode": "off"}, "review": {"security_paths": []}, "limits": {}}
+        text = spawn.review_packet(review, bus.get(fix), cfg=cfg)
+        self.assertIn("lineage unresolved; reviewing the whole branch", text)
+        self.assertIn(f"range: {base}..{head}", text)
+        self.assertIn("+ROOT = 1", text)
+        self.assertIn("tests/test_x.py +2 -0", text)            # outside the fix scope: no path filter
+
     def test_changed_paths_real_repo_source_no_match(self):
         """A change to a plain source file outside every security glob does not match."""
         repo = self.real_repo()
@@ -3287,16 +3557,17 @@ class Daemon(unittest.TestCase):
             threads.append(thread)
             thread.start()
         self.swap(daemon, "spawn_async", async_for_test)
-        self.addCleanup(lambda: [thread.join() for thread in threads])
-        self.swap(executor, "start", lambda tid, prompt, executor_id=None: (time.sleep(2), self.started.append(tid)))
-        t0 = time.time()
+        release = threading.Event()
+        self.addCleanup(lambda: (release.set(), [thread.join() for thread in threads]))
+        self.swap(executor, "start", lambda tid, prompt, executor_id=None: (release.wait(30), self.started.append(tid)))
         daemon.tick()
-        self.assertLess(time.time() - t0, 0.5)                     # tick() returned before the sleep(2) finished
+        self.assertEqual(self.started, [])                         # tick() returned while the executor was still blocked
         stamp1 = bus.get(a)["pipeline"]["dispatched_at"]
         daemon.tick()
-        self.assertLess(time.time() - t0, 1.0)
+        self.assertEqual(self.started, [])
         stamp2 = bus.get(a)["pipeline"]["dispatched_at"]
         self.assertEqual(stamp1, stamp2)                           # not dispatched a second time
+        release.set()
         self.assertEqual(self.settle_started(1), [a])
 
     def test_gate_side_effect_failure_holds(self):
@@ -3708,6 +3979,49 @@ class Daemon(unittest.TestCase):
         self.assertEqual(self.settle_started(1), [other])   # dispatch() still ran despite the reconcile blow-up
         self.assertEqual(bus.get(dead)["status"], "running")   # left alone, not requeued or crashed on
 
+    def test_tick_uses_one_snapshot(self):
+        """tick() reads the bus from disk once; every later bus.read in the tick filters that snapshot, and a stage's
+        own writes are visible to the stages after it."""
+        first, second = self.task("first", complexity=2), self.task("second", complexity=2)
+        review = self.task("review", role="review", inputs=[first])
+        real_read = bus.read
+        calls = []
+        def counted(*args, **kwargs):
+            calls.append(bus._active_snapshot() is None)
+            return real_read(*args, **kwargs)
+        self.swap(bus, "read", counted)
+
+        daemon.tick()
+
+        self.assertEqual(calls.count(True), 1)        # one disk read: the snapshot
+        self.assertGreater(calls.count(False), 1)     # the rest were served from it
+        self.assertEqual(sorted(self.settle_started(2)), sorted([first, second]))
+        self.assertEqual(bus.children(first, role="review")[0]["id"], review)
+        with bus.snapshot():
+            bus.update(first, hold_reason="seen")
+            self.assertEqual(bus.read(ids=[first])[0]["hold_reason"], "seen")
+
+    def test_slow_stage_is_logged(self):
+        clock = [1000.0]
+        def dispatch(pool):
+            clock[0] += 6
+        def gate(pool):
+            clock[0] += 31
+        def merge_reviewed(pool):
+            clock[0] += 1
+        self.swap(daemon, "dispatch", dispatch)
+        self.swap(daemon, "gate", gate)
+        self.swap(daemon, "merge_reviewed", merge_reviewed)
+        err = io.StringIO()
+        with mock.patch.object(daemon.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(daemon.sys, "stderr", err):
+            daemon.tick()
+        log = err.getvalue()
+        self.assertIn("[daemon] slow stage dispatch 6.0s", log)
+        self.assertIn("[daemon] slow stage gate 31.0s", log)
+        self.assertNotIn("slow stage merge_reviewed", log)
+        self.assertIn("[daemon] slow tick 38.0s", log)
+
     def test_tick_skips_execute_task_of_closed_goal(self):
         closed_goal = bus.create_task("goal closed", "s", ["ok"], ["x.py"], role="scout")["id"]
         bus.update(closed_goal, status="done")
@@ -3993,6 +4307,353 @@ class Daemon(unittest.TestCase):
                     self.assertEqual(held["pipeline"]["infra_failure"], "gate_timeout")
                     self.assertEqual(held["resume_hint"], {"output_tail": "timeout output"})
 
+    def bg_setup(self, results=None):
+        """Background-gate fixture: run_gate blocks until released, then returns results[task_id] (green by
+        default) or raises it when it is an exception. Cleanup releases and drains every live gate."""
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+        self.swap(daemon, "_review_plan", lambda task: (1, "always"))
+        self.swap(daemon, "_open_reviews", lambda *args, **kwargs: [])
+        release, calls = threading.Event(), []
+
+        def run_gate(worktree, *, script, task_id=None, cfg=None):
+            calls.append(task_id)
+            release.wait(30)
+            outcome = (results or {}).get(task_id)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome or {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False,
+                               "attempts": 1, "timeouts": 0}
+        self.swap(daemon.gate, "run_gate", run_gate)
+        self.addCleanup(self.drain_gates, release)
+        return release, calls
+
+    def drain_gates(self, release, pool=None):
+        release.set()
+        for run in list(daemon._LIVE_GATES.values()):
+            if run.get("thread"):
+                run["thread"].join(5)
+        if pool is not None:
+            daemon._reap_gates(pool)
+        daemon._LIVE_GATES.clear()
+        daemon._GATE_RESULTS.clear()
+
+    def bg_task(self, title, worktree):
+        tid = self.task(title)
+        path = self.sandbox / worktree
+        path.mkdir(exist_ok=True)
+        bus.update(tid, status="done", worktree=str(path))
+        return tid
+
+    def gate_in_tick(self, pool, wait=0.05):
+        token = daemon._GATE_WAIT_S.set(wait)
+        try:
+            daemon.gate(pool)
+        finally:
+            daemon._GATE_WAIT_S.reset(token)
+
+    def bg_pool(self, max_parallel=None):
+        pool = P.Pool()
+        if max_parallel is not None:
+            pool.cfg.setdefault("gate", {})["max_parallel"] = max_parallel
+        return pool
+
+    def test_gate_runs_in_background_and_tick_returns(self):
+        release, calls = self.bg_setup()
+        tid = self.bg_task("slow gate", "wt-slow")
+        started = time.monotonic()
+        daemon.tick()
+        self.assertLess(time.monotonic() - started, 5)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertIn("gate_started_at", pipeline)
+        self.assertNotIn("gated_at", pipeline)
+        daemon.tick()
+        self.assertEqual(calls, [tid])                              # in flight: not gated a second time
+        release.set()
+        for run in list(daemon._LIVE_GATES.values()):
+            run["thread"].join(5)
+        daemon.tick()
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertTrue(pipeline["gated_at"])
+        self.assertIn("gated_at_done", pipeline)
+        self.assertNotIn("gate_started_at", pipeline)
+        self.assertEqual(calls, [tid])
+
+    def test_gate_result_applied_by_reaper_green_red_timeout(self):
+        results = {}
+        release, calls = self.bg_setup(results)
+        pool = self.bg_pool(max_parallel=3)
+        green, red, slow = (self.bg_task(name, f"wt-{name}") for name in ("green", "red", "slow"))
+        results[red] = {"returncode": 1, "stdout": "", "stderr": "FAILED red", "timed_out": False,
+                        "attempts": 1, "timeouts": 0}
+        results[slow] = {"returncode": None, "stdout": "out", "stderr": "", "timed_out": True,
+                         "attempts": 2, "timeouts": 2}
+        self.gate_in_tick(pool)
+        self.assertEqual(sorted(calls), sorted([green, red, slow]))
+        for tid in (green, red, slow):
+            self.assertNotIn("gated_at", bus.get(tid)["pipeline"])
+            self.assertEqual(bus.get(tid)["status"], "done")
+        self.drain_gates(release, pool)
+        task = bus.get(green)
+        self.assertEqual(task["status"], "done")
+        self.assertTrue(task["pipeline"]["gated_at"])
+        self.assertIn("gated_at_done", task["pipeline"])
+        self.assertEqual(task["pipeline"]["reviews_expected"], 1)
+        task = bus.get(red)
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_red"))
+        self.assertEqual(task["pipeline"]["gate_reds"], 1)
+        self.assertIn("FAILED red", task["resume_hint"]["failures"])
+        task = bus.get(slow)
+        self.assertEqual((task["status"], task["hold_reason"]), ("held", "gate_timeout"))
+        self.assertEqual(task["pipeline"]["infra_failure"], "gate_timeout")
+        self.assertEqual(task["pipeline"]["gate_timeouts"], 2)
+        for tid in (green, red, slow):
+            self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(bus.get(tid)["pipeline"]))
+
+    def test_gate_worker_exception_holds_gated_error(self):
+        tid = self.task("boom")
+        release, _ = self.bg_setup({tid: RuntimeError("runner blew up")})
+        path = self.sandbox / "wt-boom"
+        path.mkdir()
+        bus.update(tid, status="done", worktree=str(path))
+        release.set()
+        daemon.gate(self.bg_pool())                                 # direct call: waits and reaps
+        task = bus.get(tid)
+        self.assertEqual(task["status"], "held")
+        self.assertTrue(task["hold_reason"].startswith("gate failed"), task["hold_reason"])
+        self.assertIn("runner blew up", task["pipeline"]["gated_error"])
+        self.assertNotIn("gate_started_at", task["pipeline"])
+        self.assertEqual(daemon._LIVE_GATES, {})
+
+    def test_gate_max_parallel_and_same_worktree(self):
+        release, calls = self.bg_setup()
+        pool = self.bg_pool(max_parallel=2)
+        first, second = self.bg_task("shared one", "wt-shared"), self.bg_task("shared two", "wt-shared")
+        other = self.bg_task("other", "wt-other")
+        self.gate_in_tick(pool)
+        self.assertEqual(len(calls), 2)
+        self.assertIn(other, calls)
+        self.assertEqual(len({first, second} & set(calls)), 1)      # one gate per worktree at a time
+        extra = self.bg_task("extra", "wt-extra")
+        self.gate_in_tick(pool)
+        self.assertNotIn(extra, calls)                              # cap of two is full
+        self.assertEqual(len(daemon._LIVE_GATES), 2)
+        self.assertNotIn("gate_started_at", bus.get(extra).get("pipeline") or {})
+        self.assertEqual(daemon.gate_runner.settings({})["max_parallel"], 1)
+
+    def test_cap_skip_does_not_count_attempt(self):
+        release, calls = self.bg_setup()
+        pool = self.bg_pool()
+        a, b = self.bg_task("a", "wt-a"), self.bg_task("b", "wt-b")
+        self.gate_in_tick(pool)
+        self.gate_in_tick(pool)
+        self.assertEqual(len(calls), 1)
+        running, skipped = (a, b) if calls == [a] else (b, a)
+        self.assertEqual(bus.get(running)["pipeline"]["gate_attempts"], 1)
+        self.assertNotIn("gate_attempts", bus.get(skipped).get("pipeline") or {})
+        self.drain_gates(release, pool)
+        self.gate_in_tick(pool, wait=5)
+        self.assertEqual(calls, [running, skipped])
+        self.assertEqual(bus.get(skipped)["pipeline"]["gate_attempts"], 1)
+        self.assertTrue(bus.get(skipped)["pipeline"]["gated_at"])
+
+    def test_sweep_extends_live_gate_lease(self):
+        release, calls = self.bg_setup()
+        pool = self.bg_pool()
+        tid = self.bg_task("long gate", "wt-long")
+        self.gate_in_tick(pool)
+        pipeline = dict(bus.get(tid)["pipeline"])
+        run_id = pipeline["gate_run_id"]
+        pipeline["gate_started_at_lease"] = time.time() - 1
+        bus.update(tid, pipeline=pipeline)
+        daemon.sweep_leases(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertGreater(pipeline["gate_started_at_lease"], time.time() + daemon.STAGE_LEASE_S - 60)
+        self.assertEqual(pipeline["gate_run_id"], run_id)
+        self.drain_gates(release, pool)
+        self.assertTrue(bus.get(tid)["pipeline"]["gated_at"])
+        self.assertEqual(calls, [tid])
+
+    def test_restart_clears_orphaned_gate_marker_and_regates(self):
+        tid = self.task("orphaned gate")
+        bus.update(tid, status="done", worktree=str(self.sandbox),
+                   pipeline={"gate_started_at": time.time() - 2000, "gate_started_at_lease": time.time() - 1,
+                             "gate_run_id": "before-restart", "gate_attempts": 1})
+        self.swap(daemon, "_dirty_scope_paths", lambda *args: [])
+        self.swap(daemon, "already_merged", lambda task: False)
+        self.swap(daemon, "_review_plan", lambda task: (1, "always"))
+        self.swap(daemon, "_open_reviews", lambda *args, **kwargs: [])
+        pool = self.bg_pool()
+        daemon.gate(pool)
+        self.assertNotIn("gated_at", bus.get(tid)["pipeline"])     # marker still says in flight
+        daemon.sweep_leases(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(pipeline))
+        daemon.gate(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertTrue(pipeline["gated_at"])
+        self.assertEqual(pipeline["gate_attempts"], 2)
+
+    def test_gated_at_not_stamped_at_start(self):
+        release, _ = self.bg_setup()
+        pool = self.bg_pool()
+        tid = self.bg_task("in flight", "wt-flight")
+        self.gate_in_tick(pool)
+        pipeline = bus.get(tid)["pipeline"]
+        for key in daemon.GATE_MARKER_KEYS:
+            self.assertIn(key, pipeline)
+        self.assertNotIn("gated_at", pipeline)
+        self.assertNotIn("gated_at_lease", pipeline)
+        self.drain_gates(release, pool)
+        pipeline = bus.get(tid)["pipeline"]
+        self.assertGreaterEqual(pipeline["gated_at"], pipeline_started := pipeline.get("first_green_at", 0))
+        self.assertGreater(pipeline_started, 0)
+        self.assertNotIn("gate_started_at", pipeline)
+
+    def drain_merges(self):
+        for thread in list(daemon._LIVE_MERGES.values()):
+            if thread is not None:
+                thread.join(5)
+        daemon._LIVE_MERGES.clear()
+        daemon._MERGE_RESULTS.clear()
+
+    def test_tick_continues_while_background_gate_runs(self):
+        """The 2026-10-09 stall: a green gate with zero reviews ran merge.merge (and its full tests-green gate) on
+        the tick thread. Both the gate and the merge now run on worker threads; every tick returns promptly."""
+        release, calls = self.bg_setup()
+        self.swap(daemon, "TICK_GATE_WAIT_S", 0.05)
+        self.swap(daemon, "_review_plan", lambda task: (0, "never"))
+        merging, merge_release = threading.Event(), threading.Event()
+
+        def slow_merge(tid, target=None):
+            merging.set()
+            merge_release.wait(30)
+            self.merged.append(tid)
+            return {"status": "merged", "target": "goal/G", "sha": "abc12345"}
+        self.swap(merge, "merge", slow_merge)
+        self.addCleanup(self.drain_merges)
+        self.addCleanup(merge_release.set)
+        tid = self.bg_task("slow gate then slow merge", "wt-tick")
+
+        def timed_tick():
+            started = time.monotonic()
+            daemon.tick()
+            return time.monotonic() - started
+        self.assertLess(max(timed_tick() for _ in range(3)), 5)    # gate in flight: ticks keep running
+        self.assertEqual(calls, [tid])
+        self.assertIn("gate_started_at", bus.get(tid)["pipeline"])
+        release.set()
+        for run in list(daemon._LIVE_GATES.values()):
+            run["thread"].join(5)
+        self.assertLess(timed_tick(), 5)                            # reaps green, merge starts on a worker
+        self.assertTrue(merging.wait(5))
+        self.assertTrue(daemon._merge_live(tid))
+        self.assertLess(max(timed_tick() for _ in range(3)), 5)    # merge gate in flight: ticks keep running
+        self.assertEqual(self.merged, [])
+        thread = daemon._LIVE_MERGES.get(tid)
+        merge_release.set()
+        if thread is not None:
+            thread.join(5)
+        daemon.tick()
+        self.assertEqual(self.merged, [tid])
+        self.assertFalse(daemon._merge_live(tid))
+        self.assertIn("gated_at_done", bus.get(tid)["pipeline"])
+
+    def test_shutdown_terminates_own_gates(self):
+        """Daemon shutdown kills the process group of every gate it started (descendants included), drops their
+        registry entries, and the killed run raises gate.Aborted instead of reporting red or timed out."""
+        gate_mod = daemon.gate_runner
+        self.swap(gate_mod, "STATE", self.sandbox)
+        worktree = self.sandbox / "wt-shutdown"
+        worktree.mkdir()
+        script = self.sandbox / "slow-gate.sh"
+        script.write_text("#!/bin/bash\nsleep 60 &\necho $! > child.pid\nwait\n")
+        script.chmod(0o755)
+        seen = {}
+
+        def run():
+            try:
+                seen["result"] = gate_mod.run_gate(worktree, script=script, task_id="T-shutdown", cfg={})
+            except Exception as e:
+                seen["error"] = e
+
+        def fake_loop(interval, stop_event):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            seen["thread"] = thread
+            deadline = time.monotonic() + 10
+            while not (worktree / "child.pid").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            seen["entry"] = json.loads((self.sandbox / "gates" / "T-shutdown.json").read_text())
+            raise KeyboardInterrupt
+
+        lock = tempfile.TemporaryFile("a+")
+        with mock.patch.object(daemon, "acquire_lock", return_value=lock), \
+                mock.patch.object(daemon, "_loop", fake_loop), \
+                mock.patch.object(daemon, "adopt_orphaned_gates"), \
+                mock.patch.object(daemon.fcntl, "flock"), \
+                mock.patch.object(daemon.executor, "join_fallback_threads"):
+            with self.assertRaises(KeyboardInterrupt):
+                daemon.main(interval=60)
+        seen["thread"].join(10)
+        self.assertFalse(seen["thread"].is_alive())
+        self.assertIsInstance(seen.get("error"), gate_mod.Aborted)
+        self.assertEqual(seen["entry"]["owner_pid"], os.getpid())
+        self.assertEqual(seen["entry"]["pgid"], seen["entry"]["pid"])
+        child = int((worktree / "child.pid").read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)                                      # the gate's descendant died with its group
+        self.assertEqual(list((self.sandbox / "gates").glob("*.json")), [])
+        self.assertEqual(gate_mod._PROCS, {})
+        self.assertTrue(lock.closed)
+
+    def test_restart_kills_or_adopts_orphaned_gate(self):
+        """A restarted daemon kills the gate a dead daemon left running, clears that task's in-flight marker so it
+        is re-gated now, and leaves alone a gate whose owner is still alive."""
+        gate_mod = daemon.gate_runner
+        self.swap(gate_mod, "STATE", self.sandbox)
+        gates = self.sandbox / "gates"
+        gates.mkdir()
+        dead_owner = subprocess.Popen(["true"])
+        dead_owner.wait()
+        procs = {}
+        for name in ("orphan", "owned"):
+            proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            self.addCleanup(lambda proc=proc: (proc.poll() is None and proc.kill(), proc.wait()))
+            threading.Thread(target=proc.wait, daemon=True).start()   # reap promptly once killed
+            procs[name] = proc
+        live_owner = os.getppid()
+        for name, owner in (("orphan", dead_owner.pid), ("owned", live_owner)):
+            pid = procs[name].pid
+            (gates / f"T-{name}.json").write_text(json.dumps({
+                "task_id": f"T-{name}", "worktree": "/wt", "pid": pid, "pgid": pid,
+                "proc_start": daemon.machine.process_start(pid), "owner_pid": owner,
+                "owner_start": daemon.machine.process_start(owner), "started_at": time.time(),
+                "timeout_s": 2700}))
+        tid = self.task("gate in flight when the old daemon died")
+        bus.update(tid, status="done", pipeline={"gate_started_at": time.time(),
+                                                 "gate_started_at_lease": time.time() + 900,
+                                                 "gate_run_id": "old-daemon-run"})
+        killed = daemon.adopt_orphaned_gates()
+        self.assertEqual([entry["task_id"] for entry in killed], ["T-orphan"])
+        deadline = time.monotonic() + 5
+        while procs["orphan"].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIsNotNone(procs["orphan"].poll())
+        self.assertIsNone(procs["owned"].poll())
+        self.assertFalse((gates / "T-orphan.json").exists())
+        self.assertTrue((gates / "T-owned.json").exists())
+        pipeline = bus.get(tid).get("pipeline") or {}
+        self.assertFalse(set(daemon.GATE_MARKER_KEYS) & set(pipeline))
+        self.assertEqual(daemon.adopt_orphaned_gates(), [])         # idempotent: nothing left to kill
+
 
 class BusLock(unittest.TestCase):
     def test_writes_take_the_flock(self):
@@ -4039,6 +4700,35 @@ class Background(unittest.TestCase):
         t3 = daemon.start_background({"daemon": {"autostart": True, "interval_s": 60}})
         self.addCleanup(daemon.stop_background, t3)
         self.assertIsNotNone(t3)                                   # lock released, a fresh start_background works
+
+    def test_cli_shutdown_stops_ship_thread_before_lock_release(self):
+        """Ctrl-C in the CLI daemon sets the stop Event and joins the non-daemon ship thread before the lock goes."""
+        from orchestrator import ship
+        seen = {}
+
+        def fake_loop(interval, stop_event):
+            thread = threading.Thread(target=stop_event.wait)
+            thread.start()
+            ship._THREADS.append(thread)
+            seen["thread"] = thread
+            raise KeyboardInterrupt
+
+        def fake_flock(fh, op):
+            if op == daemon.fcntl.LOCK_UN:
+                seen["alive_at_unlock"] = seen["thread"].is_alive()
+
+        lock = tempfile.TemporaryFile("a+")
+        with mock.patch.object(daemon, "acquire_lock", return_value=lock), \
+                mock.patch.object(daemon, "_loop", fake_loop), \
+                mock.patch.object(daemon.fcntl, "flock", fake_flock), \
+                mock.patch.object(daemon.executor, "join_fallback_threads"):
+            with self.assertRaises(KeyboardInterrupt):
+                daemon.main(interval=60)
+        if seen["thread"] in ship._THREADS:
+            ship._THREADS.remove(seen["thread"])
+        self.assertIs(seen["alive_at_unlock"], False)
+        self.assertFalse(seen["thread"].is_alive())
+        self.assertTrue(lock.closed)
 
 
 class WorkerRegistryReconciliation(unittest.TestCase):

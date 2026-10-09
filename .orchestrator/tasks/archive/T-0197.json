@@ -1,0 +1,132 @@
+{
+  "id": "T-0197",
+  "parent": "T-0109",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "D3 fix round 1: held decisions resolve via the fix-round spec, claim the key under the lock before launching, atomic fail-closed ledger, skips not appended per tick, guard registration before the daemon starts and behind an explicit entrypoint (from review T-0196)",
+  "spec": "Fix round for T-0192 (branch task/T-0192 at 97ed164). Work in this task's worktree, cut from task/T-0192. Review T-0196 (opus) requested changes; items come from it. Scope: orchestrator/planner_runs.py, orchestrator/mcp.py, tests/test_planner_runs.py, README.md.\n\n1 HIGH planner_runs.py _condition_resolved for kind held (\u2248line 195): a held task never leaves status held (the Planner clears a hold by writing a new task with depends_on=[held_id] or constraints.fix_round_for == held_id, never by editing the held task). Define resolved-for-held as: the task is no longer held, OR a task exists whose depends_on contains held_id or whose constraints.fix_round_for == held_id and whose first event timestamp is later than the decision run's started_at, OR the held task is failed/done. Test: after a run for a held key, creating a fix-round task with depends_on=[held_id] makes reconcile() stamp exited_ok, not exited_early.\n\n2 HIGH TOCTOU (\u2248line 163): claim before launch. Inside ONE bus.locked() block: re-read the ledger, return if a blocking record now exists, write the running record (pid None, status \"claimed\") atomically, release; then run the guards and launch_planner; then under the lock again update the record with pid/pid_start/status running, or on a guard skip mark it \"skipped\" with the reason so it never blocks. `daemon --once` and the background loop can then never double-launch. Test: two threads calling run() for the same key with launch_planner patched to sleep \u2192 exactly one launch.\n\n3 MED _save_records: mkstemp in the same directory + os.replace; _load_records on JSONDecodeError does not return an empty ledger: it renames the corrupt file to planner_runs.json.corrupt-<ts>, prints one stderr line, and returns [] only after that backup exists (fail closed enough: nothing is silently forgotten). Test for the backup.\n\n4 MED skips (\u2248line 133): guard skips update ONE row per (goal, kind, payload_key) in place (last_skip_at, skip_count, skipped_reason) instead of appending; skip rows never block. Test: three skipped ticks \u2192 one skip row with skip_count 3.\n\n5 MED mcp.py ordering and import side effects: registration happens in an explicit function called from the server entrypoint (main()/`if __name__ == \"__main__\"` or the fastmcp run call), BEFORE daemon.start_background, never at import time; deregistration via atexit registered in the same place. Test: `import orchestrator.mcp` writes nothing and leaves ORCH_DAEMON_HOST unset; calling the entrypoint helper in a sandboxed STATE writes and later removes the file.\n\n6 tests/test_planner_runs.py: set the sandbox STATE before importing mcp; no test may write into the real repo's .orchestrator. README: adjust the autonomous paragraph for the claim-then-launch order.\n\nNo new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0192",
+    "T-0196"
+  ],
+  "acceptance": [
+    "A held decision followed by a fix-round task (depends_on or fix_round_for) reconciles to exited_ok; no relaunch (test)",
+    "run() claims the key under bus.locked() before launching; two concurrent callers produce one launch (test)",
+    "Ledger writes are atomic and a corrupt ledger is backed up, not silently emptied (test)",
+    "Guard skips update one row per key with a count; skips never block (test)",
+    "mcp.py registers the session from the entrypoint before the daemon starts, not at import; import has no side effects (test); tests never touch the real .orchestrator",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the four scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/mcp.py",
+    "tests/test_planner_runs.py",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0192"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 45,
+    "timeout_s": 2700,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_planner_runs.py",
+    "fix_round_for": "T-0192",
+    "worktree_base": "task/T-0192",
+    "spec_review": "waived: fix round whose spec is the T-0196 comment list"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0197",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed on `task/T-0197`, tests green.\n\n**Summary:** Fixed 5 rounds of review feedback (T-0196) in `orchestrator/planner_runs.py`, `orchestrator/mcp.py`, `tests/test_planner_runs.py`, `README.md`:\n\n1. **Held-decision resolution**: `_condition_resolved` for `held` now checks whether a fix-round task (via `depends_on` or `constraints.fix_round_for`) was created after the decision run started, instead of relying on the held task's status ever changing.\n2. **TOCTOU race**: `run()` now claims the key (`status=\"claimed\"`, `pid=None`) inside the same `bus.locked()` block as the already-decided check, before any guard or `launch_planner` runs \u2014 closing the window where two concurrent callers could both launch.\n3. **Atomic ledger I/O**: `_save_records` uses `mkstemp` + `os.replace`; `_load_records` backs up a corrupt ledger to `planner_runs.json.corrupt-<ts>` instead of silently returning empty.\n4. **Skip dedup**: guard skips now update one row per key (`skip_count`, `last_skip_at`) instead of appending; skip rows never block.\n5. **mcp.py entrypoint**: registration + daemon autostart moved into `main()`, called only from `if __name__ == \"__main__\":` \u2014 importing the module now has zero side effects.\n\n**Files changed:** `orchestrator/planner_runs.py`, `orchestrator/mcp.py`, `tests/test_planner_runs.py`, `README.md` (4 files, as scoped; no new dependencies).\n\n**Test output:** all 254 tests pass (`uv run python -m unittest discover -q tests` \u2192 `OK`); `.claude/hooks/tests-green.sh` exits 0. No failures to report.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789766241.6407979,
+      "spec_review_verdict": "approve",
+      "spec_review_note": "waived: fix round",
+      "pipeline": {
+        "spec_review_at": 1789766241.6406322,
+        "gated_at": 1789766241.6406322,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789766248.522571,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789766248.527256,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0197",
+      "claimed_at": 1789766248.526932
+    },
+    {
+      "ts": 1789766248.5367491,
+      "pid": 4291,
+      "account": "B"
+    },
+    {
+      "ts": 1789766815.428884,
+      "status": "done",
+      "result": {
+        "summary": "Committed on `task/T-0197`, tests green.\n\n**Summary:** Fixed 5 rounds of review feedback (T-0196) in `orchestrator/planner_runs.py`, `orchestrator/mcp.py`, `tests/test_planner_runs.py`, `README.md`:\n\n1. **Held-decision resolution**: `_condition_resolved` for `held` now checks whether a fix-round task (via `depends_on` or `constraints.fix_round_for`) was created after the decision run started, instead of relying on the held task's status ever changing.\n2. **TOCTOU race**: `run()` now claims the key (`status=\"claimed\"`, `pid=None`) inside the same `bus.locked()` block as the already-decided check, before any guard or `launch_planner` runs \u2014 closing the window where two concurrent callers could both launch.\n3. **Atomic ledger I/O**: `_save_records` uses `mkstemp` + `os.replace`; `_load_records` backs up a corrupt ledger to `planner_runs.json.corrupt-<ts>` instead of silently returning empty.\n4. **Skip dedup**: guard skips now update one row per key (`skip_count`, `last_skip_at`) instead of appending; skip rows never block.\n5. **mcp.py entrypoint**: registration + daemon autostart moved into `main()`, called only from `if __name__ == \"__main__\":` \u2014 importing the module now has zero side effects.\n\n**Files changed:** `orchestrator/planner_runs.py`, `orchestrator/mcp.py`, `tests/test_planner_runs.py`, `README.md` (4 files, as scoped; no new dependencies).\n\n**Test output:** all 254 tests pass (`uv run python -m unittest discover -q tests` \u2192 `OK`); `.claude/hooks/tests-green.sh` exits 0. No failures to report.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789767245.602616,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789767249.4326022,
+      "pipeline": {
+        "spec_review_at": 1789766241.6406322,
+        "gated_at": 1789766241.6406322,
+        "gated_by": "planner-pre-stamp: gate and review by hand",
+        "review_held_at": 1789767249.432508
+      },
+      "status": "held",
+      "hold_reason": "review request_changes"
+    },
+    {
+      "ts": 1789809463.8903491,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "hold_reason": null,
+      "reason": "landed in goal/T-0109 via T-0199 merge 25404d4 (D3 chain 2007874, 319fcc7, 25404d4)"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_note": "waived: fix round",
+  "pipeline": {
+    "spec_review_at": 1789766241.6406322,
+    "gated_at": 1789766241.6406322,
+    "gated_by": "planner-pre-stamp: gate and review by hand",
+    "review_held_at": 1789767249.432508
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789766248.526932,
+  "pid": 4291,
+  "account": "B",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0109",
+  "reason": "landed in goal/T-0109 via T-0199 merge 25404d4 (D3 chain 2007874, 319fcc7, 25404d4)"
+}

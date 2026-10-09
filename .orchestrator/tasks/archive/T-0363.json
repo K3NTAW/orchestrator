@@ -1,0 +1,158 @@
+{
+  "id": "T-0363",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 4,
+  "title": "H5b: ensure_worktree reuses an existing task branch and spawn_scout reports spawn errors; dispatch re-spawns queued review and spec_review tasks whose worker died; handover snapshot rewritten only when goal state changed",
+  "spec": "Build on goal/T-0353 after H6 (T-0359) and H8 (T-0360) so daemon.py and spawn.py rebase cleanly. Evidence (gotchas 2026-09-19 23:18 and 2026-09-20 12:40): review T-0332 was requeued by reconcile_dead with reason \"process died; requeued\" and never ran again because daemon.dispatch iterates queued execute tasks only; spawn_scout(T-0354) answered \"spawned\" three times while ensure_worktree (spawn.py:60-71) failed on git worktree add -b for a branch left by an earlier dead spawn; handover.write runs every 15 minutes and rewrote plan.md 6 times on 2026-09-19 without state changes.\n1. spawn.ensure_worktree: when wt/<id> is missing but branch task/<id> exists, run git worktree add wt/<id> task/<id> (no -b); when the worktree exists but is not registered (stale), git worktree prune first. Errors propagate: mcp.spawn_scout, spawn_review and spawn_spec_review reply {status: error, reason} instead of \"spawned\" when the spawn thread fails before the claim, and the failure is logged as a run row with outcome spawn_error.\n2. daemon.dispatch: after the execute loop, re-spawn queued review and spec_review tasks whose pipeline is empty and whose events show a \"process died\" requeue (or that were never claimed for longer than [daemon].respawn_after_s, default 120), respecting free Claude worker slots; stamp respawned_at in pipeline to do it once per requeue.\n3. handover.write: compute a snapshot hash over the goal state it renders (task ids, statuses, hold reasons, merged_into); rewrite plan.md only when the hash differs from the last written one (kept in handover_state.json); the daemon still ticks every 15 minutes but an unchanged state produces no write and no commit churn.\nTests: tests/test_spawn.py::test_ensure_worktree_reuses_existing_task_branch; tests/test_mcp.py::test_spawn_scout_reports_error_when_worktree_fails; tests/test_daemon.py::test_dispatch_respawns_requeued_review_once, ::test_dispatch_respawns_unclaimed_spec_review_after_delay; tests/test_handover.py::test_unchanged_state_writes_nothing. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0355"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_ensure_worktree_reuses_existing_task_branch passes",
+    "tests/test_mcp.py::test_spawn_scout_reports_error_when_worktree_fails passes",
+    "tests/test_daemon.py::test_dispatch_respawns_requeued_review_once and ::test_dispatch_respawns_unclaimed_spec_review_after_delay pass",
+    "tests/test_handover.py::test_unchanged_state_writes_nothing passes",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/mcp.py",
+    "orchestrator/daemon.py",
+    "orchestrator/handover.py",
+    "tests/test_spawn.py",
+    "tests/test_mcp.py",
+    "tests/test_daemon.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [
+    "T-0359",
+    "T-0360"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 1800,
+    "task_class": "reliability"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0363",
+  "codex_thread": "01a0bebb-0020-77c1-ba67-3454b852e7fb",
+  "result": {
+    "summary": "Implemented and committed T-0363 as `ec54196`.\n\nSummary:\n- Reuses existing task branches and prunes stale worktree registrations.\n- Reports and logs pre-claim spawn failures.\n- Respawns abandoned review/spec-review tasks once per requeue.\n- Prevents unchanged handover state from rewriting `plan.md`.\n\nFiles changed:\n- `orchestrator/{spawn,mcp,daemon,handover}.py`\n- `tests/test_handover.py`\n\nValidation:\n- `.claude/hooks/tests-green.sh`: `OK 554 6b773d8 79s`\n- Worktree clean.\n- `scripts/tests_green.sh` was unavailable.\n\nFailures-only output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0bebb-0020-77c1-ba67-3454b852e7fb",
+    "usage": {
+      "input_tokens": 1597802,
+      "cached_input_tokens": 1541504,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6738,
+      "reasoning_output_tokens": 1955
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789906319.617824,
+      "pipeline": {
+        "dispatched_at": 1789906319.617739
+      }
+    },
+    {
+      "ts": 1789906321.1436422,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0363",
+      "claimed_at": 1789906321.143222
+    },
+    {
+      "ts": 1789906321.145236,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789906655.892766,
+      "codex_thread": "01a0bebb-0020-77c1-ba67-3454b852e7fb"
+    },
+    {
+      "ts": 1789906655.8951879,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed T-0363 as `ec54196`.\n\nSummary:\n- Reuses existing task branches and prunes stale worktree registrations.\n- Reports and logs pre-claim spawn failures.\n- Respawns abandoned review/spec-review tasks once per requeue.\n- Prevents unchanged handover state from rewriting `plan.md`.\n\nFiles changed:\n- `orchestrator/{spawn,mcp,daemon,handover}.py`\n- `tests/test_handover.py`\n\nValidation:\n- `.claude/hooks/tests-green.sh`: `OK 554 6b773d8 79s`\n- Worktree clean.\n- `scripts/tests_green.sh` was unavailable.\n\nFailures-only output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0bebb-0020-77c1-ba67-3454b852e7fb",
+        "usage": {
+          "input_tokens": 1597802,
+          "cached_input_tokens": 1541504,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6738,
+          "reasoning_output_tokens": 1955
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789906821.779007,
+      "pipeline": {
+        "dispatched_at": 1789906319.617739,
+        "gated_at": 1789906821.7788029,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789906986.623198,
+      "codex_thread": "01a0bebb-0020-77c1-ba67-3454b852e7fb"
+    },
+    {
+      "ts": 1789906986.626094,
+      "rounds": 1
+    },
+    {
+      "ts": 1789907049.8252218,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789907069.214581,
+      "pipeline": {
+        "dispatched_at": 1789906319.617739,
+        "gated_at": 1789906821.7788029,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789907069.214459
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0391 (request_changes)"
+    },
+    {
+      "ts": 1789910309.850223,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "merged_via": "fix round T-0405 9b058ab",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789906319.617739,
+    "gated_at": 1789906821.7788029,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789907069.214459
+  },
+  "claimed_at": 1789906321.143222,
+  "rounds": 1,
+  "executor": "sol",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0353",
+  "merged_via": "fix round T-0405 9b058ab"
+}

@@ -1,0 +1,137 @@
+{
+  "id": "T-0915",
+  "created_at": 1790114670.8391979,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "S4: skill scorecard with marginal value and redundancy: skill \u00d7 role \u00d7 task class \u00d7 complexity \u00d7 model \u00d7 workflow strategy, role-without-skill vs role-with-skill comparison, redundancy between co-used skills; reporting only",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P14, P15, P16, P24, P25, P30 (P37 stage 4). Depends on T-0894 (run context carries skills_exposed / skills_used / skill tokens; skill_scorecard.py exists with use_rate and overhead) and T-0913 (skills_selected, skill_recovery_rate). Facts: run rows (bus.log_run) carry role, task, tier/executor (model via attribution.model_of), usage tokens, usd, duration_s; lineage roots via attribution.lineage; task_class via attribution.task_class; complexity band via attribution.band; workflow strategy via strategy.derive(task, tasks); gate/review outcomes live on task pipelines (gate_reds, review verdicts on review tasks with inputs[0]); read_economy gate rows carry per-call paths and tools; promotion CRITERIA min_samples 20.\nDo:\n1. skill_scorecard.py: `usage_rows(root)` = one row per run with skills_used, plus the lineage's outcome (first_pass, fix_rounds, gate_reds, review_request_changes, accepted, accepted_tokens, accepted_usd, latency_s, tool_calls when known) and the dimensions (role, task_class, band, model, strategy, repo = \"orchestrator\"). `by_skill(root, group_by=(\"role\",\"task_class\"))` aggregates per skill \u00d7 the chosen dimensions with n and every metric; unknown values are None, never 0.\n2. Marginal value (P15): `marginal(root, skill, group_by=(\"role\",\"task_class\"), min_samples=cfg)`: for each group, compare runs of the same role/class WITH the skill used vs WITHOUT (neither used nor selected): deltas for first_pass, fix_rounds, accepted_tokens, accepted_usd, latency_s, plus the skill's own token overhead (l2 tokens per use); returns {\"insufficient\": True, \"n_with\", \"n_without\"} below min_samples on either side; otherwise deltas with both n. A `verdict` field: \"valuable\" (quality delta \u2265 0 and cost delta \u2264 0, or quality delta > +0.05 with cost delta within +10%), \"neutral\", \"costly\" (tokens up without quality change), \"harmful\" (quality down) \u2014 reporting only, no state changes (Stage 10 acts on it).\n3. Redundancy (P16): `redundancy(root)`: for skill pairs co-used in one run: count of co-uses, overlap proxy = fraction of paths read by both (from read_economy gate rows joined by session/task when available, else None), duplicated script invocations (same script:<path> tool in both skills' declared tools), unique-findings proxy = None with a note (needs Stage 6 evidence sharing). Reported as a table with n.\n4. Model and workflow interaction (P24/P25): by_skill with group_by (\"model\",) and (\"strategy\",\"task_class\") available through the CLI: `orchestrator scorecard --skills [--by role,task_class|model|strategy,task_class] [--marginal <skill>] [--redundancy]`; `--economy` skills block gains the top-3 \"costly\"/\"harmful\" verdicts when any group has sufficient samples.\n5. docs/skill-intelligence/05-scorecard.md (\u226470 lines): formulas, dimensions, the verdict rules, what is a proxy, min_samples, revert path (reporting only).\nTests (unittest): tests/test_skill_scorecard.py::test_usage_rows_join_lineage_outcomes_and_dimensions, ::test_by_skill_groups_and_none_for_unknown, ::test_marginal_insufficient_below_min_samples, ::test_marginal_verdicts_valuable_costly_harmful, ::test_redundancy_pairs_and_script_overlap, ::test_cli_by_model_and_strategy. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_skill_scorecard.py::test_usage_rows_join_lineage_outcomes_and_dimensions passes",
+    "tests/test_skill_scorecard.py::test_by_skill_groups_and_none_for_unknown passes",
+    "tests/test_skill_scorecard.py::test_marginal_insufficient_below_min_samples passes",
+    "tests/test_skill_scorecard.py::test_marginal_verdicts_valuable_costly_harmful passes",
+    "tests/test_skill_scorecard.py::test_redundancy_pairs_and_script_overlap passes",
+    "tests/test_skill_scorecard.py::test_cli_by_model_and_strategy passes",
+    "docs/skill-intelligence/05-scorecard.md exists; `uv run orchestrator scorecard --skills --redundancy` runs; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/skill_scorecard.py",
+    "orchestrator/cli.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_skill_scorecard.py",
+    "docs/skill-intelligence/05-scorecard.md"
+  ],
+  "depends_on": [
+    "T-0894",
+    "T-0913"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790116719.477225,
+      "pipeline": {
+        "first_ready_at": 1790116719.4770749
+      }
+    },
+    {
+      "ts": 1790116719.61584,
+      "pipeline": {
+        "first_ready_at": 1790116719.4770749,
+        "spec_review_at": 1790116719.6156852,
+        "spec_review_at_lease": 1790117619.6156852
+      }
+    },
+    {
+      "ts": 1790116719.6227279,
+      "pipeline": {
+        "first_ready_at": 1790116719.4770749,
+        "spec_review_at": 1790116719.6156852,
+        "spec_review_at_lease": 1790117619.6156852,
+        "spec_review_at_done": 1790116719.622539
+      }
+    },
+    {
+      "ts": 1790116829.232065,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/skill_scorecard.py",
+          "issue": "File already exists (built under T-0894/T-0913) with a working build()/format_report() API already wired into cli.py's --skills mode (cli.py:413-415) and the --economy composite (cli.py:432). The spec's own 'existing tests' table marks this file and tests/test_skill_scorecard.py as 'missing', contradicting the spec's own preamble ('skill_scorecard.py exists with use_rate and overhead'). The Do section gives no instruction to preserve build()/format_report or extend rather than replace. An executor following the stale table literally could overwrite the file and silently drop already-relied-upon, tested functionality (state decreasing).",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "tests/test_skill_scorecard.py",
+          "issue": "File already exists with 3 passing unittest methods (test_use_rate_and_overhead_ratio_per_skill, test_skill_tokens_per_accepted_task, test_skill_recovery_rate_and_reduction) exercising the current build(). Spec lists this file as new/missing and only names the 6 new test ids to add; doesn't say these 3 existing tests must keep passing, so an executor could delete or break them while adding the new tests.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/cli.py",
+          "issue": "sc.add_argument('--by', choices=[...]) at line 138 is a single fixed-choice argparse value, validated per-mode via the groupings dict (lines 201-238, 'a.by not in allowed'). The spec's CLI shape '--by role,task_class|model|strategy,task_class' requires multi-dimension comma-separated grouping tuples for --skills mode, which the current --by definition cannot express without either breaking argparse choices validation for every other scorecard mode that reuses --by, or special-casing --skills. Spec doesn't say how to reconcile this, risking either a broken --by for other modes or an unimplementable documented CLI shape.",
+          "severity": "high",
+          "line": 138
+        },
+        {
+          "path": "orchestrator/skill_scorecard.py",
+          "issue": "redundancy()'s overlap proxy needs per-call paths joined by session/task (from runs/jev/gate.jsonl rows: session, task, tool, tool_target). The only public read_economy entry points are classify() (no persistence) and summary() (pre-aggregates by role/task_class and discards per-call session/path linkage). Spec phrase 'from read_economy gate rows' is ambiguous between calling read_economy.summary() (insufficient for the join) and reading runs/jev/gate.jsonl directly (the only source with the needed fields); this ambiguity risks a wrong insertion point.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1790116868.8094158,
+      "status": "failed",
+      "reason": "superseded 06:05 by T-0932 (spec v2 after T-0931: extend existing module/tests, --group-by flag, gate rows read directly)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790116719.4770749,
+    "spec_review_at": 1790116719.6156852,
+    "spec_review_at_lease": 1790117619.6156852,
+    "spec_review_at_done": 1790116719.622539
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/skill_scorecard.py",
+      "issue": "File already exists (built under T-0894/T-0913) with a working build()/format_report() API already wired into cli.py's --skills mode (cli.py:413-415) and the --economy composite (cli.py:432). The spec's own 'existing tests' table marks this file and tests/test_skill_scorecard.py as 'missing', contradicting the spec's own preamble ('skill_scorecard.py exists with use_rate and overhead'). The Do section gives no instruction to preserve build()/format_report or extend rather than replace. An executor following the stale table literally could overwrite the file and silently drop already-relied-upon, tested functionality (state decreasing).",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "tests/test_skill_scorecard.py",
+      "issue": "File already exists with 3 passing unittest methods (test_use_rate_and_overhead_ratio_per_skill, test_skill_tokens_per_accepted_task, test_skill_recovery_rate_and_reduction) exercising the current build(). Spec lists this file as new/missing and only names the 6 new test ids to add; doesn't say these 3 existing tests must keep passing, so an executor could delete or break them while adding the new tests.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/cli.py",
+      "issue": "sc.add_argument('--by', choices=[...]) at line 138 is a single fixed-choice argparse value, validated per-mode via the groupings dict (lines 201-238, 'a.by not in allowed'). The spec's CLI shape '--by role,task_class|model|strategy,task_class' requires multi-dimension comma-separated grouping tuples for --skills mode, which the current --by definition cannot express without either breaking argparse choices validation for every other scorecard mode that reuses --by, or special-casing --skills. Spec doesn't say how to reconcile this, risking either a broken --by for other modes or an unimplementable documented CLI shape.",
+      "severity": "high",
+      "line": 138
+    },
+    {
+      "path": "orchestrator/skill_scorecard.py",
+      "issue": "redundancy()'s overlap proxy needs per-call paths joined by session/task (from runs/jev/gate.jsonl rows: session, task, tool, tool_target). The only public read_economy entry points are classify() (no persistence) and summary() (pre-aggregates by role/task_class and discards per-call session/path linkage). Spec phrase 'from read_economy gate rows' is ambiguous between calling read_economy.summary() (insufficient for the join) and reading runs/jev/gate.jsonl directly (the only source with the needed fields); this ambiguity risks a wrong insertion point.",
+      "severity": "med",
+      "line": 0
+    }
+  ],
+  "reason": "superseded 06:05 by T-0932 (spec v2 after T-0931: extend existing module/tests, --group-by flag, gate rows read directly)"
+}

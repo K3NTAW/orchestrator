@@ -1,0 +1,137 @@
+{
+  "id": "T-0169",
+  "parent": "T-0109",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "D1 fix round 5: merge_reviewed never raises on odd verdicts, review count frozen at gate time, single-review src fallback only, sweep covers ungated tasks, drop inert second_review, cheap filters first (from review T-0164)",
+  "spec": "Fix round for T-0160 (branch task/T-0160 at 2f37982 on goal/T-0109). Work in this task's worktree, cut from task/T-0160. Review T-0164 (opus) requested changes; items come from it. Scope: orchestrator/daemon.py and tests/test_daemon.py only.\n\n1 HIGH merge_reviewed (\u2248line 430): never index stuck[0] without a guard, and make the verdict buckets exhaustive: a review that is done with verdict == \"approve\" counts as approved; a review that is done with ANY other verdict value (request_changes, missing, or an off-vocabulary string like \"changes_requested\") is treated as request_changes \u2192 hold src with hold_reason \"review request_changes: <id> (<verdict>)\"; queued/running = pending; failed/held = stuck. If none of approved/pending/stuck/rejected apply (should be impossible) \u2192 hold with hold_reason \"review state unknown: <ids>\" instead of raising. Wrap the per-task body in try/except that prints one stderr line and continues, so one task can never stop the sweep for the others. Tests: (a) c7 task, r1 approve + r2 done with verdict \"changes_requested\" \u2192 held, no exception, other tasks in the same tick still processed; (b) c5 task whose only review is done with an unrecognised verdict \u2192 held with that verdict in hold_reason.\n\n2 MED gate() (\u2248line 414): persist the review count at gate time: stamp pipeline.reviews_expected = reviews_expected(t) alongside gated_at, and merge_reviewed reads pipeline.reviews_expected first, falling back to reviews_expected(t) only when the stamp is absent (tasks gated before this change). Test: gate at two_reviews_from=7 for a c7 task (stamp 2), then lower two_reviews_from to 8 in cfg \u2192 merge_reviewed still waits for 2 (no crash, no premature merge).\n\n3 LOW merge_reviewed (\u2248line 389): use the src.review_verdict fallback only when the task has exactly one review; with two or more, each review's own result verdict decides. Test: c7 task, r1 approve (src.review_verdict approve written by the worker), r2 done without a verdict key \u2192 held (rejected), not merged.\n\n4 LOW merge_reviewed (\u2248line 402): the sweep must also cover done execute tasks that have at least one review but no gated_at stamp (Planner-spawned reviews on a hand-gated task): condition = status done, not stale, not already_merged, has reviews; gated_at is not required. Test: done task without gated_at, one approve \u2192 merged.\n\n5 LOW gate(): remove constraints.second_review (nothing reads it) and its test assertion; keep the second review's tier logic.\n\n6 LOW gate() and merge_reviewed(): order the filters cheap-first: status/stale/pipeline checks before already_merged() (which shells out to git).\n\nNo new dependency. Commit on the task branch when green (`git add`, `git commit`). Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0160",
+    "T-0164"
+  ],
+  "acceptance": [
+    "merge_reviewed never raises: odd or missing verdicts on done reviews hold the task with a reason naming the review and verdict; one task's error cannot stop the sweep (tests a, b)",
+    "pipeline.reviews_expected is stamped at gate time and honoured at merge time; a later config change neither crashes nor merges early (test)",
+    "src.review_verdict fallback applies only to single-review tasks (test)",
+    "Done tasks with reviews but no gated_at are swept (test)",
+    "constraints.second_review removed with its assertion; filters ordered cheap-first (already_merged last)",
+    "uv run python -m unittest discover -q tests green; no new dependency; only daemon.py and tests/test_daemon.py change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [
+    "T-0160"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_daemon.py",
+    "fix_round_for": "T-0160",
+    "worktree_base": "task/T-0160"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0169",
+  "codex_thread": null,
+  "result": {
+    "summary": "Committed as `c593794` on `task/T-0169`.\n\n## Summary\nThe fix-round changes for the T-0164 review items were already present, uncommitted, in the worktree. I verified each acceptance criterion against the diff, ran the full test suite, and committed.\n\n- `merge_reviewed`/`_merge_reviewed_one` now buckets each review's verdict exhaustively (approved/rejected/pending/stuck/unknown), guards `stuck[0]` behind `if stuck:`, and wraps the per-task body in try/except so one bad task can't stop the sweep.\n- `gate()` stamps `pipeline.reviews_expected` at gate time; `merge_reviewed` reads that stamp first, falling back to `reviews_expected(t)` only when absent.\n- `src.review_verdict` fallback now only applies when `len(reviews) == 1`.\n- The sweep no longer requires `gated_at`, so hand-gated tasks with reviews are covered.\n- `constraints.second_review` and its test assertion removed.\n- Filters in `gate()` and `merge_reviewed()` reordered cheap-first, `already_merged()` (git shell-out) last.\n\n## Files changed\n- `orchestrator/daemon.py`\n- `tests/test_daemon.py`\n\n## Test output\n```\nRan 174 tests in 27.971s\nOK\n```\nNo failures (only harmless `ResourceWarning`s from sqlite in unrelated test fixtures). `.claude/hooks/tests-green.sh` also exited 0.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789742471.878905,
+      "pipeline": {
+        "gated_at": 1789742471.878678,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789742481.295033,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789742481.297494,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0169",
+      "claimed_at": 1789742481.297351
+    },
+    {
+      "ts": 1789742481.30552,
+      "pid": 69587,
+      "account": "A"
+    },
+    {
+      "ts": 1789742914.683707,
+      "status": "held",
+      "hold_reason": "rate_limit on A, cooling 1800s"
+    },
+    {
+      "ts": 1789752779.194823,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789752779.198431,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0169",
+      "claimed_at": 1789752779.198257
+    },
+    {
+      "ts": 1789752779.207764,
+      "pid": 31159,
+      "account": "A"
+    },
+    {
+      "ts": 1789752907.0242612,
+      "status": "done",
+      "result": {
+        "summary": "Committed as `c593794` on `task/T-0169`.\n\n## Summary\nThe fix-round changes for the T-0164 review items were already present, uncommitted, in the worktree. I verified each acceptance criterion against the diff, ran the full test suite, and committed.\n\n- `merge_reviewed`/`_merge_reviewed_one` now buckets each review's verdict exhaustively (approved/rejected/pending/stuck/unknown), guards `stuck[0]` behind `if stuck:`, and wraps the per-task body in try/except so one bad task can't stop the sweep.\n- `gate()` stamps `pipeline.reviews_expected` at gate time; `merge_reviewed` reads that stamp first, falling back to `reviews_expected(t)` only when absent.\n- `src.review_verdict` fallback now only applies when `len(reviews) == 1`.\n- The sweep no longer requires `gated_at`, so hand-gated tasks with reviews are covered.\n- `constraints.second_review` and its test assertion removed.\n- Filters in `gate()` and `merge_reviewed()` reordered cheap-first, `already_merged()` (git shell-out) last.\n\n## Files changed\n- `orchestrator/daemon.py`\n- `tests/test_daemon.py`\n\n## Test output\n```\nRan 174 tests in 27.971s\nOK\n```\nNo failures (only harmless `ResourceWarning`s from sqlite in unrelated test fixtures). `.claude/hooks/tests-green.sh` also exited 0.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789753254.266391,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789753297.3413918,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "sha": "c593794d29c64c1fbfefc37e329a90a865bb9df0"
+    },
+    {
+      "ts": 1789753317.930455,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "sha": "c593794d29c64c1fbfefc37e329a90a865bb9df0"
+    }
+  ],
+  "pipeline": {
+    "gated_at": 1789742471.878678,
+    "gated_by": "planner-pre-stamp: gate and review by hand"
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789752779.198257,
+  "pid": 31159,
+  "account": "A",
+  "hold_reason": "rate_limit on A, cooling 1800s",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0109",
+  "sha": "c593794d29c64c1fbfefc37e329a90a865bb9df0"
+}

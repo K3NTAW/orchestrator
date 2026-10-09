@@ -1,0 +1,129 @@
+{
+  "id": "T-0241",
+  "parent": "T-0240",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 3,
+  "title": "F3: daemon posts Codex results \u2014 _dispatch_worker turns executor.start()'s return into a bus result",
+  "spec": "Gotcha 2026-09-19: orchestrator/daemon.py _dispatch_worker() (about line 305) calls executor.start(task_id, prompt) and discards the returned dict, so a Codex-executed task stays running with pid null after its run logs done; three tasks needed hand-posted results. The Claude fallback path posts from spawn.run_worker and is unaffected. Change _dispatch_worker():\n1. r = executor.start(...). status done -> bus.post_result(task_id, fit_result({summary: r['message'][:3000], executed_by: 'codex:' + executor id, thread: r['thread'], usage: r.get('usage')}), 'done'). status failed -> bus.post_result(..., 'failed') with reason. status held -> leave the hold executor set (it already updated the bus) and do nothing else. Use spawn.fit_result (or move it to bus if import order needs it) so the result stays within the bus size cap.\n2. If executor.start raises, keep today's pipeline.dispatch_error stamp and also set the task failed with reason 'dispatch error: ...' so it never stays running.\n3. The gate then treats the task like any other done execute task (tests-green, review policy, merge).\nTests in tests/test_daemon.py with executor.start monkeypatched: done posts a done result with executed_by codex:astra; failed posts failed with the reason; held leaves status held; a raising start marks the task failed. Keep every existing test green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py::test_dispatch_worker_posts_codex_done, ::test_dispatch_worker_posts_codex_failed, ::test_dispatch_worker_leaves_held, ::test_dispatch_worker_exception_marks_failed pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0241",
+  "codex_thread": null,
+  "result": {
+    "summary": "Codex (astra) committed df9074f in wt/T-0241: _dispatch_worker posts done/failed results from executor.start()'s return (summary = message[:3000], executed_by codex:<executor>, thread, usage); a raising start keeps pipeline.dispatch_error and marks the task failed with reason 'dispatch error: ...'; held is left to the executor. Four new tests in tests/test_daemon.py. tests-green.sh wt/T-0241 exited 0 (run by the Planner 18:20). Result posted by hand because the running daemon predates this fix.",
+    "executed_by": "codex:astra",
+    "sha": "df9074f",
+    "confidence": 0.9,
+    "provenance": "repo"
+  },
+  "events": [
+    {
+      "ts": 1789834421.576739,
+      "pipeline": {
+        "dispatched_at": 1789834421.576679
+      }
+    },
+    {
+      "ts": 1789834422.833793,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0241",
+      "claimed_at": 1789834422.833475
+    },
+    {
+      "ts": 1789834422.83686,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789834747.901377,
+      "status": "done",
+      "result": {
+        "summary": "Codex (astra) committed df9074f in wt/T-0241: _dispatch_worker posts done/failed results from executor.start()'s return (summary = message[:3000], executed_by codex:<executor>, thread, usage); a raising start keeps pipeline.dispatch_error and marks the task failed with reason 'dispatch error: ...'; held is left to the executor. Four new tests in tests/test_daemon.py. tests-green.sh wt/T-0241 exited 0 (run by the Planner 18:20). Result posted by hand because the running daemon predates this fix.",
+        "executed_by": "codex:astra",
+        "sha": "df9074f",
+        "confidence": 0.9,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789834810.648234,
+      "pipeline": {
+        "dispatched_at": 1789834421.576679,
+        "gated_at": 1789834810.648134,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789834910.171836,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789834931.892085,
+      "pipeline": {
+        "dispatched_at": 1789834421.576679,
+        "gated_at": 1789834810.648134,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789834931.892
+      }
+    },
+    {
+      "ts": 1789834990.53352,
+      "status": "done",
+      "merged_into": "goal/T-0240",
+      "sha": "df9074feedcd9574da9a3efea9b7c270b97e141c"
+    },
+    {
+      "ts": 1789835049.308352,
+      "status": "failed",
+      "reason": "tests_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\nTypeError: 'NoneType' object is not subscriptable\nTraceback (most recent call last):\n    raise KeyError(tid)\nKeyError: 'T-0001'\nTraceback (most recent call last):\nTypeError: 'NoneType' object is not subscriptable\nTraceback (most recent call last):\n    raise KeyError(tid)\nKeyError: 'T-0002'\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_diff_unavailable_fails_closed (test_daemon.Daemon.test_diff_unavailable_fails_closed)\nTraceback (most recent call last):\n    raise KeyError(tid)\nKeyError: 'T-0002'\nFAILED (errors=1)\n"
+      }
+    },
+    {
+      "ts": 1789836128.621942,
+      "status": "done",
+      "merged_into": "goal/T-0240",
+      "merged_via": "fix round T-0245 fd2e078 carries df9074f",
+      "reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789834421.576679,
+    "gated_at": 1789834810.648134,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789834931.892
+  },
+  "claimed_at": 1789834422.833475,
+  "rounds": 0,
+  "executor": "astra",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0240",
+  "sha": "df9074feedcd9574da9a3efea9b7c270b97e141c",
+  "reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\nTypeError: 'NoneType' object is not subscriptable\nTraceback (most recent call last):\n    raise KeyError(tid)\nKeyError: 'T-0001'\nTraceback (most recent call last):\nTypeError: 'NoneType' object is not subscriptable\nTraceback (most recent call last):\n    raise KeyError(tid)\nKeyError: 'T-0002'\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nERROR: test_diff_unavailable_fails_closed (test_daemon.Daemon.test_diff_unavailable_fails_closed)\nTraceback (most recent call last):\n    raise KeyError(tid)\nKeyError: 'T-0002'\nFAILED (errors=1)\n"
+  },
+  "merged_via": "fix round T-0245 fd2e078 carries df9074f"
+}

@@ -1,0 +1,687 @@
+{
+  "id": "T-0637",
+  "created_at": 1789977523.5757592,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "R10 v3: orchestrator/strategy.py \u2014 workflow-strategy ids from task lineage (real bus fields, public scorecard API), per-strategy outcome scorecard and shadow recommendation with evidence thresholds (AP P18)",
+  "spec": "Why: the orchestrator records which model worked (scorecard.executor_economics) but not which workflow worked per task kind; AP P18 / brief P12 want explicit strategy ids, per-strategy outcomes, a strategy scorecard, and an observe-only then off/shadow/active recommendation that never removes deterministic safety steps. v3 after spec reviews T-0618 and T-0633.\nWhat: new pure module orchestrator/strategy.py reading tasks/*.json, runs and runs/sched/waves.jsonl under root. Tests are unittest.TestCase methods in the named files (this repo runs unittest; no pytest fixtures).\n- Sources (bus schema): acceptance = truthy task['merged_into']; merged_at = pipeline.get('merged_at') else task.get('merged_at'); time_s = merged_at - task['created_at'] or None; task_class = attribution.task_class(task); band = attribution.band(task['complexity']); scout objective = (constraints or {}).get('objective'), the Planner convention for scout tasks (stated in the docstring: fires only for scouts created with it); waves_rows = schedlog.read('waves') (rows {'wave': [ids], ...}); review children = tasks with role review and inputs[0] == task id; reviewer role = review constraints.get('reviewer_role'); spec review children = role spec_review with inputs[0] == task id or constraints.spec_review_for == task id; fix rounds = execute tasks whose constraints.fix_round_for resolves (transitively) to the root, i.e. attribution.lineage(task)['root'] == root id; security review = pipeline.review_reason in ('diff_unavailable', 'security_paths_empty') or startswith('security_paths:') or startswith('semantic_') (the same predicate as daemon._open_reviews).\n- STRATEGIES = ('direct_execute', 'scout_execute', 'dependency_scout_execute', 'architecture_impact_scouts_then_decompose', 'execute_specialist_review', 'security_context_strong_execute_security_review', 'parallel_wave'); derive(task, tasks, waves_rows=None) -> {'strategy': composite joined by '+' in STRATEGIES order, 'steps': observed among ['scout', 'spec_review', 'execute', 'review', 'security_review', 'fix_round'] in that order, 'components': matched STRATEGIES}: goal scouts = role scout, same parent, created_at before the task; any scout with objective dependency-map -> dependency_scout_execute; >= 2 scouts with objectives in (architecture, migration-impact, API-consumers) -> architecture_impact_scouts_then_decompose; any scout otherwise -> scout_execute; review children with roles acceptance and adversarial -> execute_specialist_review; security predicate -> security_context_strong_execute_security_review; task id in a waves row wave with >= 2 members -> parallel_wave; nothing -> direct_execute.\n- observations(root=STATE) -> one row per execute lineage root: accepted roots come from the public scorecard.efficiency(root)['tasks'] dict (keyed by root id; provides usd, tokens, fix_rounds, first_pass, goal_id) and failed roots from tasks with role execute, status failed, no constraints.fix_round_for and no merged_into (usd/tokens summed from runs rows whose task is in the lineage, may be None); each row {'task', 'goal', 'repo': root.parent.name, 'strategy', 'steps', 'task_class', 'band', 'complexity', 'models': sorted executor plus review tiers, 'tokens', 'usd', 'time_s', 'first_pass', 'fix_rounds', 'gate_reds': sum of pipeline.gate_reds over the lineage tasks, 'review_request_changes': count of review children over the lineage whose result.verdict == 'request_changes', 'accepted'}. No private scorecard helpers are imported.\n- scorecard(root=STATE, by=('task_class', 'band')) -> {(strategy, class, band): {'n', 'accepted_rate', 'first_pass_rate', 'median_usd', 'median_time_s', 'avg_fix_rounds'}}; format(card).\n- recommend(task_class, band, *, repo=None, root=STATE, cfg=None) -> {'mode', 'strategy'|None, 'n', 'evidence', 'reason', 'required': ['security_review_if_security_paths', 'tests_green', 'spec_review_from_6']}: cfg [strategy] mode off|shadow|active (default shadow), min_samples 10; observations filtered to the same repo (when given), task_class and band; n < min_samples -> None with reason insufficient_evidence; rank by accepted_rate, then first_pass_rate, then lower median_usd; off -> mode off, strategy None. Active still only recommends; 'required' always non-empty.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_strategy.py::test_derive_attributes_strategy_steps_and_components \u2014 a task with a goal scout of objective dependency-map, a spec review child, reviews with roles acceptance and adversarial, review_reason diff_unavailable, one fix round and membership in a two-task wave derives dependency_scout_execute+execute_specialist_review+security_context_strong_execute_security_review+parallel_wave, steps ['scout','spec_review','execute','review','security_review','fix_round'] and components listing those four",
+    "tests/test_strategy.py::test_observations_use_real_bus_fields_and_lineage_sums \u2014 a merged lineage with merged_into, created_at, pipeline.merged_at, a fix round with gate_reds 1 and one request_changes review yields accepted True, the right time_s, gate_reds 1 and review_request_changes 1; task_class and band come from attribution helpers",
+    "tests/test_strategy.py::test_observations_aggregate_outcomes_per_strategy \u2014 three merged lineages of two strategies yield scorecard rows with n, accepted_rate, first_pass_rate, median_usd",
+    "tests/test_strategy.py::test_cold_start_and_insufficient_evidence_return_no_strategy \u2014 empty root and n below min_samples both yield strategy None with reason insufficient_evidence and a non-empty required list",
+    "tests/test_strategy.py::test_shadow_recommendation_prefers_evidence_without_changing_policy \u2014 with 12 observations per strategy the better accepted_rate wins in shadow mode; mode off yields strategy None",
+    "tests/test_strategy.py::test_repository_and_task_class_are_separated \u2014 observations from another repo or another task class never count toward a recommendation for this one"
+  ],
+  "scope": [
+    "orchestrator/strategy.py",
+    "tests/test_strategy.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/scorecard.py",
+      "orchestrator/attribution.py",
+      "orchestrator/schedlog.py",
+      "orchestrator/bus.py",
+      "orchestrator/merge.py",
+      "orchestrator/daemon.py",
+      "tests/test_scorecard.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "STRATEGIES tuple; derive(task, tasks, waves_rows=None) -> {strategy, steps, components}; observations(root=STATE) -> rows; scorecard(root=STATE, by=('task_class','band')) -> dict; recommend(task_class, band, *, repo=None, root=STATE, cfg=None) -> {mode, strategy, n, evidence, reason, required}; config [strategy] mode off|shadow|active default shadow, min_samples 10; uses only public scorecard.efficiency, attribution.task_class/band/lineage, schedlog.read; must not import daemon or decision_log"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0637",
+  "codex_thread": "01a0c2fa-114b-7c63-9476-b92cc9855996",
+  "result": {
+    "summary": "Implemented and committed workflow strategy derivation, observations, scorecards, and recommendations.\n\n- Files: `orchestrator/strategy.py`, `tests/test_strategy.py`\n- Gate: **RED** \u2014 all strategy tests passed; four unrelated out-of-scope tests failed.\n- Commit: `bd6e02f51b1193a4bad7a910fd426355c70ded6d`\n- Worktree: clean\n\nFailures-only output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_loop_guard (test_hooks.Hooks.test_loop_guard)\nTraceback (most recent call last):\nAssertionError: 0 != 2\nFAIL: test_retrospect_and_uncommitted (test_hooks.Hooks.test_retrospect_and_uncommitted)\nTraceback (most recent call last):\nAssertionError: 2 != 0\nFAIL: test_recall_goal_flag_ranks (test_memory_skill.MemorySkill.test_recall_goal_flag_ranks)\nTraceback (most recent call last):\nAssertionError: 'bus:T-0074' not found in recall results\nFAIL: test_record_then_recall (test_memory_skill.MemorySkill.test_record_then_recall)\nTraceback (most recent call last):\nAssertionError: 1 != 0 : no task T-0076\nFAILED (failures=4)\n```",
+    "executed_by": "codex:sol",
+    "thread": "01a0c2fa-114b-7c63-9476-b92cc9855996",
+    "usage": {
+      "input_tokens": 788157,
+      "cached_input_tokens": 746112,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10308,
+      "reasoning_output_tokens": 1769,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789977523.576792,
+      "spec_review_verdict": "approve",
+      "spec_review_waived": "Planner decision 2026-09-21 after three spec-review rounds (T-0618, T-0633): every raised risk folded into v3"
+    },
+    {
+      "ts": 1789977548.303494,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172
+      }
+    },
+    {
+      "ts": 1789977548.305002,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884
+      }
+    },
+    {
+      "ts": 1789977549.271192,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984
+      }
+    },
+    {
+      "ts": 1789977563.405247,
+      "packet_meta": {
+        "chars": 3226,
+        "est_tokens": 806,
+        "hash": "d8bf1a23e545",
+        "version": "d8bf1a23e545",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@ef740c717cf2 gotchas@05a0ae49c809 memory@notes",
+        "policy_version": "ef740c717cf2",
+        "gotchas": "05a0ae49c809"
+      }
+    },
+    {
+      "ts": 1789977563.4072142,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0637",
+      "claimed_at": 1789977563.406129
+    },
+    {
+      "ts": 1789977563.409863,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789978000.053024,
+      "codex_thread": "01a0c2fa-114b-7c63-9476-b92cc9855996",
+      "codex_thread_head": "bd6e02f51b1193a4bad7a910fd426355c70ded6d"
+    },
+    {
+      "ts": 1789978000.057909,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        }
+      }
+    },
+    {
+      "ts": 1789978000.060736,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed workflow strategy derivation, observations, scorecards, and recommendations.\n\n- Files: `orchestrator/strategy.py`, `tests/test_strategy.py`\n- Gate: **RED** \u2014 all strategy tests passed; four unrelated out-of-scope tests failed.\n- Commit: `bd6e02f51b1193a4bad7a910fd426355c70ded6d`\n- Worktree: clean\n\nFailures-only output:\n\n```text\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_loop_guard (test_hooks.Hooks.test_loop_guard)\nTraceback (most recent call last):\nAssertionError: 0 != 2\nFAIL: test_retrospect_and_uncommitted (test_hooks.Hooks.test_retrospect_and_uncommitted)\nTraceback (most recent call last):\nAssertionError: 2 != 0\nFAIL: test_recall_goal_flag_ranks (test_memory_skill.MemorySkill.test_recall_goal_flag_ranks)\nTraceback (most recent call last):\nAssertionError: 'bus:T-0074' not found in recall results\nFAIL: test_record_then_recall (test_memory_skill.MemorySkill.test_record_then_recall)\nTraceback (most recent call last):\nAssertionError: 1 != 0 : no task T-0076\nFAILED (failures=4)\n```",
+        "executed_by": "codex:sol",
+        "thread": "01a0c2fa-114b-7c63-9476-b92cc9855996",
+        "usage": {
+          "input_tokens": 788157,
+          "cached_input_tokens": 746112,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10308,
+          "reasoning_output_tokens": 1769,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789978201.962218,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789978316.564065,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978316.5638568,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_loop_guard (test_hooks.Hooks.test_loop_guard)\nTraceback (most recent call last):\nAssertionError: 0 != 2\nFAIL: test_retrospect_and_uncommitted (test_hooks.Hooks.test_retrospect_and_uncommitted)\nTraceback (most recent call last):\nAssertionError: 2 != 0\nFAIL: test_recall_goal_flag_ranks (test_memory_skill.MemorySkill.test_recall_goal_flag_ranks)\nTraceback (most recent call last):\nAssertionError: 'bus:T-0074' not found in \"# 8 hits for ['jev', 'rank', 'flag'] (showing 8) \u2014 id \u00b7 date \u00b7 provenance \u00b7 age \u00b7 title \u00b7 p\\ncmem:6474 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [security_note/code] GitHub MCP server hardened with read-only mode and restricted toolsets for scout and review roles \u00b7 0.90\\ncmem:6469 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [change/orchestrator] Full-access mode with guardrails deployed; orchestrator ready for Phase 1 testing \u00b7 0.90\\ncmem:6465 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [feature/orchestrator] Comprehensive guardrails system: permission bypass with hard-floor hook enforcement \u00b7 0.90\\ncmem:6455 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Codex exec supports headless non-interactive execution with approval and output control \u00b7 0.90\\ncmem:6454 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Codex provides app-server and exec-server as experimental integration points \u00b7 0.90\\ncmem:6449 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [bugfix/orchestrator] Handle usage-credit errors and auto-trust worktrees in CLI spawned agents \u00b7 0.90\\ncmem:6448 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Phase 0 profile verification reveals partial success and blocking issues \u00b7 0.90\\ncmem:6446 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [change/orchestrator] Orchestrator system committed to git (e900990) \u00b7 0.90\\n\"\nFAIL: test_record_then_recall (test_memory_skill.MemorySkill.test_record_then_recall)\nTraceback (most recent call last):\nAssertionError: 1 != 0 : no task T-0076\nFAILED (failures=4)\n/Users/k3ntaw/code/orchestrator/wt/T-0637/.orchestrator/runs/tests/T-0637-20260921-101156.log\n"
+      }
+    },
+    {
+      "ts": 1789978317.225307,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_loop_guard (test_hooks.Hooks.test_loop_guard)\nTraceback (most recent call last):\nAssertionError: 0 != 2\nFAIL: test_retrospect_and_uncommitted (test_hooks.Hooks.test_retrospect_and_uncommitted)\nTraceback (most recent call last):\nAssertionError: 2 != 0\nFAIL: test_recall_goal_flag_ranks (test_memory_skill.MemorySkill.test_recall_goal_flag_ranks)\nTraceback (most recent call last):\nAssertionError: 'bus:T-0074' not found in \"# 8 hits for ['jev', 'rank', 'flag'] (showing 8) \u2014 id \u00b7 date \u00b7 provenance \u00b7 age \u00b7 title \u00b7 p\\ncmem:6474 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [security_note/code] GitHub MCP server hardened with read-only mode and restricted toolsets for scout and review roles \u00b7 0.90\\ncmem:6469 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [change/orchestrator] Full-access mode with guardrails deployed; orchestrator ready for Phase 1 testing \u00b7 0.90\\ncmem:6465 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [feature/orchestrator] Comprehensive guardrails system: permission bypass with hard-floor hook enforcement \u00b7 0.90\\ncmem:6455 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Codex exec supports headless non-interactive execution with approval and output control \u00b7 0.90\\ncmem:6454 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Codex provides app-server and exec-server as experimental integration points \u00b7 0.90\\ncmem:6449 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [bugfix/orchestrator] Handle usage-credit errors and auto-trust worktrees in CLI spawned agents \u00b7 0.90\\ncmem:6448 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Phase 0 profile verification reveals partial success and blocking issues \u00b7 0.90\\ncmem:6446 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [change/orchestrator] Orchestrator system committed to git (e900990) \u00b7 0.90\\n\"\nFAIL: test_record_then_recall (test_memory_skill.MemorySkill.test_record_then_recall)\nTraceback (most recent call last):\nAssertionError: 1 != 0 : no task T-0076\nFAILED (failures=4)\n/Users/k3ntaw/code/orchestrator/wt/T-0637/.orchestrator/runs/tests/T-0637-20260921-101156.log\n",
+        "rejected_ids": [
+          "(failures=4)"
+        ]
+      }
+    },
+    {
+      "ts": 1789978317.3526971,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_loop_guard (test_hooks.Hooks.test_loop_guard)\nTraceback (most recent call last):\nAssertionError: 0 != 2\nFAIL: test_retrospect_and_uncommitted (test_hooks.Hooks.test_retrospect_and_uncommitted)\nTraceback (most recent call last):\nAssertionError: 2 != 0\nFAIL: test_recall_goal_flag_ranks (test_memory_skill.MemorySkill.test_recall_goal_flag_ranks)\nTraceback (most recent call last):\nAssertionError: 'bus:T-0074' not found in \"# 8 hits for ['jev', 'rank', 'flag'] (showing 8) \u2014 id \u00b7 date \u00b7 provenance \u00b7 age \u00b7 title \u00b7 p\\ncmem:6474 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [security_note/code] GitHub MCP server hardened with read-only mode and restricted toolsets for scout and review roles \u00b7 0.90\\ncmem:6469 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [change/orchestrator] Full-access mode with guardrails deployed; orchestrator ready for Phase 1 testing \u00b7 0.90\\ncmem:6465 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [feature/orchestrator] Comprehensive guardrails system: permission bypass with hard-floor hook enforcement \u00b7 0.90\\ncmem:6455 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Codex exec supports headless non-interactive execution with approval and output control \u00b7 0.90\\ncmem:6454 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Codex provides app-server and exec-server as experimental integration points \u00b7 0.90\\ncmem:6449 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [bugfix/orchestrator] Handle usage-credit errors and auto-trust worktrees in CLI spawned agents \u00b7 0.90\\ncmem:6448 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [discovery/orchestrator] Phase 0 profile verification reveals partial success and blocking issues \u00b7 0.90\\ncmem:6446 \u00b7 2026-09-16 \u00b7 cmem \u00b7 5d \u00b7 [change/orchestrator] Orchestrator system committed to git (e900990) \u00b7 0.90\\n\"\nFAIL: test_record_then_recall (test_memory_skill.MemorySkill.test_record_then_recall)\nTraceback (most recent call last):\nAssertionError: 1 != 0 : no task T-0076\nFAILED (failures=4)\n/Users/k3ntaw/code/orchestrator/wt/T-0637/.orchestrator/runs/tests/T-0637-20260921-101156.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_hooks.Hooks.test_loop_guard",
+              "test_hooks.Hooks.test_retrospect_and_uncommitted",
+              "test_memory_skill.MemorySkill.test_recall_goal_flag_ranks",
+              "test_memory_skill.MemorySkill.test_record_then_recall"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nEEEE\n======================================================================\nERROR: test_hooks (unittest.loader._FailedTest.test_hooks)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_hooks\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_hooks'\n\n\n======================================================================\nERROR: test_hooks (unittest.loader._FailedTest.test_hooks)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_hooks\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_hooks'\n\n\n======================================================================\nERROR: test_memory_skill (unittest.loader._FailedTest.test_memory_skill)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_memory_skill\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_memory_skill'\n\n\n======================================================================\nERROR: test_memory_skill (unittest.loader._FailedTest.test_memory_skill)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_memory_skill\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_memory_skill'\n\n\n----------------------------------------------------------------------\nRan 4 tests in 0.000s\n\nFAILED (errors=4)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1789978317.35453,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978316.5638568,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1789978317.412714,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978316.5638568,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789978316.564065"
+      }
+    },
+    {
+      "ts": 1789978648.4800372,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 1,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789978316.564065"
+      },
+      "hold_reason": null,
+      "status": "done",
+      "resume_hint": null
+    },
+    {
+      "ts": 1789978659.601206,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789978316.564065"
+      }
+    },
+    {
+      "ts": 1789978659.624081,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789978316.564065",
+        "gated_at": 1789978659.623905
+      },
+      "status": "held",
+      "hold_reason": "executor did not commit",
+      "resume_hint": {
+        "dirty": [
+          "tests/test_strategy.py"
+        ]
+      }
+    },
+    {
+      "ts": 1789978660.141953,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "gated_at": 1789978659.623905
+      }
+    },
+    {
+      "ts": 1789978660.1904,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "gated_at": 1789978659.623905,
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        }
+      }
+    },
+    {
+      "ts": 1789978692.131243,
+      "codex_thread": "01a0c2fa-114b-7c63-9476-b92cc9855996",
+      "codex_thread_head": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+    },
+    {
+      "ts": 1789978692.135613,
+      "rounds": 1
+    },
+    {
+      "ts": 1789978741.816712,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        }
+      },
+      "hold_reason": null,
+      "status": "done",
+      "resume_hint": null
+    },
+    {
+      "ts": 1789978837.453565,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 2,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        },
+        "first_green_at": 1789978837.449735,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1789978983.5119932,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 3,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        },
+        "first_green_at": 1789978837.449735,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1789979097.969304,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 3,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        },
+        "first_green_at": 1789978837.449735,
+        "lineage_fix_rounds": 1,
+        "gated_at": 1789979097.969056,
+        "gated_at_lease": 1789979997.969056,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789979098.0770519,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 3,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        },
+        "first_green_at": 1789978837.449735,
+        "lineage_fix_rounds": 1,
+        "gated_at": 1789979097.969056,
+        "gated_at_lease": 1789979997.969056,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0637",
+          "goal_head": "5f2bcf620325d1832c7a3e730bd78fd22cbb1033",
+          "moved_count": 6,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789979098.0764391,
+          "head": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+        }
+      }
+    },
+    {
+      "ts": 1789979098.15681,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 3,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        },
+        "first_green_at": 1789978837.449735,
+        "lineage_fix_rounds": 1,
+        "gated_at": 1789979097.969056,
+        "gated_at_lease": 1789979997.969056,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0637",
+          "goal_head": "5f2bcf620325d1832c7a3e730bd78fd22cbb1033",
+          "moved_count": 6,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789979098.0764391,
+          "head": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+        },
+        "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+      }
+    },
+    {
+      "ts": 1789979098.166049,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 3,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        },
+        "first_green_at": 1789978837.449735,
+        "lineage_fix_rounds": 1,
+        "gated_at": 1789979097.969056,
+        "gated_at_lease": 1789979997.969056,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0637",
+          "goal_head": "5f2bcf620325d1832c7a3e730bd78fd22cbb1033",
+          "moved_count": 6,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789979098.0764391,
+          "head": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+        },
+        "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+        "gated_at_done": 1789979098.1656718
+      }
+    },
+    {
+      "ts": 1789979218.99607,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "merged_via": "fix round T-0641 983d2671b1e3071022b529d43aba767f0d81ec35",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1789977548.3034172,
+        "dispatched_at": 1789977548.304884,
+        "dispatched_at_lease": 1789978448.304884,
+        "dispatched_at_done": 1789977549.270984,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+        },
+        "gate_attempts": 3,
+        "gate_reds": 1,
+        "failure_kind": "unknown",
+        "auto_fix_hold_key": "1789978316.564065",
+        "auto_fix_skipped": {
+          "1789978659.624081": true
+        },
+        "first_green_at": 1789978837.449735,
+        "lineage_fix_rounds": 1,
+        "gated_at": 1789979097.969056,
+        "gated_at_lease": 1789979997.969056,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0637",
+          "goal_head": "5f2bcf620325d1832c7a3e730bd78fd22cbb1033",
+          "moved_count": 6,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789979098.0764391,
+          "head": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+        },
+        "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+        "gated_at_done": 1789979098.1656718,
+        "accepted_at": 1789979218.993242
+      }
+    },
+    {
+      "ts": 1789979271.075168,
+      "review_verdict": "approve"
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_waived": "Planner decision 2026-09-21 after three spec-review rounds (T-0618, T-0633): every raised risk folded into v3",
+  "pipeline": {
+    "first_ready_at": 1789977548.3034172,
+    "dispatched_at": 1789977548.304884,
+    "dispatched_at_lease": 1789978448.304884,
+    "dispatched_at_done": 1789977549.270984,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "7f59b0be64fff5b3a37b6e7140e9b165e7e08bba"
+    },
+    "gate_attempts": 3,
+    "gate_reds": 1,
+    "failure_kind": "unknown",
+    "auto_fix_hold_key": "1789978316.564065",
+    "auto_fix_skipped": {
+      "1789978659.624081": true
+    },
+    "first_green_at": 1789978837.449735,
+    "lineage_fix_rounds": 1,
+    "gated_at": 1789979097.969056,
+    "gated_at_lease": 1789979997.969056,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0637",
+      "goal_head": "5f2bcf620325d1832c7a3e730bd78fd22cbb1033",
+      "moved_count": 6,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789979098.0764391,
+      "head": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0"
+    },
+    "reviewed_sha": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+    "gated_at_done": 1789979098.1656718,
+    "accepted_at": 1789979218.993242
+  },
+  "packet_meta": {
+    "chars": 3226,
+    "est_tokens": 806,
+    "hash": "d8bf1a23e545",
+    "version": "d8bf1a23e545",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@ef740c717cf2 gotchas@05a0ae49c809 memory@notes",
+    "policy_version": "ef740c717cf2",
+    "gotchas": "05a0ae49c809"
+  },
+  "claimed_at": 1789977563.406129,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "6f301f7f0965c49f6538e2fad8bb5e3757a475c0",
+  "hold_reason": null,
+  "resume_hint": null,
+  "merged_into": "goal/T-0561",
+  "merged_via": "fix round T-0641 983d2671b1e3071022b529d43aba767f0d81ec35",
+  "review_verdict": "approve"
+}

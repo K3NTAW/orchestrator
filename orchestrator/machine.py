@@ -4,6 +4,7 @@ import errno
 import fcntl
 import json
 import os
+import subprocess
 import tempfile
 import time
 import uuid
@@ -15,6 +16,7 @@ MACHINE_DIR = Path(os.environ.get("ORCH_MACHINE_DIR", "~/.orchestrator-machine")
 LEASES = MACHINE_DIR / "leases.json"
 ACCOUNTS = MACHINE_DIR / "accounts.json"
 LOCK = MACHINE_DIR / "machine.lock"
+REPOS = MACHINE_DIR / "repos.json"
 WINDOW_S = 5 * 3600
 
 
@@ -170,3 +172,61 @@ def usage(account_id: str, now: float | None = None) -> dict:
             "planner_window_tokens": account["planner_window_tokens"],
             "planner_day_tokens": account["planner_day_tokens"],
         }
+
+
+def process_start(pid) -> str | None:
+    """A process's start time as `ps -o lstart=` prints it in the C locale and UTC, whitespace-normalised, so a
+    daemon and the watchdog render the same string whatever their own locale or TZ. None when unreadable."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+                             timeout=10, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout
+    except Exception:
+        return None
+    return " ".join(out.split()) if isinstance(out, str) and out.strip() else None
+
+
+def _temp_roots() -> tuple:
+    return (Path(tempfile.gettempdir()).resolve(), Path("/private/var/folders"))
+
+
+def is_install(path) -> bool:
+    """A real orchestrator install: <path>/.orchestrator/pool.toml exists and the path is no temp fixture."""
+    try:
+        path = Path(path).resolve()
+        if not (path / ".orchestrator" / "pool.toml").is_file():
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return not any(path == root or path.is_relative_to(root) for root in _temp_roots())
+
+
+def register_repo(path) -> None:
+    """Record a repo whose daemon took its lock, so the watchdog watches it without configuration. Only real
+    installs are recorded (is_install), so test fixtures never reach the machine registry."""
+    if not is_install(path):
+        return
+    path = str(Path(path).resolve())
+    with _machine_state():
+        known = _read(REPOS, [])
+        if not isinstance(known, list):
+            known = []
+        if path not in known:
+            known.append(path)
+            _write(REPOS, known)
+
+
+def repos() -> list:
+    with _machine_state():
+        known = _read(REPOS, [])
+    return [p for p in known if isinstance(p, str)] if isinstance(known, list) else []
+
+
+def prune_repos(paths) -> None:
+    """Drop the given paths (repos that are gone or no real install) from the registry."""
+    drop = {str(p) for p in paths}
+    if not drop:
+        return
+    with _machine_state():
+        known = _read(REPOS, [])
+        if isinstance(known, list):
+            _write(REPOS, [p for p in known if p not in drop])

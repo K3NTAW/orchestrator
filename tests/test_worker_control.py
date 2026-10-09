@@ -1,4 +1,6 @@
 import _harness
+import _fake_claude
+from _fake_claude import setUpModule, tearDownModule  # every spawn here fakes the claude CLI at an absolute path
 import json
 import signal
 import tempfile
@@ -184,7 +186,7 @@ class Steering(unittest.TestCase):
         with mock.patch.object(spawn.subprocess, "Popen", return_value=process) as popen, \
                 mock.patch.object(spawn, "trust_workspace"), \
                 mock.patch.object(spawn, "secrets_for_role", return_value={}), \
-                mock.patch.object(spawn.shutil, "which", return_value="claude"):
+                _fake_claude.patch():
             control.steer(self.tid, "Check evidence", reason="new evidence", alive=mock.Mock(side_effect=[True, False]))
         argv = popen.call_args.args[0]
         self.assertEqual(argv[argv.index("--resume") + 1], "session-example")

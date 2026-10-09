@@ -1,0 +1,192 @@
+{
+  "id": "T-0137",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 5,
+  "title": "review (other model, opus, retry of T-0134): C-O3 fix round 1 on the goal runner (T-0129, executed by claude:sonnet)",
+  "spec": "Retry of review T-0134, which ran out of budget before posting. Budget discipline: review ONLY the T-0129 delta, `git diff abc3f56 6e12f51` in worktree wt/T-0129 (about 390 lines in orchestrator/goals.py, orchestrator/cli.py, tests/test_goals.py, .orchestrator/pool.toml). Do not re-read the whole T-0115 diff or unrelated modules; read surrounding context of goals.py only where the delta needs it. Run `uv run python -m unittest tests.test_goals -q` once. Post the verdict as soon as the nine checks below are done.\n\nFix round for review T-0128's nine items; confirm each resolved: (1) commit --only and refusal on pre-staged changes, test proves the staged file survives; (2) -z/NUL status parsing with rename handling; (3) prechecks and config validation before install() writes; the before_any_write test asserts no .orchestrator/ in the target; the executor added `_preview_cfg` falling back to this repo's default pool.toml when the target has none: confirm it reads no secrets or shell values and that no refusal path writes files; (4) target [secrets.planner] filtered to env:NAME only, test proves `echo pwned` is never executed; (5) planner keys in pool.toml and KeyError \u2192 refusal; (6) the six new precheck/failure tests exist and are meaningful; (7) goals.lock used and the bus import gone; (8) concurrent goal guard via identity(); (9) status/list human-readable unless --json. Also: import boundary (only install.install, spawn.trust_workspace, spawn.resolve_secrets), no new dependency, no shell built from repo content or task fields. Verdict approve or request_changes with file:line comments; keep comments to real defects.",
+  "inputs": [
+    "T-0129"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the nine T-0128 items confirmed resolved or named unresolved with evidence from the delta",
+    "Security check on _preview_cfg and the secrets filter"
+  ],
+  "scope": [
+    "orchestrator/goals.py",
+    "orchestrator/cli.py",
+    "tests/test_goals.py",
+    ".orchestrator/pool.toml"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet",
+    "retry_of": "T-0134"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0137",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/goals.py",
+        "line": 270,
+        "issue": "_preview_cfg calls tomllib.loads unguarded on the target's pool.toml. A target repo with malformed TOML raises TOMLDecodeError out of `orchestrator goal start` as a traceback instead of {launched: false, reason}. Same for the re-read at goals.py:311. Not a regression (T-0115 had the same hole at the single read site) and nothing is written before it, but it is the one refusal path in start() that is not a refusal.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 327,
+        "issue": "Popen(argv, ...) is not wrapped the way the new uv FileNotFoundError guard at line 113 is. If `claude` is not on PATH, start() raises after the scaffold commit has landed and the GOAL task exists, leaving an orphan task and no goals.json record to stop or reconcile. Same failure shape item 6 asked to close for uv.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "line": 288,
+        "issue": "The single-goal guard is check-then-append outside _with_goals_lock: two `goal start` runs racing on the same repo both pass _running_goal and both launch. Low in practice (manual CLI), but the lock the module already owns would make it atomic.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/cli.py",
+        "line": 9,
+        "issue": "_format_goal_line drops the `note` field (the 'process-start verification unavailable on this platform' warning from _status_entry), so on a non-linux/darwin host the human-readable default silently hides that planner_alive is liveness-only.",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_goals.py",
+        "line": 489,
+        "issue": "`goals.subprocess.run = ...` rebinds the attribute on the shared subprocess module, not a goals-local alias, so the patch is process-global for the duration of the test (setUp/_restore do restore it). Harmless here because every fake passes through to the real run, but the isolation is accidental rather than designed.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789737674.431117,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0137",
+      "claimed_at": 1789737674.430721
+    },
+    {
+      "ts": 1789737674.463798,
+      "pid": 62880,
+      "account": "B"
+    },
+    {
+      "ts": 1789737860.291908,
+      "status": "done",
+      "result": {
+        "verdict": "approve",
+        "summary": "Reviewed only the delta abc3f56..6e12f51 (goals.py +153, cli.py +21, tests +255, pool.toml). uv run python -m unittest tests.test_goals -q: 24 tests, OK. Nine T-0128 items: (1) RESOLVED goals.py:105 `git commit --only -m .. -- *paths`; _staged_changes_conflict (goals.py:58) refuses before install so nothing is written; tests/test_goals.py:183 proves the staged file survives and log stays at 1 commit. (2) RESOLVED _parse_status_z (goals.py:65) splits `git status -z --porcelain --ignored` on NUL, consumes the extra source field when either status column is R/C; feeds both the `!!` compare and the add/commit pathspec; tests 441/453 cover a space-path commit and a gitignored space-path refusal. (3) RESOLVED order is now _running_goal -> _precheck_git -> staged check -> account/models validation, then install(); refusals after install carry `install` via refuse() (goals.py:305) and explicit err['install'] on the commit/GOAL-task paths; test 97 asserts `.orchestrator/` does not exist after the unknown-account refusal. _preview_cfg (goals.py:270) only tomllib-parses either the target's pool.toml or, when absent, this repo's default; it resolves no secrets, runs no shell, writes nothing. The post-install re-read skips re-validating account_id/models.planner, but install.py:113 creates pool.toml only if absent (create_if_absent, 'kept' even under --reinstall), so preview and re-read are the same file in every path -- no KeyError reachable. (4) RESOLVED _filter_target_secrets (goals.py:126) keeps only `env:NAME`, drops everything else with a stderr note, and runs before resolve_secrets; spawn.resolve_secrets untouched. test 466 writes `X = \"echo pwned > /tmp/...\"` into the target pool.toml and asserts X absent from the launched env, no run call containing 'pwned', and the marker file never created -- the marker assertion is real end-to-end proof since the spy passes through to the real subprocess.run. (5) RESOLVED pool.toml gained planner in max_turns(400)/max_budget_usd(10.0)/timeout_s(7200); goals.py:314 reads cfg['limits']['max_budget_usd']['planner'] with KeyError -> refuse, no hardcoded 10 left; test 421 asserts all three, test 127 the refusal before commit. (6) RESOLVED four _precheck_git tests (228-256) plus missing-uv (165, FileNotFoundError wrapped at goals.py:113 and no task created) and missing planner.md (148), which is now checked before the commit (goals.py:320). (7) RESOLVED GOALS_LOCK_NAME='goals.lock', `from .bus import LOCK_NAME` gone, test 429 asserts goals.lock is created and bus.lock is not. (8) RESOLVED _running_goal (goals.py:255) + refusal at goals.py:288, test 200 with _alive patched. (9) RESOLVED _format_goal_line in cli.py:9 for both status and list, --json added to list, test 513 asserts the default output is not JSON and --json is. Import boundary intact (install.install, spawn.trust_workspace, spawn.resolve_secrets only); no new dependency; no shell built from repo content or task fields -- goal text still only travels via ORCH_GOAL_TEXT and separate argv. Remaining comments are low-severity and do not block.",
+        "comments": [
+          {
+            "path": "orchestrator/goals.py",
+            "line": 270,
+            "issue": "_preview_cfg calls tomllib.loads unguarded on the target's pool.toml. A target repo with malformed TOML raises TOMLDecodeError out of `orchestrator goal start` as a traceback instead of {launched: false, reason}. Same for the re-read at goals.py:311. Not a regression (T-0115 had the same hole at the single read site) and nothing is written before it, but it is the one refusal path in start() that is not a refusal.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 327,
+            "issue": "Popen(argv, ...) is not wrapped the way the new uv FileNotFoundError guard at line 113 is. If `claude` is not on PATH, start() raises after the scaffold commit has landed and the GOAL task exists, leaving an orphan task and no goals.json record to stop or reconcile. Same failure shape item 6 asked to close for uv.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 288,
+            "issue": "The single-goal guard is check-then-append outside _with_goals_lock: two `goal start` runs racing on the same repo both pass _running_goal and both launch. Low in practice (manual CLI), but the lock the module already owns would make it atomic.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 9,
+            "issue": "_format_goal_line drops the `note` field (the 'process-start verification unavailable on this platform' warning from _status_entry), so on a non-linux/darwin host the human-readable default silently hides that planner_alive is liveness-only. Appending it when set would cost one clause.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_goals.py",
+            "line": 489,
+            "issue": "`goals.subprocess.run = ...` rebinds the attribute on the shared subprocess module, not a goals-local alias, so the patch is process-global for the duration of the test (setUp/_restore do restore it). Harmless here because every fake passes through to the real run, but it makes the isolation of these tests accidental rather than designed.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": "repo"
+      }
+    },
+    {
+      "ts": 1789737868.269196,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/goals.py",
+            "line": 270,
+            "issue": "_preview_cfg calls tomllib.loads unguarded on the target's pool.toml. A target repo with malformed TOML raises TOMLDecodeError out of `orchestrator goal start` as a traceback instead of {launched: false, reason}. Same for the re-read at goals.py:311. Not a regression (T-0115 had the same hole at the single read site) and nothing is written before it, but it is the one refusal path in start() that is not a refusal.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 327,
+            "issue": "Popen(argv, ...) is not wrapped the way the new uv FileNotFoundError guard at line 113 is. If `claude` is not on PATH, start() raises after the scaffold commit has landed and the GOAL task exists, leaving an orphan task and no goals.json record to stop or reconcile. Same failure shape item 6 asked to close for uv.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "line": 288,
+            "issue": "The single-goal guard is check-then-append outside _with_goals_lock: two `goal start` runs racing on the same repo both pass _running_goal and both launch. Low in practice (manual CLI), but the lock the module already owns would make it atomic.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/cli.py",
+            "line": 9,
+            "issue": "_format_goal_line drops the `note` field (the 'process-start verification unavailable on this platform' warning from _status_entry), so on a non-linux/darwin host the human-readable default silently hides that planner_alive is liveness-only.",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_goals.py",
+            "line": 489,
+            "issue": "`goals.subprocess.run = ...` rebinds the attribute on the shared subprocess module, not a goals-local alias, so the patch is process-global for the duration of the test (setUp/_restore do restore it). Harmless here because every fake passes through to the real run, but the isolation is accidental rather than designed.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789737868.272427,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789737894.664792,
+      "pipeline": {
+        "merged_at": 1789737894.664661
+      }
+    }
+  ],
+  "claimed_at": 1789737674.430721,
+  "pid": 62880,
+  "account": "B",
+  "review_verdict": "approve",
+  "pipeline": {
+    "merged_at": 1789737894.664661
+  }
+}

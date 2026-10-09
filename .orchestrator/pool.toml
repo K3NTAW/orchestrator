@@ -1,6 +1,6 @@
 # ponytail: TOML instead of YAML so stdlib tomllib parses it, no pyyaml dependency.
 # window_cap_tokens is a calibration knob: set from observed 5h-window resets (§13).
-window_cap_tokens = 10_000_000  # raised 2026-09-17 by user decision: 2M was hit in 2.2 h with zero real rate limits
+window_cap_tokens = 400_000_000  # 2026-10-06 human: use the subscription until the provider limit; revert: scratchpad pool.orchestrator.bak-20261006.toml
 
 [cache]
 # 2026-09-23: provider cache prices expressed as input-token equivalents for telemetry.
@@ -20,15 +20,15 @@ split_min_samples = 10  # Resolved tasks required for evidence.
 id = "A"
 config_dir = "~/.claude-a"
 role_affinity = ["planner", "scout", "triage", "execute", "review", "spec_review"]
-reserve_for_planner = 0.35
-daily_budget_tokens = 30_000_000  # 2026-09-18: was 6M, below the 10M 5h window; sized to ~3 windows/day
+reserve_for_planner = 0.15  # 2026-10-06 human: use the subscription until the provider limit; revert: scratchpad pool.orchestrator.bak-20261006.toml
+daily_budget_tokens = 2_000_000_000  # 2026-10-06 human: use the subscription until the provider limit; revert: scratchpad pool.orchestrator.bak-20261006.toml
 
 [[claude_accounts]]
 id = "B"
 config_dir = "~/.claude-b"
-role_affinity = ["planner", "scout", "triage", "review", "challenge", "execute", "spec_review"]  # 2026-09-21 18:40 user: planner added so headless launches have headroom while A is over budget
+role_affinity = ["planner", "scout", "triage", "challenge", "execute", "review", "spec_review"]  # 2026-10-06 human: use the subscription until the provider limit; revert: scratchpad pool.orchestrator.bak-20261006.toml
 reserve_for_planner = 0.0
-daily_budget_tokens = 40_000_000  # 2026-09-18: was 8M; see window_cap_tokens note
+daily_budget_tokens = 2_000_000_000  # 2026-10-06 human: use the subscription until the provider limit; revert: scratchpad pool.orchestrator.bak-20261006.toml
 
 [daemon]
 autostart = true   # the orchestrator MCP server starts the pipeline loop in a background thread; ORCH_DAEMON=0 overrides
@@ -43,17 +43,25 @@ flaky_rerun_max = 1  # Default 1; rerun a held gate's named failures at most thi
 flaky_rerun_timeout_s = 600  # Default 600s; bound each held-test rerun so a hung test cannot block a daemon tick.
 
 [gate]
-timeout_s = 2700
+timeout_s = 4500  # 2026-10-08: was 2700; full gates run 40+ min while three repos gate in parallel (T-1714 timed out). Revert: 2700
 # cleanup_cmd = "xcrun simctl shutdown all"
 cleanup_timeout_s = 300
 
+[ship]
+# orchestrator/ship.py: ship a closed goal to target after a green full gate on the merged tree. Default false.
+enabled = true  # 2026-10-09: re-enabled after goal T-1705 (PR 47) merged; T-1706 ignores goals closed before enabled_at. 2026-10-07 it was off after it re-gated and tried to roll back PRs 30/31/32
+target = "main"
+max_regates = 3  # hold "ship target kept moving" after this many re-gates
+# gate_env = { LUNA_GATE_FULL = "1" }  # merged over os.environ for the ship gate; this repo sets nothing
+
 [planner]
-autonomous = true   # 2026-09-21 18:30 user: flipped on for shadow evidence (was false). 2026-09-18: launch a headless Planner to act on scouts_done/held/closable decisions with no
+autonomous = true  # 2026-10-01 18:45 human: on, so decision Planners handle holds and (after T-1443/E12) file the next wave without a session. Live machine setting, never commit. Caveat from 2026-09-23: an interactive Planner WITHOUT the orchestrator MCP host is invisible to the attached-session check and can duplicate work; start sessions with f orch. revert path: autonomous = false
                      # interactive session running -- off by default (interactive Planner is a human's proxy);
                      # turn on only in the executor container, where no human session ever attaches
 # Context at which the interactive Planner should hand over; decision packets are sized separately for each run.
-handover_context_tokens = 150000
+handover_context_tokens = 300000  # 2026-10-02 01:20 human: raised from 150000; a resume that reads plan.md, the bus and the open specs passes 150k in one session. Live setting; revert path: set 150000
 # account = "A"  # pin the Planner (interactive and headless) to one account; unset = least-loaded
+account = "A"  # 2026-10-01 20:55 human: the Planner stays on one account; honoured once goal T-1481 lands (unknown key before that). Live setting; revert path: delete this line
 decision_packet_chars = 6000
 
 [planner.routes]
@@ -70,7 +78,7 @@ investigate_max_complexity = 4
 premium_launches_soft_per_goal = 2
 
 [planner.routing]
-mode = "shadow" # planner_router.load_cfg: off = today's Fable-only behaviour; shadow records Opus evidence; active routes eligible decisions.
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 default_tier = "opus" # planner_router.load_cfg: candidate tier used for ordinary Planner decisions.
 escalation_tier = "fable" # planner_router.load_cfg: premium tier reserved for hard or escalated decisions.
 hard_complexity_min = 9 # planner_router.load_cfg: complexity at or above this value is a hard escalation.
@@ -80,7 +88,7 @@ hard_ambiguous = true # planner_router.load_cfg: ambiguous classifications trigg
 min_samples = 20 # planner_router.load_cfg: observations required per class before evidence can route.
 shadow_sample_rate = 1.0 # planner_router.load_cfg: share of eligible shadow decisions sampled.
 fable_reserve_share = 0.2 # planner_router.load_cfg: minimum Fable headroom retained for escalations.
-jev_mode = "shadow" # planner_router.load_cfg: Jev advice is observed without changing routing.
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 soft_threshold = 0.5 # planner_router.load_cfg: minimum soft escalation score.
 
 # Review policy. Measurement 2026-09-18: every fallback-executed task got two reviews (daemon's sonnet one plus
@@ -159,7 +167,7 @@ max_parallel = 2
 daily_budget_tasks = 40
 quota_group = "chatgpt"
 weight = 1.0
-enabled = true          # confirmed in models_cache.json 2026-09-17
+enabled = false  # 2026-10-03 human: executors switched fully to Opus 5.5; revert: enabled = true
 
 [[executors]]
 id = "luna"
@@ -172,7 +180,7 @@ max_parallel = 2
 daily_budget_tasks = 40
 quota_group = "chatgpt"
 weight = 1.0
-enabled = true          # confirmed in models_cache.json 2026-09-17
+enabled = false  # 2026-10-03 human: executors switched fully to Opus 5.5; revert: enabled = true
 
 [[executors]]
 id = "terra"
@@ -185,7 +193,7 @@ max_parallel = 2
 daily_budget_tasks = 40
 quota_group = "chatgpt"
 weight = 1.0
-enabled = true          # confirmed in models_cache.json 2026-09-17
+enabled = false  # 2026-10-03 human: executors switched fully to Opus 5.5; revert: enabled = true
 
 [[executors]]
 id = "sol"
@@ -198,7 +206,7 @@ max_parallel = 2
 daily_budget_tasks = 40
 quota_group = "chatgpt"
 weight = 1.0
-enabled = true          # confirmed in models_cache.json 2026-09-17
+enabled = false  # 2026-10-03 human: executors switched fully to Opus 5.5; revert: enabled = true
 
 # Disabled placeholders for the 6.x generation: flip enabled = true once the id shows up in
 # ~/.codex/models_cache.json (README "Executors and routing").
@@ -265,20 +273,20 @@ max_parallel = 3
 daily_budget_tasks = 40
 quota_group = "claude"
 weight = 1.0
-enabled = true
+enabled = false  # 2026-10-03 human: executors switched fully to Opus 5.5; revert: enabled = true
 
 [[executors]]
 id = "claude:opus"
 provider = "claude"
 model = "claude-opus-5-5"
 roles = ["execute"]
-complexity_min = 6
+complexity_min = 1
 complexity_max = 10
-max_parallel = 2
-daily_budget_tasks = 20
+max_parallel = 3
+daily_budget_tasks = 400  # 2026-10-06 human: use the subscription until the provider limit; revert: 40
 quota_group = "claude"
 weight = 1.0
-enabled = true  # goal T-1334; revert: enabled = false
+enabled = true  # 2026-10-03 human: Opus 5.5 is the only executor (complexity 1-10); revert: restore pool.toml backup
 
 [limits]
 # Default true; budget reservations prevent same-tick launches from oversubscribing daily/goal limits. Set false
@@ -337,14 +345,14 @@ max_state_chars = 100_000
 gate_mode = "sample"  # E3 gate: "sample" scores a deterministic 10% sample; "log" all; "block" may deny
 sample_rate = 0.1  # Fraction of calls scored in sample mode; keep labels gathered before enabling block
 block_repeats = false  # In block mode, deny unchanged repeated reads only after labelling confirms the rule
-read_suppression = "shadow"  # "active" deterministically denies safe exact repeats after evidence checks
+read_suppression = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 max_suppressions_per_session = 20
 max_false_suppression = 0.02
 
 [jev.routing]
 # Questions: localized_simple, substantial_reasoning, large_context, debugging_reproduction, architectural,
 # elevated_risk, stronger_executor_helps. Hard pool constraints stay authoritative; shadow never changes routing.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 cache_ttl_s = 86400
 cache_max_entries = 500
 # Default 0.25; caps each evidence-backed routing score adjustment.
@@ -354,17 +362,16 @@ evidence_floor_n = 10
 
 [jev.points]
 # Default shadow; log scout-necessity Jev decisions without changing dispatch.
-scout_necessity = "shadow"
+scout_necessity = "active"  # 2026-10-08 human: jev mode shadow -> active; revert: set back to "shadow"
 # Default shadow; log context-escalation Jev decisions without changing dispatch.
-context_escalation = "shadow"
+context_escalation = "active"  # 2026-10-08 human: jev mode shadow -> active; revert: set back to "shadow"
 # Default shadow; log review-escalation Jev decisions without changing dispatch.
-review_escalation = "shadow"
+review_escalation = "active"  # 2026-10-08 human: jev mode shadow -> active; revert: set back to "shadow"
 # Default shadow; log planner-relaunch Jev decisions without changing dispatch.
-planner_relaunch = "shadow"
-
+planner_relaunch = "active"  # 2026-10-08 human: jev mode shadow -> active; revert: set back to "shadow"
 [allocation]
 # Default shadow; record allocation recommendations without applying them.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default 5; samples required before allocation evidence is used.
 min_samples = 5
 # Default 2.0; hourly latency cost used in allocation comparisons.
@@ -376,7 +383,7 @@ non_critical_factor = 0.25
 
 [strategy]
 # Default shadow; record strategy recommendations without applying them.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default 10; samples required before strategy evidence is used.
 min_samples = 10
 
@@ -392,7 +399,7 @@ min_retry_cost_usd = 1.0
 
 [context_router]
 # P23, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
-mode = "shadow" # shadow computes and logs the routed packet without changing what the model sees
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; back to active real 22:00 after a 15-minute shadow: the legacy evidence section is unbounded (a 2.3 MB review packet, argv too long); the routed-findings trim KeyError (T-1280) is worked around by pruning the evidence pool instead. revert: set back to "shadow"
 # 2026-09-23: record cache-adjusted disclosure decisions; revert: set cache_mode = "off".
 cache_mode = "shadow"
 # 2026-09-23: cap legacy/shared evidence while oversized legacy pools age out.
@@ -402,7 +409,7 @@ legacy_evidence_chars = 6000
 # 2026-09-23: measure stable disclosure in shadow; revert: cache_mode = "off".
 cache_mode = "shadow"
 # P24, 2026-09-22: off | shadow | active; revert by setting mode back to "off".
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 
 [instructions]
 # P25, 2026-09-22: conditional modules; safety rules are never conditional; revert by setting mode back to "off".
@@ -414,7 +421,7 @@ min_samples = 20
 
 [handoff]
 # P16/T-0858: shadow measures only; active may select the lowest sufficient expected route cost.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 min_gain = 0.15
 max_active_share = 0.5
 
@@ -442,7 +449,7 @@ TYPESAFE_API_KEY = "source ~/.config/f/f.sh && f tok get typesafe --reveal"
 [scheduler]
 # shadow keeps first-come dispatch and only logs proposed waves (default).
 # active dispatches the selected wave; off disables wave selection and logging.
-mode = "shadow"
+mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default empirical; estimate execution duration from completed-task evidence.
 duration_mode = "empirical"
 # Default 5; samples required before an empirical duration estimate is used.
@@ -462,7 +469,7 @@ merge_queue_saturated = 5
 # Default 2; merge conflicts at which merge pressure is saturated.
 merge_conflicts_saturated = 2
 # Default shadow; record Jev scheduler recommendations without applying them.
-jev_mode = "shadow"
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 # Default 8; candidate task pairs considered by the Jev scheduler.
 jev_max_pairs = 8
 # Default 3600 seconds; Jev scheduler cache lifetime.
@@ -478,8 +485,8 @@ stale_rebase = false
 # 2026-09-23: measure stable disclosure in shadow; revert: cache_mode = "off".
 cache_mode = "shadow"
 # 2026-09-23: shadow records minimal routing without changing exposure; revert: off.
-mode = "shadow"
-jev_mode = "shadow" # Jev classifies only ambiguous weak matches; revert: off.
+mode = "active"  # 2026-09-24 01:40: back to active after PR 25 merged the evidence feedback-loop fix (T-1286) and the trim fix (T-1280); revert: set back to "shadow"
+jev_mode = "active"  # 2026-09-23 11:20 user: all shadow modes flipped to active; revert: set back to "shadow"
 jev_max_batch = 8
 max_selected = 3
 max_recovery = 0.10

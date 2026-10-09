@@ -1,0 +1,194 @@
+{
+  "id": "T-0143",
+  "parent": "T-0073",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review (round 2): C-O4 v2 `orchestrator serve` (T-0142)",
+  "spec": "Spec review of execute task T-0142 (C-O4 v2, supersedes T-0116). Round 1 (T-0140) raised five risks: requester field lives outside the scoped files; 409 detected by string-matching start()'s reason; async handlers would block the event loop on clone/subprocess; unmapped launched:false reasons; no account field. Check that the round-2 spec resolves each (goals.py now in scope with an additive requester param; 409 via goals.list_goals precheck; plain def handlers; 422 for every other refusal; optional account body field). Then review the spec as usual: is every acceptance criterion testable with the named tests, is the scope sufficient (six files), does anything in the spec contradict goals.py as merged on goal/T-0073 (read orchestrator/goals.py: start(), status(), list_goals(), stop() signatures and return shapes), is any dependency being added implicitly (starlette and uvicorn come with the mcp dependency tree; confirm they import in this venv). Verdict approve or request_changes with concrete risks.",
+  "inputs": [
+    "T-0142"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes",
+    "Each of the five round-1 risks is marked resolved or still open with evidence",
+    "Any contradiction with the merged goals.py API is named with file:line"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "orchestrator/cli.py",
+    "orchestrator/goals.py",
+    "tests/test_serve.py",
+    "tests/test_goals.py",
+    ".orchestrator/repos.toml.example"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 15,
+    "timeout_s": 900,
+    "spec_review_round": 2
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0143",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "POST /goals clones on first use (path missing + git_url set) with no lock around the check-then-clone sequence. Route handlers run in starlette's threadpool specifically so concurrent requests aren't serialized, so two concurrent POST /goals for the same never-before-used slug can both observe 'path missing' and both exec `git clone` into <ORCH_WORK>/<slug> at once, corrupting the checkout or spuriously 502ing one of them. goals.py already has a precedent for this (GOALS_LOCK_NAME, _with_goals_lock) that serve.py should mirror per-slug before cloning.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "Spec says tests patch 'goals.start/list_goals/status/stop' directly, but doesn't say serve.py must do `from . import goals` and call `goals.start(...)` through the module attribute. If it instead does `from .goals import start, list_goals, status, stop` (binding names at import time), `unittest.mock.patch` on `orchestrator.goals.start` etc. in test_serve.py will silently not intercept the calls serve.py makes, and the acceptance criterion 'no real git' / no real Popen spawn will fail in a confusing way.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "GET /goals with no repo filter aggregates goals.list_goals(path) across every repo in repos.toml, but each entry's 'repo' field (from goals.json) is the absolute filesystem path on the executor box, not the repos.toml slug the kgpt caller knows. There's no way for the caller to map a multi-repo listing entry back to the slug it POSTed to /goals with unless it does prefix-matching against paths it was never given. Not covered by any named test, so this ships un-caught.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "issue": "requester from the POST /goals body is passed straight into goals.start(..., requester=body.get('requester')) with no type check, but goals.py's contract for the new field is explicitly 'string or None'. Since kgpt-forwarded input is untrusted, a non-string requester (int/list/dict) gets written into goals.json and returned from status()/list_goals() unnormalized.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add a per-slug lock (reuse the goals.py GOALS_LOCK_NAME pattern, or a simple flock in ORCH_WORK) around the 'path missing -> git clone' step so two concurrent first-time goal-starts for the same slug can't race the clone.",
+      "State explicitly that serve.py must `from . import goals` and call `goals.start/list_goals/status/stop` via the module attribute (not `from .goals import start`), so the described unittest.mock.patch targets actually intercept the calls.",
+      "For the no-filter GET /goals aggregation, include the repos.toml slug alongside each entry (or key the response by slug) so a caller can correlate results without knowing the executor's absolute filesystem layout.",
+      "Validate requester is a str or None in the POST /goals handler (400 otherwise, or coerce to str) to match goals.py's stated contract for the field."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789739426.5296798,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0143",
+      "claimed_at": 1789739426.5292659
+    },
+    {
+      "ts": 1789739426.541298,
+      "pid": 3590,
+      "account": "B"
+    },
+    {
+      "ts": 1789739588.5155258,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "POST /goals clones on first use (path missing + git_url set) with no lock around the check-then-clone sequence. Route handlers run in starlette's threadpool specifically so concurrent requests aren't serialized, so two concurrent POST /goals for the same never-before-used slug can both observe 'path missing' and both exec `git clone` into <ORCH_WORK>/<slug> at once, corrupting the checkout or spuriously 502ing one of them. goals.py already has a precedent for this (GOALS_LOCK_NAME, _with_goals_lock) that serve.py should mirror per-slug before cloning.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "Spec says tests patch 'goals.start/list_goals/status/stop' directly, but doesn't say serve.py must do `from . import goals` and call `goals.start(...)` through the module attribute. If it instead does `from .goals import start, list_goals, status, stop` (binding names at import time), `unittest.mock.patch` on `orchestrator.goals.start` etc. in test_serve.py will silently not intercept the calls serve.py makes, and the acceptance criterion 'no real git' / no real Popen spawn will fail in a confusing way.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "GET /goals with no repo filter aggregates goals.list_goals(path) across every repo in repos.toml, but each entry's 'repo' field (from goals.json) is the absolute filesystem path on the executor box, not the repos.toml slug the kgpt caller knows. There's no way for the caller to map a multi-repo listing entry back to the slug it POSTed to /goals with unless it does prefix-matching against paths it was never given. Not covered by any named test, so this ships un-caught.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "issue": "requester from the POST /goals body is passed straight into goals.start(..., requester=body.get('requester')) with no type check, but goals.py's contract for the new field is explicitly 'string or None'. Since kgpt-forwarded input is untrusted, a non-string requester (int/list/dict) gets written into goals.json and returned from status()/list_goals() unnormalized.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add a per-slug lock (reuse the goals.py GOALS_LOCK_NAME pattern, or a simple flock in ORCH_WORK) around the 'path missing -> git clone' step so two concurrent first-time goal-starts for the same slug can't race the clone.",
+          "State explicitly that serve.py must `from . import goals` and call `goals.start/list_goals/status/stop` via the module attribute (not `from .goals import start`), so the described unittest.mock.patch targets actually intercept the calls.",
+          "For the no-filter GET /goals aggregation, include the repos.toml slug alongside each entry (or key the response by slug) so a caller can correlate results without knowing the executor's absolute filesystem layout.",
+          "Validate requester is a str or None in the POST /goals handler (400 otherwise, or coerce to str) to match goals.py's stated contract for the field."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789739588.517694,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "POST /goals clones on first use (path missing + git_url set) with no lock around the check-then-clone sequence. Route handlers run in starlette's threadpool specifically so concurrent requests aren't serialized, so two concurrent POST /goals for the same never-before-used slug can both observe 'path missing' and both exec `git clone` into <ORCH_WORK>/<slug> at once, corrupting the checkout or spuriously 502ing one of them. goals.py already has a precedent for this (GOALS_LOCK_NAME, _with_goals_lock) that serve.py should mirror per-slug before cloning.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "Spec says tests patch 'goals.start/list_goals/status/stop' directly, but doesn't say serve.py must do `from . import goals` and call `goals.start(...)` through the module attribute. If it instead does `from .goals import start, list_goals, status, stop` (binding names at import time), `unittest.mock.patch` on `orchestrator.goals.start` etc. in test_serve.py will silently not intercept the calls serve.py makes, and the acceptance criterion 'no real git' / no real Popen spawn will fail in a confusing way.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "GET /goals with no repo filter aggregates goals.list_goals(path) across every repo in repos.toml, but each entry's 'repo' field (from goals.json) is the absolute filesystem path on the executor box, not the repos.toml slug the kgpt caller knows. There's no way for the caller to map a multi-repo listing entry back to the slug it POSTed to /goals with unless it does prefix-matching against paths it was never given. Not covered by any named test, so this ships un-caught.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/serve.py",
+          "issue": "requester from the POST /goals body is passed straight into goals.start(..., requester=body.get('requester')) with no type check, but goals.py's contract for the new field is explicitly 'string or None'. Since kgpt-forwarded input is untrusted, a non-string requester (int/list/dict) gets written into goals.json and returned from status()/list_goals() unnormalized.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789739426.5292659,
+  "pid": 3590,
+  "account": "B",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "POST /goals clones on first use (path missing + git_url set) with no lock around the check-then-clone sequence. Route handlers run in starlette's threadpool specifically so concurrent requests aren't serialized, so two concurrent POST /goals for the same never-before-used slug can both observe 'path missing' and both exec `git clone` into <ORCH_WORK>/<slug> at once, corrupting the checkout or spuriously 502ing one of them. goals.py already has a precedent for this (GOALS_LOCK_NAME, _with_goals_lock) that serve.py should mirror per-slug before cloning.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "Spec says tests patch 'goals.start/list_goals/status/stop' directly, but doesn't say serve.py must do `from . import goals` and call `goals.start(...)` through the module attribute. If it instead does `from .goals import start, list_goals, status, stop` (binding names at import time), `unittest.mock.patch` on `orchestrator.goals.start` etc. in test_serve.py will silently not intercept the calls serve.py makes, and the acceptance criterion 'no real git' / no real Popen spawn will fail in a confusing way.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "GET /goals with no repo filter aggregates goals.list_goals(path) across every repo in repos.toml, but each entry's 'repo' field (from goals.json) is the absolute filesystem path on the executor box, not the repos.toml slug the kgpt caller knows. There's no way for the caller to map a multi-repo listing entry back to the slug it POSTed to /goals with unless it does prefix-matching against paths it was never given. Not covered by any named test, so this ships un-caught.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/serve.py",
+      "issue": "requester from the POST /goals body is passed straight into goals.start(..., requester=body.get('requester')) with no type check, but goals.py's contract for the new field is explicitly 'string or None'. Since kgpt-forwarded input is untrusted, a non-string requester (int/list/dict) gets written into goals.json and returned from status()/list_goals() unnormalized.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

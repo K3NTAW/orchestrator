@@ -1,0 +1,121 @@
+{
+  "id": "T-0026",
+  "parent": "T-0005",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "Review B2 (T-0017): executor routing via pick_executor, per-executor -m, quota-group cooldowns, run-log fields",
+  "spec": "Adversarial review of the T-0017 diff against its acceptance criteria (skill adversarial-review). Focus: (1) executor.start picks by the task's real complexity and passes exactly that executor's model to `-m`; reply() reuses the recorded executor and never re-picks; (2) a usage-limit error cools the executor's whole quota_group and codex_available(complexity) turns False for all of them; running/day_tasks increments and decrements are balanced on every path including timeout and exceptions (finally blocks); (3) log_run entries from executor.py and spawn.py carry executor and complexity, and the token key is normalized to cache_read_input_tokens without losing the Codex value; (4) legacy pool.codex fields still keep status() meaningful, or are removed consistently with pool.py's bridge; (5) concurrent Pool() instances: does any new code make the last-writer-wins state clobbering worse; (6) tests assert behaviour, not implementation. Return ONLY the review JSON {\"verdict\":\"approve|request_changes\",\"comments\":[{\"path\":\"\",\"line\":0,\"issue\":\"\",\"severity\":\"low|med|high\"}]}; under 3,000 chars.",
+  "inputs": [
+    "T-0017"
+  ],
+  "acceptance": [
+    "verdict with line-anchored comments",
+    "each high-severity comment names a concrete failing input",
+    "result under 3,000 chars"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/bus.py",
+    "tests/test_orchestrator.py"
+  ],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0026",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/executor.py",
+        "line": 94,
+        "issue": "pool.pick_executor(...) does not exist. orchestrator/pool.py has no pick_executor, executors, cooldown_executor, Executor class, scores, or _legacy_executor \u2014 none were added by this diff and none exist anywhere in the repo (grep confirms zero hits) or in .orchestrator/pool.toml (no [[executors]] table). Reproduced directly: creating an execute task and calling executor.start(task_id, prompt) raises AttributeError: 'Pool' object has no attribute 'pick_executor'. Every new test that exercises this path fails the same way (Executors test class, test_start_routes_through_pick_executor, test_usage_limit_cools_the_whole_quota_group, test_run_log_carries_executor_and_complexity) \u2014 verified by applying the diff and running them.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/executor.py",
+        "line": 129,
+        "issue": "reply() has the same missing dependency: pool.executors.get(...) and pool._legacy_executor() are undefined, so codex_reply() on any task raises AttributeError before it can check cooldown or max_parallel \u2014 e.g. reply('T-1', 'fix x') on a task with a codex_thread set crashes instead of holding.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/pool.py",
+        "line": 115,
+        "issue": "Pool.status() still only returns {accounts, codex} (no update in this diff). tests.Cli.test_status expects an 'executors' key with 7 rows / 4 enabled, so cli.main() output fails that assertion \u2014 the diff's own test suite can't pass without a pool.py change that isn't part of this scoped diff.",
+        "severity": "high"
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "line": 1,
+        "issue": "No [[executors]] table was added. test_missing_table_synthesizes_legacy_row does `{k: v for k, v in P.config().items() if k != 'executors'}` expecting to strip a real 'executors' key to exercise the legacy-row fallback; since the key never existed, the filter is a no-op and the test doesn't exercise the intended synthesize-legacy-row behavior at all.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789658889.10773,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0026",
+      "claimed_at": 1789658889.107528
+    },
+    {
+      "ts": 1789658889.1365702,
+      "pid": 39589,
+      "account": "B"
+    },
+    {
+      "ts": 1789659097.84924,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/executor.py",
+            "line": 94,
+            "issue": "pool.pick_executor(...) does not exist. orchestrator/pool.py has no pick_executor, executors, cooldown_executor, Executor class, scores, or _legacy_executor \u2014 none were added by this diff and none exist anywhere in the repo (grep confirms zero hits) or in .orchestrator/pool.toml (no [[executors]] table). Reproduced directly: creating an execute task and calling executor.start(task_id, prompt) raises AttributeError: 'Pool' object has no attribute 'pick_executor'. Every new test that exercises this path fails the same way (Executors test class, test_start_routes_through_pick_executor, test_usage_limit_cools_the_whole_quota_group, test_run_log_carries_executor_and_complexity) \u2014 verified by applying the diff and running them.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/executor.py",
+            "line": 129,
+            "issue": "reply() has the same missing dependency: pool.executors.get(...) and pool._legacy_executor() are undefined, so codex_reply() on any task raises AttributeError before it can check cooldown or max_parallel \u2014 e.g. reply('T-1', 'fix x') on a task with a codex_thread set crashes instead of holding.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/pool.py",
+            "line": 115,
+            "issue": "Pool.status() still only returns {accounts, codex} (no update in this diff). tests.Cli.test_status expects an 'executors' key with 7 rows / 4 enabled, so cli.main() output fails that assertion \u2014 the diff's own test suite can't pass without a pool.py change that isn't part of this scoped diff.",
+            "severity": "high"
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "line": 1,
+            "issue": "No [[executors]] table was added. test_missing_table_synthesizes_legacy_row does `{k: v for k, v in P.config().items() if k != 'executors'}` expecting to strip a real 'executors' key to exercise the legacy-row fallback; since the key never existed, the filter is a no-op and the test doesn't exercise the intended synthesize-legacy-row behavior at all.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789658889.107528,
+  "pid": 39589,
+  "account": "B"
+}

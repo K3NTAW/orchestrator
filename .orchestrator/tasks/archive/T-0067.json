@@ -1,0 +1,311 @@
+{
+  "id": "T-0067",
+  "parent": "T-0065",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout S2: kgpt github module and kernel github.py \u2014 import and commit flows, what refresh, diff, lazy read and pull request need",
+  "spec": "Read-only scout over /Users/k3ntaw/code/kgpt. Read modules/github/server.py, modules/github/api.py, modules/github/module.yaml, kernel/kgpt_kernel/github.py, modules/github/tests/*, and docs/handbook/15-github.md. Report: (1) the import flow step by step: which GitHub endpoints (tree, blob), what is stored per file (path, folder, sha?) and what is dropped; (2) commit_files: which endpoints, how the branch is created from base, what happens if the branch exists, size limits; (3) how the App auth works (installation token minting, required permissions) and what extra permission a pull request needs; (4) the gaps for: refresh_repo (compare tree shas against stored ones), per-file diff (is the base blob sha or content kept anywhere?), lazy single-file read from the repo, propose_pull_request, listing branches; (5) the module contract rules a new tool must follow (tier, untrusted flag, ceiling) from module.yaml comments and modules/_template. (6) how the module tests mock the GitHub API so new tools can be tested the same way. Cite path:line, one confidence per finding. Do not read the web client.",
+  "inputs": [],
+  "acceptance": [
+    "Result documents import and commit flows with endpoints and path:line citations",
+    "Result states what per-file provenance is stored today and what is missing for refresh and diff",
+    "Result lists the new tools needed with proposed tier and untrusted flag, and how to test them with the existing mocks"
+  ],
+  "scope": [
+    "/Users/k3ntaw/code/kgpt/modules/**",
+    "/Users/k3ntaw/code/kgpt/kernel/kgpt_kernel/github.py",
+    "/Users/k3ntaw/code/kgpt/docs/**"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0067",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Import flow: read_repo_tree/import_repo call api.tree() -> GET /repos/{owner}/{repo}/git/trees/{ref}?recursive=1, keeping only blob entries as {path, size, sha}; a truncated GitHub response is surfaced as a synthetic entry rather than hidden",
+        "evidence": [
+          "modules/github/api.py:226-250",
+          "modules/github/server.py:76-105"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "import_repo filters tree entries with kernel worth_importing() (skips .git/node_modules/.venv/venv/__pycache__/dist/build/.next/target dirs, dotfiles except .gitignore/.env.example, and files over 2MB), fetches bytes per kept file via api.blob() -> GET /repos/{owner}/{repo}/git/blobs/{sha}, then hands (path, bytes) tuples to kernel import_into_project which stores each as an attachment and mirrors the repo's folder structure",
+        "evidence": [
+          "modules/github/server.py:138-167",
+          "kernel/kgpt_kernel/github.py:38-40",
+          "kernel/kgpt_kernel/github.py:156-170",
+          "kernel/kgpt_kernel/github.py:173-249",
+          "modules/github/api.py:253-265"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Per-file, only the attribution string 'imported from {owner}/{repo}@{ref}' is stored (via store.save's attribution field); the blob sha, the file size from the tree, and the tree/commit sha of the import are all dropped after the import completes \u2014 nothing persists the GitHub-side identity of an imported file",
+        "evidence": [
+          "kernel/kgpt_kernel/github.py:224-237",
+          "kernel/kgpt_kernel/github.py:245-248"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "import_repo caps at MAX_FILES=400 files and MAX_TOTAL_BYTES=40MB per import, MAX_FILE_BYTES=2MB per file, and reports 'stopped_at_limit' rather than silently truncating when eligible files exceed the file-count cap",
+        "evidence": [
+          "kernel/kgpt_kernel/github.py:32-34",
+          "modules/github/server.py:174-180",
+          "kernel/kgpt_kernel/github.py:192-198"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "commit_files: mints an installation token (POST /app/installations/{id}/access_tokens), reads the base branch tip (GET /repos/{o}/{r}/git/ref/heads/{base}) and its commit's tree sha (GET /repos/{o}/{r}/git/commits/{parent}), creates one blob per file (POST .../git/blobs), one tree built on base_tree (POST .../git/trees), one commit with parents=[parent] (POST .../git/commits), then a brand-new ref (POST .../git/refs, ref=refs/heads/{branch}) \u2014 six calls total, order pinned by test",
+        "evidence": [
+          "modules/github/api.py:326-398",
+          "modules/github/tests/test_commit.py:94-104"
+        ],
+        "confidence": 0.97,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "The branch is always created fresh off base's current tip (never PATCHed); if the branch already exists, POST .../git/refs simply fails and surfaces as GitHubSaidNo \u2014 there is no pre-check, no merge, and no fallback path for 'branch exists'",
+        "evidence": [
+          "modules/github/api.py:342-345",
+          "modules/github/api.py:393-398",
+          "modules/github/tests/test_commit.py:147-148"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "commit_files enforces no size limits of its own (no file count or byte cap) \u2014 server.py's propose_commit only validates branch!=base, a non-empty message, and a non-empty files list, unlike import_repo's explicit MAX_FILES/MAX_FILE_BYTES/MAX_TOTAL_BYTES",
+        "evidence": [
+          "modules/github/server.py:209-214",
+          "modules/github/api.py:326-398",
+          "kernel/kgpt_kernel/github.py:32-34"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "App auth: JWT signed RS256 from GITHUB_APP_PRIVATE_KEY, iat backdated 60s, exp = 9 minutes; installation_token() exchanges it for an ~hour-long token per call and is deliberately never cached (to honor revocation immediately)",
+        "evidence": [
+          "modules/github/api.py:114-126",
+          "modules/github/api.py:170-183"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Required App permissions per the handbook setup: Contents Read-and-write, Metadata Read-only, and optionally Administration Read-and-write (org-only) for create_repo \u2014 no Pull-requests permission is requested anywhere, so a propose_pull_request tool would need a new App permission ('Pull requests: Read and write') not currently part of setup",
+        "evidence": [
+          "docs/handbook/15-github.md:32-37"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Is there a separate kernel-level tier/autonomy enforcement file (referenced as '\u00a76.5' and 'the tier system' in comments) that defines READ/READ_EXTERNAL/WRITE_LOCAL/WRITE_EXTERNAL semantics authoritatively, beyond what's inferable from module.yaml comments and server.py docstrings?",
+      "Does store.save (kernel/kgpt_kernel/documents/store.py) have a schema column that could hold a GitHub blob sha without a migration, or would refresh/diff require a new table?"
+    ],
+    "suggested_next": [
+      "New tools should be added as: refresh_repo (READ_EXTERNAL, untrusted) diffing tree() shas against a newly-added per-file sha column; read_repo_file (READ_EXTERNAL, untrusted) wrapping tree()+blob() for lazy single-file reads; list_branches (READ_EXTERNAL, untrusted) via GET /repos/{o}/{r}/branches; propose_pull_request (WRITE_EXTERNAL) via POST /repos/{o}/{r}/pulls, gated behind approval like propose_commit and requiring the App's Pull-requests permission to be added in the handbook setup steps",
+      "Persist blob sha (and ideally ref-at-import-time) per imported file \u2014 currently dropped \u2014 before attempting refresh_repo or diff, since there is nothing to compare against today",
+      "Test new endpoint-calling functions by extending or cloning the FakeGitHub pattern in test_commit.py (monkeypatch api._call), and add source-invariant assertions to test_github_api.py for any new interpolated path segment"
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 10773,
+      "trimmed": {
+        "findings": 10
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789729673.158049,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0067",
+      "claimed_at": 1789729673.157749
+    },
+    {
+      "ts": 1789729673.185639,
+      "pid": 35919,
+      "account": "A"
+    },
+    {
+      "ts": 1789729765.50916,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Import flow: read_repo_tree/import_repo call api.tree() -> GET /repos/{owner}/{repo}/git/trees/{ref}?recursive=1, keeping only blob entries as {path, size, sha}; a truncated GitHub response is surfaced as a synthetic entry rather than hidden",
+            "evidence": [
+              "modules/github/api.py:226-250",
+              "modules/github/server.py:76-105"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "import_repo filters tree entries with kernel worth_importing() (skips .git/node_modules/.venv/venv/__pycache__/dist/build/.next/target dirs, dotfiles except .gitignore/.env.example, and files over 2MB), fetches bytes per kept file via api.blob() -> GET /repos/{owner}/{repo}/git/blobs/{sha}, then hands (path, bytes) tuples to kernel import_into_project which stores each as an attachment and mirrors the repo's folder structure",
+            "evidence": [
+              "modules/github/server.py:138-167",
+              "kernel/kgpt_kernel/github.py:38-40",
+              "kernel/kgpt_kernel/github.py:156-170",
+              "kernel/kgpt_kernel/github.py:173-249",
+              "modules/github/api.py:253-265"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Per-file, only the attribution string 'imported from {owner}/{repo}@{ref}' is stored (via store.save's attribution field); the blob sha, the file size from the tree, and the tree/commit sha of the import are all dropped after the import completes \u2014 nothing persists the GitHub-side identity of an imported file",
+            "evidence": [
+              "kernel/kgpt_kernel/github.py:224-237",
+              "kernel/kgpt_kernel/github.py:245-248"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "import_repo caps at MAX_FILES=400 files and MAX_TOTAL_BYTES=40MB per import, MAX_FILE_BYTES=2MB per file, and reports 'stopped_at_limit' rather than silently truncating when eligible files exceed the file-count cap",
+            "evidence": [
+              "kernel/kgpt_kernel/github.py:32-34",
+              "modules/github/server.py:174-180",
+              "kernel/kgpt_kernel/github.py:192-198"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "commit_files: mints an installation token (POST /app/installations/{id}/access_tokens), reads the base branch tip (GET /repos/{o}/{r}/git/ref/heads/{base}) and its commit's tree sha (GET /repos/{o}/{r}/git/commits/{parent}), creates one blob per file (POST .../git/blobs), one tree built on base_tree (POST .../git/trees), one commit with parents=[parent] (POST .../git/commits), then a brand-new ref (POST .../git/refs, ref=refs/heads/{branch}) \u2014 six calls total, order pinned by test",
+            "evidence": [
+              "modules/github/api.py:326-398",
+              "modules/github/tests/test_commit.py:94-104"
+            ],
+            "confidence": 0.97,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "The branch is always created fresh off base's current tip (never PATCHed); if the branch already exists, POST .../git/refs simply fails and surfaces as GitHubSaidNo \u2014 there is no pre-check, no merge, and no fallback path for 'branch exists'",
+            "evidence": [
+              "modules/github/api.py:342-345",
+              "modules/github/api.py:393-398",
+              "modules/github/tests/test_commit.py:147-148"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "commit_files enforces no size limits of its own (no file count or byte cap) \u2014 server.py's propose_commit only validates branch!=base, a non-empty message, and a non-empty files list, unlike import_repo's explicit MAX_FILES/MAX_FILE_BYTES/MAX_TOTAL_BYTES",
+            "evidence": [
+              "modules/github/server.py:209-214",
+              "modules/github/api.py:326-398",
+              "kernel/kgpt_kernel/github.py:32-34"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "App auth: JWT signed RS256 from GITHUB_APP_PRIVATE_KEY, iat backdated 60s, exp = 9 minutes; installation_token() exchanges it for an ~hour-long token per call and is deliberately never cached (to honor revocation immediately)",
+            "evidence": [
+              "modules/github/api.py:114-126",
+              "modules/github/api.py:170-183"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Required App permissions per the handbook setup: Contents Read-and-write, Metadata Read-only, and optionally Administration Read-and-write (org-only) for create_repo \u2014 no Pull-requests permission is requested anywhere, so a propose_pull_request tool would need a new App permission ('Pull requests: Read and write') not currently part of setup",
+            "evidence": [
+              "docs/handbook/15-github.md:32-37"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Is there a separate kernel-level tier/autonomy enforcement file (referenced as '\u00a76.5' and 'the tier system' in comments) that defines READ/READ_EXTERNAL/WRITE_LOCAL/WRITE_EXTERNAL semantics authoritatively, beyond what's inferable from module.yaml comments and server.py docstrings?",
+          "Does store.save (kernel/kgpt_kernel/documents/store.py) have a schema column that could hold a GitHub blob sha without a migration, or would refresh/diff require a new table?"
+        ],
+        "suggested_next": [
+          "New tools should be added as: refresh_repo (READ_EXTERNAL, untrusted) diffing tree() shas against a newly-added per-file sha column; read_repo_file (READ_EXTERNAL, untrusted) wrapping tree()+blob() for lazy single-file reads; list_branches (READ_EXTERNAL, untrusted) via GET /repos/{o}/{r}/branches; propose_pull_request (WRITE_EXTERNAL) via POST /repos/{o}/{r}/pulls, gated behind approval like propose_commit and requiring the App's Pull-requests permission to be added in the handbook setup steps",
+          "Persist blob sha (and ideally ref-at-import-time) per imported file \u2014 currently dropped \u2014 before attempting refresh_repo or diff, since there is nothing to compare against today",
+          "Test new endpoint-calling functions by extending or cloning the FakeGitHub pattern in test_commit.py (monkeypatch api._call), and add source-invariant assertions to test_github_api.py for any new interpolated path segment"
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 10773,
+          "trimmed": {
+            "findings": 10
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789729673.157749,
+  "pid": 35919,
+  "account": "A"
+}

@@ -1,0 +1,176 @@
+{
+  "id": "T-0678",
+  "created_at": 1789998047.516333,
+  "parent": "T-0674",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "Q3: orchestrator/planner_packet.py \u2014 compact, delta-oriented Planner decision packets and the Opus\u2192Fable escalation packet, size-measured (P4, P10)",
+  "spec": "Why: planner_runs.decision_packet (lines 43-107) and grouped_packet rebuild a per-point packet with the full spawn packet inventory, 300-char scout summaries, no memory, no changes-since-last-decision and no required-output section; the brief (P4) wants a delta-oriented packet with only what the decision needs, invalidated on state change, and (P10) a compact escalation packet so Fable solves the unresolved part instead of redoing Opus's work.\nWhat: new pure module orchestrator/planner_packet.py. Never reads the bus or files itself: the caller passes data. Untrusted text goes inside fences labelled data with backticks elided (reuse planner_runs._fenced style: copy the 6-line helper, do not import planner_runs).\n- build(sections, *, goal, previous=None, changes=None, scout_findings=None, memory_hits=None, cap_chars=6000) -> {\"text\", \"chars\", \"est_tokens\" (chars // 4), \"hash\" (sha256[:12]), \"sections\": [names included], \"truncated\": [names cut], \"delta\": bool}. sections = list of {\"point\", \"ctx\", \"route\" (decision.Route or dict with name/reason/evidence/tier), \"classification\" (planner_taxonomy dict), \"task\" (bus dict or None), \"reviews\" (list of {path, line, issue}), \"failures\" (str or None), \"depends_on_statuses\" ([{id, status}])}. Section order and rules: 1 Decision header (per section: decision_type, expected output: initial_goal_plan/scout_results -> 'write plan.md and atomic specs', fix_strategy/held_task -> 'write one fix-round spec with depends_on=[held]', architectural_replan -> 'respec or split; state why', closable_goal -> 'open PR goal/<id> -> main or say why not', ambiguous_requirement -> 'state the ambiguity under Needs the human', retrospective -> 'record.sh add', other -> 'decide'); 2 Goal (id, title, complexity, spec first 600 chars); 3 Changes since previous decision: when previous is None the line 'first Planner decision for this goal'; else changes (list of {\"task\", \"field\", \"from\", \"to\", \"ts\"} supplied by caller, max 20 lines) and previous.state_version; delta True iff previous given; 4 Relevant task state per section (title, status, hold_reason, failures capped 1500, review comments max 10, depends_on statuses); 5 Scout findings: only when a section is scout_results/initial_goal_plan, list of structured findings {claim, path, confidence} max 10 lines (caller normalises via scout_evidence.normalize_findings); 6 Memory: titles only, max 10, each 200 chars; 7 Unresolved alternatives: route.evidence lines plus the option sets (copy planner_runs._SCOUTS_DONE_OPTIONS/_NEXT_ACTION_OPTIONS names as constants here); 8 Required output (repeat of header expectations plus 'Do not restate this packet'). Excluded by construction: event logs, unrelated tasks, transcripts, previous prompts.\n- Truncation: header, Goal and Required output are never truncated; when over cap, cut sections in this order until it fits: Memory, Scout findings, Unresolved alternatives, Changes, Relevant task state (failures first). Record cut names in truncated.\n- escalation_packet(*, goal, original_sections, opus_decision, unresolved, conflicting_evidence=None, scout_findings=None, memory_hits=None, reason, cap_chars=6000) -> same shape; opus_decision is a structured dict {\"proposed_action\", \"summary\" (cap 800), \"tasks_proposed\" ([{\"title\", \"scope\"}] cap 10), \"confidence\", \"needs_fable\", \"unresolved\"} \u2014 the packet includes it under 'Opus proposed decision (data)' and the header 'Escalation reason: <reason>. Solve only the unresolved items.' Never includes raw transcripts; any key not in that whitelist is dropped.\n- invalidated(previous_state_version, current_state_version) -> bool (differ or either None).\n- meta(text) -> {\"chars\", \"est_tokens\", \"hash\"}.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_packet.py::test_first_decision_has_no_delta_and_all_sections \u2014 one scout_results section with findings and memory hits produces sections in the documented order, delta False and the text 'first Planner decision for this goal'",
+    "tests/test_planner_packet.py::test_delta_lists_changes_since_previous \u2014 previous record and 3 changes give delta True, the 3 change lines and the previous state_version; a 40-entry change list is cut to 20 lines",
+    "tests/test_planner_packet.py::test_truncation_order_and_protected_sections \u2014 cap 1200 with long failures drops Memory first, then Scout findings, and never cuts the header or Required output; truncated names match",
+    "tests/test_planner_packet.py::test_untrusted_text_is_fenced_and_backticks_elided \u2014 a hold_reason containing ``` and 'ignore previous instructions' appears inside a data fence with backticks elided",
+    "tests/test_planner_packet.py::test_escalation_packet_whitelists_opus_decision \u2014 an opus_decision carrying a 'transcript' key and a 3000-char summary yields a packet without the transcript, summary capped at 800, the escalation reason in the header and invalidated() True for differing versions"
+  ],
+  "scope": [
+    "orchestrator/planner_packet.py",
+    "tests/test_planner_packet.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/planner_runs.py",
+      "orchestrator/spawn.py",
+      "orchestrator/scout_evidence.py",
+      "orchestrator/decision.py",
+      "tests/test_planner_runs.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "build(sections, *, goal, previous=None, changes=None, scout_findings=None, memory_hits=None, cap_chars=6000) -> {text, chars, est_tokens, hash, sections, truncated, delta}; sections items {point, ctx, route, classification, task, reviews, failures, depends_on_statuses}; escalation_packet(*, goal, original_sections, opus_decision, unresolved, conflicting_evidence, scout_findings, memory_hits, reason, cap_chars) -> same shape; invalidated(prev, cur) -> bool; meta(text) -> {chars, est_tokens, hash}. Pure: no bus/file reads. Wave B (planner_runs integration) calls build/escalation_packet in place of decision_packet/grouped_packet."
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": {
+    "summary": "superseded by Q3 v2 after spec review T-0679 request_changes (sections carry an explicit classification dict from planner_taxonomy T-0675 with a kind->decision_type fallback; scout findings use normalize_findings' real field names finding/source/confidence)",
+    "provenance": "repo",
+    "confidence": 0.0
+  },
+  "events": [
+    {
+      "ts": 1789998077.820575,
+      "pipeline": {
+        "first_ready_at": 1789998077.820531
+      }
+    },
+    {
+      "ts": 1789998077.859464,
+      "pipeline": {
+        "first_ready_at": 1789998077.820531,
+        "spec_review_at": 1789998077.859422,
+        "spec_review_at_lease": 1789998977.859422
+      }
+    },
+    {
+      "ts": 1789998077.864993,
+      "pipeline": {
+        "first_ready_at": 1789998077.820531,
+        "spec_review_at": 1789998077.859422,
+        "spec_review_at_lease": 1789998977.859422,
+        "spec_review_at_done": 1789998077.8648262
+      }
+    },
+    {
+      "ts": 1789998172.950279,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_packet.py",
+          "issue": "Section schema (point, ctx, route, classification, task, reviews, failures, depends_on_statuses) carries no decision_type field, but header rule 1 requires picking the expected-output line from a 9-value enum (initial_goal_plan/scout_results/fix_strategy/held_task/architectural_replan/closable_goal/ambiguous_requirement/retrospective/other) that has no counterpart anywhere in the repo \u2014 planner_runs.decision_points() only ever yields kind in {scouts_done, held, closable}, 3 values, not 9.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_packet.py",
+          "issue": "'classification (planner_taxonomy dict)' names a module, planner_taxonomy, that does not exist anywhere in the repo (grep across orchestrator/ and .claude/ finds nothing) \u2014 there is no real shape for the executor to conform to for the header/decision_type derivation or the Relevant task state section.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_packet.py",
+          "issue": "Scout findings are specified as {claim, path, confidence} 'normalised via scout_evidence.normalize_findings', but that function actually returns entries keyed finding/source/confidence/relevance/unresolved/needs_challenge \u2014 not claim/path \u2014 so the field names in the spec don't match the cited helper's real output.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1789998204.237427,
+      "pipeline": {
+        "first_ready_at": 1789998077.820531,
+        "spec_review_at": 1789998077.859422,
+        "spec_review_at_lease": 1789998977.859422,
+        "spec_review_at_done": 1789998077.8648262,
+        "spec_review_held_at": 1789998204.237372
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1789998205.023276,
+      "pipeline": {
+        "first_ready_at": 1789998077.820531,
+        "spec_review_at": 1789998077.859422,
+        "spec_review_at_lease": 1789998977.859422,
+        "spec_review_at_done": 1789998077.8648262,
+        "spec_review_held_at": 1789998204.237372,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789998205.0623438,
+      "pipeline": {
+        "first_ready_at": 1789998077.820531,
+        "spec_review_at": 1789998077.859422,
+        "spec_review_at_lease": 1789998977.859422,
+        "spec_review_at_done": 1789998077.8648262,
+        "spec_review_held_at": 1789998204.237372,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789998204.237427": true
+        }
+      }
+    },
+    {
+      "ts": 1789998307.61884,
+      "status": "failed",
+      "result": {
+        "summary": "superseded by Q3 v2 after spec review T-0679 request_changes (sections carry an explicit classification dict from planner_taxonomy T-0675 with a kind->decision_type fallback; scout findings use normalize_findings' real field names finding/source/confidence)",
+        "provenance": "repo",
+        "confidence": 0.0
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789998077.820531,
+    "spec_review_at": 1789998077.859422,
+    "spec_review_at_lease": 1789998977.859422,
+    "spec_review_at_done": 1789998077.8648262,
+    "spec_review_held_at": 1789998204.237372,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789998204.237427": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_packet.py",
+      "issue": "Section schema (point, ctx, route, classification, task, reviews, failures, depends_on_statuses) carries no decision_type field, but header rule 1 requires picking the expected-output line from a 9-value enum (initial_goal_plan/scout_results/fix_strategy/held_task/architectural_replan/closable_goal/ambiguous_requirement/retrospective/other) that has no counterpart anywhere in the repo \u2014 planner_runs.decision_points() only ever yields kind in {scouts_done, held, closable}, 3 values, not 9.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_packet.py",
+      "issue": "'classification (planner_taxonomy dict)' names a module, planner_taxonomy, that does not exist anywhere in the repo (grep across orchestrator/ and .claude/ finds nothing) \u2014 there is no real shape for the executor to conform to for the header/decision_type derivation or the Relevant task state section.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_packet.py",
+      "issue": "Scout findings are specified as {claim, path, confidence} 'normalised via scout_evidence.normalize_findings', but that function actually returns entries keyed finding/source/confidence/relevance/unresolved/needs_challenge \u2014 not claim/path \u2014 so the field names in the spec don't match the cited helper's real output.",
+      "severity": "low",
+      "line": 0
+    }
+  ],
+  "hold_reason": "spec_review request_changes"
+}

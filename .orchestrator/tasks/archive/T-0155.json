@@ -1,0 +1,127 @@
+{
+  "id": "T-0155",
+  "parent": "T-0073",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model, opus): C-O4 fix round 1 on serve.py from security review T-0152 (T-0153, executed by claude:sonnet)",
+  "spec": "Review ONLY the T-0153 delta: `git diff be42500 38db9bb` in worktree wt/T-0153 (orchestrator/serve.py, tests/test_serve.py, .orchestrator/repos.toml.example). Fix round for security review T-0152; confirm each item resolved: (1) auth compare encodes both sides (utf-8 surrogateescape) and any exception yields 401, tested with a non-ASCII header; (2) MAX_BODY_BYTES 65536 \u2192 413 and MAX_GOAL_CHARS 20000 \u2192 400 with tests; (3) import-failure message names the mcp package and uv sync, no dependency group, pyproject untouched; (4) module docstring and repos.toml.example state requester scoping is kgpt's job; (5) the lock test proves the flock is actually held (not just that the file exists), plus tests for the multi-repo GET fan-out, the not-configured 404 and invalid JSON \u2192 400. Also check nothing regressed from T-0147 (auth on every route but /healthz, 409 via list_goals, per-slug lock spanning clone+check+start, clone stderr never in a body). Run `uv run python -m unittest tests.test_serve -q` once. Verdict approve or request_changes with file:line comments; keep to real defects.",
+  "inputs": [
+    "T-0153"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes with file:line comments",
+    "Each of the five T-0152 items confirmed resolved or named unresolved with evidence",
+    "No regression of the T-0147 guarantees"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "tests/test_serve.py",
+    ".orchestrator/repos.toml.example"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "executor_of_input": "claude:sonnet"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0155",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "orchestrator/serve.py",
+        "line": 156,
+        "issue": "Unredacted subprocess stderr reaches the response body, contradicting the T-0147 guarantee this module states at line 22 (\"clone stderr is never safe to echo verbatim, and it must never reach a response body at all\"). The clone path is careful (generic \"clone failed\" + CREDENTIAL_RE on the log line), but goals.start refusal reasons are passed through raw: goals.py builds them as f\"git add failed: {add.stderr[:300]}\", f\"scaffold commit failed: {commit.stderr[:300]}\" and f\"GOAL task creation failed (rc=...): {(r.stderr or r.stdout)[-500:]}\". Verified: mocking goals.start to return reason='GOAL task creation failed (rc=1): Traceback /Users/secret/path token=https://u:SECRET@h/r.git' returns 422 with that string verbatim in the body, SECRET included. Apply CREDENTIAL_RE (or a fixed reason set) to r['reason'] before it goes into the JSONResponse, and log the full text instead.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "line": 106,
+        "issue": "T-0152 item 2 (\"bound request bodies before they reach argv\") is only half-resolved. request.body() buffers the entire body into memory first; MAX_BODY_BYTES is only checked at line 107, after the fact. Verified: a 40 MB POST to /goals returns 413 but tracemalloc shows a 42.8 MB peak allocation, so the limit bounds nothing an attacker cares about. Check the content-length header before reading, and/or stream via request.stream() aborting once the accumulated length exceeds MAX_BODY_BYTES. The goal-length bound (MAX_GOAL_CHARS) is correctly enforced and is not affected.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "line": 50,
+        "issue": "tomllib.loads is unguarded, so a malformed .orchestrator/repos.toml raises TOMLDecodeError out of every authenticated goal route as an unhandled 500. Verified: with repos.toml containing '[demo\\npath = broken', GET /goals returns 500 while /healthz still returns 200, so the health probe reports the service up while every real route is broken. _resolve_repo already takes care to turn a configured-but-incomplete entry into a clean 404 rather than a 500; a parse failure deserves the same (503 + logged reason). Same class of problem in list_all_goals (line 176): an unreadable or corrupt goals.json in one configured repo fails the whole unfiltered fan-out instead of that one slug.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/serve.py",
+        "line": 213,
+        "issue": "Cancel is not idempotent against a planner that exits mid-request. goals.stop does `if identity(record): os.killpg(...)` with no guard, so when the planner exits between the liveness check and the signal, ProcessLookupError propagates uncaught through cancel_goal. Verified: patching goals.stop to raise ProcessLookupError makes POST /goals/demo/T-1/cancel return 500 rather than the 200 'stopped' the caller should see for an already-dead goal. kgpt will retry-loop on that. Catch ProcessLookupError/PermissionError around the killpg (or here) and still report stopped.",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789740966.1301801,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0155",
+      "claimed_at": 1789740966.1297522
+    },
+    {
+      "ts": 1789740966.172992,
+      "pid": 89821,
+      "account": "A"
+    },
+    {
+      "ts": 1789741130.024896,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "orchestrator/serve.py",
+            "line": 156,
+            "issue": "Unredacted subprocess stderr reaches the response body, contradicting the T-0147 guarantee this module states at line 22 (\"clone stderr is never safe to echo verbatim, and it must never reach a response body at all\"). The clone path is careful (generic \"clone failed\" + CREDENTIAL_RE on the log line), but goals.start refusal reasons are passed through raw: goals.py builds them as f\"git add failed: {add.stderr[:300]}\", f\"scaffold commit failed: {commit.stderr[:300]}\" and f\"GOAL task creation failed (rc=...): {(r.stderr or r.stdout)[-500:]}\". Verified: mocking goals.start to return reason='GOAL task creation failed (rc=1): Traceback /Users/secret/path token=https://u:SECRET@h/r.git' returns 422 with that string verbatim in the body, SECRET included. Apply CREDENTIAL_RE (or a fixed reason set) to r['reason'] before it goes into the JSONResponse, and log the full text instead.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 106,
+            "issue": "T-0152 item 2 (\"bound request bodies before they reach argv\") is only half-resolved. request.body() buffers the entire body into memory first; MAX_BODY_BYTES is only checked at line 107, after the fact. Verified: a 40 MB POST to /goals returns 413 but tracemalloc shows a 42.8 MB peak allocation, so the limit bounds nothing an attacker cares about. Check the content-length header before reading, and/or stream via request.stream() aborting once the accumulated length exceeds MAX_BODY_BYTES. The goal-length bound (MAX_GOAL_CHARS) is correctly enforced and is not affected.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 50,
+            "issue": "tomllib.loads is unguarded, so a malformed .orchestrator/repos.toml raises TOMLDecodeError out of every authenticated goal route as an unhandled 500. Verified: with repos.toml containing '[demo\\npath = broken', GET /goals returns 500 while /healthz still returns 200, so the health probe reports the service up while every real route is broken. _resolve_repo already takes care to turn a configured-but-incomplete entry into a clean 404 rather than a 500; a parse failure deserves the same (503 + logged reason). Same class of problem in list_all_goals (line 176): an unreadable or corrupt goals.json in one configured repo fails the whole unfiltered fan-out instead of that one slug.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/serve.py",
+            "line": 213,
+            "issue": "Cancel is not idempotent against a planner that exits mid-request. goals.stop does `if identity(record): os.killpg(...)` with no guard, so when the planner exits between the liveness check and the signal, ProcessLookupError propagates uncaught through cancel_goal. Verified: patching goals.stop to raise ProcessLookupError makes POST /goals/demo/T-1/cancel return 500 rather than the 200 'stopped' the caller should see for an already-dead goal. kgpt will retry-loop on that. Catch ProcessLookupError/PermissionError around the killpg (or here) and still report stopped.",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789741130.028081,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789740966.1297522,
+  "pid": 89821,
+  "account": "A",
+  "review_verdict": "request_changes"
+}

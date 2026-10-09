@@ -1,0 +1,1024 @@
+{
+  "id": "T-0860",
+  "created_at": 1790104883.6590111,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "Active path 4: read suppression in the Jev gate returns a structured \"already read\" reply for unchanged repeated reads and identical searches, bounded and reversible (v3)",
+  "spec": "Today (T-0809) read_economy classifies Read/Grep/Glob calls in the Jev gate and logs would_suppress without acting. Build the active branch behind a new [jev] read_suppression = \"off\" | \"shadow\" | \"active\" key (default shadow; add to promotion.FEATURES as read_suppression with an evidence loader over gate.jsonl). Facts: the gate is a PreToolUse hook (.claude/hooks/jev-gate.sh \u2192 jev_gate.run) that can deny a call with a message; guardrails.sh remains the only destructive-command blocker; block_repeats stays as is.\nDo:\n1. Active: for kind repeated_read_unchanged (same path, mtime and size unchanged) and repeated_search (identical pattern+path+flags), deny the call with a structured reply: \"already read at call N in this session; file unchanged (mtime, size); use your earlier result or pass a different range\". A narrower_search or a read with a different offset/limit is never suppressed. At most [jev] max_suppressions_per_session (default 20) and never twice in a row for the same path (the second identical attempt is allowed and logged \"suppression_override\"), so a worker can always recover.\n2. Every suppression records an action_gate decision row with selected \"suppress\" and the tokens_estimate; read_economy.summary adds suppressed, overrides, and the false-suppression proxy computed from overrides + later edits of the path.\n3. Safety: refuse active (fall back to shadow with one notify line) when read_economy.summary over the last 7 days shows a false-suppression proxy above [jev] max_false_suppression (default 0.02) or fewer than 50 would_suppress rows.\nTests: tests/test_jev_gate.py::test_active_suppresses_unchanged_repeated_read_with_structured_reply, ::test_active_allows_second_identical_attempt_and_logs_override, ::test_active_never_suppresses_narrower_search_or_different_range, ::test_active_refused_without_evidence; tests/test_read_economy.py::test_summary_counts_suppressions_and_overrides; docs/context-economy/09-read-economy.md Active section with the revert path.\nDo not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-22 22:45) after spec review T-0852 (request_changes), binding on top of v1:\n- read_economy.classify() compares the full Read input signature (path, offset, limit and any other range keys; ignoring only cosmetic keys) plus mtime and size: a different offset/limit on an unchanged file is kind \"same_file_different_range\" and never suppressed. Test: tests/test_read_economy.py::test_different_range_is_never_repeated_read_unchanged.\n- Active suppression fires independent of [jev] gate_mode: the read_suppression key alone decides (off/shadow/active), and the deny happens before the Jev sample logic. Test: tests/test_jev_gate.py::test_active_suppresses_with_gate_mode_sample (gate_mode \"sample\", read_suppression \"active\" \u2192 suppressed).\n- Call index: _record_call stores an incrementing per-session call_index on every history entry; the deny message cites the earlier entry's index (\"already read at call 7\"). Test asserts the cited index equals the earlier matching entry's index.\n- read_economy.summary(root, since_s=None) gains a since filter and a top-level \"total\" block (would_suppress, suppressed, overrides, false_suppression_proxy over unique rows) separate from by_role/by_task_class; the active-mode safety check and the promotion evidence loader read total with since_s=7 days. Test: tests/test_read_economy.py::test_summary_total_block_respects_since_and_counts_rows_once.\n\nSPEC v3 (2026-09-22 23:15) after spec review T-0854 (round 2; points folded in, further review waived by the Planner, verdict set to approve):\n- total block: `false_suppression_rate` = (overrides + later edits of a suppressed path within 5 calls) / suppressed, over the since window; the existing per-row false_suppression_proxy counts stay as they are under by_role/by_task_class. The safety check compares false_suppression_rate with [jev] max_false_suppression.\n- Deny path: the suppression goes through finish() with new keyword arguments selected=\"suppress\" and blocked=True, so the action_gate row (selected \"suppress\", tokens_estimate) and the gate.jsonl row are never dropped and the hook exit code denies the call.\n- Safety check cost: computed from a sidecar STATE/runs/jev/read_economy_safety.json {\"computed_at\", \"since_s\", \"would_suppress\", \"false_suppression_rate\", \"rows\"} that any gate invocation refreshes when it is older than 600 s (bounded tail scan of gate.jsonl by since_s); a gate call never runs the full read_economy.summary(). Test: tests/test_jev_gate.py::test_safety_sidecar_refreshes_only_when_stale.\n- Session cap: tests/test_jev_gate.py::test_session_cap_allows_after_max_suppressions drives max_suppressions_per_session + 1 candidate suppressions and asserts the last one is allowed with reason \"session_cap\".\n- Override semantics: once an exact signature (tool, path, range, pattern) has been overridden in a session, it is never suppressed again in that session; a different signature on the same path is still eligible. Test: tests/test_jev_gate.py::test_override_disables_that_signature_for_the_session.\n- _call_record merges call_index into the stored history entry before _history() persists it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_gate.py::test_active_suppresses_unchanged_repeated_read_with_structured_reply passes",
+    "tests/test_jev_gate.py::test_active_allows_second_identical_attempt_and_logs_override passes",
+    "tests/test_jev_gate.py::test_active_never_suppresses_narrower_search_or_different_range passes",
+    "tests/test_jev_gate.py::test_active_refused_without_evidence passes",
+    "tests/test_read_economy.py::test_summary_counts_suppressions_and_overrides passes",
+    "pool.toml has [jev] read_suppression and promotion.FEATURES has read_suppression; docs/context-economy/09-read-economy.md has an Active section; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_read_economy.py::test_different_range_is_never_repeated_read_unchanged passes",
+    "tests/test_jev_gate.py::test_active_suppresses_with_gate_mode_sample passes",
+    "tests/test_read_economy.py::test_summary_total_block_respects_since_and_counts_rows_once passes",
+    "tests/test_jev_gate.py::test_safety_sidecar_refreshes_only_when_stale passes",
+    "tests/test_jev_gate.py::test_session_cap_allows_after_max_suppressions passes",
+    "tests/test_jev_gate.py::test_override_disables_that_signature_for_the_session passes"
+  ],
+  "scope": [
+    "orchestrator/jev_gate.py",
+    "orchestrator/read_economy.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_jev_gate.py",
+    "tests/test_read_economy.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/09-read-economy.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0860",
+  "codex_thread": "01a0ca91-560e-7cd0-96a2-633d7707fea1",
+  "result": {
+    "summary": "Summary: Implemented bounded, reversible active read suppression with safety evidence, structured replies, session caps/overrides, telemetry, promotion support, tests, and documentation.\n\nFiles changed: 7 scoped files, 299 insertions, 14 deletions.\n\nGate result: `tests-green: OK 1121 91553af 98s`\n\nCommit: `ceaf31552fcbac7168e5633e4a557977c58486d1`\n\nFailures-only test output: empty.",
+    "executed_by": "codex:sol",
+    "thread": "01a0ca91-560e-7cd0-96a2-633d7707fea1",
+    "usage": {
+      "input_tokens": 1463483,
+      "cached_input_tokens": 1410432,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 10303,
+      "reasoning_output_tokens": 1339,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790104883.6604311,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 23:15: two spec-review rounds (T-0852, T-0854); round-2 points folded into v3; further review waived"
+    },
+    {
+      "ts": 1790104896.343887,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841
+      }
+    },
+    {
+      "ts": 1790104896.345367,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262
+      }
+    },
+    {
+      "ts": 1790104898.496162,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608
+      }
+    },
+    {
+      "ts": 1790104915.961909,
+      "packet_meta": {
+        "chars": 7464,
+        "est_tokens": 1866,
+        "presented_tokens": 1866,
+        "sections": {
+          "_preamble": {
+            "chars": 150,
+            "est_tokens": 37,
+            "sha256": "b1753c1f2597a481a0fddc7deff8b60d563608d394d9441a18d00ac52fa2c4e8"
+          },
+          "objective": {
+            "chars": 5405,
+            "est_tokens": 1351,
+            "sha256": "46c55924cc78e5c6bd5b36e124c5341403c1d61e0a37a384afd336e25f15c032"
+          },
+          "acceptance": {
+            "chars": 1159,
+            "est_tokens": 289,
+            "sha256": "cc724b90bc99dbeba76c0e3301980fa49ee7d040b10c780e2cedacfabc6e18dd"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "78625556652efbb0cedf3cfaca6c69b59f571056873c744bf20a090fbbc73f60"
+          },
+          "write_scope": {
+            "chars": 249,
+            "est_tokens": 62,
+            "sha256": "a4305f52eb9cc641f31c33de37a0684cd09f9adb8b17e46f5970233cbe6d5074"
+          },
+          "read_scope": {
+            "chars": 107,
+            "est_tokens": 26,
+            "sha256": "307731cad5ecf916619b5b4411205ce9b9229372514e0df8bd354e38575dfe87"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "3778bbe8f6064a355454dc5c55ddddc1de547a3e9d7557340f1feda2c9b52bec"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "ca14c87f0897",
+        "version": "ca14c87f0897",
+        "candidate_known": true,
+        "base": "91553afa603d",
+        "sources": "pool.toml@6169e347305f gotchas@aadf9159b350 memory@notes over cap by 2664 chars: acceptance kept whole",
+        "policy_version": "6169e347305f",
+        "gotchas": "aadf9159b350",
+        "candidate_tokens": 2789,
+        "routed_tokens": 20865,
+        "routed_reduction_ratio": 0.955969944103363,
+        "routed_hidden": 9,
+        "routed_ambiguous": 27,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "8f497a157481",
+          "6c9c132c8315",
+          "df8063d9463b",
+          "597825dae4d4",
+          "7e84d8d7d154",
+          "341e7b31a636",
+          "f32c7d3a27d0",
+          "7944cd097fc5",
+          "ed46043e50ce",
+          "6c7397be9c65",
+          "9550c9b94c55",
+          "fcae652783b0",
+          "29c7fdee42a6",
+          "df0fe9793008",
+          "e00b92d9d6a8",
+          "db2aba2ba523",
+          "4a9aa53e5a1d",
+          "be9a1b183d5b",
+          "1a963a1781ba",
+          "bd78c3eee610",
+          "537568318415",
+          "6f6b02dad815",
+          "50403e2578bf",
+          "66c3ac364af0",
+          "504365aa02ad",
+          "06bec9643b86",
+          "8f1e886e9047",
+          "9993917d282f",
+          "6e3274ec580b",
+          "5505171875cc",
+          "7b809d48835d",
+          "008254f4d9f6",
+          "200745416479",
+          "cec6f551dd1b",
+          "bf8b47ad950c",
+          "2f4c8852c0a1",
+          "710622122965",
+          "c7531df1ba82",
+          "f332b7839604",
+          "b73f0d4bd88f",
+          "97bffc546cd1",
+          "c2104cf37e14",
+          "105af21eed97",
+          "cbefb3335aff",
+          "beebcbf81a66",
+          "94c3c1517efd",
+          "fd1c1ec70550",
+          "36ae277faada",
+          "11b722c053e5",
+          "b10c8ee43bfa",
+          "6d4e4f554a2f",
+          "49c8770bce9c",
+          "1c96af84a84a",
+          "2b446b31060e",
+          "2642cc203e8e",
+          "0bd695ea6220",
+          "cd2ca5b8db6f",
+          "8ebc6e19eba1",
+          "19ba53f5452c",
+          "f2f707d8e0c7",
+          "a336133f97f8",
+          "4e84fae2a4ae",
+          "794265d5ff83",
+          "06c65713e256",
+          "39f17a2e3fe9",
+          "99024ea3f890",
+          "bbbf85f5d306",
+          "20b4fadb76f6",
+          "c83c7bbbe524"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401
+      }
+    },
+    {
+      "ts": 1790104915.963305,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0860",
+      "claimed_at": 1790104915.963146
+    },
+    {
+      "ts": 1790104915.964426,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790105416.3169348,
+      "codex_thread": "01a0ca91-560e-7cd0-96a2-633d7707fea1",
+      "codex_thread_head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+    },
+    {
+      "ts": 1790105416.325564,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790105416.329292,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented bounded, reversible active read suppression with safety evidence, structured replies, session caps/overrides, telemetry, promotion support, tests, and documentation.\n\nFiles changed: 7 scoped files, 299 insertions, 14 deletions.\n\nGate result: `tests-green: OK 1121 91553af 98s`\n\nCommit: `ceaf31552fcbac7168e5633e4a557977c58486d1`\n\nFailures-only test output: empty.",
+        "executed_by": "codex:sol",
+        "thread": "01a0ca91-560e-7cd0-96a2-633d7707fea1",
+        "usage": {
+          "input_tokens": 1463483,
+          "cached_input_tokens": 1410432,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10303,
+          "reasoning_output_tokens": 1339,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790105445.425546,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790105544.997351,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790105545.437089,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        }
+      }
+    },
+    {
+      "ts": 1790105545.503547,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        },
+        "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+      }
+    },
+    {
+      "ts": 1790105545.509639,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        },
+        "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1",
+        "gated_at_done": 1790105545.509513
+      }
+    },
+    {
+      "ts": 1790105712.405888,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790105726.997348,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        },
+        "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1",
+        "gated_at_done": 1790105545.509513,
+        "review_held_at": 1790105726.9971478
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0862 (request_changes)"
+    },
+    {
+      "ts": 1790105727.827559,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        },
+        "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1",
+        "gated_at_done": 1790105545.509513,
+        "review_held_at": 1790105726.9971478,
+        "failure_kind": "invalid_spec"
+      }
+    },
+    {
+      "ts": 1790105728.234029,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        },
+        "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1",
+        "gated_at_done": 1790105545.509513,
+        "review_held_at": 1790105726.9971478,
+        "failure_kind": "invalid_spec",
+        "auto_fix_skipped": {
+          "1790105726.997348": true
+        }
+      }
+    },
+    {
+      "ts": 1790105906.10896,
+      "codex_thread": "01a0ca91-560e-7cd0-96a2-633d7707fea1",
+      "codex_thread_head": "fe22f21107e1dc07505baa1bda6066fc0f530016"
+    },
+    {
+      "ts": 1790105906.1180859,
+      "rounds": 1
+    },
+    {
+      "ts": 1790106033.221331,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        },
+        "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1",
+        "gated_at_done": 1790105545.509513,
+        "review_held_at": 1790105726.9971478,
+        "failure_kind": "invalid_spec",
+        "auto_fix_skipped": {
+          "1790105726.997348": true
+        },
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790106239.137897,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "merged_via": "fix round T-0868 fe22f21107e1dc07505baa1bda6066fc0f530016",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790104896.343841,
+        "dispatched_at": 1790104896.3453262,
+        "dispatched_at_lease": 1790105796.3453262,
+        "dispatched_at_done": 1790104898.4960608,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0604166666666666
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790105544.99722,
+        "gated_at_lease": 1790106444.99722,
+        "first_green_at": 1790105544.996526,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0860",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790105545.4367669,
+          "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+        },
+        "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1",
+        "gated_at_done": 1790105545.509513,
+        "review_held_at": 1790105726.9971478,
+        "failure_kind": "invalid_spec",
+        "auto_fix_skipped": {
+          "1790105726.997348": true
+        },
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790106239.135803
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 23:15: two spec-review rounds (T-0852, T-0854); round-2 points folded into v3; further review waived",
+  "pipeline": {
+    "first_ready_at": 1790104896.343841,
+    "dispatched_at": 1790104896.3453262,
+    "dispatched_at_lease": 1790105796.3453262,
+    "dispatched_at_done": 1790104898.4960608,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "bbc9b11ae68f2f8ec6d5e12bc8420063c684320a",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0604166666666666
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790105544.99722,
+    "gated_at_lease": 1790106444.99722,
+    "first_green_at": 1790105544.996526,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0860",
+      "goal_head": "goal/T-0760",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790105545.4367669,
+      "head": "ceaf31552fcbac7168e5633e4a557977c58486d1"
+    },
+    "reviewed_sha": "ceaf31552fcbac7168e5633e4a557977c58486d1",
+    "gated_at_done": 1790105545.509513,
+    "review_held_at": 1790105726.9971478,
+    "failure_kind": "invalid_spec",
+    "auto_fix_skipped": {
+      "1790105726.997348": true
+    },
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790106239.135803
+  },
+  "packet_meta": {
+    "chars": 7464,
+    "est_tokens": 1866,
+    "presented_tokens": 1866,
+    "sections": {
+      "_preamble": {
+        "chars": 150,
+        "est_tokens": 37,
+        "sha256": "b1753c1f2597a481a0fddc7deff8b60d563608d394d9441a18d00ac52fa2c4e8"
+      },
+      "objective": {
+        "chars": 5405,
+        "est_tokens": 1351,
+        "sha256": "46c55924cc78e5c6bd5b36e124c5341403c1d61e0a37a384afd336e25f15c032"
+      },
+      "acceptance": {
+        "chars": 1159,
+        "est_tokens": 289,
+        "sha256": "cc724b90bc99dbeba76c0e3301980fa49ee7d040b10c780e2cedacfabc6e18dd"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "78625556652efbb0cedf3cfaca6c69b59f571056873c744bf20a090fbbc73f60"
+      },
+      "write_scope": {
+        "chars": 249,
+        "est_tokens": 62,
+        "sha256": "a4305f52eb9cc641f31c33de37a0684cd09f9adb8b17e46f5970233cbe6d5074"
+      },
+      "read_scope": {
+        "chars": 107,
+        "est_tokens": 26,
+        "sha256": "307731cad5ecf916619b5b4411205ce9b9229372514e0df8bd354e38575dfe87"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "3778bbe8f6064a355454dc5c55ddddc1de547a3e9d7557340f1feda2c9b52bec"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "ca14c87f0897",
+    "version": "ca14c87f0897",
+    "candidate_known": true,
+    "base": "91553afa603d",
+    "sources": "pool.toml@6169e347305f gotchas@aadf9159b350 memory@notes over cap by 2664 chars: acceptance kept whole",
+    "policy_version": "6169e347305f",
+    "gotchas": "aadf9159b350",
+    "candidate_tokens": 2789,
+    "routed_tokens": 20865,
+    "routed_reduction_ratio": 0.955969944103363,
+    "routed_hidden": 9,
+    "routed_ambiguous": 27,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "8f497a157481",
+      "6c9c132c8315",
+      "df8063d9463b",
+      "597825dae4d4",
+      "7e84d8d7d154",
+      "341e7b31a636",
+      "f32c7d3a27d0",
+      "7944cd097fc5",
+      "ed46043e50ce",
+      "6c7397be9c65",
+      "9550c9b94c55",
+      "fcae652783b0",
+      "29c7fdee42a6",
+      "df0fe9793008",
+      "e00b92d9d6a8",
+      "db2aba2ba523",
+      "4a9aa53e5a1d",
+      "be9a1b183d5b",
+      "1a963a1781ba",
+      "bd78c3eee610",
+      "537568318415",
+      "6f6b02dad815",
+      "50403e2578bf",
+      "66c3ac364af0",
+      "504365aa02ad",
+      "06bec9643b86",
+      "8f1e886e9047",
+      "9993917d282f",
+      "6e3274ec580b",
+      "5505171875cc",
+      "7b809d48835d",
+      "008254f4d9f6",
+      "200745416479",
+      "cec6f551dd1b",
+      "bf8b47ad950c",
+      "2f4c8852c0a1",
+      "710622122965",
+      "c7531df1ba82",
+      "f332b7839604",
+      "b73f0d4bd88f",
+      "97bffc546cd1",
+      "c2104cf37e14",
+      "105af21eed97",
+      "cbefb3335aff",
+      "beebcbf81a66",
+      "94c3c1517efd",
+      "fd1c1ec70550",
+      "36ae277faada",
+      "11b722c053e5",
+      "b10c8ee43bfa",
+      "6d4e4f554a2f",
+      "49c8770bce9c",
+      "1c96af84a84a",
+      "2b446b31060e",
+      "2642cc203e8e",
+      "0bd695ea6220",
+      "cd2ca5b8db6f",
+      "8ebc6e19eba1",
+      "19ba53f5452c",
+      "f2f707d8e0c7",
+      "a336133f97f8",
+      "4e84fae2a4ae",
+      "794265d5ff83",
+      "06c65713e256",
+      "39f17a2e3fe9",
+      "99024ea3f890",
+      "bbbf85f5d306",
+      "20b4fadb76f6",
+      "c83c7bbbe524"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401
+  },
+  "claimed_at": 1790104915.963146,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "fe22f21107e1dc07505baa1bda6066fc0f530016",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0760",
+  "merged_via": "fix round T-0868 fe22f21107e1dc07505baa1bda6066fc0f530016"
+}

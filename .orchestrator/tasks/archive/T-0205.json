@@ -1,0 +1,101 @@
+{
+  "id": "T-0205",
+  "parent": "T-0201",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 3,
+  "title": "P4: daemon.py polish \u2014 dispatch continue instead of break, decision-point loop, review cfg type checks, handover only with an open goal",
+  "spec": "Gotchas and approving-review notes on orchestrator/daemon.py (branch goal/T-0109 version). Fix all, no policy change:\n1. dispatch(): the `break` when free_slots is 0 (around line 269) skips later spec_review tasks that need no executor slot; make it `continue` so spec reviews still dispatch, and only skip execute dispatch.\n2. tick() decision-point loop (around line 553): `break` fires after every planner_runs.run() call, so a permanently skipped decision point starves later ones; break only when run() reports an actual launch (status running), continue on skip.\n3. _load_review_cfg(): validate types (ints for the three thresholds, spec_review_tier must be a key of pool.cfg['models']); on a bad value keep the default and notify once.\n4. merge_reviewed()/_merge_reviewed_one(): the empty-hold_reason path when fewer review records exist than reviews_expected (T-0172 note) must hold with hold_reason 'reviews missing: expected N, found M'.\n5. maybe_handover(): write the Auto-handover only when at least one goal task (role triage, status not done) exists; otherwise skip and do not touch plan.md.\nTests in tests/test_daemon.py, one per item; keep the existing 200+ tests green.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_daemon.py gains test_dispatch_zero_slots_still_dispatches_spec_review, test_decision_loop_continues_after_skip, test_review_cfg_rejects_bad_types, test_missing_reviews_hold_reason, test_handover_skipped_without_open_goal and all pass",
+    "All pre-existing tests in tests/test_daemon.py pass unchanged",
+    ".claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0205",
+  "codex_thread": null,
+  "result": {
+    "summary": "All 65 tests in `tests/test_daemon.py` pass. Given the full-suite gate fails only due to a scope conflict I'm not permitted to fix, I won't commit. Let me report this clearly.\n\n## Summary\n\nImplemented all 5 fixes in `orchestrator/daemon.py`:\n\n1. **`dispatch()`**: `break` on `slots <= 0` \u2192 `continue`. A queued spec-review candidate (needs no executor slot) no longer gets starved by an earlier task exhausting slots.\n2. **`tick()` decision loop**: now captures `planner_runs.run()`'s result and only `break`s when `result[\"launched\"]` is true; a skip (already-decided, no headroom, unsafe key) lets the loop continue to the next decision point.\n3. **`_load_review_cfg()`**: the three thresholds are now type-checked as `int` (bools rejected too), and `spec_review_tier` must be a key of `pool.cfg['models']` when that table is non-empty. A bad value keeps the documented default and calls `notify()` once.\n4. **`_merge_reviewed_one()`**: when fewer review records exist than `reviews_expected` and none are rejected/stuck/off-vocabulary, hold reason is now `\"reviews missing: expected N, found M\"` instead of falling into the old `\"review state unknown: \"` branch with an empty join.\n5. **`maybe_handover()`**: added `_has_open_goal()` \u2014 skips the write (and never touches `plan.md`) unless at least one top-level `role=triage`, non-done task exists.\n\nAdded 6 new tests to `tests/test_daemon.py` (one extra beyond the 5 asked for, covering the valid-tier path for #3): `test_dispatch_zero_slots_still_dispatches_spec_review`, `test_decision_loop_continues_after_skip`, `test_review_cfg_rejects_bad_types` (+`test_review_cfg_accepts_configured_model_tier`), `test_missing_reviews_hold_reason`, `test_handover_skipped_without_open_goal`.\n\n**Files changed**: `orchestrator/daemon.py`, `tests/test_daemon.py` (both in scope; nothing else touched).\n\n**tests/test_daemon.py**: all 65 tests pass (`OK`), including the new ones and every pre-existing one unchanged.\n\n**Blocker \u2014 full-suite gate fails, not committing**: `.claude/hooks/tests-green.sh` runs the whole suite, and fixing item 5 correctly breaks two pre-existing tests outside my scope:\n\n```\nFAIL: test_daemon_throttle_timestamp_lives_in_handover_state_not_pool_state (test_handover.Handover)\nAssertionError: False is not true\nFAIL: test_daemon_throttles_to_15_min (test_handover.Handover)\nAssertionError: False is not true\n```\n\nBoth call `daemon.maybe_handover(...)` against an empty bus (no tasks created at all) and assert it returns `True`/writes. That's exactly the old, buggy policy item 5 is meant to remove \u2014 with zero goal tasks in the bus, `maybe_handover` must now correctly return `False`. The fix is a one-line addition (`self.goal()`) to each of those two tests in `tests/test_handover.py`, but `.claude/hooks/scope-guard.sh` hard-blocked my edit there (T-0205's scope is `orchestrator/daemon.py` + `tests/test_daemon.py` only).\n\nI didn't commit since the gate isn't green. Recommend either widening this task's scope to include `t",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789810678.2012968,
+      "pipeline": {
+        "dispatched_at": 1789810678.20125
+      }
+    },
+    {
+      "ts": 1789810678.233912,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789810678.237143,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789810679.325397,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0205",
+      "claimed_at": 1789810679.324964
+    },
+    {
+      "ts": 1789810679.3272488,
+      "account": "B"
+    },
+    {
+      "ts": 1789810679.338947,
+      "pid": 74523,
+      "account": "B"
+    },
+    {
+      "ts": 1789811291.343103,
+      "status": "done",
+      "result": {
+        "summary": "All 65 tests in `tests/test_daemon.py` pass. Given the full-suite gate fails only due to a scope conflict I'm not permitted to fix, I won't commit. Let me report this clearly.\n\n## Summary\n\nImplemented all 5 fixes in `orchestrator/daemon.py`:\n\n1. **`dispatch()`**: `break` on `slots <= 0` \u2192 `continue`. A queued spec-review candidate (needs no executor slot) no longer gets starved by an earlier task exhausting slots.\n2. **`tick()` decision loop**: now captures `planner_runs.run()`'s result and only `break`s when `result[\"launched\"]` is true; a skip (already-decided, no headroom, unsafe key) lets the loop continue to the next decision point.\n3. **`_load_review_cfg()`**: the three thresholds are now type-checked as `int` (bools rejected too), and `spec_review_tier` must be a key of `pool.cfg['models']` when that table is non-empty. A bad value keeps the documented default and calls `notify()` once.\n4. **`_merge_reviewed_one()`**: when fewer review records exist than `reviews_expected` and none are rejected/stuck/off-vocabulary, hold reason is now `\"reviews missing: expected N, found M\"` instead of falling into the old `\"review state unknown: \"` branch with an empty join.\n5. **`maybe_handover()`**: added `_has_open_goal()` \u2014 skips the write (and never touches `plan.md`) unless at least one top-level `role=triage`, non-done task exists.\n\nAdded 6 new tests to `tests/test_daemon.py` (one extra beyond the 5 asked for, covering the valid-tier path for #3): `test_dispatch_zero_slots_still_dispatches_spec_review`, `test_decision_loop_continues_after_skip`, `test_review_cfg_rejects_bad_types` (+`test_review_cfg_accepts_configured_model_tier`), `test_missing_reviews_hold_reason`, `test_handover_skipped_without_open_goal`.\n\n**Files changed**: `orchestrator/daemon.py`, `tests/test_daemon.py` (both in scope; nothing else touched).\n\n**tests/test_daemon.py**: all 65 tests pass (`OK`), including the new ones and every pre-existing one unchanged.\n\n**Blocker \u2014 full-suite gate fails, not committing**: `.claude/hooks/tests-green.sh` runs the whole suite, and fixing item 5 correctly breaks two pre-existing tests outside my scope:\n\n```\nFAIL: test_daemon_throttle_timestamp_lives_in_handover_state_not_pool_state (test_handover.Handover)\nAssertionError: False is not true\nFAIL: test_daemon_throttles_to_15_min (test_handover.Handover)\nAssertionError: False is not true\n```\n\nBoth call `daemon.maybe_handover(...)` against an empty bus (no tasks created at all) and assert it returns `True`/writes. That's exactly the old, buggy policy item 5 is meant to remove \u2014 with zero goal tasks in the bus, `maybe_handover` must now correctly return `False`. The fix is a one-line addition (`self.goal()`) to each of those two tests in `tests/test_handover.py`, but `.claude/hooks/scope-guard.sh` hard-blocked my edit there (T-0205's scope is `orchestrator/daemon.py` + `tests/test_daemon.py` only).\n\nI didn't commit since the gate isn't green. Recommend either widening this task's scope to include `t",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789811361.158774,
+      "merged_into": "goal/T-0201",
+      "merged_via": "ancestor"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789810678.20125
+  },
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "executor": "claude:sonnet",
+  "claimed_at": 1789810679.324964,
+  "account": "B",
+  "pid": 74523,
+  "merged_into": "goal/T-0201",
+  "merged_via": "ancestor"
+}

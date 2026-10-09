@@ -1,0 +1,87 @@
+{
+  "id": "T-1083",
+  "created_at": 1790164173.1858912,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "S2i harness_depth and small-task fast path in shadow: deterministic depth level 0-4 from existing task fields, fast path skips Jev, skill routing, strategy lookup and scouts for level 0-1, promotion feature fast_path (P24, P25, P26)",
+  "spec": "Create orchestrator/harness_depth.py. level(task, *, tasks, cfg, history) -> {\"level\": 0..4, \"reasons\": [...], \"eligible_fast_path\": bool}. Deterministic rules in order: 4 when constraints.architectural, any scope path matches [review] security_paths or migrations area globs, complexity >= 8, or the task is a goal container; 3 when complexity 6-7, unresolved depends_on, or constraints.route is spec_review; 2 when complexity 4-5; 1 when complexity <= 3, scope <= 3 files, no security path, no dependency unresolved; 0 additionally when every acceptance line except the gate line is a test id (tests/test_x.py::test_y) and history first-pass rate for the task_class is >= 0.8 over at least 5 samples (history from scorecard rows; missing history means level 1, never 0). Fast path = level 0 or 1: in daemon dispatch and spawn packet building skip jev_route, skill routing (skills=None path), strategy lookup, context-router Jev calls and scout suggestions; keep hooks, tests-green, security review by path and human PR untouched. [harness].depth_mode = \"shadow\" (dated comment; off|shadow|active): shadow records a decision_log row kind harness_depth (add to KINDS) per dispatch with candidates 0..4, selected, reasons, would_skip list, and changes nothing; active applies the skips and stamps pipeline.harness_level. promotion FEATURES entry fast_path with criteria: at least 20 shadow rows at level 0-1, and once active first-pass rate of fast-path tasks not below the shadow baseline and lower tokens per accepted task; demotion on a fast-path task that needed two fix rounds. Docs: docs/hermes-hardening/15-harness-depth.md with the distribution of levels over the real bus tasks of this repository (run level over all merged execute tasks and tabulate).\nSpec review T-1070 folded in: (a) The fast-path skip list names only behaviours that exist: jev_route in daemon dispatch, skill routing where it really runs (spawn._prepare_skills in run_worker for the Claude fallback executor, scout, review, challenge and spec_review roles), context-router Jev calls, and spec review; drop 'strategy lookup' and 'scout suggestions' from the list and from would_skip (strategy.py is reporting-only and no scout suggestion exists). The active test verifies jev_route and _prepare_skills are not called for a level 0-1 task and the security review still fires. (b) 'architectural' is not a persisted constraint: level 4 uses constraints.architectural when present (Planner-set) OR the planner_taxonomy classification of the task computed at dispatch (planner_taxonomy.classify), whichever says architectural; document that real tasks today carry it only through the classifier. (c) History: first-pass rate per task_class uses first_pass_defined_count as the sample count (rows where first_pass is known), threshold 5; compute the history table ONCE per daemon tick (cache on the pool or a module-level cache keyed by the runs directory mtime) and reuse it for every candidate task in that tick.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_harness_depth.py::test_levels_from_rules (security path task 4, complexity 6 task 3, complexity 5 task 2, small localized task 1, small task with test-id acceptance and good history 0)",
+    "tests/test_harness_depth.py::test_missing_history_never_yields_level_zero",
+    "tests/test_daemon.py::test_dispatch_records_harness_depth_row_in_shadow_and_changes_nothing",
+    "tests/test_daemon.py::test_active_fast_path_skips_jev_and_skill_routing_but_keeps_security_review",
+    "tests/test_promotion.py::test_fast_path_feature_registered",
+    "tests/test_harness_depth.py::test_history_uses_defined_first_pass_count_and_is_computed_once_per_tick",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/harness_depth.py",
+    "orchestrator/daemon.py",
+    "orchestrator/spawn.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_harness_depth.py",
+    "tests/test_daemon.py",
+    "tests/test_promotion.py",
+    "docs/hermes-hardening/15-harness-depth.md",
+    "orchestrator/planner_taxonomy.py"
+  ],
+  "depends_on": [
+    "T-0996"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790164188.772547,
+      "pipeline": {
+        "first_ready_at": 1790164188.772167
+      }
+    },
+    {
+      "ts": 1790164189.458226,
+      "pipeline": {
+        "first_ready_at": 1790164188.772167,
+        "spec_review_at": 1790164189.4577122,
+        "spec_review_at_lease": 1790165089.4577122
+      }
+    },
+    {
+      "ts": 1790164189.4881458,
+      "pipeline": {
+        "first_ready_at": 1790164188.772167,
+        "spec_review_at": 1790164189.4577122,
+        "spec_review_at_lease": 1790165089.4577122,
+        "spec_review_at_done": 1790164189.4871838
+      }
+    },
+    {
+      "ts": 1790164594.638273,
+      "status": "superseded",
+      "hold_reason": null,
+      "reason": "Planner 18:10: spec review T-1094 (on the duplicate) folded into T-1096"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790164188.772167,
+    "spec_review_at": 1790164189.4577122,
+    "spec_review_at_lease": 1790165089.4577122,
+    "spec_review_at_done": 1790164189.4871838
+  },
+  "hold_reason": null,
+  "reason": "Planner 18:10: spec review T-1094 (on the duplicate) folded into T-1096"
+}

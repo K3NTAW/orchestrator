@@ -1,0 +1,453 @@
+{
+  "id": "T-0636",
+  "created_at": 1789977523.569719,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "R8 v3: orchestrator/jev_sched.py \u2014 Jev as a shadow scheduling signal for soft-interference pairs only: batched, locked cache, [scheduler].jev_* keys matching promotion.FEATURES, fail-open, never overriding deterministic constraints; promotion evidence from decision rows (AP P15)",
+  "spec": "Why: waves are deterministic (interference.select_wave) and soft pairs are deferred or admitted by rule; AP P15 / brief P10 allow Jev to answer only ambiguous questions in shadow first, without O(n^2) calls. v3 after spec reviews T-0616 and T-0632.\nWhat: new module orchestrator/jev_sched.py using jev.ask (orchestrator/jev.py:184; returns {answers:{key:{noul, confidence}}, usage} or None) and decision_log.record(kind='jev_sched'); plus promotion.collect('jev_sched') evidence. Tests are unittest.TestCase methods in the named files (this repo runs unittest; no pytest fixtures).\n- PAIR_QUESTIONS = {'semantic_interference': {'type': 'noul', 'instructions': 'Probability that these two tasks change the same behaviour or interface and would conflict if run concurrently'}, 'stale_assumption_risk': {'type': 'noul', 'instructions': 'Probability that finishing one task first invalidates assumptions the other relies on'}} (jev.ask dict shape, as jev_route.QUESTIONS). ambiguous_pairs(pairwise_rows) -> only rows with level soft whose reasons contain no 'dependency:' kind; hard and none are never asked.\n- cfg: flat keys on the existing [scheduler] table, matching promotion.FEATURES['jev_sched'] (table scheduler, key jev_mode): jev_mode off|shadow|active (default shadow; unknown -> shadow), jev_max_pairs 8, jev_cache_ttl_s 3600, jev_cache_max_entries 200; read via (pool_config().get('scheduler') or {}). No pool.toml edit; defaults in code.\n- Privacy: per-pair state = {a, b, titles, scope (the tasks' scope path lists; paths are metadata and allowed), spec excerpts spec[:400] passed through jev.redact, interference reasons}; never file contents, diffs or worktree reads (the module performs no file or git reads).\n- One jev.ask per annotate() call with at most jev_max_pairs pairs, questions keyed '<a>|<b>:<question>'. Per-pair confidence = None if either sub-question confidence is None, else the mean of the two (mirrors jev_route.classify).\n- Cache: STATE/runs/jev/sched_cache.json keyed sha1(sorted pair ids + scope tuples + goal_head); read/write with the same fcntl-locked sidecar (.lock) plus tempfile.mkstemp + os.replace discipline as jev_route._cache_read/_cache_write; TTL and max-entries pruning; a different goal_head or scope misses.\n- annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask) -> {'mode', 'asked', 'cache': hit|miss|None, 'signals': {'a|b': {semantic_interference, stale_assumption_risk, confidence}}, 'would_defer': [ids Jev rates semantic_interference >= 0.7 for a pair with both members in the wave; the later one in wave order], 'applied': [], 'wave', 'deferred', 'error': None|reason}. off -> input unchanged, asked 0, no ask call. shadow -> computes would_defer, changes nothing. active -> moves would_defer ids from wave to deferred with reason 'jev:<a>|<b>'; only removes from the wave (never adds, never touches hard-deferred or dependency pairs, never exceeds capacity); any failure (ask None, malformed, value outside [0,1]) -> error set, wave and deferred unchanged (fail open).\n- Every annotate call with asked > 0 or mode active records decision_log.record(kind='jev_sched', subject=<goal id of the first candidate or first task id>, candidates=pair keys, hard_constraints=['dependency', 'hard_conflicts', 'capacity'], deterministic={'wave', 'deferred'}, jev=signals, selected=applied, rejected=would_defer, reason, confidence=mean pair confidence, n=asked, mode).\n- promotion.py: collect('jev_sched', root) reads decision_log rows of kind jev_sched via decision_log.read_all and returns {'n': rows, 'jev_disagreement_rate': share of rows whose would_defer (rejected) is non-empty, 'applied': rows with non-empty selected}; other features unchanged. Add one test in tests/test_promotion.py.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_jev_sched.py::test_off_mode_never_calls_jev_and_returns_wave_unchanged \u2014 jev_mode off: ask not called, asked 0, wave and deferred identical",
+    "tests/test_jev_sched.py::test_shadow_mode_records_would_defer_without_changing_wave \u2014 a soft pair rated 0.9 lands in would_defer, applied empty, wave unchanged, a jev_sched decision row is written and the pair confidence is the mean of both sub-question confidences",
+    "tests/test_jev_sched.py::test_active_mode_defers_soft_pair_but_never_hard_or_dependency \u2014 active: the soft-pair task moves to deferred with reason jev:<a>|<b>; a hard pair and a soft pair carrying a dependency reason are never asked and never changed",
+    "tests/test_jev_sched.py::test_fail_open_and_single_batched_call_without_n_squared \u2014 ask returning None yields error set and the deterministic wave; with 12 soft pairs ask is called once with at most jev_max_pairs pairs and no hard or none pair appears in the questions",
+    "tests/test_jev_sched.py::test_cache_locking_invalidation_and_privacy \u2014 the same pairs and goal_head hit the cache (ask called once across two calls) and a .lock sidecar exists; a new goal_head misses; the state passed to ask holds only titles, scope paths, redacted spec excerpts and reasons (a marker planted in a scope file's contents never appears) and jev.redact was applied",
+    "tests/test_promotion.py::test_collect_jev_sched_reads_decision_rows \u2014 two jev_sched decision rows, one with a non-empty rejected list, yield n 2 and jev_disagreement_rate 0.5"
+  ],
+  "scope": [
+    "orchestrator/jev_sched.py",
+    "orchestrator/promotion.py",
+    "tests/test_jev_sched.py",
+    "tests/test_promotion.py"
+  ],
+  "depends_on": [
+    "T-0570",
+    "T-0571"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "full",
+    "read_scope": [
+      "orchestrator/jev.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/interference.py",
+      "orchestrator/decision_log.py",
+      "orchestrator/promotion.py",
+      "orchestrator/daemon.py",
+      "tests/test_jev_route.py",
+      "tests/test_promotion.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "annotate(wave_result, pairwise_rows, tasks, *, goal_head, cfg=None, root=STATE, ask=jev.ask) -> {mode, asked, cache, signals, would_defer, applied, wave, deferred, error}; ambiguous_pairs(pairwise_rows); PAIR_QUESTIONS in jev.ask dict shape; config [scheduler].jev_mode off|shadow|active default shadow, jev_max_pairs 8, jev_cache_ttl_s 3600, jev_cache_max_entries 200; cache runs/jev/sched_cache.json with .lock sidecar; decision rows kind jev_sched; promotion.collect('jev_sched') from decision rows; must not import daemon"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0636",
+  "codex_thread": "01a0c2fa-113f-7691-b580-c99cfb921a5a",
+  "result": {
+    "summary": "Implemented and committed Jev scheduler shadow/active signaling with batched calls, locked caching, privacy redaction, fail-open behavior, decision logging, and promotion evidence collection.\n\nFiles changed: 4, with 368 insertions and 3 deletions.\n\nGate result: `tests-green: OK 894 52d3f09 118s`  \nCommit: `f40fd852073ae563d2f14f13a5e2c91dd7aedbb2`  \nFailures-only output: empty  \nWorktree: clean",
+    "executed_by": "codex:sol",
+    "thread": "01a0c2fa-113f-7691-b580-c99cfb921a5a",
+    "usage": {
+      "input_tokens": 1022905,
+      "cached_input_tokens": 951936,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9477,
+      "reasoning_output_tokens": 1809,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789977523.5710368,
+      "spec_review_verdict": "approve",
+      "spec_review_waived": "Planner decision 2026-09-21 after three spec-review rounds (T-0616, T-0632): every raised risk folded into v3"
+    },
+    {
+      "ts": 1789977547.340224,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017
+      }
+    },
+    {
+      "ts": 1789977547.342179,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119
+      }
+    },
+    {
+      "ts": 1789977548.3015838,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418
+      }
+    },
+    {
+      "ts": 1789977563.403328,
+      "packet_meta": {
+        "chars": 3277,
+        "est_tokens": 819,
+        "hash": "f49963830a88",
+        "version": "f49963830a88",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@ef740c717cf2 gotchas@95c806f6c218 memory@notes",
+        "policy_version": "ef740c717cf2",
+        "gotchas": "95c806f6c218"
+      }
+    },
+    {
+      "ts": 1789977563.4062479,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0636",
+      "claimed_at": 1789977563.4050949
+    },
+    {
+      "ts": 1789977563.40831,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789977939.365259,
+      "codex_thread": "01a0c2fa-113f-7691-b580-c99cfb921a5a",
+      "codex_thread_head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+    },
+    {
+      "ts": 1789977939.370476,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        }
+      }
+    },
+    {
+      "ts": 1789977939.373554,
+      "status": "done",
+      "result": {
+        "summary": "Implemented and committed Jev scheduler shadow/active signaling with batched calls, locked caching, privacy redaction, fail-open behavior, decision logging, and promotion evidence collection.\n\nFiles changed: 4, with 368 insertions and 3 deletions.\n\nGate result: `tests-green: OK 894 52d3f09 118s`  \nCommit: `f40fd852073ae563d2f14f13a5e2c91dd7aedbb2`  \nFailures-only output: empty  \nWorktree: clean",
+        "executed_by": "codex:sol",
+        "thread": "01a0c2fa-113f-7691-b580-c99cfb921a5a",
+        "usage": {
+          "input_tokens": 1022905,
+          "cached_input_tokens": 951936,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9477,
+          "reasoning_output_tokens": 1809,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789977941.4875898,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789978055.725895,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978055.7257202,
+        "gated_at_lease": 1789978955.7257202,
+        "first_green_at": 1789978055.725114,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789978055.822335,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978055.7257202,
+        "gated_at_lease": 1789978955.7257202,
+        "first_green_at": 1789978055.725114,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0636",
+          "goal_head": "a944b8542679aaaefe374cf7ee1a9e7629d0dabb",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789978055.821834,
+          "head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+        }
+      }
+    },
+    {
+      "ts": 1789978055.9728808,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978055.7257202,
+        "gated_at_lease": 1789978955.7257202,
+        "first_green_at": 1789978055.725114,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0636",
+          "goal_head": "a944b8542679aaaefe374cf7ee1a9e7629d0dabb",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789978055.821834,
+          "head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+        },
+        "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+      }
+    },
+    {
+      "ts": 1789978055.980897,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978055.7257202,
+        "gated_at_lease": 1789978955.7257202,
+        "first_green_at": 1789978055.725114,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0636",
+          "goal_head": "a944b8542679aaaefe374cf7ee1a9e7629d0dabb",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789978055.821834,
+          "head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+        },
+        "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+        "gated_at_done": 1789978055.980753
+      }
+    },
+    {
+      "ts": 1789978486.5987709,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789978509.287393,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978055.7257202,
+        "gated_at_lease": 1789978955.7257202,
+        "first_green_at": 1789978055.725114,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0636",
+          "goal_head": "a944b8542679aaaefe374cf7ee1a9e7629d0dabb",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789978055.821834,
+          "head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+        },
+        "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+        "gated_at_done": 1789978055.980753,
+        "merged_at": 1789978509.287232,
+        "merged_at_lease": 1789979409.287232
+      }
+    },
+    {
+      "ts": 1789978627.5710049,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "5f2bcf620325d1832c7a3e730bd78fd22cbb1033"
+    },
+    {
+      "ts": 1789978628.134638,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978055.7257202,
+        "gated_at_lease": 1789978955.7257202,
+        "first_green_at": 1789978055.725114,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0636",
+          "goal_head": "a944b8542679aaaefe374cf7ee1a9e7629d0dabb",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789978055.821834,
+          "head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+        },
+        "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+        "gated_at_done": 1789978055.980753,
+        "merged_at": 1789978509.287232,
+        "merged_at_lease": 1789979409.287232,
+        "accepted_at": 1789978628.134181
+      }
+    },
+    {
+      "ts": 1789978628.277311,
+      "pipeline": {
+        "first_ready_at": 1789977547.34017,
+        "dispatched_at": 1789977547.342119,
+        "dispatched_at_lease": 1789978447.342119,
+        "dispatched_at_done": 1789977548.301418,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789978055.7257202,
+        "gated_at_lease": 1789978955.7257202,
+        "first_green_at": 1789978055.725114,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0636",
+          "goal_head": "a944b8542679aaaefe374cf7ee1a9e7629d0dabb",
+          "moved_count": 2,
+          "stale_paths": [],
+          "risk": "none",
+          "checked_at": 1789978055.821834,
+          "head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+        },
+        "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+        "gated_at_done": 1789978055.980753,
+        "merged_at": 1789978509.287232,
+        "merged_at_lease": 1789979409.287232,
+        "accepted_at": 1789978628.134181,
+        "merged_at_done": 1789978628.277143
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "spec_review_waived": "Planner decision 2026-09-21 after three spec-review rounds (T-0616, T-0632): every raised risk folded into v3",
+  "pipeline": {
+    "first_ready_at": 1789977547.34017,
+    "dispatched_at": 1789977547.342119,
+    "dispatched_at_lease": 1789978447.342119,
+    "dispatched_at_done": 1789977548.301418,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "b528f2e3e90fa31aa131da125646dffb8636efab"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789978055.7257202,
+    "gated_at_lease": 1789978955.7257202,
+    "first_green_at": 1789978055.725114,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0636",
+      "goal_head": "a944b8542679aaaefe374cf7ee1a9e7629d0dabb",
+      "moved_count": 2,
+      "stale_paths": [],
+      "risk": "none",
+      "checked_at": 1789978055.821834,
+      "head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2"
+    },
+    "reviewed_sha": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+    "gated_at_done": 1789978055.980753,
+    "merged_at": 1789978509.287232,
+    "merged_at_lease": 1789979409.287232,
+    "accepted_at": 1789978628.134181,
+    "merged_at_done": 1789978628.277143
+  },
+  "packet_meta": {
+    "chars": 3277,
+    "est_tokens": 819,
+    "hash": "f49963830a88",
+    "version": "f49963830a88",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@ef740c717cf2 gotchas@95c806f6c218 memory@notes",
+    "policy_version": "ef740c717cf2",
+    "gotchas": "95c806f6c218"
+  },
+  "claimed_at": 1789977563.4050949,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "f40fd852073ae563d2f14f13a5e2c91dd7aedbb2",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0561",
+  "sha": "5f2bcf620325d1832c7a3e730bd78fd22cbb1033"
+}

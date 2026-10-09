@@ -1,0 +1,182 @@
+{
+  "id": "T-1673",
+  "created_at": 1791317890.944671,
+  "parent": "T-1667",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 7,
+  "title": "v3 ship v2: unattended merge of a closed goal to main after a full gate on the merged tree, resumable, with orchestrator rollback",
+  "spec": "v2 of T-1660 (spec review T-1666 request_changes, all five findings folded). Ship a finished goal to main\nunattended, with a full gate on the exact merged tree and a recorded rollback.\n\nBuild ON the existing close path, do not duplicate it: orchestrator/planner_runs.py routine_close() (line ~1495) already\ncloses a goal when gate_state is green and all children merged, writes the retrospective, and with\n[routes].auto_open_pr = true opens the goal/<id> -> main PR through _open_pr() (line ~1476, idempotent via\n`gh pr list --state all`). Ship is the next stage after that close, owned by the same module.\n\n1. Config: [ship] in pool.toml: enabled (default false), target \"main\", max_regates 3. This repo sets enabled = true and\n   [routes].auto_open_pr = true. With ship disabled behaviour is exactly as today.\n2. State on the goal task: pipeline.ship = {state, pr_url, pr_number, gated_head_sha, gated_target_sha, merge_sha,\n   attempts, last_error, updated_at}; states: pending -> gating -> merging -> shipped, or held. Every step first reads the\n   observable truth and reconciles: `gh pr view <n> --json state,mergeCommit,headRefOid`; if MERGED, record merge_sha,\n   set shipped, notify once, stop. This makes every step resumable after a crash (finding 3).\n3. Where it runs (finding 2): planner_runs.tick() picks at most one goal per tick whose result.goal_closed is true, ship\n   state not shipped/held. The gate never runs inside tick(): ship claims a stage lease on the goal (reuse the daemon's\n   claim/complete stage-lease helpers, daemon.py ~284-330, stage name \"ship\") and runs the work in a background thread\n   (the daemon's existing thread helper, daemon.py ~518). One ship per repo at a time (machine lease optional).\n4. Gating (finding 4): fresh worktree at goal/<id>; `git fetch origin`; merge origin/<target> into it (no rebase; conflict ->\n   held \"ship conflict\"); push that head to goal/<id>; record gated_target_sha = origin/<target> sha and gated_head_sha;\n   run the full gate (gate.run_gate on the worktree, env LUNA_GATE_FULL=1 for repos that scope their gate). Red/timeout ->\n   held with the failure tail.\n5. Merging: `git fetch origin` again; if origin/<target> moved since gated_target_sha, go back to gating (attempts+1, held\n   \"ship target kept moving\" after max_regates). Else `gh pr merge <n> --merge --match-head-commit <gated_head_sha>\n   --subject \"Merge PR <n>: <goal title> (goal/<id>, auto-merged after green full gate)\"`. Then reconcile as in 2.\n6. Holds (finding 5): held goals are excluded from ship readiness; notify through notify.notify_once (orchestrator/notify.py)\n   so a hold is reported once; release with `orchestrator ship --retry <goal>` which clears the hold.\n7. Shipped: pipeline.ship.state shipped, a decisions.md entry through the existing memory record script naming\n   `orchestrator rollback <merge_sha>`, and one notification \"<goal> shipped to main as <sha>; rollback: orchestrator rollback <sha>\".\n8. `orchestrator rollback <merge_sha>`: refuse unless the sha is a merge commit reachable from origin/<target>; branch\n   rollback/<short> from origin/<target>, `git revert -m 1 <sha>`, push, open PR \"Revert <subject>\", merge it with --merge\n   (no full gate: it restores a state that already passed one), record a decisions entry, notify.\n9. Never force-push, never push to the target branch directly (guardrails block it); all writes to main go through gh pr merge.\n10. CLAUDE.md: first line and step 8 say merges to main are automatic after a green full gate and every merge records\n    `orchestrator rollback <sha>`.\nTests tests/test_ship.py with a temp bare origin and a fake gh on PATH (records calls, returns PR numbers/state): test_ship_disabled_by_default,\ntest_ship_runs_after_routine_close_only, test_ship_gate_runs_in_background_not_in_tick, test_ship_resumes_after_crash_when_pr_already_merged,\ntest_ship_regates_when_target_moved, test_ship_holds_after_max_regates, test_ship_holds_on_conflict, test_ship_holds_on_red_gate_and_notifies_once,\ntest_ship_retry_releases_hold, test_ship_merge_uses_match_head_commit, test_rollback_reverts_merge_commit, test_rollback_refuses_non_merge.\n\n\nAMENDMENTS from spec review T-1671 (v3). Where they differ from the text above, the amendments win.\nS1 Selection: ship does not ride on decision_points(). planner_runs.tick() (or a new ship.tick(pool) called right after it\n   in daemon.tick) scans the bus itself: goal tasks (is_goal) with result.goal_closed true, pr_url present, and\n   pipeline.ship.state not in (shipped, held). Oldest closed first.\nS2 One ship per repo: a repo-level lock file .orchestrator/ship.lock taken with fcntl LOCK_EX|LOCK_NB by the background\n   thread for its whole run (released in finally). If the lock is held, ship.tick returns without starting anything.\n   This is the only concurrency guard; do not use stamp() for ship.\nS3 Crash recovery: no stage lease. pipeline.ship.updated_at is refreshed at every step; on start, a goal whose state is\n   gating/merging with no ship.lock holder is simply resumed from the state machine (step 2 reconcile reads the PR truth\n   first). A gate that was running when the process died is re-run.\nS4 Worktree: `git worktree add --detach <S>/ship-<goal> goal/<id>` under .orchestrator/ship-wt/ (removed in finally), merge\n   origin/<target> there, then `git push origin HEAD:refs/heads/goal/<id>` (fast-forward only; refuse and hold if it is not\n   a fast-forward). Never check out the goal branch itself.\nS5 Gate: call gate.run_gate(wt, script=merge.TESTS_GREEN, task_id=goal_id, cfg=pool.cfg). If run_gate cannot pass env,\n   add an optional env parameter to gate.run_gate/run_bounded (default None = inherit) and pass {\"LUNA_GATE_FULL\": \"1\"}\n   merged over os.environ; add orchestrator/gate.py to scope for this one parameter. Timeout from [gate].timeout_s as today.\nS6 Notifications: do not use notify.notify_once for ship (one slot per task). Keep ship's own dedupe in\n   pipeline.ship.notified = {key: ts} with keys \"held:<reason>:<attempt>\" and \"shipped\"; send via notify.notify. A retry\n   increments attempt, so a new hold after --retry is reported again.\nExtra tests: test_second_ship_waits_for_lock, test_resume_reads_pr_truth_after_crash, test_detached_worktree_and_ff_push,\ntest_gate_env_full_passed, test_hold_after_retry_notifies_again.\n",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_ship.py: the twelve named tests exist and pass",
+    "[ship].enabled defaults to false; no force-push or direct push to main anywhere",
+    "CLAUDE.md states the automatic merge rule and the rollback command"
+  ],
+  "scope": [
+    "orchestrator/ship.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    "orchestrator/cli.py",
+    "tests/test_ship.py",
+    "CLAUDE.md",
+    ".orchestrator/pool.toml",
+    "orchestrator/gate.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 5400,
+    "task_class": "architectural",
+    "route": "high-risk",
+    "respec_for": "T-1668"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791317900.498399,
+      "pipeline": {
+        "first_ready_at": 1791317900.498336
+      }
+    },
+    {
+      "ts": 1791317900.8068109,
+      "pipeline": {
+        "first_ready_at": 1791317900.498336,
+        "spec_review_at": 1791317900.806729,
+        "spec_review_at_lease": 1791318800.806729
+      }
+    },
+    {
+      "ts": 1791317900.817136,
+      "pipeline": {
+        "first_ready_at": 1791317900.498336,
+        "spec_review_at": 1791317900.806729,
+        "spec_review_at_lease": 1791318800.806729,
+        "spec_review_at_done": 1791317900.8170629
+      }
+    },
+    {
+      "ts": 1791317966.744509,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/gate.py",
+          "issue": "LUNA_GATE_FULL appears nowhere in this repo, including tests-green.sh. Passing it is a no-op here, so criterion 'full gate on the exact merged tree' is not verifiable. Also run_gate retries once after a timeout, so worst-case gate time is 2x [gate].timeout_s inside a thread holding ship.lock. The env param has to reach the Popen at gate.py:41 through _run and run_bounded, and both call sites (run_gate, run_bounded) need it.",
+          "severity": "med",
+          "line": 100
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "_open_pr hardcodes --base main (line 1478) and picks the PR via `gh pr list --state all`. The returned URL can be a closed-unmerged PR. Ship's [ship].target is not honored by PR creation. Selection requires a pr_url, but result.pr_url is None when auto_open_pr is false or the PR is pending. Ship must handle a missing pr_url, derive pr_number from the URL, and reconcile a CLOSED (not merged) PR state. The spec only covers MERGED.",
+          "severity": "high",
+          "line": 1476
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Ship writes pipeline.ship (state, notified, updated_at) from a background thread, while routine_close and other code do read-modify-write on the whole pipeline dict. Without every ship update done as a bus.locked() re-read and merge of only the ship key, one writer can clobber the other. The spec does not require this.",
+          "severity": "high",
+          "line": 1509
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "Ship runs in a thread that survives only while the daemon lives. A `--once` daemon pass exits and kills it mid-gate. The spec does not say how ship.tick behaves under `daemon --once`, or that the thread must be non-daemon and joined. S3 says an interrupted gate is re-run, but the amendment is silent on the stale-lock case. fcntl locks release on process death, which is fine, but the updated_at heartbeat is never used for anything. The goal is either stuck in 'gating' with no visible signal or restarted without a bound on attempts.",
+          "severity": "med",
+          "line": 1889
+        },
+        {
+          "path": "orchestrator/ship.py",
+          "issue": "Merge step has a TOCTOU window. The target can move between the second `git fetch` and `gh pr merge`. --match-head-commit only guards the head, not the base. The recheck narrows this but cannot close it, and the spec should state that residual risk is accepted. The goal/<id> push also changes the PR head, so gated_head_sha must be re-read from the remote after the push, not from the local worktree HEAD alone. If the PR is a squash-only repo setting, `--merge` fails and the hold reason must say so (no silent fallback).",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/ship.py",
+          "issue": "Rollback is the part most likely to ship broken. It merges a revert PR with no gate, depends on the merge commit being on origin/<target> first-parent, and `git revert -m 1` conflicts if later commits touched the same files. The spec has no hold or conflict path for rollback, no idempotency (an existing rollback/<short> branch or open revert PR), and no rule about which worktree it runs in (must be a detached worktree like ship, never the main checkout). Rollback also writes to main automatically, and 'auto-merge a revert without a human' is a policy decision that should be surfaced explicitly. The Planner CLAUDE.md says a human approves every merge to main.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "CLAUDE.md",
+          "issue": "Rewriting the first line and step 8 removes the human-approval-on-main invariant for the whole orchestrator. This matches the stated intent, but it should be gated by [ship].enabled: the CLAUDE.md text currently describes behavior that is off by default, and the CLAUDE.md edit is not testable by the acceptance criterion (only 'states the rule').",
+          "severity": "low",
+          "line": 1
+        },
+        {
+          "path": "tests/test_ship.py",
+          "issue": "A fake gh on PATH in a unittest harness that shares one ORCH_ROOT must not leak PATH or lock files across tests. ship.lock is under .orchestrator/ in the shared root, so tests need a per-test state dir or must release the lock in teardown. test_gate_runs_in_background_not_in_tick needs a deterministic synchronization primitive (join or event), not sleeps. The twelve plus five tests listed include no test for a CLOSED-unmerged PR, a missing pr_url, or pipeline clobbering.",
+          "severity": "med",
+          "line": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791318024.08384,
+      "status": "superseded",
+      "reason": "respec v4 filed as T-1678"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791317900.498336,
+    "spec_review_at": 1791317900.806729,
+    "spec_review_at_lease": 1791318800.806729,
+    "spec_review_at_done": 1791317900.8170629
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/gate.py",
+      "issue": "LUNA_GATE_FULL appears nowhere in this repo, including tests-green.sh. Passing it is a no-op here, so criterion 'full gate on the exact merged tree' is not verifiable. Also run_gate retries once after a timeout, so worst-case gate time is 2x [gate].timeout_s inside a thread holding ship.lock. The env param has to reach the Popen at gate.py:41 through _run and run_bounded, and both call sites (run_gate, run_bounded) need it.",
+      "severity": "med",
+      "line": 100
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "_open_pr hardcodes --base main (line 1478) and picks the PR via `gh pr list --state all`. The returned URL can be a closed-unmerged PR. Ship's [ship].target is not honored by PR creation. Selection requires a pr_url, but result.pr_url is None when auto_open_pr is false or the PR is pending. Ship must handle a missing pr_url, derive pr_number from the URL, and reconcile a CLOSED (not merged) PR state. The spec only covers MERGED.",
+      "severity": "high",
+      "line": 1476
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Ship writes pipeline.ship (state, notified, updated_at) from a background thread, while routine_close and other code do read-modify-write on the whole pipeline dict. Without every ship update done as a bus.locked() re-read and merge of only the ship key, one writer can clobber the other. The spec does not require this.",
+      "severity": "high",
+      "line": 1509
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "Ship runs in a thread that survives only while the daemon lives. A `--once` daemon pass exits and kills it mid-gate. The spec does not say how ship.tick behaves under `daemon --once`, or that the thread must be non-daemon and joined. S3 says an interrupted gate is re-run, but the amendment is silent on the stale-lock case. fcntl locks release on process death, which is fine, but the updated_at heartbeat is never used for anything. The goal is either stuck in 'gating' with no visible signal or restarted without a bound on attempts.",
+      "severity": "med",
+      "line": 1889
+    },
+    {
+      "path": "orchestrator/ship.py",
+      "issue": "Merge step has a TOCTOU window. The target can move between the second `git fetch` and `gh pr merge`. --match-head-commit only guards the head, not the base. The recheck narrows this but cannot close it, and the spec should state that residual risk is accepted. The goal/<id> push also changes the PR head, so gated_head_sha must be re-read from the remote after the push, not from the local worktree HEAD alone. If the PR is a squash-only repo setting, `--merge` fails and the hold reason must say so (no silent fallback).",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/ship.py",
+      "issue": "Rollback is the part most likely to ship broken. It merges a revert PR with no gate, depends on the merge commit being on origin/<target> first-parent, and `git revert -m 1` conflicts if later commits touched the same files. The spec has no hold or conflict path for rollback, no idempotency (an existing rollback/<short> branch or open revert PR), and no rule about which worktree it runs in (must be a detached worktree like ship, never the main checkout). Rollback also writes to main automatically, and 'auto-merge a revert without a human' is a policy decision that should be surfaced explicitly. The Planner CLAUDE.md says a human approves every merge to main.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "CLAUDE.md",
+      "issue": "Rewriting the first line and step 8 removes the human-approval-on-main invariant for the whole orchestrator. This matches the stated intent, but it should be gated by [ship].enabled: the CLAUDE.md text currently describes behavior that is off by default, and the CLAUDE.md edit is not testable by the acceptance criterion (only 'states the rule').",
+      "severity": "low",
+      "line": 1
+    },
+    {
+      "path": "tests/test_ship.py",
+      "issue": "A fake gh on PATH in a unittest harness that shares one ORCH_ROOT must not leak PATH or lock files across tests. ship.lock is under .orchestrator/ in the shared root, so tests need a per-test state dir or must release the lock in teardown. test_gate_runs_in_background_not_in_tick needs a deterministic synchronization primitive (join or event), not sleeps. The twelve plus five tests listed include no test for a CLOSED-unmerged PR, a missing pr_url, or pipeline clobbering.",
+      "severity": "med",
+      "line": 0
+    }
+  ],
+  "reason": "respec v4 filed as T-1678"
+}

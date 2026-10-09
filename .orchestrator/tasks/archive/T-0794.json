@@ -1,0 +1,726 @@
+{
+  "id": "T-0794",
+  "created_at": 1790084465.526161,
+  "parent": "T-0760",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "P2 + P3/P4 (library, v4): canonical evidence objects and a deterministic context router (HIDE/SHORT/LONG/FULL) with role profiles, pure functions, no packet wiring",
+  "spec": "This task builds the evidence + context-router library; the rules in sections A and B below are the sole source of truth (the program brief is not on the goal branch; do not look for it). This task builds the library; T-<wiring task> (filed separately, depends on this) hooks it into spawn packets in shadow. No existing behaviour changes.\n\nA. orchestrator/evidence.py (new)\n- `@dataclass(frozen=True) Evidence`: id (str, 12-hex sha256 over f\"{source_type}|{location}|{content_hash}\"), source_type (one of SOURCE_TYPES = (\"source_chunk\", \"test_result\", \"scout_finding\", \"memory_entry\", \"graph_finding\", \"previous_result\", \"review_finding\", \"architecture_note\", \"decision\", \"external_doc\")), location (str: path[:line-range], task id, memory heading), commit (str, goal head sha or \"\"), content_hash (sha256 of the raw content, full hex), content (str, raw, bounded by the caller), summary_short (str \u2264 160 chars: deterministic first meaningful line / signature / heading), summary_long (str \u2264 600 chars: first 600 chars of content with whitespace collapsed; callers may pass a better one), relevance (dict: scope_match bool, title_terms int (count of task-title words \u22654 chars found in content, case-insensitive), path_terms int (scope path stems found), recent_task str|None), provenance (one of \"repo\", \"bus\", \"memory\", \"scout\", \"external\"), observed_at (float epoch), trust (\"trusted\" for provenance repo/memory, \"untrusted\" otherwise).\n- `make(source_type, location, content, *, commit=\"\", provenance, task=None, scope=(), summary_long=None, observed_at=None) -> Evidence` computes id, hashes, summaries and relevance from task title/scope when task is given.\n- `EvidencePool` bound to a goal (NOT `Pool`: orchestrator/pool.py already owns that name): file `.orchestrator/evidence/<goal>.jsonl` under STATE (create dir), `add(ev)` idempotent by id (returns existing), `get(id)`, `by_type(t)`, `fresh(ev, head_sha)` (True when ev.commit == head_sha or source_type not in (\"source_chunk\",\"test_result\")), `stale_ids(head_sha)`. Never store secrets: run jev.redact over content before persisting and note it in the docstring.\n- `cache_key(ev, task_class, role, level)` = sha256 of f\"{ev.content_hash}|{task_class}|{role}|{level}\"[:16] (P7 key shape; no summariser yet).\n\nB. orchestrator/context_router.py (new)\n- LEVELS = (\"HIDE\", \"SHORT\", \"LONG\", \"FULL\"); `@dataclass Routed`: evidence_id, level, reason (short deterministic string, e.g. \"in_scope_file\", \"acceptance\", \"failing_output\", \"unrelated_memory\", \"stale\", \"read_scope\", \"dependency\", \"ambiguous\"), tokens_full, tokens_at_level (chars//4 of the text render() would emit).\n- `route(task, candidates: list[Evidence], *, role, head_sha=None, cfg=None) -> RoutedPacket` with RoutedPacket fields: items (list[Routed]), candidate_tokens, routed_tokens, reduction_ratio (routed/candidate, 1.0 when candidate 0), ambiguous_ids (list), profile (role name), rules_version (\"v1\").\n- Deterministic rules (P4), applied in this order, first match wins: FULL when source_type==\"source_chunk\" and location's path is in task scope (write scope) and role in (\"execute\", \"scout\"); FULL for source_type \"test_result\" whose location matches a failing id in task.constraints/pipeline (fix rounds) or whose content contains \"FAIL\"/\"ERROR\"; FULL for the task's own spec/acceptance (source_type \"architecture_note\" with location \"task:<id>:spec|acceptance\", callers create these); HIDE when relevance.scope_match is False and title_terms == 0 and path_terms == 0 and source_type in (\"memory_entry\", \"decision\", \"previous_result\", \"review_finding\"); HIDE when not fresh(ev, head_sha) and source_type in (\"source_chunk\", \"test_result\"); SHORT for source_chunk not in scope (read scope / imports) in every role; LONG for previous_result, scout_finding, decision, memory_entry that match by scope or title terms; everything else \u2192 LONG with reason \"ambiguous\" and the id appended to ambiguous_ids (P5 hands these to Jev later; never call Jev here).\n- Role profiles (P6): execute as above; review: source_chunk in scope \u2192 LONG (interface summary) not FULL, review_finding/previous_result \u2192 SHORT, test_result \u2192 FULL; security_review: like review plus FULL for any source_chunk whose path matches a [review] security_paths glob from cfg; planner: every source_chunk \u2192 SHORT, decisions/architecture_note \u2192 LONG; scout: FULL only for source_chunk in scope, else SHORT. Unknown role \u2192 execute profile.\n- `render(routed_packet, evidence_pool_or_lookup) -> str`: \"## evidence (routed v1)\" followed by one block per non-HIDE item: SHORT = \"- {location} \u2014 {summary_short}\", LONG = \"- {location}\\n  {summary_long}\", FULL = \"- {location}\\n```\\n{content}\\n```\"; HIDE items are counted in a trailing line \"hidden: N\". Deterministic ordering: FULL, LONG, SHORT, then by location.\n- `decision_row(task, routed_packet, *, mode)` returns a dict that the caller splats directly: `decision_log.record(**row)`; the dict therefore INCLUDES kind=\"context_selection\" and subject=task[\"id\"] plus candidates = [id:level], hard_constraints = the FULL reasons, deterministic = {counts per level, candidate_tokens, routed_tokens, reduction_ratio, ambiguous: n}, selected = \"routed v1\", reason = f\"{role} profile rules v1\", mode = mode; no chain-of-thought text, no content. (Uses decision_log kind context_selection from T-0772.)\n\nC. Tests (unittest, `import _harness` first): tests/test_evidence.py::test_make_ids_are_content_addressed_and_redacted, ::test_pool_add_is_idempotent_and_fresh_by_commit; tests/test_context_router.py::test_execute_profile_full_for_scope_hide_unrelated_memory, ::test_review_profile_long_for_scope_and_full_tests, ::test_render_orders_and_counts_hidden, ::test_reduction_ratio_and_ambiguous_bucket, ::test_decision_row_has_no_content. Fixtures build Evidence via make(); no real repo needed.\nD. docs/context-economy/05-context-router.md (\u226480 lines): the rule table per role, the Evidence schema, what shadow will log (from the wiring task), what is explicitly not done yet (Jev P5, summariser P7, active mode P21).\nConstraints: no new dependencies; never call jev.ask() or the external Jev HTTP API (jev.redact() in evidence.py is required and exempt: it is a local stdlib sanitizer); never read files outside STATE in this module (callers build Evidence). Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-22 15:45) after spec review T-0784 (request_changes), binding on top of v1:\n- The brief citation is dropped; sections A/B are the source of truth. 05-context-router.md documents the rules as implemented and lists Jev classification, query-time summaries and active mode as \"not in this task\".\n- evidence.EvidencePool replaces the name Pool everywhere (class, docs, tests).\n- decision_row() returns the full keyword set for decision_log.record (kind, subject, candidates, hard_constraints, deterministic, selected, reason, mode, extra); the test test_decision_row_has_no_content asserts decision_log.record(**row) succeeds against the harness root and the stored row contains no Evidence.content text.\n- Acceptance \"no change to any existing module\" becomes mechanically checkable: `git diff --stat goal/T-0760...HEAD` names only files in this task's scope; the Planner runs that check before merge.\n\nSPEC v3 (2026-09-22 16:00) after spec review T-0788 (request_changes), binding on top of v2; a fourth round is waived per the three-round precedent:\n- Rule 2 (FULL test_result for failing ids): failing ids come from task.get(\"resume_hint\", {}).get(\"failures\") parsed exactly like orchestrator/failures.py test_ids / daemon._test_ids (import and reuse failures.test_ids; never re-implement the parser). task.constraints and task.pipeline are NOT consulted. Fallback clause (content contains FAIL/ERROR) stays.\n- Scope resolution everywhere in route(): `scope = task.get(\"scope\") or task.get(\"write_scope\") or []`, matching jev_sched.py:81, stale.py:52, speculation.py:62. Path match = exact path or the evidence location's path part (before ':') equals a scope entry.\n- evidence.fresh(ev, head_sha) is a MODULE-LEVEL function (no pool or goal state); EvidencePool.fresh delegates to it as a staticmethod. context_router.route() calls evidence.fresh directly and takes no pool parameter.\n- Add tests: tests/test_context_router.py::test_failing_ids_come_from_resume_hint (a task with resume_hint.failures naming tests/test_x.py::test_y routes that test_result FULL with reason failing_output) and ::test_write_scope_alias_routes_full (task with write_scope instead of scope).\n\nSPEC v4 (2026-09-22 16:10) after spec review T-0793 (two clarifications; Planner waives a further review round, verdict set to approve by the Planner):\n- route() recomputes relevance LIVE against the task argument for every candidate (a helper evidence.relevance_for(ev, task) used by both make() and route()); the relevance stored on an Evidence is a cache for the task that built it and is never trusted across tasks. HIDE and the ambiguous-LONG rule use the live values. Add tests/test_context_router.py::test_relevance_is_recomputed_per_task (the same Evidence routes HIDE for an unrelated task and LONG for a matching one).",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_evidence.py::test_make_ids_are_content_addressed_and_redacted passes",
+    "tests/test_evidence.py::test_pool_add_is_idempotent_and_fresh_by_commit passes",
+    "tests/test_context_router.py::test_execute_profile_full_for_scope_hide_unrelated_memory passes",
+    "tests/test_context_router.py::test_review_profile_long_for_scope_and_full_tests passes",
+    "tests/test_context_router.py::test_render_orders_and_counts_hidden passes",
+    "tests/test_context_router.py::test_reduction_ratio_and_ambiguous_bucket passes",
+    "tests/test_context_router.py::test_decision_row_has_no_content passes",
+    "docs/context-economy/05-context-router.md exists; git diff --stat goal/T-0760...HEAD names only files in scope; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_context_router.py::test_failing_ids_come_from_resume_hint passes",
+    "tests/test_context_router.py::test_write_scope_alias_routes_full passes",
+    "tests/test_context_router.py::test_relevance_is_recomputed_per_task passes"
+  ],
+  "scope": [
+    "orchestrator/evidence.py",
+    "orchestrator/context_router.py",
+    "tests/test_evidence.py",
+    "tests/test_context_router.py",
+    "docs/context-economy/05-context-router.md"
+  ],
+  "depends_on": [
+    "T-0772"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0794",
+  "codex_thread": "01a0c95c-2e9f-7b02-8a0b-5fe84566a56b",
+  "result": {
+    "summary": "Implemented canonical evidence storage and deterministic context routing, including role profiles, live relevance, rendering, decision rows, tests, and documentation.\n\n- Gate: `tests-green: OK 1058 3d30979 123s`\n- Commit: `9b19668ccaf31283c84c616ec3e4e1553a64dd54`\n- Files changed: 5 scoped files, 444 insertions\n- Worktree: clean\n- Failures-only output: empty\n\nSkill used: [implement-spec](/Users/k3ntaw/code/orchestrator/wt/T-0794/skills/executor/implement-spec/SKILL.md)",
+    "executed_by": "codex:sol",
+    "thread": "01a0c95c-2e9f-7b02-8a0b-5fe84566a56b",
+    "usage": {
+      "input_tokens": 563298,
+      "cached_input_tokens": 529536,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9631,
+      "reasoning_output_tokens": 2053,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790084465.5281239,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 16:10: spec reviewed three rounds (T-0784, T-0788, T-0793); round-3 comments folded in as v4; further review waived per the three-round precedent"
+    },
+    {
+      "ts": 1790084633.90105,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974
+      }
+    },
+    {
+      "ts": 1790084633.9027488,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592
+      }
+    },
+    {
+      "ts": 1790084635.024,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912
+      }
+    },
+    {
+      "ts": 1790084655.905555,
+      "packet_meta": {
+        "chars": 1885,
+        "est_tokens": 471,
+        "hash": "3077f5b45e88",
+        "version": "3077f5b45e88",
+        "base": "b6554efa37bb",
+        "sources": "pool.toml@c6194eabcbae gotchas@5f5c9b5c82e9 memory@notes",
+        "policy_version": "c6194eabcbae",
+        "gotchas": "5f5c9b5c82e9"
+      }
+    },
+    {
+      "ts": 1790084655.907022,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0794",
+      "claimed_at": 1790084655.906852
+    },
+    {
+      "ts": 1790084655.9082408,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790085227.812552,
+      "codex_thread": "01a0c95c-2e9f-7b02-8a0b-5fe84566a56b",
+      "codex_thread_head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+    },
+    {
+      "ts": 1790085227.8179789,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790085227.821297,
+      "status": "done",
+      "result": {
+        "summary": "Implemented canonical evidence storage and deterministic context routing, including role profiles, live relevance, rendering, decision rows, tests, and documentation.\n\n- Gate: `tests-green: OK 1058 3d30979 123s`\n- Commit: `9b19668ccaf31283c84c616ec3e4e1553a64dd54`\n- Files changed: 5 scoped files, 444 insertions\n- Worktree: clean\n- Failures-only output: empty\n\nSkill used: [implement-spec](/Users/k3ntaw/code/orchestrator/wt/T-0794/skills/executor/implement-spec/SKILL.md)",
+        "executed_by": "codex:sol",
+        "thread": "01a0c95c-2e9f-7b02-8a0b-5fe84566a56b",
+        "usage": {
+          "input_tokens": 563298,
+          "cached_input_tokens": 529536,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9631,
+          "reasoning_output_tokens": 2053,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790085229.898134,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790085352.4375758,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790085352.9085178,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        }
+      }
+    },
+    {
+      "ts": 1790085353.002743,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        },
+        "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+      }
+    },
+    {
+      "ts": 1790085353.0152361,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        },
+        "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54",
+        "gated_at_done": 1790085353.015073
+      }
+    },
+    {
+      "ts": 1790085498.7153301,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790085500.230915,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        },
+        "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54",
+        "gated_at_done": 1790085353.015073,
+        "review_held_at": 1790085500.23071
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0796 (request_changes)"
+    },
+    {
+      "ts": 1790085501.2962618,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        },
+        "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54",
+        "gated_at_done": 1790085353.015073,
+        "review_held_at": 1790085500.23071,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790085501.794872,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        },
+        "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54",
+        "gated_at_done": 1790085353.015073,
+        "review_held_at": 1790085500.23071,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790085500.230915": true
+        }
+      }
+    },
+    {
+      "ts": 1790086531.5540009,
+      "codex_thread": "01a0c95c-2e9f-7b02-8a0b-5fe84566a56b",
+      "codex_thread_head": "ccfd59d81e09806a67d7ba1a825291cebb7dd1a3"
+    },
+    {
+      "ts": 1790086531.55879,
+      "rounds": 1
+    },
+    {
+      "ts": 1790086669.404611,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        },
+        "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54",
+        "gated_at_done": 1790085353.015073,
+        "review_held_at": 1790085500.23071,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790085500.230915": true
+        },
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790086998.832646,
+      "status": "done",
+      "merged_into": "goal/T-0760",
+      "merged_via": "fix round T-0797 8167b60582da8201d9be55192e7d44086c87dab8",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790084633.900974,
+        "dispatched_at": 1790084633.9026592,
+        "dispatched_at_lease": 1790085533.9026592,
+        "dispatched_at_done": 1790084635.023912,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790085352.4373949,
+        "gated_at_lease": 1790086252.4373949,
+        "first_green_at": 1790085352.43623,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0794",
+          "goal_head": "goal/T-0760",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790085352.9079978,
+          "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+        },
+        "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54",
+        "gated_at_done": 1790085353.015073,
+        "review_held_at": 1790085500.23071,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790085500.230915": true
+        },
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790086998.83024
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 16:10: spec reviewed three rounds (T-0784, T-0788, T-0793); round-3 comments folded in as v4; further review waived per the three-round precedent",
+  "pipeline": {
+    "first_ready_at": 1790084633.900974,
+    "dispatched_at": 1790084633.9026592,
+    "dispatched_at_lease": 1790085533.9026592,
+    "dispatched_at_done": 1790084635.023912,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "0808c268dc23783f78e68111f267004f648ae0fe",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790085352.4373949,
+    "gated_at_lease": 1790086252.4373949,
+    "first_green_at": 1790085352.43623,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0794",
+      "goal_head": "goal/T-0760",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790085352.9079978,
+      "head": "9b19668ccaf31283c84c616ec3e4e1553a64dd54"
+    },
+    "reviewed_sha": "9b19668ccaf31283c84c616ec3e4e1553a64dd54",
+    "gated_at_done": 1790085353.015073,
+    "review_held_at": 1790085500.23071,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790085500.230915": true
+    },
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790086998.83024
+  },
+  "packet_meta": {
+    "chars": 1885,
+    "est_tokens": 471,
+    "hash": "3077f5b45e88",
+    "version": "3077f5b45e88",
+    "base": "b6554efa37bb",
+    "sources": "pool.toml@c6194eabcbae gotchas@5f5c9b5c82e9 memory@notes",
+    "policy_version": "c6194eabcbae",
+    "gotchas": "5f5c9b5c82e9"
+  },
+  "claimed_at": 1790084655.906852,
+  "rounds": 1,
+  "executor": "sol",
+  "codex_thread_head": "ccfd59d81e09806a67d7ba1a825291cebb7dd1a3",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0760",
+  "merged_via": "fix round T-0797 8167b60582da8201d9be55192e7d44086c87dab8"
+}

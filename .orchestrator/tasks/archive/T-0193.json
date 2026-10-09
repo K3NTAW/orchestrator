@@ -1,0 +1,81 @@
+{
+  "id": "T-0193",
+  "parent": "T-0109",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: D3 v4: Planner as a function \u2014 decision-point launches; the interactive MCP server registers its session; terminal gave_up blocks re-decision (final spec after T-0182, T-0188, T-0190; supersedes T-0189)",
+  "spec": "Why: the interactive Planner spent about 11.2M tokens on 2026-09-18 and session 2 repeated it; most was re-sending a large context on wait notifications. Round 4 folds in spec reviews T-0182, T-0188 and T-0190; dispatched without a further spec review by Planner decision. Scope is nine files by Planner decision.\n\ngoals.py (additive refactor): extract the launch step of start() into `launch_planner(repo_path, prompt, account_id, max_budget_usd, log_path, extra_env=None) -> dict` (trust_workspace, env incl. CLAUDE_CONFIG_DIR / CLAUDE_CODE_OAUTH_TOKEN / ORCH_ROOT / filtered target secrets via _filter_target_secrets + resolve_secrets, argv with --model models.planner, --output-format json, --max-budget-usd, --mcp-config .mcp.planner.json, --strict-mcp-config, --append-system-prompt <planner.md>, --dangerously-skip-permissions, Popen start_new_session, stdout+stderr to log_path; returns {pid, pid_start, log}); start() calls it; behaviour unchanged (tests/test_goals.py green plus one test that start() goes through launch_planner). Expose `identity_of(pid, pid_start) -> bool`.\n\nmcp.py SESSION REGISTRATION: at server start, set os.environ[\"ORCH_DAEMON_HOST\"] = \"mcp\" and write .orchestrator/planner_session.json = {\"pid\": os.getpid(), \"pid_start\": goals._proc_start(os.getpid()), \"started_at\": time.time(), \"host\": \"mcp\"} (atomic temp+replace); register atexit removal of the file when its pid is still ours. The MCP server lives exactly as long as the interactive Planner session (pool.toml [daemon] autostart comment), so this file marks an attached human session; a stale file (dead pid per identity_of) is ignored by readers.\n\norchestrator/planner_runs.py (ROOT only). DEDUP KEYS: \"scouts_done\" \u2192 payload_key = goal_id; \"closable\" \u2192 payload_key = goal_id; \"held\" \u2192 payload_key = f\"{task_id}:{hold_reason}:{held_at!r}\" with held_at the full float from the task's pipeline review_held_at or spec_review_held_at or the latest status=held event timestamp (no truncation). A record BLOCKS re-decision when its status is running, exited_ok or gave_up (terminal); exited_early records block only while attempts < 2 is false... precisely: exited_early with attempts < 2 \u2192 retry allowed; when a retry would make attempts reach 2 after another early exit, reconcile() sets status gave_up and notify()s once; gave_up blocks forever (test: decision_points() stays quiet after gave_up). decision_points() yields (goal_id, kind, payload_key) for scouts_done (scout children exist, all done or failed, no execute child, no blocking run), held (each held execute child, no blocking run for the key), closable (every execute child merged, nothing queued or running, no blocking run).\nrun(goal_id, kind, payload_key): (a) ATTACHED-SESSION GUARD: env ORCH_DAEMON_HOST == \"mcp\" \u2192 skip \"planner session attached\"; or .orchestrator/planner_session.json exists with identity_of(pid, pid_start) true \u2192 skip \"planner session attached\"; stale file ignored. (b) ACCOUNT GUARD: acct = Pool().pick(\"planner\"); None \u2192 skip \"no account with headroom\". (c) handover.write(f\"decision {kind}\"). (d) prompt from .orchestrator/prompts/planner-decision.md ({{kind}}, {{goal_id}}, {{payload}}: \"Read .orchestrator/plan.md and the bus. Decision: <kind> for <goal_id>. Do only what this decision needs, write plan.md, and finish.\"). (e) goals.launch_planner(ROOT, prompt, acct.id, limits.max_budget_usd.get(\"planner_decision\", 3), runs/planner-decision-<goal_id>-<kind>-<attempt>.log). (f) record {goal_id, kind, payload_key, pid, pid_start, started_at, account, log, status \"running\", attempts} in .orchestrator/runs/planner_runs.json under bus.locked(); guard skips are recorded with skipped_reason, no pid, and never block.\nreconcile(): for each running record with identity_of false \u2192 \"exited_ok\" if the decision's condition no longer holds (scouts_done: an execute child now exists; held: the task no longer held with that held_at; closable: the goal is done), else \"exited_early\" with attempts += 1, and \"gave_up\" + one notify when attempts reaches 2. Called at the start of the autonomous block each tick.\ndaemon.tick(): after the stages, when pool.cfg.get(\"planner\", {}).get(\"autonomous\", False): reconcile(), then iterate decision_points() and launch at most one per tick, wrapped like the stages. pool.toml: `[planner] autonomous = false` with a comment (default off; turn on only in the executor container) and `planner_decision = 3.0` in limits.max_budget_usd. README.md: paragraph \"Autonomous decisions\" under Pipeline.\nTests tests/test_planner_runs.py (harness; launch_planner and identity_of patched): decision_points_scouts_done_held_closable, held_key_changes_with_each_new_hold, run_skips_when_daemon_host_is_mcp, run_skips_when_planner_session_file_has_live_pid_and_ignores_stale, run_skips_without_account_headroom, run_launches_once_per_key, reconcile_exited_ok_exited_early_gave_up_and_gave_up_blocks_redecision, tick_launches_nothing_when_autonomous_false; tests/test_goals.py: start_uses_launch_planner; a test that mcp.py's registration helper writes and removes planner_session.json (call the helper functions directly, do not start the server). No new dependency; commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0192"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py has the eight named tests, tests/test_goals.py the launch_planner test, and the mcp registration helper is tested; all green; existing tests untouched and green",
+    "With [planner] autonomous = false (default) tick() launches nothing; with it true, ORCH_DAEMON_HOST=mcp or a live planner_session.json pid skips with a recorded reason; a stale session file does not block",
+    "mcp.py writes planner_session.json at start (pid, pid_start, started_at) and removes it at exit; the file and the env flag are the two guard branches",
+    "Dedup keys per kind with full-precision held_at; running/exited_ok/gave_up block re-decision; exited_early retried until attempts reach 2, then gave_up with one notify and no further launches (test)",
+    "goals.start unchanged and routed through launch_planner (secrets filter preserved); identity_of exposed; uv run python -m unittest discover -q tests green; no new dependency; only the nine scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/goals.py",
+    "orchestrator/daemon.py",
+    "orchestrator/mcp.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    "tests/test_goals.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0193",
+  "codex_thread": null,
+  "result": {
+    "summary": "not run: spec review of T-0192 is waived by Planner decision after three rounds (T-0182, T-0188, T-0190); the daemon created this in the gap before the waiver stamp. Killed at start.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789764855.3905332,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0193",
+      "claimed_at": 1789764855.390053
+    },
+    {
+      "ts": 1789764855.4022028,
+      "pid": 57497,
+      "account": "A"
+    },
+    {
+      "ts": 1789764887.17212,
+      "status": "failed",
+      "reason": "non-JSON output (rc=143): "
+    },
+    {
+      "ts": 1789764887.267238,
+      "status": "failed",
+      "result": {
+        "summary": "not run: spec review of T-0192 is waived by Planner decision after three rounds (T-0182, T-0188, T-0190); the daemon created this in the gap before the waiver stamp. Killed at start.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789764855.390053,
+  "pid": 57497,
+  "account": "A",
+  "reason": "non-JSON output (rc=143): "
+}

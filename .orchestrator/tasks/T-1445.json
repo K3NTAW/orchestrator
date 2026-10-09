@@ -1,0 +1,724 @@
+{
+  "id": "T-1445",
+  "created_at": 1790872060.9776099,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: Execute result derived from git state in spawn.run_worker: commits+clean -> done; dirty in scope -> one commit-now resume then auto-commit; out-of-scope dirt or no commits -> execute_incomplete hold",
+  "spec": "Goal T-1403, wave 2, plan label B4. Contract (plan.md): gitutil.execute_outcome(worktree, parent, scope)\n-> {ahead, head, dirty_in_scope, dirty_out_of_scope}; hold prefix execute_incomplete (B5 later maps it to failure\nkind 'incomplete').\n\nU2 resolved by reading the evidence (2026-10-01): status_reason non_json is NOT a prose final message. It is set at\norchestrator/spawn.py:1380-1384 when json.loads(stdout) of `claude -p --output-format json` fails, i.e. the CLI\nprinted no JSON envelope at all. Every recorded case has the same shape: reason 'non-JSON output (rc=143): ' with\nempty stdout+stderr, the CLI killed by SIGTERM. luna-inbox T-0514 (bus event 2026-09-27, ~20 min after spawn,\nworkers/T-0514.events.jsonl exit status_reason non_json, no execute run row logged) and 12 local orchestrator cases\n(T-0116, T-0127, T-0133, T-0136, T-0142, T-0145, T-0148, T-0149, T-0166, T-0168, T-0193, T-0222). luna T-0526 was\nnot non_json: reconcile marked the worker process_dead, then its own bus_post_result landed status done with a prose\nsummary ('Gate result: not finished ... Last commit c1f766b. The working tree is clean'). So the robust signal is the\ngit state of the worktree, whatever run_claude returned.\n\nFacts (main 355583c):\n- spawn.py:1513 run_worker(); 1611 first = run_claude(...); 1656-1660 execute + status done posts\n  {'summary', 'executed_by': f\"claude:{t['tier']}\", 'review'} with NO commit; 1709-1716 failed -> status failed,\n  reason, resume_hint.partial_output. The execute contract (orchestrator/contracts.py:36) expects summary, commit,\n  executed_by.\n- spawn.py:1637-1655 resume_output() resumes with resume_session, which run_claude turns into\n  `--resume <id> --tools \"\"` (1320-1322): no tools, so it cannot commit. The task-level resume path\n  t['_resume_session'] (1323-1324, set at 1541) resumes WITH the normal allowlist: use that for commit-now.\n- run_worker sets t['executor'] = 'claude:<tier>' at 1564 for execute.\n- orchestrator/gitutil.py:11-22 _resolve_base(worktree, parent) picks merge-base with goal/<parent>, origin/main,\n  main. daemon.py:1230 _dirty_scope_paths parses `git status --porcelain -z --untracked-files=all` and ignores\n  .orchestrator/ and .venv; mirror that parsing in gitutil (do not import daemon). Scope matching:\n  orchestrator/scopes.py:7 matches(path, entries).\n\nChange:\n1. gitutil.execute_outcome(worktree, parent, scope): None when worktree is not a git work tree or no base resolves;\n   else {'ahead': int (rev-list --count base..HEAD), 'head': sha, 'dirty_in_scope': sorted list,\n   'dirty_out_of_scope': sorted list}. Read-only.\n2. run_worker, role execute only, after the run (statuses 'done' and 'failed'; leave 'held', 'budget',\n   'superseded' as today): o = execute_outcome(worktree, t.get('parent'), t.get('scope') or []).\n   - o is None -> today's behaviour exactly.\n   - dirty_out_of_scope non-empty -> status held, hold_reason 'execute_incomplete: uncommitted changes outside\n     scope', resume_hint {'dirty_out_of_scope': [...], 'dirty_in_scope': [...], 'commit': head}.\n   - dirty_in_scope non-empty -> once: if a session id exists and budget/time remain, resume that session through\n     t['_resume_session'] with the normal allowlist and a short prompt ('Commit the in-scope changes now: git add\n     <paths> && git commit -m \"<task id>: ...\"; do not run tests; reply DONE.'), budget <= 20% of the role budget,\n     timeout <= 600 s. Then recompute; if in-scope files are still dirty, the orchestrator commits them itself in\n     the worktree (git add -- <exact paths>; git commit -m '<task id>: auto-commit in-scope leftovers after\n     executor exit'), never `git add -A`. Recompute again.\n   - ahead > 0 and tree clean (after the step above) -> post_result done with summary (the model's result text when\n     there is one, else 'derived from git state after <reason>'), commit = head, executed_by = t['executor'],\n     'derived_from': 'git_state' when run_claude did not return done.\n   - ahead == 0 and clean -> status held, hold_reason 'execute_incomplete: no commits', resume_hint carrying the\n     partial output when there is one.\n   All writes go through worker_control.write_if_current like the neighbouring code; usage of the resume is\n   combined into release_usage like resume_output does.\n3. spawn.py:1657: executed_by = t['executor'] (set at 1564) instead of re-deriving from tier.\n\nTests that assert the old behaviour (SPEC RULE; update to the new contract):\n- tests/test_spawn.py::test_failed_without_reason_key_sets_default_and_resume_hint (~543-558): its worktree is a\n  plain directory (not git), so execute_outcome returns None and it must still pass unchanged; keep it that way.\n- Other execute run_worker tests in tests/test_spawn.py patch ensure_worktree to TMP (e.g.\n  test_run_worker_records_skills_exposed_and_l0_tokens ~1774, the instruction-token test ~1755-1773). If TMP is a\n  git work tree during the run, they now take the git branch; they assert only packet_meta, so they should pass;\n  run all of tests/test_spawn.py and update any execute test whose expected status changed to the new contract.\n- Build the new tests on tests/_harness.py scratch_repo; patch run_claude like the neighbouring tests.\n\nOut of scope: daemon.py (B5 adds fix rounds for execute_incomplete; the daemon gate hold 'executor did not commit'\nstays), executor.py, failures.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests.",
+  "inputs": [
+    "T-1435"
+  ],
+  "acceptance": [
+    "tests/test_gitutil.py::test_execute_outcome_reports_ahead_head_and_dirty_split_by_scope: passes: in a scratch repo with a goal branch and a task worktree, gitutil.execute_outcome(worktree, parent, scope) returns ahead (commits since merge-base with goal/<parent>), head sha, and uncommitted paths split into dirty_in_scope / dirty_out_of_scope (untracked included, .orchestrator/ and .venv ignored), and None for a directory that is not a git work tree",
+    "tests/test_spawn.py::test_execute_result_derived_from_git_state: passes: run_worker for an execute task whose run_claude returns failed 'non-JSON output (rc=143): ' posts status done with result.commit = the worktree HEAD when the branch has a commit and a clean tree; with in-scope uncommitted files and no session it auto-commits them and posts done; with an out-of-scope dirty file it holds 'execute_incomplete: ...' with resume_hint.dirty_out_of_scope; with no commits it holds 'execute_incomplete: no commits'",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/gitutil.py",
+    "tests/test_spawn.py",
+    "tests/test_gitutil.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1445",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "`ahead > 0` is measured from the merge-base, not from the start of this run. A fix-round or retry worktree already has commits from earlier rounds. A run that did nothing (killed, rc=143) would then be posted as done with commit = old head, which reports false success. The spec does not record `head` or `ahead` before the run.",
+        "severity": "high",
+        "line": 1611
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Derived done with `derived_from: git_state` overwrites a result the worker already posted through bus_post_result. The T-0526 case in the spec is exactly this: the worker posted done with its own summary, and the new post would replace it. The write path has no check for an existing result, and the spec does not say whether the worker's own post wins.",
+        "severity": "med",
+        "line": 1656
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The 'status done' path changes behaviour without a stated rule. When run_claude returns done but out-of-scope files are dirty or there are no commits, the result becomes a hold. Today that case posts done and the daemon gate then holds it with 'executor did not commit'. Two different hold reasons now cover the same state, and the daemon is out of scope. The spec does not say how `contracts.process` and `fit_result` interact with the derived commit, or whether they should run.",
+        "severity": "med",
+        "line": 1656
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The auto-commit of in-scope leftovers stages whatever a killed executor left behind. That can be partial or broken work, and it then looks like a finished commit with done status. There is no cap on file count or size, no guard for in-scope secrets or junk, and no marker in the result that the commit was synthetic. A stale `.git/index.lock` left by the SIGTERM can also make `git add` fail. The spec leaves unspecified what happens when the add or commit fails (it should hold, not raise or fall through silently).",
+        "severity": "med",
+        "line": 1637
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The commit-now resume reuses `t['_resume_session']` and mutates `t`. `run_claude` also reads `_resume_session` for the main run (1323), and `resume_task` sets it as well. The spec does not say to restore the key afterwards. A later `run_claude` call in the same worker, such as the tool escalation respawn, would silently resume the wrong session. For the non_json cases there is usually no session id, so the resume branch is mostly dead and untested against real failures.",
+        "severity": "med",
+        "line": 1323
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Time and budget accounting for the resume is underspecified. Elapsed time since `started`, and spend from the first run (including the tool-escalation respawn), must be subtracted. The spec says '<= 20% of the role budget' and '<= 600 s' but does not say 'remaining'. The usage of the resume must be added through `_combined_usage`, as `resume_output` does, with a `bus.log_run` row. The spec does not require that row, so the extra spend would be unlogged. A `superseded` check is also needed after the resume and before any commit or post.",
+        "severity": "med",
+        "line": 1637
+      },
+      {
+        "path": "orchestrator/gitutil.py",
+        "issue": "Scope matching is split across two implementations: scopes.matches here, and the fnmatch or prefix logic in daemon `_dirty_scope_paths`. The spec says to mirror the parsing but use `scopes.matches`. If the two disagree on glob or directory entries (daemon also treats '.' as match-all), the daemon gate and the new split will classify the same file differently. The spec also does not say whether `rev-list` and `git status` failures return None or raise, and the git calls have no timeout.",
+        "severity": "low",
+        "line": 11
+      }
+    ],
+    "suggested_spec_changes": [
+      "Capture `head` and `ahead` (via execute_outcome) before run_claude and compare after the run. Derive done only when HEAD advanced during this run, or when the worker explicitly resumed a task that already carried a commit. Otherwise a retry round with an old commit reads as success.",
+      "State precedence when the worker has already posted its own result (bus.get(task_id).result with a commit). Keep the worker's result and only fill in a missing commit, instead of overwriting it.",
+      "Define the done-with-dirty and done-with-no-commit cases explicitly. Say whether they now hold as execute_incomplete, and keep the daemon 'executor did not commit' hold consistent. Also say whether contracts.process still runs on the derived result.",
+      "Define failure handling for the orchestrator auto-commit: on a git add or commit error, hold with 'execute_incomplete: auto-commit failed' and the stderr tail. Mark the synthetic commit in the result (e.g. `auto_committed: [paths]`) so review and the human can see it.",
+      "Pass the commit-now resume the remaining budget and time (min of 20% of the role budget and what is left after the first run and any escalation). Log a bus.log_run row, fold usage into release_usage via `_combined_usage`, restore `t['_resume_session']` afterwards, and re-check is_current before any commit or post.",
+      "In test_execute_result_derived_from_git_state, add a case for the resume path with a session id (asserting the allowlist and budget cap) and a case for 'ahead>0 but nothing new this run'. Pin the TMP-based execute tests to a non-git dir or a mocked execute_outcome.",
+      "Add a rollback note: the change is local to run_worker and gitutil, with revert via `git revert <sha>`. Optionally gate behind a pool.toml flag."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 6355,
+      "trimmed": {
+        "risks": 2
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790872077.749042,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7891,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790872077.7696111,
+      "packet_meta": {
+        "chars": 7152,
+        "est_tokens": 1788,
+        "presented_tokens": 1788,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "fc69e06a15e937ebb970696268f935d8c20f600d3440d5c4b5d9b2df66c26c6d"
+          },
+          "spec": {
+            "chars": 5633,
+            "est_tokens": 1408,
+            "sha256": "6094bd8b8e16783b676da3c45a39c3d5e7d8a03e7ab9d3bba14ae20bfd3d4ad9"
+          },
+          "acceptance": {
+            "chars": 1038,
+            "est_tokens": 259,
+            "sha256": "bbae01cbf44f99fa4627c7b5405bd9342e94b4df4c9e51601de61d222bc0ed50"
+          },
+          "scope": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "9f91099f9c6d465606212c17ea156f44a8f24a9d8f4341483fb50a79c039bb4f"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 256,
+            "est_tokens": 64,
+            "sha256": "5af62f31a93e5a815ead95d7c407d3db53d7d05cdf6b6c70e7d5eb19a9da8796"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "decf54e7d879",
+        "version": "decf54e7d879",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1435 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7891,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790872081.183566,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1445",
+      "claimed_at": 1790872081.1827211
+    },
+    {
+      "ts": 1790872081.195998,
+      "account": "A"
+    },
+    {
+      "ts": 1790872092.421063,
+      "pid": 47119,
+      "account": "A"
+    },
+    {
+      "ts": 1790872124.741898,
+      "packet_meta": {
+        "chars": 7152,
+        "est_tokens": 1788,
+        "presented_tokens": 1788,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "fc69e06a15e937ebb970696268f935d8c20f600d3440d5c4b5d9b2df66c26c6d"
+          },
+          "spec": {
+            "chars": 5633,
+            "est_tokens": 1408,
+            "sha256": "6094bd8b8e16783b676da3c45a39c3d5e7d8a03e7ab9d3bba14ae20bfd3d4ad9"
+          },
+          "acceptance": {
+            "chars": 1038,
+            "est_tokens": 259,
+            "sha256": "bbae01cbf44f99fa4627c7b5405bd9342e94b4df4c9e51601de61d222bc0ed50"
+          },
+          "scope": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "9f91099f9c6d465606212c17ea156f44a8f24a9d8f4341483fb50a79c039bb4f"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 256,
+            "est_tokens": 64,
+            "sha256": "5af62f31a93e5a815ead95d7c407d3db53d7d05cdf6b6c70e7d5eb19a9da8796"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "decf54e7d879",
+        "version": "decf54e7d879",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1435 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7891,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "08ab8895-3e72-47f9-a611-2503e0c5249d"
+      }
+    },
+    {
+      "ts": 1790872124.782625,
+      "packet_meta": {
+        "chars": 7152,
+        "est_tokens": 1788,
+        "presented_tokens": 1788,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "fc69e06a15e937ebb970696268f935d8c20f600d3440d5c4b5d9b2df66c26c6d"
+          },
+          "spec": {
+            "chars": 5633,
+            "est_tokens": 1408,
+            "sha256": "6094bd8b8e16783b676da3c45a39c3d5e7d8a03e7ab9d3bba14ae20bfd3d4ad9"
+          },
+          "acceptance": {
+            "chars": 1038,
+            "est_tokens": 259,
+            "sha256": "bbae01cbf44f99fa4627c7b5405bd9342e94b4df4c9e51601de61d222bc0ed50"
+          },
+          "scope": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "9f91099f9c6d465606212c17ea156f44a8f24a9d8f4341483fb50a79c039bb4f"
+          },
+          "depends_on": {
+            "chars": 23,
+            "est_tokens": 5,
+            "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+          },
+          "existing tests": {
+            "chars": 256,
+            "est_tokens": 64,
+            "sha256": "5af62f31a93e5a815ead95d7c407d3db53d7d05cdf6b6c70e7d5eb19a9da8796"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "decf54e7d879",
+        "version": "decf54e7d879",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1435 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 7891,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "08ab8895-3e72-47f9-a611-2503e0c5249d",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790872126.837017,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "`ahead > 0` is measured from the merge-base, not from the start of this run. A fix-round or retry worktree already has commits from earlier rounds. A run that did nothing (killed, rc=143) would then be posted as done with commit = old head, which reports false success. The spec does not record `head` or `ahead` before the run.",
+            "severity": "high",
+            "line": 1611
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Derived done with `derived_from: git_state` overwrites a result the worker already posted through bus_post_result. The T-0526 case in the spec is exactly this: the worker posted done with its own summary, and the new post would replace it. The write path has no check for an existing result, and the spec does not say whether the worker's own post wins.",
+            "severity": "med",
+            "line": 1656
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The 'status done' path changes behaviour without a stated rule. When run_claude returns done but out-of-scope files are dirty or there are no commits, the result becomes a hold. Today that case posts done and the daemon gate then holds it with 'executor did not commit'. Two different hold reasons now cover the same state, and the daemon is out of scope. The spec does not say how `contracts.process` and `fit_result` interact with the derived commit, or whether they should run.",
+            "severity": "med",
+            "line": 1656
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The auto-commit of in-scope leftovers stages whatever a killed executor left behind. That can be partial or broken work, and it then looks like a finished commit with done status. There is no cap on file count or size, no guard for in-scope secrets or junk, and no marker in the result that the commit was synthetic. A stale `.git/index.lock` left by the SIGTERM can also make `git add` fail. The spec leaves unspecified what happens when the add or commit fails (it should hold, not raise or fall through silently).",
+            "severity": "med",
+            "line": 1637
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The commit-now resume reuses `t['_resume_session']` and mutates `t`. `run_claude` also reads `_resume_session` for the main run (1323), and `resume_task` sets it as well. The spec does not say to restore the key afterwards. A later `run_claude` call in the same worker, such as the tool escalation respawn, would silently resume the wrong session. For the non_json cases there is usually no session id, so the resume branch is mostly dead and untested against real failures.",
+            "severity": "med",
+            "line": 1323
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Time and budget accounting for the resume is underspecified. Elapsed time since `started`, and spend from the first run (including the tool-escalation respawn), must be subtracted. The spec says '<= 20% of the role budget' and '<= 600 s' but does not say 'remaining'. The usage of the resume must be added through `_combined_usage`, as `resume_output` does, with a `bus.log_run` row. The spec does not require that row, so the extra spend would be unlogged. A `superseded` check is also needed after the resume and before any commit or post.",
+            "severity": "med",
+            "line": 1637
+          },
+          {
+            "path": "orchestrator/gitutil.py",
+            "issue": "Scope matching is split across two implementations: scopes.matches here, and the fnmatch or prefix logic in daemon `_dirty_scope_paths`. The spec says to mirror the parsing but use `scopes.matches`. If the two disagree on glob or directory entries (daemon also treats '.' as match-all), the daemon gate and the new split will classify the same file differently. The spec also does not say whether `rev-list` and `git status` failures return None or raise, and the git calls have no timeout.",
+            "severity": "low",
+            "line": 11
+          }
+        ],
+        "suggested_spec_changes": [
+          "Capture `head` and `ahead` (via execute_outcome) before run_claude and compare after the run. Derive done only when HEAD advanced during this run, or when the worker explicitly resumed a task that already carried a commit. Otherwise a retry round with an old commit reads as success.",
+          "State precedence when the worker has already posted its own result (bus.get(task_id).result with a commit). Keep the worker's result and only fill in a missing commit, instead of overwriting it.",
+          "Define the done-with-dirty and done-with-no-commit cases explicitly. Say whether they now hold as execute_incomplete, and keep the daemon 'executor did not commit' hold consistent. Also say whether contracts.process still runs on the derived result.",
+          "Define failure handling for the orchestrator auto-commit: on a git add or commit error, hold with 'execute_incomplete: auto-commit failed' and the stderr tail. Mark the synthetic commit in the result (e.g. `auto_committed: [paths]`) so review and the human can see it.",
+          "Pass the commit-now resume the remaining budget and time (min of 20% of the role budget and what is left after the first run and any escalation). Log a bus.log_run row, fold usage into release_usage via `_combined_usage`, restore `t['_resume_session']` afterwards, and re-check is_current before any commit or post.",
+          "In test_execute_result_derived_from_git_state, add a case for the resume path with a session id (asserting the allowlist and budget cap) and a case for 'ahead>0 but nothing new this run'. Pin the TMP-based execute tests to a non-git dir or a mocked execute_outcome.",
+          "Add a rollback note: the change is local to run_worker and gitutil, with revert via `git revert <sha>`. Optionally gate behind a pool.toml flag."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 6355,
+          "trimmed": {
+            "risks": 2
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790872126.839029,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "`ahead > 0` is measured from the merge-base, not from the start of this run. A fix-round or retry worktree already has commits from earlier rounds. A run that did nothing (killed, rc=143) would then be posted as done with commit = old head, which reports false success. The spec does not record `head` or `ahead` before the run.",
+          "severity": "high",
+          "line": 1611
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Derived done with `derived_from: git_state` overwrites a result the worker already posted through bus_post_result. The T-0526 case in the spec is exactly this: the worker posted done with its own summary, and the new post would replace it. The write path has no check for an existing result, and the spec does not say whether the worker's own post wins.",
+          "severity": "med",
+          "line": 1656
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The 'status done' path changes behaviour without a stated rule. When run_claude returns done but out-of-scope files are dirty or there are no commits, the result becomes a hold. Today that case posts done and the daemon gate then holds it with 'executor did not commit'. Two different hold reasons now cover the same state, and the daemon is out of scope. The spec does not say how `contracts.process` and `fit_result` interact with the derived commit, or whether they should run.",
+          "severity": "med",
+          "line": 1656
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The auto-commit of in-scope leftovers stages whatever a killed executor left behind. That can be partial or broken work, and it then looks like a finished commit with done status. There is no cap on file count or size, no guard for in-scope secrets or junk, and no marker in the result that the commit was synthetic. A stale `.git/index.lock` left by the SIGTERM can also make `git add` fail. The spec leaves unspecified what happens when the add or commit fails (it should hold, not raise or fall through silently).",
+          "severity": "med",
+          "line": 1637
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The commit-now resume reuses `t['_resume_session']` and mutates `t`. `run_claude` also reads `_resume_session` for the main run (1323), and `resume_task` sets it as well. The spec does not say to restore the key afterwards. A later `run_claude` call in the same worker, such as the tool escalation respawn, would silently resume the wrong session. For the non_json cases there is usually no session id, so the resume branch is mostly dead and untested against real failures.",
+          "severity": "med",
+          "line": 1323
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Time and budget accounting for the resume is underspecified. Elapsed time since `started`, and spend from the first run (including the tool-escalation respawn), must be subtracted. The spec says '<= 20% of the role budget' and '<= 600 s' but does not say 'remaining'. The usage of the resume must be added through `_combined_usage`, as `resume_output` does, with a `bus.log_run` row. The spec does not require that row, so the extra spend would be unlogged. A `superseded` check is also needed after the resume and before any commit or post.",
+          "severity": "med",
+          "line": 1637
+        },
+        {
+          "path": "orchestrator/gitutil.py",
+          "issue": "Scope matching is split across two implementations: scopes.matches here, and the fnmatch or prefix logic in daemon `_dirty_scope_paths`. The spec says to mirror the parsing but use `scopes.matches`. If the two disagree on glob or directory entries (daemon also treats '.' as match-all), the daemon gate and the new split will classify the same file differently. The spec also does not say whether `rev-list` and `git status` failures return None or raise, and the git calls have no timeout.",
+          "severity": "low",
+          "line": 11
+        },
+        {
+          "path": "tests/test_spawn.py",
+          "issue": "Execute tests that patch `ensure_worktree` to TMP are hostage to whether TMP is a git work tree. The harness's shared root may sit inside a repo. If it does, those tests silently take the new branch and may hold instead of post. The spec says only 'should pass'. It should require those tests to pin a non-git worktree, or an explicit execute_outcome mock, so they stay independent of the host environment.",
+          "severity": "low",
+          "line": 1774
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "No rollback or kill-switch is given for an outward-behaviour change, one that overrides run_claude's verdict and auto-commits. A config flag defaulting to on, or at least a note on the revert path, is missing.",
+          "severity": "low",
+          "line": 1611
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 7152,
+    "est_tokens": 1788,
+    "presented_tokens": 1788,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "fc69e06a15e937ebb970696268f935d8c20f600d3440d5c4b5d9b2df66c26c6d"
+      },
+      "spec": {
+        "chars": 5633,
+        "est_tokens": 1408,
+        "sha256": "6094bd8b8e16783b676da3c45a39c3d5e7d8a03e7ab9d3bba14ae20bfd3d4ad9"
+      },
+      "acceptance": {
+        "chars": 1038,
+        "est_tokens": 259,
+        "sha256": "bbae01cbf44f99fa4627c7b5405bd9342e94b4df4c9e51601de61d222bc0ed50"
+      },
+      "scope": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "9f91099f9c6d465606212c17ea156f44a8f24a9d8f4341483fb50a79c039bb4f"
+      },
+      "depends_on": {
+        "chars": 23,
+        "est_tokens": 5,
+        "sha256": "a1f80c68ea5dfed4c164f0a1b57674c850b8e75df45a22fc0e938ae8cbfc28ab"
+      },
+      "existing tests": {
+        "chars": 256,
+        "est_tokens": 64,
+        "sha256": "5af62f31a93e5a815ead95d7c407d3db53d7d05cdf6b6c70e7d5eb19a9da8796"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "decf54e7d879",
+    "version": "decf54e7d879",
+    "candidate_known": false,
+    "base": "db2ae815ac55",
+    "sources": "task@T-1435 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 7891,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "08ab8895-3e72-47f9-a611-2503e0c5249d",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790872081.1827211,
+  "account": "A",
+  "pid": 47119,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "`ahead > 0` is measured from the merge-base, not from the start of this run. A fix-round or retry worktree already has commits from earlier rounds. A run that did nothing (killed, rc=143) would then be posted as done with commit = old head, which reports false success. The spec does not record `head` or `ahead` before the run.",
+      "severity": "high",
+      "line": 1611
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Derived done with `derived_from: git_state` overwrites a result the worker already posted through bus_post_result. The T-0526 case in the spec is exactly this: the worker posted done with its own summary, and the new post would replace it. The write path has no check for an existing result, and the spec does not say whether the worker's own post wins.",
+      "severity": "med",
+      "line": 1656
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The 'status done' path changes behaviour without a stated rule. When run_claude returns done but out-of-scope files are dirty or there are no commits, the result becomes a hold. Today that case posts done and the daemon gate then holds it with 'executor did not commit'. Two different hold reasons now cover the same state, and the daemon is out of scope. The spec does not say how `contracts.process` and `fit_result` interact with the derived commit, or whether they should run.",
+      "severity": "med",
+      "line": 1656
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The auto-commit of in-scope leftovers stages whatever a killed executor left behind. That can be partial or broken work, and it then looks like a finished commit with done status. There is no cap on file count or size, no guard for in-scope secrets or junk, and no marker in the result that the commit was synthetic. A stale `.git/index.lock` left by the SIGTERM can also make `git add` fail. The spec leaves unspecified what happens when the add or commit fails (it should hold, not raise or fall through silently).",
+      "severity": "med",
+      "line": 1637
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The commit-now resume reuses `t['_resume_session']` and mutates `t`. `run_claude` also reads `_resume_session` for the main run (1323), and `resume_task` sets it as well. The spec does not say to restore the key afterwards. A later `run_claude` call in the same worker, such as the tool escalation respawn, would silently resume the wrong session. For the non_json cases there is usually no session id, so the resume branch is mostly dead and untested against real failures.",
+      "severity": "med",
+      "line": 1323
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Time and budget accounting for the resume is underspecified. Elapsed time since `started`, and spend from the first run (including the tool-escalation respawn), must be subtracted. The spec says '<= 20% of the role budget' and '<= 600 s' but does not say 'remaining'. The usage of the resume must be added through `_combined_usage`, as `resume_output` does, with a `bus.log_run` row. The spec does not require that row, so the extra spend would be unlogged. A `superseded` check is also needed after the resume and before any commit or post.",
+      "severity": "med",
+      "line": 1637
+    },
+    {
+      "path": "orchestrator/gitutil.py",
+      "issue": "Scope matching is split across two implementations: scopes.matches here, and the fnmatch or prefix logic in daemon `_dirty_scope_paths`. The spec says to mirror the parsing but use `scopes.matches`. If the two disagree on glob or directory entries (daemon also treats '.' as match-all), the daemon gate and the new split will classify the same file differently. The spec also does not say whether `rev-list` and `git status` failures return None or raise, and the git calls have no timeout.",
+      "severity": "low",
+      "line": 11
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "issue": "Execute tests that patch `ensure_worktree` to TMP are hostage to whether TMP is a git work tree. The harness's shared root may sit inside a repo. If it does, those tests silently take the new branch and may hold instead of post. The spec says only 'should pass'. It should require those tests to pin a non-git worktree, or an explicit execute_outcome mock, so they stay independent of the host environment.",
+      "severity": "low",
+      "line": 1774
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "No rollback or kill-switch is given for an outward-behaviour change, one that overrides run_claude's verdict and auto-commits. A config flag defaulting to on, or at least a note on the revert path, is missing.",
+      "severity": "low",
+      "line": 1611
+    }
+  ]
+}

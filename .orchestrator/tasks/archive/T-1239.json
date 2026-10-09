@@ -1,0 +1,651 @@
+{
+  "id": "T-1239",
+  "created_at": 1790174074.0058408,
+  "parent": "T-0991",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: S2d cache-aware disclosure in shadow: context router gains cacheability and invalidation-cost inputs, tool catalog stable L0 plus dynamic L2, skill catalog stable ids (P8, P9, P10)",
+  "spec": "orchestrator/context_router.py: each routed evidence decision row gains cacheability (stable|semi|dynamic, from evidence source_type and freshness: repo files at a pinned commit are stable, memory semi, tool outputs dynamic) and cache_cost (tokens the presented text would add to the dynamic suffix, using cache_telemetry ratios) and a shadow field cache_adjusted_level: the level the router would choose if effective cost replaced raw tokens in its budget rule; recorded on the existing context_route decision_log rows; the presented level is unchanged unless [context_router].cache_mode is active (add cache_mode = \"shadow\" with a dated comment). orchestrator/tool_catalog.py: add a stable Level-0 catalog (names and one-line purposes of every known tool, identical across tasks of a role) and keep the dynamic Level-2 schemas for the minimal set; [tool_disclosure].cache_mode (shadow: record on the tool_disclosure decision rows the size of the stable catalog vs the current dynamic list and whether the dynamic list changed since the previous task of the same role; active: present the stable catalog plus the dynamic selection). orchestrator/skill_router.py: the presented skills section gets a stable compact catalog line block (ids and triggers of every active skill for the role, sorted) ahead of the selected full instructions; [skills].cache_mode likewise shadow-first with the same measurement. All three log through the existing decision_log kinds (extend row fields, no new kinds). Docs: docs/hermes-hardening/10-cache-aware-disclosure.md with the measured shadow numbers over the real decision_log rows of this repository.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [
+    "T-1173"
+  ],
+  "acceptance": [
+    "tests/test_context_router.py::test_rows_carry_cacheability_and_cache_adjusted_level_without_changing_presented_level",
+    "tests/test_tool_catalog.py::test_stable_l0_catalog_identical_across_tasks_and_dynamic_change_flag",
+    "tests/test_skill_router.py::test_stable_skill_catalog_block_precedes_selected_instructions_in_active_only",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/context_router.py",
+    "orchestrator/tool_catalog.py",
+    "orchestrator/skill_router.py",
+    ".orchestrator/pool.toml",
+    "tests/test_context_router.py",
+    "tests/test_tool_catalog.py",
+    "tests/test_skill_router.py",
+    "docs/hermes-hardening/10-cache-aware-disclosure.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1239",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "The spec says to extend 'existing context_route decision_log rows', but decision_row() emits kind 'context_selection'. It also stores candidates as 'id:level' strings, so there is no per-evidence dict to hold cacheability, cache_cost or cache_adjusted_level. The spec has to say whether these go into the 'deterministic' dict as parallel lists or whether candidates changes shape. Changing candidates would break context_scorecard and context_eval consumers.",
+        "severity": "high",
+        "line": 149
+      },
+      {
+        "path": "orchestrator/context_router.py",
+        "issue": "_choice() has no token-budget rule. Levels come from source_type, scope and role rules only. 'The level the router would choose if effective cost replaced raw tokens in its budget rule' therefore has no defined meaning. The spec must define the shadow algorithm (for example, downgrade or upgrade one level when the cost delta crosses a threshold, and never below the hard-constraint FULL reasons such as in_scope_file, security_path, failing_output and acceptance). Otherwise the acceptance test cannot check a specific value.",
+        "severity": "high",
+        "line": 53
+      },
+      {
+        "path": "orchestrator/cache_telemetry.py",
+        "issue": "cache_telemetry is outside scope and exposes effective_cost(norm, cfg) over normalized provider usage. It has no token-to-dynamic-suffix ratio API. The spec should name the exact function to reuse, or allow a small read-only helper. It also needs a defined fallback when there is no telemetry data. A silent ratio of 1.0 would make cache_adjusted_level equal the presented level and hide missing data.",
+        "severity": "med",
+        "line": 35
+      },
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "issue": "tool_disclosure rows are written in orchestrator/bus.py (around line 285), which is out of scope. The shadow fields (stable catalog size, dynamic list size, changed-since-previous-task-of-same-role) and the active-mode presentation cannot be recorded or applied from tool_catalog.py alone. Either add bus.py to scope or specify that tool_catalog exposes a pure function (for example cache_view(role, keep, previous)) that bus.py calls unchanged.",
+        "severity": "high",
+        "line": 80
+      },
+      {
+        "path": "orchestrator/tool_catalog.py",
+        "issue": "'Changed since the previous task of the same role' needs persisted state. The only source is decision_log tool_disclosure rows. The spec must say how the previous row is found (filter by role, order, bounded read) and what the first task reports (unknown, not false). It must not use in-process module state, which resets per process and breaks the deterministic acceptance test.",
+        "severity": "med",
+        "line": 96
+      },
+      {
+        "path": "orchestrator/skill_router.py",
+        "issue": "skill_router.py is only 94 lines and select() returns a selection. The presented skills section is very likely built in executor.py or the prompt builder, both out of scope. The catalog block 'ahead of the selected full instructions in active only' needs an explicit insertion point and a scope fix. The measurement rows also need a decision_log kind, and the spec does not name the skills kind.",
+        "severity": "high",
+        "line": 28
+      },
+      {
+        "path": ".orchestrator/pool.toml",
+        "issue": "cache_mode must be added to three sections ([context_router], [tool_disclosure], [skills]), each with a dated comment. The spec should require defaults of off or shadow when the key is missing, and validation that rejects unknown values. It should also state that the existing 'mode' off|shadow|active gates cache_mode. If mode is off, cache_mode active must have no effect, or the shadow-first guarantee breaks. tests/test_pool.py should cover this, but it is not in scope.",
+        "severity": "med",
+        "line": 355
+      },
+      {
+        "path": "docs/hermes-hardening/10-cache-aware-disclosure.md",
+        "issue": "'Measured shadow numbers over the real decision_log rows of this repository' cannot be verified by any acceptance test. The rows may be absent in a fresh worktree, and any numbers would be hand-typed. The spec should require a reproducible command or script that generates them, with the doc stating the row count and date range. If there are no rows, it should say so instead of inventing figures.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "tests/test_context_router.py",
+        "issue": "The context_router acceptance test title asserts 'without changing presented level'. The spec should require that it compare render() and route() levels with cache_mode shadow against a run with no cache_mode key. It should also require an active-mode case showing a difference, or explicitly say active is untested here.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790174075.6321359,
+      "packet_meta": {
+        "chars": 4109,
+        "est_tokens": 1027,
+        "presented_tokens": 1027,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7257fe4a67e531ce39a5034265c5f1b90012193a02718fde141b9a6c109d90a0"
+          },
+          "spec": {
+            "chars": 2579,
+            "est_tokens": 644,
+            "sha256": "abbf6ed122ebe5db3039a07106653ca5b16c25252be4a1d2d75dbc27a3e44ace"
+          },
+          "acceptance": {
+            "chars": 380,
+            "est_tokens": 95,
+            "sha256": "eae907199cf35072cf8ee69e16dbe080f60c6131cc5cd0f7ac51919e80dc7834"
+          },
+          "scope": {
+            "chars": 272,
+            "est_tokens": 68,
+            "sha256": "6d7fec196364d638aaba86be98eb8b12cbd1af3ff8ee681119ddba0564a1f8ef"
+          },
+          "depends_on": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+          },
+          "existing tests": {
+            "chars": 617,
+            "est_tokens": 154,
+            "sha256": "8f80ec377eb3b0c802ebf18c21d6f1b54a091cc59f61f49f33a5054ff97a7a35"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "c01c2b7e5ed3",
+        "version": "c01c2b7e5ed3",
+        "candidate_known": false,
+        "base": "4c318bc2ddaa",
+        "sources": "task@T-1173 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790174077.727366,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1239",
+      "claimed_at": 1790174077.7269819
+    },
+    {
+      "ts": 1790174077.728498,
+      "account": "A"
+    },
+    {
+      "ts": 1790174078.67699,
+      "pid": 90711,
+      "account": "A"
+    },
+    {
+      "ts": 1790174111.89067,
+      "packet_meta": {
+        "chars": 4109,
+        "est_tokens": 1027,
+        "presented_tokens": 1027,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7257fe4a67e531ce39a5034265c5f1b90012193a02718fde141b9a6c109d90a0"
+          },
+          "spec": {
+            "chars": 2579,
+            "est_tokens": 644,
+            "sha256": "abbf6ed122ebe5db3039a07106653ca5b16c25252be4a1d2d75dbc27a3e44ace"
+          },
+          "acceptance": {
+            "chars": 380,
+            "est_tokens": 95,
+            "sha256": "eae907199cf35072cf8ee69e16dbe080f60c6131cc5cd0f7ac51919e80dc7834"
+          },
+          "scope": {
+            "chars": 272,
+            "est_tokens": 68,
+            "sha256": "6d7fec196364d638aaba86be98eb8b12cbd1af3ff8ee681119ddba0564a1f8ef"
+          },
+          "depends_on": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+          },
+          "existing tests": {
+            "chars": 617,
+            "est_tokens": 154,
+            "sha256": "8f80ec377eb3b0c802ebf18c21d6f1b54a091cc59f61f49f33a5054ff97a7a35"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "c01c2b7e5ed3",
+        "version": "c01c2b7e5ed3",
+        "candidate_known": false,
+        "base": "4c318bc2ddaa",
+        "sources": "task@T-1173 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d5256392-260e-4658-b951-f6e455344e86"
+      }
+    },
+    {
+      "ts": 1790174111.91364,
+      "packet_meta": {
+        "chars": 4109,
+        "est_tokens": 1027,
+        "presented_tokens": 1027,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7257fe4a67e531ce39a5034265c5f1b90012193a02718fde141b9a6c109d90a0"
+          },
+          "spec": {
+            "chars": 2579,
+            "est_tokens": 644,
+            "sha256": "abbf6ed122ebe5db3039a07106653ca5b16c25252be4a1d2d75dbc27a3e44ace"
+          },
+          "acceptance": {
+            "chars": 380,
+            "est_tokens": 95,
+            "sha256": "eae907199cf35072cf8ee69e16dbe080f60c6131cc5cd0f7ac51919e80dc7834"
+          },
+          "scope": {
+            "chars": 272,
+            "est_tokens": 68,
+            "sha256": "6d7fec196364d638aaba86be98eb8b12cbd1af3ff8ee681119ddba0564a1f8ef"
+          },
+          "depends_on": {
+            "chars": 162,
+            "est_tokens": 40,
+            "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+          },
+          "existing tests": {
+            "chars": 617,
+            "est_tokens": 154,
+            "sha256": "8f80ec377eb3b0c802ebf18c21d6f1b54a091cc59f61f49f33a5054ff97a7a35"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+          }
+        },
+        "hash": "c01c2b7e5ed3",
+        "version": "c01c2b7e5ed3",
+        "candidate_known": false,
+        "base": "4c318bc2ddaa",
+        "sources": "task@T-1173 tree@HEAD",
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "d5256392-260e-4658-b951-f6e455344e86",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790174111.9190688,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "The spec says to extend 'existing context_route decision_log rows', but decision_row() emits kind 'context_selection'. It also stores candidates as 'id:level' strings, so there is no per-evidence dict to hold cacheability, cache_cost or cache_adjusted_level. The spec has to say whether these go into the 'deterministic' dict as parallel lists or whether candidates changes shape. Changing candidates would break context_scorecard and context_eval consumers.",
+            "severity": "high",
+            "line": 149
+          },
+          {
+            "path": "orchestrator/context_router.py",
+            "issue": "_choice() has no token-budget rule. Levels come from source_type, scope and role rules only. 'The level the router would choose if effective cost replaced raw tokens in its budget rule' therefore has no defined meaning. The spec must define the shadow algorithm (for example, downgrade or upgrade one level when the cost delta crosses a threshold, and never below the hard-constraint FULL reasons such as in_scope_file, security_path, failing_output and acceptance). Otherwise the acceptance test cannot check a specific value.",
+            "severity": "high",
+            "line": 53
+          },
+          {
+            "path": "orchestrator/cache_telemetry.py",
+            "issue": "cache_telemetry is outside scope and exposes effective_cost(norm, cfg) over normalized provider usage. It has no token-to-dynamic-suffix ratio API. The spec should name the exact function to reuse, or allow a small read-only helper. It also needs a defined fallback when there is no telemetry data. A silent ratio of 1.0 would make cache_adjusted_level equal the presented level and hide missing data.",
+            "severity": "med",
+            "line": 35
+          },
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "issue": "tool_disclosure rows are written in orchestrator/bus.py (around line 285), which is out of scope. The shadow fields (stable catalog size, dynamic list size, changed-since-previous-task-of-same-role) and the active-mode presentation cannot be recorded or applied from tool_catalog.py alone. Either add bus.py to scope or specify that tool_catalog exposes a pure function (for example cache_view(role, keep, previous)) that bus.py calls unchanged.",
+            "severity": "high",
+            "line": 80
+          },
+          {
+            "path": "orchestrator/tool_catalog.py",
+            "issue": "'Changed since the previous task of the same role' needs persisted state. The only source is decision_log tool_disclosure rows. The spec must say how the previous row is found (filter by role, order, bounded read) and what the first task reports (unknown, not false). It must not use in-process module state, which resets per process and breaks the deterministic acceptance test.",
+            "severity": "med",
+            "line": 96
+          },
+          {
+            "path": "orchestrator/skill_router.py",
+            "issue": "skill_router.py is only 94 lines and select() returns a selection. The presented skills section is very likely built in executor.py or the prompt builder, both out of scope. The catalog block 'ahead of the selected full instructions in active only' needs an explicit insertion point and a scope fix. The measurement rows also need a decision_log kind, and the spec does not name the skills kind.",
+            "severity": "high",
+            "line": 28
+          },
+          {
+            "path": ".orchestrator/pool.toml",
+            "issue": "cache_mode must be added to three sections ([context_router], [tool_disclosure], [skills]), each with a dated comment. The spec should require defaults of off or shadow when the key is missing, and validation that rejects unknown values. It should also state that the existing 'mode' off|shadow|active gates cache_mode. If mode is off, cache_mode active must have no effect, or the shadow-first guarantee breaks. tests/test_pool.py should cover this, but it is not in scope.",
+            "severity": "med",
+            "line": 355
+          },
+          {
+            "path": "docs/hermes-hardening/10-cache-aware-disclosure.md",
+            "issue": "'Measured shadow numbers over the real decision_log rows of this repository' cannot be verified by any acceptance test. The rows may be absent in a fresh worktree, and any numbers would be hand-typed. The spec should require a reproducible command or script that generates them, with the doc stating the row count and date range. If there are no rows, it should say so instead of inventing figures.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "tests/test_context_router.py",
+            "issue": "The context_router acceptance test title asserts 'without changing presented level'. The spec should require that it compare render() and route() levels with cache_mode shadow against a run with no cache_mode key. It should also require an active-mode case showing a difference, or explicitly say active is untested here.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790174111.920235,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "The spec says to extend 'existing context_route decision_log rows', but decision_row() emits kind 'context_selection'. It also stores candidates as 'id:level' strings, so there is no per-evidence dict to hold cacheability, cache_cost or cache_adjusted_level. The spec has to say whether these go into the 'deterministic' dict as parallel lists or whether candidates changes shape. Changing candidates would break context_scorecard and context_eval consumers.",
+          "severity": "high",
+          "line": 149
+        },
+        {
+          "path": "orchestrator/context_router.py",
+          "issue": "_choice() has no token-budget rule. Levels come from source_type, scope and role rules only. 'The level the router would choose if effective cost replaced raw tokens in its budget rule' therefore has no defined meaning. The spec must define the shadow algorithm (for example, downgrade or upgrade one level when the cost delta crosses a threshold, and never below the hard-constraint FULL reasons such as in_scope_file, security_path, failing_output and acceptance). Otherwise the acceptance test cannot check a specific value.",
+          "severity": "high",
+          "line": 53
+        },
+        {
+          "path": "orchestrator/cache_telemetry.py",
+          "issue": "cache_telemetry is outside scope and exposes effective_cost(norm, cfg) over normalized provider usage. It has no token-to-dynamic-suffix ratio API. The spec should name the exact function to reuse, or allow a small read-only helper. It also needs a defined fallback when there is no telemetry data. A silent ratio of 1.0 would make cache_adjusted_level equal the presented level and hide missing data.",
+          "severity": "med",
+          "line": 35
+        },
+        {
+          "path": "orchestrator/tool_catalog.py",
+          "issue": "tool_disclosure rows are written in orchestrator/bus.py (around line 285), which is out of scope. The shadow fields (stable catalog size, dynamic list size, changed-since-previous-task-of-same-role) and the active-mode presentation cannot be recorded or applied from tool_catalog.py alone. Either add bus.py to scope or specify that tool_catalog exposes a pure function (for example cache_view(role, keep, previous)) that bus.py calls unchanged.",
+          "severity": "high",
+          "line": 80
+        },
+        {
+          "path": "orchestrator/tool_catalog.py",
+          "issue": "'Changed since the previous task of the same role' needs persisted state. The only source is decision_log tool_disclosure rows. The spec must say how the previous row is found (filter by role, order, bounded read) and what the first task reports (unknown, not false). It must not use in-process module state, which resets per process and breaks the deterministic acceptance test.",
+          "severity": "med",
+          "line": 96
+        },
+        {
+          "path": "orchestrator/skill_router.py",
+          "issue": "skill_router.py is only 94 lines and select() returns a selection. The presented skills section is very likely built in executor.py or the prompt builder, both out of scope. The catalog block 'ahead of the selected full instructions in active only' needs an explicit insertion point and a scope fix. The measurement rows also need a decision_log kind, and the spec does not name the skills kind.",
+          "severity": "high",
+          "line": 28
+        },
+        {
+          "path": ".orchestrator/pool.toml",
+          "issue": "cache_mode must be added to three sections ([context_router], [tool_disclosure], [skills]), each with a dated comment. The spec should require defaults of off or shadow when the key is missing, and validation that rejects unknown values. It should also state that the existing 'mode' off|shadow|active gates cache_mode. If mode is off, cache_mode active must have no effect, or the shadow-first guarantee breaks. tests/test_pool.py should cover this, but it is not in scope.",
+          "severity": "med",
+          "line": 355
+        },
+        {
+          "path": "docs/hermes-hardening/10-cache-aware-disclosure.md",
+          "issue": "'Measured shadow numbers over the real decision_log rows of this repository' cannot be verified by any acceptance test. The rows may be absent in a fresh worktree, and any numbers would be hand-typed. The spec should require a reproducible command or script that generates them, with the doc stating the row count and date range. If there are no rows, it should say so instead of inventing figures.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "tests/test_context_router.py",
+          "issue": "The context_router acceptance test title asserts 'without changing presented level'. The spec should require that it compare render() and route() levels with cache_mode shadow against a run with no cache_mode key. It should also require an active-mode case showing a difference, or explicitly say active is untested here.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 4109,
+    "est_tokens": 1027,
+    "presented_tokens": 1027,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "7257fe4a67e531ce39a5034265c5f1b90012193a02718fde141b9a6c109d90a0"
+      },
+      "spec": {
+        "chars": 2579,
+        "est_tokens": 644,
+        "sha256": "abbf6ed122ebe5db3039a07106653ca5b16c25252be4a1d2d75dbc27a3e44ace"
+      },
+      "acceptance": {
+        "chars": 380,
+        "est_tokens": 95,
+        "sha256": "eae907199cf35072cf8ee69e16dbe080f60c6131cc5cd0f7ac51919e80dc7834"
+      },
+      "scope": {
+        "chars": 272,
+        "est_tokens": 68,
+        "sha256": "6d7fec196364d638aaba86be98eb8b12cbd1af3ff8ee681119ddba0564a1f8ef"
+      },
+      "depends_on": {
+        "chars": 162,
+        "est_tokens": 40,
+        "sha256": "9409fcf09788a7c8a7e079b0031a296c2146836258e252c5417269136684a39b"
+      },
+      "existing tests": {
+        "chars": 617,
+        "est_tokens": 154,
+        "sha256": "8f80ec377eb3b0c802ebf18c21d6f1b54a091cc59f61f49f33a5054ff97a7a35"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "8ed442f238ec61eea4e2f29a3399fa22677dd8cf9a426039038b8bf327ee92fd"
+      }
+    },
+    "hash": "c01c2b7e5ed3",
+    "version": "c01c2b7e5ed3",
+    "candidate_known": false,
+    "base": "4c318bc2ddaa",
+    "sources": "task@T-1173 tree@HEAD",
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "d5256392-260e-4658-b951-f6e455344e86",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790174077.7269819,
+  "account": "A",
+  "pid": 90711,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "The spec says to extend 'existing context_route decision_log rows', but decision_row() emits kind 'context_selection'. It also stores candidates as 'id:level' strings, so there is no per-evidence dict to hold cacheability, cache_cost or cache_adjusted_level. The spec has to say whether these go into the 'deterministic' dict as parallel lists or whether candidates changes shape. Changing candidates would break context_scorecard and context_eval consumers.",
+      "severity": "high",
+      "line": 149
+    },
+    {
+      "path": "orchestrator/context_router.py",
+      "issue": "_choice() has no token-budget rule. Levels come from source_type, scope and role rules only. 'The level the router would choose if effective cost replaced raw tokens in its budget rule' therefore has no defined meaning. The spec must define the shadow algorithm (for example, downgrade or upgrade one level when the cost delta crosses a threshold, and never below the hard-constraint FULL reasons such as in_scope_file, security_path, failing_output and acceptance). Otherwise the acceptance test cannot check a specific value.",
+      "severity": "high",
+      "line": 53
+    },
+    {
+      "path": "orchestrator/cache_telemetry.py",
+      "issue": "cache_telemetry is outside scope and exposes effective_cost(norm, cfg) over normalized provider usage. It has no token-to-dynamic-suffix ratio API. The spec should name the exact function to reuse, or allow a small read-only helper. It also needs a defined fallback when there is no telemetry data. A silent ratio of 1.0 would make cache_adjusted_level equal the presented level and hide missing data.",
+      "severity": "med",
+      "line": 35
+    },
+    {
+      "path": "orchestrator/tool_catalog.py",
+      "issue": "tool_disclosure rows are written in orchestrator/bus.py (around line 285), which is out of scope. The shadow fields (stable catalog size, dynamic list size, changed-since-previous-task-of-same-role) and the active-mode presentation cannot be recorded or applied from tool_catalog.py alone. Either add bus.py to scope or specify that tool_catalog exposes a pure function (for example cache_view(role, keep, previous)) that bus.py calls unchanged.",
+      "severity": "high",
+      "line": 80
+    },
+    {
+      "path": "orchestrator/tool_catalog.py",
+      "issue": "'Changed since the previous task of the same role' needs persisted state. The only source is decision_log tool_disclosure rows. The spec must say how the previous row is found (filter by role, order, bounded read) and what the first task reports (unknown, not false). It must not use in-process module state, which resets per process and breaks the deterministic acceptance test.",
+      "severity": "med",
+      "line": 96
+    },
+    {
+      "path": "orchestrator/skill_router.py",
+      "issue": "skill_router.py is only 94 lines and select() returns a selection. The presented skills section is very likely built in executor.py or the prompt builder, both out of scope. The catalog block 'ahead of the selected full instructions in active only' needs an explicit insertion point and a scope fix. The measurement rows also need a decision_log kind, and the spec does not name the skills kind.",
+      "severity": "high",
+      "line": 28
+    },
+    {
+      "path": ".orchestrator/pool.toml",
+      "issue": "cache_mode must be added to three sections ([context_router], [tool_disclosure], [skills]), each with a dated comment. The spec should require defaults of off or shadow when the key is missing, and validation that rejects unknown values. It should also state that the existing 'mode' off|shadow|active gates cache_mode. If mode is off, cache_mode active must have no effect, or the shadow-first guarantee breaks. tests/test_pool.py should cover this, but it is not in scope.",
+      "severity": "med",
+      "line": 355
+    },
+    {
+      "path": "docs/hermes-hardening/10-cache-aware-disclosure.md",
+      "issue": "'Measured shadow numbers over the real decision_log rows of this repository' cannot be verified by any acceptance test. The rows may be absent in a fresh worktree, and any numbers would be hand-typed. The spec should require a reproducible command or script that generates them, with the doc stating the row count and date range. If there are no rows, it should say so instead of inventing figures.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "tests/test_context_router.py",
+      "issue": "The context_router acceptance test title asserts 'without changing presented level'. The spec should require that it compare render() and route() levels with cache_mode shadow against a run with no cache_mode key. It should also require an active-mode case showing a difference, or explicitly say active is untested here.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

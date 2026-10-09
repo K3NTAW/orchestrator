@@ -1,0 +1,106 @@
+{
+  "id": "T-0002",
+  "parent": "T-0001",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 2,
+  "title": "Relax planner-mode.sh: allow Planner commit/add/branch; keep history-rewriting git blocked; add rollback rule",
+  "spec": "Why: user decision 2026-09-17: the Planner may commit, branch and push what it is allowed to write (.orchestrator/**, human-applied guardrail files, dotfiles), and must document every change so it can be rolled back. It still never edits source.\n\nWhat (4 files, exact):\n1. .claude/hooks/planner-mode.sh \u2014 in the \"git history writes\" grep (the line starting `if grep -qE '(^|[;&|[:space:]])git[[:space:]]+`), change the alternation so it blocks ONLY: merge|rebase|cherry-pick|apply|am|reset[[:space:]]+--hard|filter-branch. Remove commit, add, checkout -b, switch -c, stash, restore from it. Keep the optional `-C <dir>` group. Update the comment above it to: \"# 1) history rewriting is the merge queue's and the workers' job. commit/add/branch/push are allowed (guardrails.sh still blocks force-push and push to main).\" Update the deny() text: replace \"The Planner never edits source or commits.\" with \"The Planner never edits source. It may commit, branch and push; every commit message states what and why, and decisions.md gets a dated entry with the revert path.\" Everything else in the file unchanged.\n2. tests/test_orchestrator.py \u2014 class PlannerMode.test_bash: move these from `blocked` to `allowed`: \"git commit -m x\", the git add + heredoc commit case, \"git checkout -b memory-skill\". Add to `blocked`: \"git rebase main\", \"git reset --hard HEAD~1\", \"git merge task/T-0001\", \"git -C ~/dotfiles cherry-pick abc123\". Keep the final worker-passthrough assertion. Do not touch other test classes.\n3. CLAUDE.md \u2014 \"## Never\" first bullet: change to \"- Edit source files. Delegate via `codex` / `codex_reply`; Codex cooling \u2192 `executor_fallback(complexity)` \u2192 a Claude tier executes. Never do the work yourself. Committing, branching and pushing are allowed.\" Then under \"## Always\" append item \"11. Rollback record: every commit you make says what and why in its message and gets a dated `decisions.md` entry (skill `memory`, `record.sh add`) naming the revert path: `git revert <sha>`, or the backup file for a human-applied change. Do the work yourself; never hand the human commands to run, except for paths guardrails.sh protects.\"\n4. README.md \u2014 in the \"## Access model\" list, append one bullet: \"- The Planner may commit, branch and push but never edits source (`planner-mode.sh`, PreToolUse). Every change carries a rollback path in `decisions.md`.\"\n\nThen run `.claude/hooks/tests-green.sh` (or `uv run python -m unittest tests/test_orchestrator.py`). Commit on the task branch with message \"planner-mode: allow Planner commit/branch/push; block only history rewriting; rollback rule\" and a body naming the revert path (`git revert` this commit). Report: summary, `git diff --stat`, failures-only test output.",
+  "inputs": [],
+  "acceptance": [
+    "uv run python -m unittest tests/test_orchestrator.py exits 0 (21 tests OK, PlannerMode not skipped)",
+    "printf '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit -m x\"}}' | ORCH_TASK_ID= .claude/hooks/planner-mode.sh exits 0",
+    "same pipe with command \"git rebase main\" exits 2 and with \"git reset --hard HEAD~1\" exits 2",
+    "same pipe with tool_name Write and file_path <repo>/orchestrator/x.py exits 2 (source writes still blocked)",
+    "CLAUDE.md contains an item starting '11. Rollback record' and README.md Access model mentions planner-mode.sh"
+  ],
+  "scope": [
+    ".claude/hooks/planner-mode.sh",
+    "tests/test_orchestrator.py",
+    "CLAUDE.md",
+    "README.md"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0002",
+  "codex_thread": null,
+  "result": {
+    "summary": "stale hold from the first daemon smoke run: gate ran on a worktree whose venv predates the tests-green uv change. The work itself (planner-mode relaxation) merged via fix round T-0003 on 2026-09-17 (PR 2). Closed as superseded.",
+    "confidence": 1,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789655165.426409,
+      "tier": "sonnet",
+      "fallback": "claude",
+      "review_rule": "same-family-review: other account, different model"
+    },
+    {
+      "ts": 1789655165.432767,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0002",
+      "claimed_at": 1789655165.432678
+    },
+    {
+      "ts": 1789655165.441178,
+      "pid": 58856,
+      "account": "A"
+    },
+    {
+      "ts": 1789655312.737768,
+      "status": "done",
+      "result": {
+        "summary": "Done. Final report:\n\n**Summary:** Loosened `planner-mode.sh` so the Planner (fallback executor in this worktree) may `commit`/`add`/`checkout -b`/`switch -c`/`stash`/`restore`/push; it now blocks only history-rewriting commands (`merge`, `rebase`, `cherry-pick`, `apply`, `am`, `reset --hard`, `filter-branch`). Updated deny-message text, `CLAUDE.md`, `README.md`, and the `PlannerMode.test_bash` test cases to match, per the 2026-09-17 decision that the Planner may write/commit/branch/push but never edit source, with every change carrying a rollback path.\n\n**Files changed:**\n```\n .claude/hooks/planner-mode.sh | 6 +++---\n CLAUDE.md                     | 3 ++-\n README.md                     | 1 +\n tests/test_orchestrator.py    | 9 +++++----\n 4 files changed, 11 insertions(+), 8 deletions(-)\n```\n\n**Test output (failures only):** one pre-existing, out-of-scope failure \u2014 `Guardrails.test_edit_protected_path` fails identically with my changes stashed out, because `protected-paths.txt` hardcodes `~/code/orchestrator/.claude/settings.json` while tests run against this worktree's path (`wt/T-0002/.claude/settings.json`), so the prefix never matches. Not in scope (only `PlannerMode` was to be touched), unrelated to this task. All 4 `PlannerMode` tests pass, and the acceptance-criteria pipe checks (`git commit -m x` \u2192 0, `git rebase main` \u2192 2, `git reset --hard HEAD~1` \u2192 2, source `Write` \u2192 2) all verified correct when run outside a `T-xxxx`-named cwd (this worktree's own dirname otherwise short-circuits the hook via the existing scope-guard passthrough rule).\n\nCommitted on `task/T-0002` as `b4f03ea`. Revert path: `git revert b4f03ea`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789674061.962206,
+      "pipeline": {
+        "gated_at": 1789674061.962093
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nFAIL: test_edit_protected_path (test_orchestrator.Guardrails.test_edit_protected_path)\nTraceback (most recent call last):\nAssertionError: 0 != 2\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789685965.582185,
+      "status": "failed",
+      "result": {
+        "summary": "stale hold from the first daemon smoke run: gate ran on a worktree whose venv predates the tests-green uv change. The work itself (planner-mode relaxation) merged via fix round T-0003 on 2026-09-17 (PR 2). Closed as superseded.",
+        "confidence": 1,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "fallback": "claude",
+  "review_rule": "same-family-review: other account, different model",
+  "claimed_at": 1789655165.432678,
+  "pid": 58856,
+  "account": "A",
+  "pipeline": {
+    "gated_at": 1789674061.962093
+  },
+  "hold_reason": "gate_red",
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nFAIL: test_edit_protected_path (test_orchestrator.Guardrails.test_edit_protected_path)\nTraceback (most recent call last):\nAssertionError: 0 != 2\nFAILED (failures=1)\n"
+  }
+}

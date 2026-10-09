@@ -1,0 +1,425 @@
+{
+  "id": "T-0762",
+  "created_at": 1790079458.060666,
+  "parent": "T-0760",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout C-B: retrieval, evidence reuse, Jev call sites and decision/promotion plumbing (what exists for P2, P8, P9, P17, P20, P26, P30)",
+  "spec": "Objective: tell the Planner which retrieval and evidence mechanisms already exist, which agents re-retrieve the same evidence, and what every Jev call sends off the machine. Read (this checkout, main): orchestrator/spawn.py memory_recall (line 11) and .claude/skills/memory/scripts/recall.py (layers, ranking, limits), orchestrator/scout_evidence.py (reuse_check, record_decision, freshness), orchestrator/repomap.py, .claude/skills/memory/scripts/graph.sh and any graphify use, orchestrator/stale.py, orchestrator/jev.py (ask, redact, budget, usage log), orchestrator/jev_gate.py (what tool calls are gated, the state sent, thresholds), orchestrator/jev_route.py, jev_planner.py, jev_sched.py, jev_points.py, jev_rank.py (each call site: state payload, questions, mode), orchestrator/decision_log.py (KINDS, record/outcome, storage), orchestrator/promotion.py (FEATURES table, criteria, evaluate), orchestrator/attribution.py and orchestrator/scorecard.py (which token/cost fields exist per task, role, model; routing_eval). Deliver: 1. every place an agent reads repository evidence (memory recall, repomap, scout, graph, worker Read/Grep) and whether a second agent on the same task repeats it, with anchors; 2. existing reuse/dedup mechanisms (scout_evidence reuse_check, caches) and their keys/freshness rules; 3. a table of Jev call sites: module:line, what state text is sent, redaction applied, questions, mode key, fail-open behaviour (the P20 audit input); 4. decision_log KINDS today versus the P26 list, and where outcome() is called; 5. promotion FEATURES today versus the P30 candidates, and the criteria vocabulary; 6. attribution/scorecard fields available per task and role for P1 (what tokens are already split, what is missing). Rules: read-only; cite path:line; confidence per finding; result under 1,500 tokens; unverifiable stated as such.",
+  "inputs": [],
+  "acceptance": [
+    "result under 1,500 tokens with findings anchored path:line and confidence",
+    "every deliverable item answered or marked unverifiable"
+  ],
+  "scope": [
+    "read-only"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 25,
+    "timeout_s": 1200,
+    "objective": "retrieval evidence jev decision promotion inventory",
+    "force": true
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0762",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "spawn.py memory_recall (11) is called independently per role-packet build: execute/review packet at spawn.py:276 and scout_packet at spawn.py:537, each re-querying notes+bus layers with title+scope text \u2014 no cache shared across a task's scout/execute/review agents, so each repeats the recall",
+        "evidence": [
+          "orchestrator/spawn.py:11",
+          "orchestrator/spawn.py:276",
+          "orchestrator/spawn.py:537"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "scout_evidence.py:29 reimplements the identical lazy-import pattern as spawn.py:11 (duplicate loader for the same recall.py) rather than reusing spawn.memory_recall",
+        "evidence": [
+          "orchestrator/scout_evidence.py:29-38",
+          "orchestrator/spawn.py:11-21"
+        ],
+        "confidence": 0.8,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "repomap.build() is not part of any agent packet; it's invoked only via `orchestrator repomap` CLI (cli.py:282) and auto-refresh in merge.py:85 after a merge \u2014 one-shot, not re-read per agent",
+        "evidence": [
+          "orchestrator/cli.py:282",
+          "orchestrator/merge.py:5",
+          "orchestrator/merge.py:85"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "graphify graph layer is read by recall.py index_graph and by scout_evidence.reuse_check (layers include graph) but NOT by spawn.py's packet-building recall calls (layers=notes,bus only) \u2014 graph evidence only reaches the pre-scout gate, not execute/review packets",
+        "evidence": [
+          "orchestrator/scout_evidence.py:80",
+          "orchestrator/spawn.py:276",
+          "orchestrator/spawn.py:537",
+          ".claude/skills/memory/scripts/recall.py:138-163"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "reuse_check (scout_evidence.py:74) is the only scout dedup: keys=title+objective via memory_recall(notes,bus,graph); freshness=age<=max_age_days(14) plus bus hits validated by _bus_fresh (scout_evidence.py:53) checking packet_meta.base against moved_paths(head_sha); called once, at mcp.py:85, before a scout spawns",
+        "evidence": [
+          "orchestrator/scout_evidence.py:74-106",
+          "orchestrator/scout_evidence.py:53-71",
+          "orchestrator/mcp.py:85"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev_gate.py has a separate session-scoped dedup (block_repeats): input_hash+target mtime keyed per session_id (jev_gate.py:172-199), independent of scout_evidence's cross-task reuse_check",
+        "evidence": [
+          "orchestrator/jev_gate.py:172-199",
+          "orchestrator/jev_gate.py:318-322"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Jev call sites (state/redaction/questions/mode/fail-open): jev_gate.py:221 ask_jev sends task title+spec[:1500]+acceptance+scope+role, 20 redacted recent tool calls, proposed tool redacted input[:300] (needed/redundant/destructive noul); mode=jev.gate_mode; fail-open=allow(0) on None",
+        "evidence": [
+          "orchestrator/jev_gate.py:202-235",
+          "orchestrator/jev_gate.py:292-352"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev_route.py:classify(97) sends redacted spec[:1500]/acceptance/scope/complexity/task_class/memory_titles[:10]; 7 noul signals (jev_route.py:13); mode=[jev.routing].mode; fail-open=None\u2192neutral 1.0 multipliers",
+        "evidence": [
+          "orchestrator/jev_route.py:97-133",
+          "orchestrator/jev_route.py:13-21"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev_planner.py:ask(126) sends state() (33) redacted subject_id/title/spec_excerpt[:300]/goal_title/scope_count/etc, capped 4000 chars; 5 noul signals; mode=cfg.jev_mode(shadow default); fail-open=raw None\u2192reason jev_unavailable, soft_adjust 0",
+        "evidence": [
+          "orchestrator/jev_planner.py:33-63",
+          "orchestrator/jev_planner.py:126-200"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev_sched.py:annotate(194) sends redacted pair titles/scope/spec_excerpts[:400]/reasons for up to jev_max_pairs(8) ambiguous pairs; 2 noul questions/pair; mode=scheduler.jev_mode; fail-open=exception\u2192signals={} error set, wave unchanged",
+        "evidence": [
+          "orchestrator/jev_sched.py:152-227"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev_points.py:ask(148) sends redacted title[:300]/spec[:600]/scope[:300 each]/complexity/task_class/memory_titles/deterministic_evidence (content/source keys stripped, jev_points.py:91-107); 2 options/point noul; mode=jev.points.<point>(shadow default); fail-open=exception\u2192error set, applied=False",
+        "evidence": [
+          "orchestrator/jev_points.py:76-176"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev_rank.py:rank(41) sends goal_text unredacted by rank itself (caller's responsibility) plus one noul/item batched 40; no mode key (unconditional if jev enabled); fail-open=None/exception\u2192all items unranked p_relevant=None",
+        "evidence": [
+          "orchestrator/jev_rank.py:41-68"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "decision_log.py KINDS today: routing, wave, capacity, concurrency, merge_pressure, stale, jev_sched, allocation, strategy, speculation, scout, review_plan, planner_route (13 kinds); outcome() called at executor.py:313 for kind='allocation'; no other outcome() call sites found in orchestrator/",
+        "evidence": [
+          "orchestrator/decision_log.py:12-26",
+          "orchestrator/decision_log.py:131-139",
+          "orchestrator/executor.py:313"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "P26/P30 target lists not found in this checkout \u2014 may live in an external doc or a later commit not present on main at e8c4687"
+    ],
+    "suggested_next": [
+      "diff decision_log.KINDS/promotion.FEATURES against the actual P26/P30 spec once located, rather than against memory titles"
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 7212,
+      "trimmed": {
+        "findings": 3
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790079517.240534,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0762",
+      "claimed_at": 1790079517.240216
+    },
+    {
+      "ts": 1790079517.242584,
+      "account": "A"
+    },
+    {
+      "ts": 1790079517.9131489,
+      "pid": 2486,
+      "account": "A"
+    },
+    {
+      "ts": 1790079685.50277,
+      "status": "failed",
+      "reason": "budget or error exit (rc=1): "
+    },
+    {
+      "ts": 1790079799.550167,
+      "pipeline": {},
+      "status": "queued",
+      "pid": null,
+      "hold_reason": null,
+      "reason": "2026-09-22 14:30 Planner: first run exited rc=1 with no result (budget or error exit); re-spawned"
+    },
+    {
+      "ts": 1790079803.715531,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0762",
+      "claimed_at": 1790079803.715102
+    },
+    {
+      "ts": 1790079803.717174,
+      "account": "B"
+    },
+    {
+      "ts": 1790079804.2104099,
+      "pid": 8405,
+      "account": "B"
+    },
+    {
+      "ts": 1790079891.607156,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "spawn.py memory_recall (11) is called independently per role-packet build: execute/review packet at spawn.py:276 and scout_packet at spawn.py:537, each re-querying notes+bus layers with title+scope text \u2014 no cache shared across a task's scout/execute/review agents, so each repeats the recall",
+            "evidence": [
+              "orchestrator/spawn.py:11",
+              "orchestrator/spawn.py:276",
+              "orchestrator/spawn.py:537"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "scout_evidence.py:29 reimplements the identical lazy-import pattern as spawn.py:11 (duplicate loader for the same recall.py) rather than reusing spawn.memory_recall",
+            "evidence": [
+              "orchestrator/scout_evidence.py:29-38",
+              "orchestrator/spawn.py:11-21"
+            ],
+            "confidence": 0.8,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "repomap.build() is not part of any agent packet; it's invoked only via `orchestrator repomap` CLI (cli.py:282) and auto-refresh in merge.py:85 after a merge \u2014 one-shot, not re-read per agent",
+            "evidence": [
+              "orchestrator/cli.py:282",
+              "orchestrator/merge.py:5",
+              "orchestrator/merge.py:85"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "graphify graph layer is read by recall.py index_graph and by scout_evidence.reuse_check (layers include graph) but NOT by spawn.py's packet-building recall calls (layers=notes,bus only) \u2014 graph evidence only reaches the pre-scout gate, not execute/review packets",
+            "evidence": [
+              "orchestrator/scout_evidence.py:80",
+              "orchestrator/spawn.py:276",
+              "orchestrator/spawn.py:537",
+              ".claude/skills/memory/scripts/recall.py:138-163"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "reuse_check (scout_evidence.py:74) is the only scout dedup: keys=title+objective via memory_recall(notes,bus,graph); freshness=age<=max_age_days(14) plus bus hits validated by _bus_fresh (scout_evidence.py:53) checking packet_meta.base against moved_paths(head_sha); called once, at mcp.py:85, before a scout spawns",
+            "evidence": [
+              "orchestrator/scout_evidence.py:74-106",
+              "orchestrator/scout_evidence.py:53-71",
+              "orchestrator/mcp.py:85"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev_gate.py has a separate session-scoped dedup (block_repeats): input_hash+target mtime keyed per session_id (jev_gate.py:172-199), independent of scout_evidence's cross-task reuse_check",
+            "evidence": [
+              "orchestrator/jev_gate.py:172-199",
+              "orchestrator/jev_gate.py:318-322"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Jev call sites (state/redaction/questions/mode/fail-open): jev_gate.py:221 ask_jev sends task title+spec[:1500]+acceptance+scope+role, 20 redacted recent tool calls, proposed tool redacted input[:300] (needed/redundant/destructive noul); mode=jev.gate_mode; fail-open=allow(0) on None",
+            "evidence": [
+              "orchestrator/jev_gate.py:202-235",
+              "orchestrator/jev_gate.py:292-352"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev_route.py:classify(97) sends redacted spec[:1500]/acceptance/scope/complexity/task_class/memory_titles[:10]; 7 noul signals (jev_route.py:13); mode=[jev.routing].mode; fail-open=None\u2192neutral 1.0 multipliers",
+            "evidence": [
+              "orchestrator/jev_route.py:97-133",
+              "orchestrator/jev_route.py:13-21"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev_planner.py:ask(126) sends state() (33) redacted subject_id/title/spec_excerpt[:300]/goal_title/scope_count/etc, capped 4000 chars; 5 noul signals; mode=cfg.jev_mode(shadow default); fail-open=raw None\u2192reason jev_unavailable, soft_adjust 0",
+            "evidence": [
+              "orchestrator/jev_planner.py:33-63",
+              "orchestrator/jev_planner.py:126-200"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev_sched.py:annotate(194) sends redacted pair titles/scope/spec_excerpts[:400]/reasons for up to jev_max_pairs(8) ambiguous pairs; 2 noul questions/pair; mode=scheduler.jev_mode; fail-open=exception\u2192signals={} error set, wave unchanged",
+            "evidence": [
+              "orchestrator/jev_sched.py:152-227"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev_points.py:ask(148) sends redacted title[:300]/spec[:600]/scope[:300 each]/complexity/task_class/memory_titles/deterministic_evidence (content/source keys stripped, jev_points.py:91-107); 2 options/point noul; mode=jev.points.<point>(shadow default); fail-open=exception\u2192error set, applied=False",
+            "evidence": [
+              "orchestrator/jev_points.py:76-176"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev_rank.py:rank(41) sends goal_text unredacted by rank itself (caller's responsibility) plus one noul/item batched 40; no mode key (unconditional if jev enabled); fail-open=None/exception\u2192all items unranked p_relevant=None",
+            "evidence": [
+              "orchestrator/jev_rank.py:41-68"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "decision_log.py KINDS today: routing, wave, capacity, concurrency, merge_pressure, stale, jev_sched, allocation, strategy, speculation, scout, review_plan, planner_route (13 kinds); outcome() called at executor.py:313 for kind='allocation'; no other outcome() call sites found in orchestrator/",
+            "evidence": [
+              "orchestrator/decision_log.py:12-26",
+              "orchestrator/decision_log.py:131-139",
+              "orchestrator/executor.py:313"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "P26/P30 target lists not found in this checkout \u2014 may live in an external doc or a later commit not present on main at e8c4687"
+        ],
+        "suggested_next": [
+          "diff decision_log.KINDS/promotion.FEATURES against the actual P26/P30 spec once located, rather than against memory titles"
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 7212,
+          "trimmed": {
+            "findings": 3
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1790079803.715102,
+  "account": "B",
+  "pid": 8405,
+  "reason": "2026-09-22 14:30 Planner: first run exited rc=1 with no result (budget or error exit); re-spawned",
+  "pipeline": {},
+  "hold_reason": null
+}

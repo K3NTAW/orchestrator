@@ -1,0 +1,703 @@
+{
+  "id": "T-1462",
+  "created_at": 1790874984.641917,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: next_wave decision point: when every filed execute task of an open goal is merged or superseded and its plan still lists unfiled labels, launch a headless Planner to file the next wave",
+  "spec": "Goal T-1403, plan label E12 (new, human 2026-10-01). Wave 1 of T-1403 finished 2026-10-01 09:30 and\nnothing happened for 8.5 h: no decision point covers 'filed work done, plan has more waves'.\n\nFacts (main 355583c):\n- orchestrator/planner_runs.py:168-210 decision_points() yields scouts_done, held and closable only. closable\n  needs every execute child merged_into (205); T-1403 has superseded execute children (T-1405, T-1410, T-1413,\n  T-1414, no merged_into), so even closable never fired.\n- tick() (1545-1590) routes each point through build_ctx() (1009-1071) and decision.route()\n  (orchestrator/decision.py:39-161, unknown kinds -> escalate 'unknown:kind'), then run_group() (1254-1447).\n  run() (452-454) and run_group() (1283-1291) already skip when _session_attached() (213-233) is true.\n- daemon.py:1929-1934 calls planner_runs.reconcile()/tick() only when [planner].autonomous is true (the live\n  pool.toml has it false; the harness forces false). Leave that gate as is.\n- _claim() decision_requested map (257-258) and _condition_resolved() (588-616, default True) are per kind.\n- Plan text lives in STATE/plan.md: section '## GOAL <goal id> ...' up to the next line starting with '## '. Wave\n  lines start with 'Wave <n>' (e.g. 'Wave 2: B1 claude_split(cfg, card) ... | B2 ...; then B3 ...'); additions are\n  bullets '- E3 (wave 3, ...) ...'. Filed children carry constraints.plan_label (T-1403: A1..A8, A3b, A1v2, A6v2,\n  E1, E2).\n\nChange:\n1. planner_runs.unfiled_labels(goal_id, children) -> sorted list: labels = tokens matching\n   (?<![\\w./:-])[A-Z]\\d{1,2}[a-z]?(?:v\\d+)?(?![\\w/:-]) on wave lines (^\\s*(?:[-*]\\s*)?Wave \\d+\\b) of the goal's\n   section, plus the leading label of bullets matching ^\\s*[-*]\\s*<label>\\s*\\(wave \\d+. Minus labels on a line\n   starting 'Dropped:' in that section. Minus filed labels: a label is filed when a child's plan_label equals it\n   or equals it followed by a lowercase letter or v<digits> (E11 -> E11a, A1 -> A1v2). No plan.md or no section\n   -> []. Plan text is data: it only yields labels, never reaches a prompt except as these label tokens.\n2. decision_points(): for a goal with execute children, every execute child merged_into or status 'superseded', no\n   child of any role queued or running, no execute child held, and unfiled_labels non-empty -> yield\n   (goal_id, 'next_wave', f\"{goal_id}:{sha256(','.join(labels))[:12]}\") unless _blocked; in that case do NOT\n   yield closable for the goal. With no unfiled labels, closable behaves exactly as today.\n3. build_ctx(): for next_wave add unfiled_labels and goal_complexity. _claim decision_requested: 'file the next\n   wave from plan.md'. _condition_resolved for next_wave: goal done, or the goal's current unfiled set hashes to a\n   different key than the record's payload_key.\n4. decision.route(): kind next_wave -> required unfiled_labels (list); empty -> none 'no_unfiled_work'; else\n   escalate 'next_wave_unfiled' (planner_router still picks the tier). Add unfiled_labels to the evidence fields.\n5. .orchestrator/prompts/planner-decision.md: one sentence: a next_wave decision means every filed execute task\n   of the goal is merged or superseded while plan.md still lists unfiled labels; file the next wave from plan.md\n   (SPEC RULE, depends_on by plan label) or record under 'Needs the human' why not, and list labels that will\n   never be filed on a 'Dropped:' line.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_planner_runs.py::test_closable_requires_every_execute_child_merged\n(~97-104) and test_decision_points_scouts_done_held_closable (~125) write no plan.md, so they must pass unchanged;\ntests/test_decision.py::test_disabled_routes_everything_to_escalate (~113-119) and the unknown-field table (~104-111)\nmust pass unchanged. Run tests/test_planner_runs.py, tests/test_planner_runs_packets.py,\ntests/test_planner_runs_routing.py, tests/test_decision.py and tests/test_planner_taxonomy.py (next_wave classifies\nas decision_type 'other'; do not edit planner_taxonomy.py).\n\nDepends on E9 (planner_runs.py, tests/test_planner_runs.py). The human decides when [planner].autonomous goes true.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests.",
+  "inputs": [
+    "T-1443"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py::test_next_wave_point_when_filed_work_resolved_and_plan_lists_unfiled_labels: passes: with STATE/plan.md holding a '## GOAL <id>' section whose wave lines name A1, A2, B1 and children plan_label A1 (merged) and A2 (superseded), decision_points() yields (goal, 'next_wave', key) and not closable; nothing is yielded while any child is queued/running or an execute child is held, or once B1 is filed (or listed on a 'Dropped:' line); tick() records a skip and launches nothing while _session_attached() is true",
+    "tests/test_decision.py::test_next_wave_routes_escalate_or_none: passes: decision.route on kind next_wave returns escalate 'next_wave_unfiled' with unfiled_labels in the evidence when the list is non-empty, none 'no_unfiled_work' when empty, and escalate 'unknown:unfiled_labels' when the field is missing",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/decision.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    "tests/test_decision.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1462",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Line numbers in the spec (168-210, 1545-1590, 257-258, 588-616) do not match this worktree. decision_points() is at about 190-244, _claim's decision_requested map at about 260, _condition_resolved at about 626, build_ctx's closable branch at about 1104. The base is older than 'main 355583c', so insertion points must be located by symbol.",
+        "severity": "low",
+        "line": 190
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Superseded execute children never satisfy closable, and the spec leaves that alone. A goal whose children are all merged or superseded, with no unfiled labels and at least one superseded child, still never reaches closable. That is the original T-1403 stall once plan.md is fully filed or dropped. The next_wave condition accepts 'merged_into or superseded', but closable still needs every child merged_into.",
+        "severity": "med",
+        "line": 241
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "The next_wave key is a hash of the label set only. If the Planner decides not to file and records 'Needs the human', the record stays blocked and never re-fires. That is intended, but the Planner can also file part of the wave and merge it. The leftover labels then hash to a new key and fire again, which is correct. If the Planner files nothing and the labels change only because plan.md was edited, a new Planner launches with no attempt cap. _condition_resolved says a changed hash counts as resolved, but nothing ties that to attempts or notify dedup.",
+        "severity": "med",
+        "line": 243
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Hidden coupling outside scope. planner_runs treats every non-'held' kind as goal-keyed in _decision_task (~330), _observed_outcome (~631), reconcile/jev (~1000), and the closable-specific branches in build_ctx and tick (~1570-1575). The 'unchanged_state' route and _record_running (~333) copy the point to evidence as [goal_id, payload_key]. The spec does not say next_wave must skip the closable-only gate_state and routine paths, or that _observed_outcome returns None for it. The decision packet kind mapping in planner_packet.py _KIND_FALLBACK has no next_wave entry. That file is out of scope, so the resulting decision type and prompt text fall to 'other'/'decide' with no explanation of the kind.",
+        "severity": "med",
+        "line": 330
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "unfiled_labels reads plan.md, which is mutable and may be stale or injected. The tokens are label-shaped only, but the regex permits false positives from prose on wave lines, for example 'B1' or 'E12' inside commentary, or a label like 'A1' inside a path-like string that slips through the lookarounds. A false positive creates a permanent next_wave that blocks closable. The 'Dropped:' escape hatch needs a Planner write to plan.md, which is blocked outside .orchestrator/ only for source files, so it works. Add a test where a wave line contains a label-shaped token in prose.",
+        "severity": "low",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/planner_runs.py",
+        "issue": "Reading plan.md and matching 'queued or running' on children make the behaviour depend on _session_attached() and the autonomous gate. Both are unchanged. The acceptance test asserts that tick() records a skip while attached, but does not assert that an already-blocked or already-resolved record launches nothing. tick() also calls build_ctx and decision.route before the attached check at ~1283, so the new plan.md read runs on every tick for every goal, including goals with no plan section. Cost is small, but the file read should be wrapped so a missing or unreadable plan.md or a decode error yields [] and does not raise.",
+        "severity": "low",
+        "line": 1509
+      }
+    ],
+    "suggested_spec_changes": [
+      "Refer to insertion points by symbol (decision_points, _claim decision_requested, _condition_resolved, build_ctx) because the quoted line numbers are stale against this worktree.",
+      "Decide the closable gap explicitly. Either let closable count 'superseded' execute children, or state that goals with superseded children and no unfiled labels remain unclosable and why that is accepted.",
+      "Specify next_wave handling in the closable-only code paths: skip the gate_state/routine branches in tick(), return None from _observed_outcome, and make _decision_task return the goal. Add a test that tick() on a next_wave point with route escalate launches exactly one decision run.",
+      "Add a retry and dedup rule: say what happens when plan.md labels change without any filing, and cap or notify so an edited plan cannot spawn unbounded Planner launches.",
+      "Make unfiled_labels fail safe: catch OSError and UnicodeDecodeError, return [], and add tests for no plan.md, no section, prose false positives, 'Dropped:' lines, and suffix matching (E11 filed by E11a, A1 by A1v2, but A1 not filed by A10).",
+      "State that decision.py checks key presence for unfiled_labels so an empty list is valid, and add tests for the empty, non-empty and missing cases in tests/test_decision.py.",
+      "Confirm that unfiled_labels is included in the packet the decision Planner reads. If planner_packet.py needs a next_wave mapping, either add it to scope or document that 'other' is intended.",
+      "Add a rollback line: git revert of the task commit, with existing next_wave records left inert."
+    ],
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 6508,
+      "trimmed": {
+        "risks": 2
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790874996.0711548,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6828,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790874996.249151,
+      "packet_meta": {
+        "chars": 6089,
+        "est_tokens": 1522,
+        "presented_tokens": 1522,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b383b998cda9b0b002b98c28ba26c6ba442e08d7c679bad1587687f341b03f0e"
+          },
+          "spec": {
+            "chars": 4395,
+            "est_tokens": 1098,
+            "sha256": "3cfa66560e400a3020a62c6fc5cd39237d140ffe17fca4200294e992684a1eea"
+          },
+          "acceptance": {
+            "chars": 911,
+            "est_tokens": 227,
+            "sha256": "23e52d3d92c91529e468ec325b9efe5f4e903854a0db4e62258da7ff9dd4faf2"
+          },
+          "scope": {
+            "chars": 165,
+            "est_tokens": 41,
+            "sha256": "78654203e1d40da627cef6a85a3156d3fa47791d3253c3b191e879d79a8a806c"
+          },
+          "depends_on": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+          },
+          "existing tests": {
+            "chars": 375,
+            "est_tokens": 93,
+            "sha256": "00dac5342562b15153455e959b0af67595a675ed52b6c18c322796721e30deba"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "847fec5a6772",
+        "version": "847fec5a6772",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1443 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6828,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790875003.5561469,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1462",
+      "claimed_at": 1790875003.544755
+    },
+    {
+      "ts": 1790875003.571691,
+      "account": "A"
+    },
+    {
+      "ts": 1790875019.107458,
+      "pid": 27952,
+      "account": "A"
+    },
+    {
+      "ts": 1790875066.991015,
+      "packet_meta": {
+        "chars": 6089,
+        "est_tokens": 1522,
+        "presented_tokens": 1522,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b383b998cda9b0b002b98c28ba26c6ba442e08d7c679bad1587687f341b03f0e"
+          },
+          "spec": {
+            "chars": 4395,
+            "est_tokens": 1098,
+            "sha256": "3cfa66560e400a3020a62c6fc5cd39237d140ffe17fca4200294e992684a1eea"
+          },
+          "acceptance": {
+            "chars": 911,
+            "est_tokens": 227,
+            "sha256": "23e52d3d92c91529e468ec325b9efe5f4e903854a0db4e62258da7ff9dd4faf2"
+          },
+          "scope": {
+            "chars": 165,
+            "est_tokens": 41,
+            "sha256": "78654203e1d40da627cef6a85a3156d3fa47791d3253c3b191e879d79a8a806c"
+          },
+          "depends_on": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+          },
+          "existing tests": {
+            "chars": 375,
+            "est_tokens": 93,
+            "sha256": "00dac5342562b15153455e959b0af67595a675ed52b6c18c322796721e30deba"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "847fec5a6772",
+        "version": "847fec5a6772",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1443 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6828,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "e30d21a0-ef5d-4274-bd2f-b69af821bf20"
+      }
+    },
+    {
+      "ts": 1790875067.0188642,
+      "packet_meta": {
+        "chars": 6089,
+        "est_tokens": 1522,
+        "presented_tokens": 1522,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "b383b998cda9b0b002b98c28ba26c6ba442e08d7c679bad1587687f341b03f0e"
+          },
+          "spec": {
+            "chars": 4395,
+            "est_tokens": 1098,
+            "sha256": "3cfa66560e400a3020a62c6fc5cd39237d140ffe17fca4200294e992684a1eea"
+          },
+          "acceptance": {
+            "chars": 911,
+            "est_tokens": 227,
+            "sha256": "23e52d3d92c91529e468ec325b9efe5f4e903854a0db4e62258da7ff9dd4faf2"
+          },
+          "scope": {
+            "chars": 165,
+            "est_tokens": 41,
+            "sha256": "78654203e1d40da627cef6a85a3156d3fa47791d3253c3b191e879d79a8a806c"
+          },
+          "depends_on": {
+            "chars": 146,
+            "est_tokens": 36,
+            "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+          },
+          "existing tests": {
+            "chars": 375,
+            "est_tokens": 93,
+            "sha256": "00dac5342562b15153455e959b0af67595a675ed52b6c18c322796721e30deba"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "847fec5a6772",
+        "version": "847fec5a6772",
+        "candidate_known": false,
+        "base": "db2ae815ac55",
+        "sources": "task@T-1443 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 6828,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 356,
+        "instruction_tokens_modular": 356,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "e30d21a0-ef5d-4274-bd2f-b69af821bf20",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790875069.1454568,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Line numbers in the spec (168-210, 1545-1590, 257-258, 588-616) do not match this worktree. decision_points() is at about 190-244, _claim's decision_requested map at about 260, _condition_resolved at about 626, build_ctx's closable branch at about 1104. The base is older than 'main 355583c', so insertion points must be located by symbol.",
+            "severity": "low",
+            "line": 190
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Superseded execute children never satisfy closable, and the spec leaves that alone. A goal whose children are all merged or superseded, with no unfiled labels and at least one superseded child, still never reaches closable. That is the original T-1403 stall once plan.md is fully filed or dropped. The next_wave condition accepts 'merged_into or superseded', but closable still needs every child merged_into.",
+            "severity": "med",
+            "line": 241
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "The next_wave key is a hash of the label set only. If the Planner decides not to file and records 'Needs the human', the record stays blocked and never re-fires. That is intended, but the Planner can also file part of the wave and merge it. The leftover labels then hash to a new key and fire again, which is correct. If the Planner files nothing and the labels change only because plan.md was edited, a new Planner launches with no attempt cap. _condition_resolved says a changed hash counts as resolved, but nothing ties that to attempts or notify dedup.",
+            "severity": "med",
+            "line": 243
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Hidden coupling outside scope. planner_runs treats every non-'held' kind as goal-keyed in _decision_task (~330), _observed_outcome (~631), reconcile/jev (~1000), and the closable-specific branches in build_ctx and tick (~1570-1575). The 'unchanged_state' route and _record_running (~333) copy the point to evidence as [goal_id, payload_key]. The spec does not say next_wave must skip the closable-only gate_state and routine paths, or that _observed_outcome returns None for it. The decision packet kind mapping in planner_packet.py _KIND_FALLBACK has no next_wave entry. That file is out of scope, so the resulting decision type and prompt text fall to 'other'/'decide' with no explanation of the kind.",
+            "severity": "med",
+            "line": 330
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "unfiled_labels reads plan.md, which is mutable and may be stale or injected. The tokens are label-shaped only, but the regex permits false positives from prose on wave lines, for example 'B1' or 'E12' inside commentary, or a label like 'A1' inside a path-like string that slips through the lookarounds. A false positive creates a permanent next_wave that blocks closable. The 'Dropped:' escape hatch needs a Planner write to plan.md, which is blocked outside .orchestrator/ only for source files, so it works. Add a test where a wave line contains a label-shaped token in prose.",
+            "severity": "low",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/planner_runs.py",
+            "issue": "Reading plan.md and matching 'queued or running' on children make the behaviour depend on _session_attached() and the autonomous gate. Both are unchanged. The acceptance test asserts that tick() records a skip while attached, but does not assert that an already-blocked or already-resolved record launches nothing. tick() also calls build_ctx and decision.route before the attached check at ~1283, so the new plan.md read runs on every tick for every goal, including goals with no plan section. Cost is small, but the file read should be wrapped so a missing or unreadable plan.md or a decode error yields [] and does not raise.",
+            "severity": "low",
+            "line": 1509
+          }
+        ],
+        "suggested_spec_changes": [
+          "Refer to insertion points by symbol (decision_points, _claim decision_requested, _condition_resolved, build_ctx) because the quoted line numbers are stale against this worktree.",
+          "Decide the closable gap explicitly. Either let closable count 'superseded' execute children, or state that goals with superseded children and no unfiled labels remain unclosable and why that is accepted.",
+          "Specify next_wave handling in the closable-only code paths: skip the gate_state/routine branches in tick(), return None from _observed_outcome, and make _decision_task return the goal. Add a test that tick() on a next_wave point with route escalate launches exactly one decision run.",
+          "Add a retry and dedup rule: say what happens when plan.md labels change without any filing, and cap or notify so an edited plan cannot spawn unbounded Planner launches.",
+          "Make unfiled_labels fail safe: catch OSError and UnicodeDecodeError, return [], and add tests for no plan.md, no section, prose false positives, 'Dropped:' lines, and suffix matching (E11 filed by E11a, A1 by A1v2, but A1 not filed by A10).",
+          "State that decision.py checks key presence for unfiled_labels so an empty list is valid, and add tests for the empty, non-empty and missing cases in tests/test_decision.py.",
+          "Confirm that unfiled_labels is included in the packet the decision Planner reads. If planner_packet.py needs a next_wave mapping, either add it to scope or document that 'other' is intended.",
+          "Add a rollback line: git revert of the task commit, with existing next_wave records left inert."
+        ],
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 6508,
+          "trimmed": {
+            "risks": 2
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790875069.148353,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Line numbers in the spec (168-210, 1545-1590, 257-258, 588-616) do not match this worktree. decision_points() is at about 190-244, _claim's decision_requested map at about 260, _condition_resolved at about 626, build_ctx's closable branch at about 1104. The base is older than 'main 355583c', so insertion points must be located by symbol.",
+          "severity": "low",
+          "line": 190
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Superseded execute children never satisfy closable, and the spec leaves that alone. A goal whose children are all merged or superseded, with no unfiled labels and at least one superseded child, still never reaches closable. That is the original T-1403 stall once plan.md is fully filed or dropped. The next_wave condition accepts 'merged_into or superseded', but closable still needs every child merged_into.",
+          "severity": "med",
+          "line": 241
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "The next_wave key is a hash of the label set only. If the Planner decides not to file and records 'Needs the human', the record stays blocked and never re-fires. That is intended, but the Planner can also file part of the wave and merge it. The leftover labels then hash to a new key and fire again, which is correct. If the Planner files nothing and the labels change only because plan.md was edited, a new Planner launches with no attempt cap. _condition_resolved says a changed hash counts as resolved, but nothing ties that to attempts or notify dedup.",
+          "severity": "med",
+          "line": 243
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Hidden coupling outside scope. planner_runs treats every non-'held' kind as goal-keyed in _decision_task (~330), _observed_outcome (~631), reconcile/jev (~1000), and the closable-specific branches in build_ctx and tick (~1570-1575). The 'unchanged_state' route and _record_running (~333) copy the point to evidence as [goal_id, payload_key]. The spec does not say next_wave must skip the closable-only gate_state and routine paths, or that _observed_outcome returns None for it. The decision packet kind mapping in planner_packet.py _KIND_FALLBACK has no next_wave entry. That file is out of scope, so the resulting decision type and prompt text fall to 'other'/'decide' with no explanation of the kind.",
+          "severity": "med",
+          "line": 330
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "unfiled_labels reads plan.md, which is mutable and may be stale or injected. The tokens are label-shaped only, but the regex permits false positives from prose on wave lines, for example 'B1' or 'E12' inside commentary, or a label like 'A1' inside a path-like string that slips through the lookarounds. A false positive creates a permanent next_wave that blocks closable. The 'Dropped:' escape hatch needs a Planner write to plan.md, which is blocked outside .orchestrator/ only for source files, so it works. Add a test where a wave line contains a label-shaped token in prose.",
+          "severity": "low",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/planner_runs.py",
+          "issue": "Reading plan.md and matching 'queued or running' on children make the behaviour depend on _session_attached() and the autonomous gate. Both are unchanged. The acceptance test asserts that tick() records a skip while attached, but does not assert that an already-blocked or already-resolved record launches nothing. tick() also calls build_ctx and decision.route before the attached check at ~1283, so the new plan.md read runs on every tick for every goal, including goals with no plan section. Cost is small, but the file read should be wrapped so a missing or unreadable plan.md or a decode error yields [] and does not raise.",
+          "severity": "low",
+          "line": 1509
+        },
+        {
+          "path": "orchestrator/decision.py",
+          "issue": "'unknown:unfiled_labels' is the existing 'unknown(required)' path, but the field check must accept the empty list as present. The spec says empty -> none 'no_unfiled_work', so 'missing' must test for key absence, not falsiness. Also decide whether next_wave honours the disabled and unchanged_state short-circuits above line 95 (the spec says test_disabled_routes_everything_to_escalate must pass unchanged, so it must).",
+          "severity": "low",
+          "line": 109
+        },
+        {
+          "path": ".orchestrator/prompts/planner-decision.md",
+          "issue": "The new sentence says to 'file the next wave from plan.md (SPEC RULE, depends_on by plan label)'. Nothing in the packet gives the Planner the unfiled labels except the evidence list, and the prompt's only data path is the packet. Confirm unfiled_labels reaches the rendered packet, otherwise the Planner works from plan.md alone. Also rollback is unstated. State that reverting the commit removes the kind, and that records already written with kind next_wave must be tolerated (they fall to the _condition_resolved default True).",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 6089,
+    "est_tokens": 1522,
+    "presented_tokens": 1522,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "b383b998cda9b0b002b98c28ba26c6ba442e08d7c679bad1587687f341b03f0e"
+      },
+      "spec": {
+        "chars": 4395,
+        "est_tokens": 1098,
+        "sha256": "3cfa66560e400a3020a62c6fc5cd39237d140ffe17fca4200294e992684a1eea"
+      },
+      "acceptance": {
+        "chars": 911,
+        "est_tokens": 227,
+        "sha256": "23e52d3d92c91529e468ec325b9efe5f4e903854a0db4e62258da7ff9dd4faf2"
+      },
+      "scope": {
+        "chars": 165,
+        "est_tokens": 41,
+        "sha256": "78654203e1d40da627cef6a85a3156d3fa47791d3253c3b191e879d79a8a806c"
+      },
+      "depends_on": {
+        "chars": 146,
+        "est_tokens": 36,
+        "sha256": "82c3946cbe2494e3f4f7b135d10f79e1f0769af5f13342375ee56a71d3aa5b98"
+      },
+      "existing tests": {
+        "chars": 375,
+        "est_tokens": 93,
+        "sha256": "00dac5342562b15153455e959b0af67595a675ed52b6c18c322796721e30deba"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "48a0d75060c96df5c16f0e3782f148ab3629f08b4272ab15542e3f44caa02c94"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "847fec5a6772",
+    "version": "847fec5a6772",
+    "candidate_known": false,
+    "base": "db2ae815ac55",
+    "sources": "task@T-1443 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 6828,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 356,
+    "instruction_tokens_modular": 356,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "e30d21a0-ef5d-4274-bd2f-b69af821bf20",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790875003.544755,
+  "account": "A",
+  "pid": 27952,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Line numbers in the spec (168-210, 1545-1590, 257-258, 588-616) do not match this worktree. decision_points() is at about 190-244, _claim's decision_requested map at about 260, _condition_resolved at about 626, build_ctx's closable branch at about 1104. The base is older than 'main 355583c', so insertion points must be located by symbol.",
+      "severity": "low",
+      "line": 190
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Superseded execute children never satisfy closable, and the spec leaves that alone. A goal whose children are all merged or superseded, with no unfiled labels and at least one superseded child, still never reaches closable. That is the original T-1403 stall once plan.md is fully filed or dropped. The next_wave condition accepts 'merged_into or superseded', but closable still needs every child merged_into.",
+      "severity": "med",
+      "line": 241
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "The next_wave key is a hash of the label set only. If the Planner decides not to file and records 'Needs the human', the record stays blocked and never re-fires. That is intended, but the Planner can also file part of the wave and merge it. The leftover labels then hash to a new key and fire again, which is correct. If the Planner files nothing and the labels change only because plan.md was edited, a new Planner launches with no attempt cap. _condition_resolved says a changed hash counts as resolved, but nothing ties that to attempts or notify dedup.",
+      "severity": "med",
+      "line": 243
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Hidden coupling outside scope. planner_runs treats every non-'held' kind as goal-keyed in _decision_task (~330), _observed_outcome (~631), reconcile/jev (~1000), and the closable-specific branches in build_ctx and tick (~1570-1575). The 'unchanged_state' route and _record_running (~333) copy the point to evidence as [goal_id, payload_key]. The spec does not say next_wave must skip the closable-only gate_state and routine paths, or that _observed_outcome returns None for it. The decision packet kind mapping in planner_packet.py _KIND_FALLBACK has no next_wave entry. That file is out of scope, so the resulting decision type and prompt text fall to 'other'/'decide' with no explanation of the kind.",
+      "severity": "med",
+      "line": 330
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "unfiled_labels reads plan.md, which is mutable and may be stale or injected. The tokens are label-shaped only, but the regex permits false positives from prose on wave lines, for example 'B1' or 'E12' inside commentary, or a label like 'A1' inside a path-like string that slips through the lookarounds. A false positive creates a permanent next_wave that blocks closable. The 'Dropped:' escape hatch needs a Planner write to plan.md, which is blocked outside .orchestrator/ only for source files, so it works. Add a test where a wave line contains a label-shaped token in prose.",
+      "severity": "low",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/planner_runs.py",
+      "issue": "Reading plan.md and matching 'queued or running' on children make the behaviour depend on _session_attached() and the autonomous gate. Both are unchanged. The acceptance test asserts that tick() records a skip while attached, but does not assert that an already-blocked or already-resolved record launches nothing. tick() also calls build_ctx and decision.route before the attached check at ~1283, so the new plan.md read runs on every tick for every goal, including goals with no plan section. Cost is small, but the file read should be wrapped so a missing or unreadable plan.md or a decode error yields [] and does not raise.",
+      "severity": "low",
+      "line": 1509
+    },
+    {
+      "path": "orchestrator/decision.py",
+      "issue": "'unknown:unfiled_labels' is the existing 'unknown(required)' path, but the field check must accept the empty list as present. The spec says empty -> none 'no_unfiled_work', so 'missing' must test for key absence, not falsiness. Also decide whether next_wave honours the disabled and unchanged_state short-circuits above line 95 (the spec says test_disabled_routes_everything_to_escalate must pass unchanged, so it must).",
+      "severity": "low",
+      "line": 109
+    },
+    {
+      "path": ".orchestrator/prompts/planner-decision.md",
+      "issue": "The new sentence says to 'file the next wave from plan.md (SPEC RULE, depends_on by plan label)'. Nothing in the packet gives the Planner the unfiled labels except the evidence list, and the prompt's only data path is the packet. Confirm unfiled_labels reaches the rendered packet, otherwise the Planner works from plan.md alone. Also rollback is unstated. State that reverting the commit removes the kind, and that records already written with kind next_wave must be tolerated (they fall to the _condition_resolved default True).",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "id": "T-0158",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "C-O4 fix round 2: redact start() refusal reasons, bound the body before buffering, guard repos.toml parsing and per-repo fan-out, idempotent cancel (from review T-0155)",
+  "spec": "Fix round for T-0153 (branch task/T-0153 at 38db9bb, on top of T-0147 be42500). Work in this task's worktree, cut from task/T-0153. Review T-0155 (opus) requested changes; items come from it. Do not widen scope.\n\n1 MED serve.py 422 path (\u2248line 156): goals.start refusal reasons can embed git stderr (f\"git add failed: {stderr}\", \"scaffold commit failed: ...\", \"GOAL task creation failed (rc=...): ...\"). Before any reason string goes into a JSONResponse, pass it through the existing CREDENTIAL_RE redaction and cap it at 300 chars; log the full text to the server log (redacted as well). Apply the same helper to every place a goals.* string reaches a body (422 reasons, cancel errors). Test: start returns launched false with reason containing \"https://u:SECRET@h/r.git\" \u2192 422 body has no \"SECRET\" and contains \"***\".\n\n2 MED serve.py body bound (\u2248line 106): enforce MAX_BODY_BYTES before buffering: if the Content-Length header is present and > MAX_BODY_BYTES \u2192 413 without reading; otherwise read via `request.stream()` accumulating chunks and abort with 413 as soon as the total exceeds MAX_BODY_BYTES (never call request.body() on POST /goals). Test: a request with Content-Length 40000000 and a short body \u2192 413 without reading the stream (patch the stream to assert it was not consumed); a chunked body over the limit \u2192 413 with at most MAX_BODY_BYTES + one chunk consumed.\n\n3 LOW serve.py repos.toml (\u2248line 50): wrap tomllib.loads (and the file read) in try/except \u2192 503 {\"reason\": \"repos.toml unreadable\"} with the parse error logged; /healthz unchanged. In the unfiltered GET /goals fan-out (\u2248line 176), isolate each slug: an exception from goals.list_goals for one repo becomes an entry {\"repo\": slug, \"error\": \"unreadable\"} and the others still return. Tests for both.\n\n4 LOW serve.py cancel (\u2248line 213): wrap the goals.stop call in try/except (ProcessLookupError, PermissionError) \u2192 200 {goal_id, repo, status: \"stopped\", note: \"planner already gone\"}. Test with goals.stop patched to raise ProcessLookupError \u2192 200.\n\nNo new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0153",
+    "T-0155"
+  ],
+  "acceptance": [
+    "No goals.* string reaches a response body unredacted; the SECRET test passes; full text goes to the log",
+    "Content-Length above MAX_BODY_BYTES yields 413 without reading; streamed bodies abort at the limit (tests)",
+    "Malformed repos.toml yields 503 on goal routes with /healthz still 200; one failing repo in the fan-out does not break the others (tests)",
+    "Cancel returns 200 stopped when the planner is already gone (test)",
+    "uv run python -m unittest discover -q tests green; no new dependency; only serve.py and tests/test_serve.py change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/serve.py",
+    "tests/test_serve.py"
+  ],
+  "depends_on": [
+    "T-0153"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 35,
+    "timeout_s": 2100,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_serve.py",
+    "fix_round_for": "T-0153",
+    "worktree_base": "task/T-0153"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0158",
+  "codex_thread": null,
+  "result": {
+    "summary": "All 191 tests pass (`OK`). The one \"Traceback\" line in the grep is expected diagnostic output from the `access_log.error(..., exc_info=True)` call in the fan-out isolation test \u2014 not a failure.\n\n## Summary\n\nImplemented all four T-0155 review items in `orchestrator/serve.py`, adding matching tests in `tests/test_serve.py`.\n\n1. **Reason redaction/cap**: added `_safe_reason()` \u2014 applies `CREDENTIAL_RE`, caps the client-facing string at 300 chars, logs the full redacted text via `access_log`. Wired into the `goals.start` 422 path.\n2. **Body bound**: added `_read_body_bounded()` \u2014 checks `Content-Length` and rejects with `None` before touching the stream if it's over `MAX_BODY_BYTES`; otherwise reads via `request.stream()`, aborting as soon as the running total exceeds the limit. `create_goal` never calls `request.body()` anymore.\n3. **repos.toml robustness**: added `_load_repos_or_503()`, used by `_resolve_repo` and the unfiltered `list_all_goals` fan-out; a parse/read failure now yields `503 {\"reason\": \"repos.toml unreadable\"}` (logged), `/healthz` untouched. The unfiltered fan-out loop now isolates each repo's `goals.list_goals` call in try/except, appending `{\"repo\": slug, \"error\": \"unreadable\"}` on failure instead of aborting the whole response.\n4. **Cancel resilience**: `cancel_goal` wraps `goals.stop` in try/except for `ProcessLookupError`/`PermissionError`, returning `200 {..., \"note\": \"planner already gone\"}`.\n\n**Files changed**: `orchestrator/serve.py`, `tests/test_serve.py` (only in-scope paths).\n\n**Test run**: `uv run python -m unittest discover -q tests` \u2192 191 tests, `OK`, no failures.\n\nCommitted on `task/T-0158` as `6f8018d`.",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789741189.251015,
+      "pipeline": {
+        "gated_at": 1789741189.250838,
+        "gated_by": "planner-pre-stamp: gate and review by hand"
+      }
+    },
+    {
+      "ts": 1789741194.094087,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789741194.0968618,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0158",
+      "claimed_at": 1789741194.09671
+    },
+    {
+      "ts": 1789741194.104796,
+      "pid": 2666,
+      "account": "B"
+    },
+    {
+      "ts": 1789741601.062741,
+      "status": "done",
+      "result": {
+        "summary": "All 191 tests pass (`OK`). The one \"Traceback\" line in the grep is expected diagnostic output from the `access_log.error(..., exc_info=True)` call in the fan-out isolation test \u2014 not a failure.\n\n## Summary\n\nImplemented all four T-0155 review items in `orchestrator/serve.py`, adding matching tests in `tests/test_serve.py`.\n\n1. **Reason redaction/cap**: added `_safe_reason()` \u2014 applies `CREDENTIAL_RE`, caps the client-facing string at 300 chars, logs the full redacted text via `access_log`. Wired into the `goals.start` 422 path.\n2. **Body bound**: added `_read_body_bounded()` \u2014 checks `Content-Length` and rejects with `None` before touching the stream if it's over `MAX_BODY_BYTES`; otherwise reads via `request.stream()`, aborting as soon as the running total exceeds the limit. `create_goal` never calls `request.body()` anymore.\n3. **repos.toml robustness**: added `_load_repos_or_503()`, used by `_resolve_repo` and the unfiltered `list_all_goals` fan-out; a parse/read failure now yields `503 {\"reason\": \"repos.toml unreadable\"}` (logged), `/healthz` untouched. The unfiltered fan-out loop now isolates each repo's `goals.list_goals` call in try/except, appending `{\"repo\": slug, \"error\": \"unreadable\"}` on failure instead of aborting the whole response.\n4. **Cancel resilience**: `cancel_goal` wraps `goals.stop` in try/except for `ProcessLookupError`/`PermissionError`, returning `200 {..., \"note\": \"planner already gone\"}`.\n\n**Files changed**: `orchestrator/serve.py`, `tests/test_serve.py` (only in-scope paths).\n\n**Test run**: `uv run python -m unittest discover -q tests` \u2192 191 tests, `OK`, no failures.\n\nCommitted on `task/T-0158` as `6f8018d`.",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789741839.3994298,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789741881.921011,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "6f8018de2f94b99bb2cfb532944df922035ab6fa"
+    },
+    {
+      "ts": 1789741910.448294,
+      "status": "done",
+      "merged_into": "goal/T-0073",
+      "sha": "6f8018de2f94b99bb2cfb532944df922035ab6fa"
+    }
+  ],
+  "pipeline": {
+    "gated_at": 1789741189.250838,
+    "gated_by": "planner-pre-stamp: gate and review by hand"
+  },
+  "executor": "claude:sonnet",
+  "claimed_at": 1789741194.09671,
+  "pid": 2666,
+  "account": "B",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0073",
+  "sha": "6f8018de2f94b99bb2cfb532944df922035ab6fa"
+}

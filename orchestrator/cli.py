@@ -1,4 +1,4 @@
-"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
+"""orchestrator status | cost [--by role|tier|account|task] | hold A [--minutes] | resume A | pick planner|scout|review|execute | daemon [--once] | watchdog [--once] [--install-launchd] | merge T-0001 | repomap [--budget N] [--stdout] | install /path/to/target | post T-0001 --summary ... | planner-runs --summary | jev diagnose"""
 import argparse, json, os, random, re, sys, time
 from collections import defaultdict
 from datetime import datetime
@@ -188,13 +188,20 @@ def main():
     pk = sub.add_parser("pick"); pk.add_argument("role", choices=["planner", "scout", "review", "execute"])
     pk.add_argument("--model", action="store_true")
     dm = sub.add_parser("daemon"); dm.add_argument("--once", action="store_true", help="run one pipeline tick and exit")
+    wd = sub.add_parser("watchdog"); wd.add_argument("--once", action="store_true", help="run one watchdog pass and exit")
+    wd.add_argument("--install-launchd", action="store_true", help="print a LaunchAgent plist and load commands; writes nothing")
     ho = sub.add_parser("handover"); ho.add_argument("--reason", default="manual"); ho.add_argument("--session-id")
-    pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true")
+    pc = sub.add_parser("planner-context"); pc.add_argument("--hook", action="store_true"); pc.add_argument("--brief", action="store_true")
     pc.add_argument("--transcript"); pc.add_argument("--session-id")
     m = sub.add_parser("merge"); m.add_argument("task"); m.add_argument("--target")
+    shp = sub.add_parser("ship", help="advance one closed goal to the target branch; --retry clears a hold")
+    shp.add_argument("--retry", metavar="GOAL")
+    rb = sub.add_parser("rollback", help="revert a merge commit on the ship target through a gated PR")
+    rb.add_argument("sha"); rb.add_argument("--force", action="store_true", help="skip the gate (emergency)")
     rm = sub.add_parser("repomap"); rm.add_argument("--budget", type=int, default=4000)
     rm.add_argument("--stdout", action="store_true")
     ins = sub.add_parser("install"); ins.add_argument("target")
+    new = sub.add_parser("new"); new.add_argument("path")
     p = sub.add_parser("post"); p.add_argument("task"); p.add_argument("--summary", required=True); p.add_argument("--status", default="done")
     sc = sub.add_parser("scorecard")
     sc.add_argument("--by", choices=["executor", "tier", "task", "goal", "band", "class", "role", "packet_version", "reviewed_executor"])
@@ -614,6 +621,12 @@ def main():
             print(f"model\t{model}\t{reason}")
     elif a.cmd == "daemon":
         from .daemon import main as d; d(once=a.once)
+    elif a.cmd == "watchdog":
+        from . import watchdog
+        if a.install_launchd:
+            print(watchdog.install_launchd_text())
+        else:
+            sys.exit(watchdog.run(once=a.once))
     elif a.cmd == "handover":
         from . import handover
         from pathlib import Path
@@ -626,7 +639,9 @@ def main():
         from pathlib import Path
         from . import planner_context
         config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
-        if a.hook:
+        if a.brief:
+            print(planner_context.compact_brief(ROOT))
+        elif a.hook:
             message = planner_context.hook_message(pool_config(), config_dir, ROOT,
                                                    transcript=a.transcript, session_id=a.session_id)
             if message:
@@ -638,6 +653,16 @@ def main():
                 print(tokens)
     elif a.cmd == "merge":
         from .merge import merge; print(json.dumps(merge(a.task, a.target), indent=1))
+    elif a.cmd == "ship":
+        from . import ship
+        result = ship.retry(a.retry) if a.retry else ship.tick(Pool(), inline=True)
+        print(json.dumps(result, indent=1, default=str))
+    elif a.cmd == "rollback":
+        from . import ship
+        result = ship.rollback(a.sha, force=a.force)
+        print(json.dumps(result, indent=1))
+        if result["status"] != "rolled_back":
+            raise SystemExit(1)
     elif a.cmd == "repomap":
         from .repomap import build
         # Leave a little room for command wrappers while keeping the requested value an upper bound.
@@ -654,6 +679,18 @@ def main():
         for line in install(a.target):
             print(line)
         print(f'Next: orchestrator goal start {a.target} "<goal>"')
+    elif a.cmd == "new":
+        from .new_project import NewProjectError, create
+        try:
+            lines = create(a.path)
+        except NewProjectError as e:
+            print(f"new: {e}", file=sys.stderr)
+            raise SystemExit(2)
+        for line in lines:
+            print(line)
+        target = lines[0].split(" ", 1)[1].removeprefix("existing ")
+        print(f"Next: ORCH_ROOT={target} uv run orchestrator daemon")
+        print(f'  or: orchestrator goal start {target} "<goal>"')
     elif a.cmd == "goal":
         from . import goals
         if a.goal_cmd == "start":

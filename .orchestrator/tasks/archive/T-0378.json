@@ -1,0 +1,139 @@
+{
+  "id": "T-0378",
+  "parent": "T-0353",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 2,
+  "title": "H5a fix round 2: a fresh codex() on a task that already carries a result refuses to claim and start unless the task is running; post_tool_result never overwrites an existing result without merged_into and thread checks; the test exercises the real bus.claim path (review T-0376)",
+  "spec": "STEP 0: the worktree must contain 2de1126 (T-0358) and 4968f53 (T-0371) in git log; never drop or amend them.\nReview T-0376 on T-0371, one high finding:\n1. executor.start calls bus.claim(task_id, \"codex\", worktree) unconditionally before post_tool_result runs, flipping any task, even one done or merged, to running while its old result stays; a second codex(task_id, prompt) (Planner retry after a dropped MCP response) then passes post_tool_result's guard (previous is not None and status != running is False) and silently overwrites commit, thread, rounds and provenance with no previous_commits entry and no merged_into check. test_codex_fresh_thread_does_not_overwrite_done_task passes only because it mocks executor.start.\nFix: (a) executor.start (or mcp.codex before it) refuses to claim a task whose status is done or whose merged_into is set and which already has a result: return {status: refused, reason: \"task <id> already has a result from thread <thread>; use codex_reply for a fix round\"} without touching the bus; only a queued or running task (or a done task with no result) may be claimed. (b) post_tool_result: the overwrite guard checks merged_into is null and, for a fresh thread, that no result exists, independent of status; codex_reply's replace path keeps recording previous_commits and rounds. (c) Rewrite test_codex_fresh_thread_does_not_overwrite_done_task to drive the real code path: create a done task with a result on the sandbox bus, call the mcp codex tool with executor._run (the subprocess) mocked but bus.claim and post_tool_result real, and assert the result, status and thread are unchanged and the reply says refused. Add test_codex_reply_on_merged_task_is_refused.\nKeep the T-0358 and T-0371 tests and every existing test green. Run .claude/hooks/tests-green.sh from the worktree root until it exits 0, then git add -A and git commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0371",
+    "T-0376"
+  ],
+  "acceptance": [
+    "git log --oneline in the worktree shows 4968f53 and 2de1126 below your commit",
+    "tests/test_mcp.py::test_codex_fresh_thread_does_not_overwrite_done_task drives the real bus.claim and post_tool_result path (executor.start is not mocked) and passes; ::test_codex_reply_on_merged_task_is_refused passes",
+    "tests/test_mcp.py::test_codex_tool_posts_result_for_running_codex_task, ::test_codex_reply_replaces_previous_round_result and tests/test_executor.py::test_commit_sha_parse_requires_label_or_full_sha still pass",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/mcp.py",
+    "tests/test_mcp.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 20,
+    "timeout_s": 900,
+    "fix_round_for": "T-0371",
+    "task_class": "reliability"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0378",
+  "codex_thread": "01a0be86-a980-7f40-8391-a8d33b143aff",
+  "result": {
+    "summary": "Committed `64fbd0e`: protects existing Codex results and refuses merged-task replies.\nAll 518 tests passed; hook exited 0. Required ancestor commits remain intact.\nChanged `orchestrator/executor.py` and `tests/test_mcp.py`; 58 insertions, 13 deletions.\n\nFailures-only test output: empty.\n\nRequested `scripts/tests_green.sh` and `scripts/failures_only.sh` were missing; used `.claude/hooks/tests-green.sh`.",
+    "executed_by": "codex:astra",
+    "thread": "01a0be86-a980-7f40-8391-a8d33b143aff",
+    "usage": {
+      "input_tokens": 372853,
+      "cached_input_tokens": 354816,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 2815,
+      "reasoning_output_tokens": 236
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789902889.4817228,
+      "pipeline": {
+        "dispatched_at": 1789902889.481676
+      }
+    },
+    {
+      "ts": 1789902891.091993,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0378",
+      "claimed_at": 1789902891.089865
+    },
+    {
+      "ts": 1789902891.095219,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1789903054.00827,
+      "codex_thread": "01a0be86-a980-7f40-8391-a8d33b143aff"
+    },
+    {
+      "ts": 1789903054.0109282,
+      "status": "done",
+      "result": {
+        "summary": "Committed `64fbd0e`: protects existing Codex results and refuses merged-task replies.\nAll 518 tests passed; hook exited 0. Required ancestor commits remain intact.\nChanged `orchestrator/executor.py` and `tests/test_mcp.py`; 58 insertions, 13 deletions.\n\nFailures-only test output: empty.\n\nRequested `scripts/tests_green.sh` and `scripts/failures_only.sh` were missing; used `.claude/hooks/tests-green.sh`.",
+        "executed_by": "codex:astra",
+        "thread": "01a0be86-a980-7f40-8391-a8d33b143aff",
+        "usage": {
+          "input_tokens": 372853,
+          "cached_input_tokens": 354816,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 2815,
+          "reasoning_output_tokens": 236
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789903151.989266,
+      "pipeline": {
+        "dispatched_at": 1789902889.481676,
+        "gated_at": 1789903151.989147,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789903459.950367,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1789903511.413141,
+      "pipeline": {
+        "dispatched_at": 1789902889.481676,
+        "gated_at": 1789903151.989147,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "merged_at": 1789903511.413043
+      }
+    },
+    {
+      "ts": 1789903591.759219,
+      "status": "done",
+      "merged_into": "goal/T-0353",
+      "sha": "2905bc434f2330c5979815d6480117f2b960b85b"
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789902889.481676,
+    "gated_at": 1789903151.989147,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "merged_at": 1789903511.413043
+  },
+  "claimed_at": 1789902891.089865,
+  "rounds": 0,
+  "executor": "astra",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0353",
+  "sha": "2905bc434f2330c5979815d6480117f2b960b85b"
+}

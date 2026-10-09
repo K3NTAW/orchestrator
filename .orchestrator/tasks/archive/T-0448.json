@@ -1,0 +1,401 @@
+{
+  "id": "T-0448",
+  "parent": "T-0445",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Scout I-S3 (routing and Jev integration at Phase H code, READ wt/goal-T-0353): pick_executor inputs and order, scorecard and bench feeds, the Jev client API, budget, cache, redaction and fail-open patterns, the jev_gate flow, and the exact seam where a pre-dispatch classification would attach in shadow mode",
+  "spec": "Read-only. Work in /Users/k3ntaw/code/orchestrator/wt/goal-T-0353 (Phase H head 0d7bf09). Program: .orchestrator/phase-i-program.md sections P3, P4, P5 and the safety invariants. Deliver, each item with path:line:\n1. Routing: pool.pick_executor inputs (enabled, roles, cooling, complexity range, max_parallel, day budget, weight, score, quota_group), the sort key, where scores come from (scorecard.build, bench.json weights, G9 rules), fallback_tier and on_exhausted, the H4 reservation check, dispatch path daemon.dispatch -> _dispatch_worker -> executor.start -> pick_executor; where a classification result could be passed in without changing the chosen executor (shadow) and what a ranking adjustment hook would look like (active).\n2. Jev client: jev.py public functions (ask, noul, choice, score), request shape, votes, timeout, daily budget accounting and the state file, cache key and mtime logic (G5), redaction rules (what is never sent), fail-open behaviour and every error path; jev_rank.py purpose; jev_gate.py flow and the runs/jev rows it writes (fields), sample mode.\n3. Telemetry seam: where a shadow-routing row (baseline executor, hypothetical executor, eligible candidates, Jev signals, scorecard evidence, latency, usage) could be written so scorecard can join it to the task outcome later (task id key, runs/*.jsonl or a new file), consistent with bus.log_run conventions.\n4. Tests: existing tests for pick_executor, fallback, cooldown, Jev client (tests/test_pool.py, tests/test_jev.py, tests/test_jev_gate.py), and any fixture patterns for mocking Jev responses.\n5. Safety: list the hard constraints as code locations so a P3 spec can assert they run before any Jev influence, and the merge/scope/tests-green invariants' enforcement points.\nOutput under 1,500 tokens, confidence per section, provenance repo.",
+  "inputs": [],
+  "acceptance": [
+    "pick_executor inputs, sort key, score sources and the dispatch call chain with path:line",
+    "Jev client API, budget, cache, redaction, fail-open paths and jev_gate row fields with path:line",
+    "a named telemetry seam consistent with bus.log_run",
+    "existing routing and Jev tests and mocking fixtures listed",
+    "hard-constraint and invariant enforcement points listed"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/jev.py",
+    "orchestrator/jev_rank.py",
+    "orchestrator/jev_gate.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/bench.py",
+    "orchestrator/merge.py",
+    ".orchestrator/pool.toml",
+    "tests/test_pool.py",
+    "tests/test_jev.py",
+    "tests/test_jev_gate.py",
+    "tests/test_executor.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 30,
+    "timeout_s": 1200,
+    "cwd": "wt/goal-T-0353"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0448",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "pick_executor(role,complexity,scores=None,task=None) filters by enabled, role in ex.roles, not cooling, complexity_min<=c<=complexity_max, running<max_parallel, daily_budget_tasks; without task sorts ok by (-(weight*scores.get(id,1.0)), day_tasks, id); with task, ranks by scorecard cost among executors whose class_success>=floor, else falls back to weight*score sort",
+        "evidence": [
+          "orchestrator/pool.py:522-554"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "scores come from scorecard.scores(scorecard.build()) called in executor.start before pick_executor; scores() uses merged/(merged+failed) with min_runs=5, else falls back to prior_weights(executors) derived from bench.json coding/intelligence scores scaled 0.5-1.5, halved if quota group hit usage-limit>=3 today",
+        "evidence": [
+          "orchestrator/executor.py:243-246",
+          "orchestrator/scorecard.py:282-301",
+          "orchestrator/scorecard.py:257-266"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "expected_cost/class_success come from local runs/tasks only, gated by min_samples (pool.toml models.min_samples, default 3); task_class() infers class from constraints.task_class, review.security_paths match, complexity, title prefix 'fix'",
+        "evidence": [
+          "orchestrator/scorecard.py:65-86",
+          "orchestrator/scorecard.py:89-116",
+          "orchestrator/scorecard.py:123-128"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "fallback_tier(complexity): sonnet<=5, opus 6-8, None>=9; on_exhausted policy and Claude fallback dispatch handled in executor._exhausted when pick_executor yields no codex executor",
+        "evidence": [
+          "orchestrator/pool.py:650-652",
+          "orchestrator/executor.py:247-249,272-279"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "H4 reservation check: pool.reserve(task_id, ex.id, 'execute', t) after executor selection; None reservation requeues task with status=budget instead of dispatching",
+        "evidence": [
+          "orchestrator/executor.py:251-256"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Dispatch chain: daemon.dispatch -> spawn_async(_dispatch_worker) -> _dispatch_worker -> executor.start -> pool.pick_executor",
+        "evidence": [
+          "orchestrator/daemon.py:521-538",
+          "orchestrator/daemon.py:492-518",
+          "orchestrator/daemon.py:502",
+          "orchestrator/executor.py:246"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Shadow seam: daemon.dispatch's per-task loop (before render/spawn_async) is where a Jev classification could be attached to the task/pipeline dict without pick_executor consuming it; active seam is pool.pick_executor's measured/safe ranking block, where a jev_suitability_adjustment could multiply into the sort key alongside weight*score",
+        "evidence": [
+          "orchestrator/daemon.py:525-538",
+          "orchestrator/pool.py:539-554"
+        ],
+        "confidence": 0.55,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev.ask(state,questions,*,model=None,timeout_s=None,task=None) fails open (returns None) on: disabled, missing api key, daily budget exhausted, HTTPError (one retry only on 429/529), URLError/Timeout/OSError/ValueError, malformed answers (KeyError/TypeError/ValueError/AttributeError)",
+        "evidence": [
+          "orchestrator/jev.py:181-256"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "noul/choice/score are typed wrappers over ask(); votes>1 duplicates each question and averages noul/probabilities/score/confidence across responses",
+        "evidence": [
+          "orchestrator/jev.py:259-289",
+          "orchestrator/jev.py:201-249"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Daily budget: DEFAULT_DAILY_BUDGET_TOKENS=20M tracked in jev_state.json under flock on jev_state.lock with atomic tempfile replace and in-process fallback tally on corruption",
+        "evidence": [
+          "orchestrator/jev.py:18-19,24,125-148"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Cache/mtime logic (G5) is in jev_gate, not jev.py: _record_call keys on sha1(tool_name+sorted-json input) and repeats only if the target file's mtime is unchanged, persisted per-session to runs/jev/session-<id>.json",
+        "evidence": [
+          "orchestrator/jev_gate.py:145-147,165-199"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "redact() strips sk-/ghp_/Bearer/KEY=VALUE/32+char hex-base64 tokens; applied to outgoing state text (jev.ask) and to gate targets/recent tool inputs before ever building state; full repo file contents are never sent (only spec[:1500], acceptance, scope, redacted tool input[:300])",
+        "evidence": [
+          "orchestrator/jev.py:34-60,199",
+          "orchestrator/jev_gate.py:114,142,202-218"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "jev_rank.py ranks candidate items (e.g. memory/context) for relevance to a goal via noul questions, batched, fail-open to unranked original list on any ask() failure or parse error",
+        "evidence": [
+          "orchestrator/jev_rank.py:1-11,41-68"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Exact enforcement code for 'human approval for main' (PR gate) not read in this pass \u2014 likely outside orchestrator/*.py",
+      "planner-mode.sh/scope-guard.sh/guardrails.sh contents not read \u2014 only referenced by name and by jev_gate.py's comment on guardrails.sh owning destructive blocking"
+    ],
+    "suggested_next": [
+      "Read .claude/hooks/scope-guard.sh, planner-mode.sh, guardrails.sh for exact invariant code before writing P3/P5 specs",
+      "Confirm no existing routing telemetry file exists elsewhere (e.g. runs/jev/routing.jsonl) before specifying the new seam as net-new"
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 8629,
+      "trimmed": {
+        "findings": 7
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789918564.012922,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0448",
+      "claimed_at": 1789918564.012701
+    },
+    {
+      "ts": 1789918564.014449,
+      "account": "B"
+    },
+    {
+      "ts": 1789918564.056044,
+      "pid": 58947,
+      "account": "B"
+    },
+    {
+      "ts": 1789918726.905822,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "pick_executor(role,complexity,scores=None,task=None) filters by enabled, role in ex.roles, not cooling, complexity_min<=c<=complexity_max, running<max_parallel, daily_budget_tasks; without task sorts ok by (-(weight*scores.get(id,1.0)), day_tasks, id); with task, ranks by scorecard cost among executors whose class_success>=floor, else falls back to weight*score sort",
+            "evidence": [
+              "orchestrator/pool.py:522-554"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "scores come from scorecard.scores(scorecard.build()) called in executor.start before pick_executor; scores() uses merged/(merged+failed) with min_runs=5, else falls back to prior_weights(executors) derived from bench.json coding/intelligence scores scaled 0.5-1.5, halved if quota group hit usage-limit>=3 today",
+            "evidence": [
+              "orchestrator/executor.py:243-246",
+              "orchestrator/scorecard.py:282-301",
+              "orchestrator/scorecard.py:257-266"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "expected_cost/class_success come from local runs/tasks only, gated by min_samples (pool.toml models.min_samples, default 3); task_class() infers class from constraints.task_class, review.security_paths match, complexity, title prefix 'fix'",
+            "evidence": [
+              "orchestrator/scorecard.py:65-86",
+              "orchestrator/scorecard.py:89-116",
+              "orchestrator/scorecard.py:123-128"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "fallback_tier(complexity): sonnet<=5, opus 6-8, None>=9; on_exhausted policy and Claude fallback dispatch handled in executor._exhausted when pick_executor yields no codex executor",
+            "evidence": [
+              "orchestrator/pool.py:650-652",
+              "orchestrator/executor.py:247-249,272-279"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "H4 reservation check: pool.reserve(task_id, ex.id, 'execute', t) after executor selection; None reservation requeues task with status=budget instead of dispatching",
+            "evidence": [
+              "orchestrator/executor.py:251-256"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Dispatch chain: daemon.dispatch -> spawn_async(_dispatch_worker) -> _dispatch_worker -> executor.start -> pool.pick_executor",
+            "evidence": [
+              "orchestrator/daemon.py:521-538",
+              "orchestrator/daemon.py:492-518",
+              "orchestrator/daemon.py:502",
+              "orchestrator/executor.py:246"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Shadow seam: daemon.dispatch's per-task loop (before render/spawn_async) is where a Jev classification could be attached to the task/pipeline dict without pick_executor consuming it; active seam is pool.pick_executor's measured/safe ranking block, where a jev_suitability_adjustment could multiply into the sort key alongside weight*score",
+            "evidence": [
+              "orchestrator/daemon.py:525-538",
+              "orchestrator/pool.py:539-554"
+            ],
+            "confidence": 0.55,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev.ask(state,questions,*,model=None,timeout_s=None,task=None) fails open (returns None) on: disabled, missing api key, daily budget exhausted, HTTPError (one retry only on 429/529), URLError/Timeout/OSError/ValueError, malformed answers (KeyError/TypeError/ValueError/AttributeError)",
+            "evidence": [
+              "orchestrator/jev.py:181-256"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "noul/choice/score are typed wrappers over ask(); votes>1 duplicates each question and averages noul/probabilities/score/confidence across responses",
+            "evidence": [
+              "orchestrator/jev.py:259-289",
+              "orchestrator/jev.py:201-249"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Daily budget: DEFAULT_DAILY_BUDGET_TOKENS=20M tracked in jev_state.json under flock on jev_state.lock with atomic tempfile replace and in-process fallback tally on corruption",
+            "evidence": [
+              "orchestrator/jev.py:18-19,24,125-148"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Cache/mtime logic (G5) is in jev_gate, not jev.py: _record_call keys on sha1(tool_name+sorted-json input) and repeats only if the target file's mtime is unchanged, persisted per-session to runs/jev/session-<id>.json",
+            "evidence": [
+              "orchestrator/jev_gate.py:145-147,165-199"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "redact() strips sk-/ghp_/Bearer/KEY=VALUE/32+char hex-base64 tokens; applied to outgoing state text (jev.ask) and to gate targets/recent tool inputs before ever building state; full repo file contents are never sent (only spec[:1500], acceptance, scope, redacted tool input[:300])",
+            "evidence": [
+              "orchestrator/jev.py:34-60,199",
+              "orchestrator/jev_gate.py:114,142,202-218"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "jev_rank.py ranks candidate items (e.g. memory/context) for relevance to a goal via noul questions, batched, fail-open to unranked original list on any ask() failure or parse error",
+            "evidence": [
+              "orchestrator/jev_rank.py:1-11,41-68"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Exact enforcement code for 'human approval for main' (PR gate) not read in this pass \u2014 likely outside orchestrator/*.py",
+          "planner-mode.sh/scope-guard.sh/guardrails.sh contents not read \u2014 only referenced by name and by jev_gate.py's comment on guardrails.sh owning destructive blocking"
+        ],
+        "suggested_next": [
+          "Read .claude/hooks/scope-guard.sh, planner-mode.sh, guardrails.sh for exact invariant code before writing P3/P5 specs",
+          "Confirm no existing routing telemetry file exists elsewhere (e.g. runs/jev/routing.jsonl) before specifying the new seam as net-new"
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 8629,
+          "trimmed": {
+            "findings": 7
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789918564.012701,
+  "account": "B",
+  "pid": 58947
+}

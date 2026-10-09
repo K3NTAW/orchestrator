@@ -1,0 +1,91 @@
+{
+  "id": "T-1353",
+  "created_at": 1790192410.668127,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "S2 v6: Dispatch provider=\"claude\" executor rows through run_worker with the row's model, capacity-aware",
+  "spec": "Respec of T-1348: depends_on moved to S1 v6 T-1352 and acceptance ids rewritten to the gate-parseable tests/x.py::test_name form (acceptance.py:8 does not read Class::test). Spec otherwise unchanged. Goal T-1334. After S1, pick_executor can return a provider=\"claude\" row, but executor.start (executor.py:487) sends every non-codex pick to _exhausted() (fallback tier by complexity), and the daemon's dispatch capacity (capacity.snapshot / eligible_executors_from_snapshot, capacity.py:54, used at daemon.py:806) treats every row like a Codex row. Plug and play means a Claude row runs as itself within Claude capacity.\n\n1. orchestrator/executor.py start(): when ex.provider == \"claude\": acct = pool.pick(\"execute\") (re-checked here: S1 eligibility reserves nothing); None -> bus.update status held, hold_reason \"no account with headroom\", return {\"status\": \"held\"}. Else bus.update(task, executor=ex.id, tier=ex.id); ex.roll_day(); ex.day_tasks += 1; pool.save(); run spawn.run_worker(task_id, account_id=acct.id) in a background thread registered in _fallback_threads exactly like _exhausted() (executor.py:535-569); handed_off=True so the dispatch reservation passes to run_worker. Return {\"status\": \"dispatched\", \"executor\": ex.id, \"provider\": \"claude\"}. No fallback/review_rule fields. ex None keeps _exhausted(). Unknown provider -> held, hold_reason \"unknown executor provider <p>\".\n2. orchestrator/spawn.py run_worker: model (spawn.py:1538) = the row model when pool.executor_identity(t[\"tier\"]) is provider \"claude\" with a model, else cfg[\"models\"][t[\"tier\"]] as today. Execute branch (spawn.py:1564): executor = row id for a row-routed task, legacy f\"claude:{tier}\" otherwise; the \"Claude fallback executor (Codex is unavailable)\" line only for legacy, row-routed gets \"You are the routed executor\". executed_by (spawn.py:1657) uses t[\"executor\"]. Claim stays \"claude:<acct>\" (spawn.py:1603).\n3. orchestrator/capacity.py: snapshot rows carry provider; in eligible_executors_from_snapshot a claude row additionally needs snapshot[\"claude_workers_free\"] > 0 and at least one account with headroom in snapshot[\"accounts\"] (use fields the snapshot already has). Codex rows unchanged.\n4. orchestrator/daemon.py _codex_available (daemon.py:454, drives fallback mode): a claude row counts only when not cooling and pool.pick(\"execute\") returns an account.\n5. Fix rounds: executor.resume_plan returns fresh for non-codex parents (executor.py:279); keep it, test it.\n6. README.md \"Executors and routing\" (README.md:278): provider=\"claude\" rows (id, full model id, quota_group, roles, complexity band), Claude headroom from [[claude_accounts]], reviewer never runs the executing model, plug-and-play recipe: add a row to add a model; enabled=false on every codex row to run without Codex.\nTest behaviour per acceptance id: test_start_runs_claude_row_with_its_model (only a claude row eligible -> run_worker called with account_id, executor and tier = row id, _exhausted not called); test_claude_row_holds_without_headroom (every account cooling -> held, 'no account with headroom'); test_fix_round_for_claude_row_is_fresh (resume_plan -> mode fresh); test_run_worker_uses_row_model (claude --model = row model, executor = row id; legacy tier 'sonnet' still via [models]); test_claude_row_needs_claude_capacity (snapshot excludes a claude row when claude_workers_free is 0 or no account has headroom; codex rows unchanged). Define each as a method in a unittest.TestCase.\nNo .orchestrator/pool.toml edit (Planner adds the opus55 row after merge). No new dependencies. Additive; git revert restores Codex-only dispatch. 8 files: one behaviour, not split.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_executor.py::test_start_runs_claude_row_with_its_model",
+    "tests/test_executor.py::test_claude_row_holds_without_headroom",
+    "tests/test_executor.py::test_fix_round_for_claude_row_is_fresh",
+    "tests/test_spawn.py::test_run_worker_uses_row_model",
+    "tests/test_capacity.py::test_claude_row_needs_claude_capacity",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/executor.py",
+    "orchestrator/spawn.py",
+    "orchestrator/capacity.py",
+    "orchestrator/daemon.py",
+    "README.md",
+    "tests/test_executor.py",
+    "tests/test_spawn.py",
+    "tests/test_capacity.py"
+  ],
+  "depends_on": [
+    "T-1352"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1348",
+    "read_scope": [
+      "orchestrator/pool.py",
+      "orchestrator/bus.py",
+      "orchestrator/worker_control.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/specialist.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "Uses S1 (T-1352): pool.executor_rows(cfg), pool.executor_identity(field, cfg), Pool.executor_identity(field), Pool.is_claude_executor(field). A claude-row task has executor == tier == row id; its bus claim stays 'claude:<account id>' so running_claude_workers and max_parallel_claude_workers keep counting it."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790193250.4341881,
+      "pipeline": {
+        "first_ready_at": 1790193250.434151
+      }
+    },
+    {
+      "ts": 1790193250.536405,
+      "pipeline": {
+        "first_ready_at": 1790193250.434151,
+        "spec_review_at": 1790193250.536355,
+        "spec_review_at_lease": 1790194150.536355
+      }
+    },
+    {
+      "ts": 1790193250.543893,
+      "pipeline": {
+        "first_ready_at": 1790193250.434151,
+        "spec_review_at": 1790193250.536355,
+        "spec_review_at_lease": 1790194150.536355,
+        "spec_review_at_done": 1790193250.543772
+      }
+    },
+    {
+      "ts": 1790194324.7818801,
+      "status": "superseded",
+      "hold_reason": "split into S2a (dispatch) and S2b (capacity) after spec review T-1355 (unparsed output; findings: budget reservation, shared claude slots, fallback definition, run_worker model order, handed_off ordering)"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790193250.434151,
+    "spec_review_at": 1790193250.536355,
+    "spec_review_at_lease": 1790194150.536355,
+    "spec_review_at_done": 1790193250.543772
+  },
+  "hold_reason": "split into S2a (dispatch) and S2b (capacity) after spec review T-1355 (unparsed output; findings: budget reservation, shared claude slots, fallback definition, run_worker model order, handed_off ordering)"
+}

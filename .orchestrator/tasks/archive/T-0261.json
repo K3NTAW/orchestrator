@@ -1,0 +1,339 @@
+{
+  "id": "T-0261",
+  "parent": "T-0260",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout G-S1 (token accounting inventory): every place tokens or usd are recorded per role, what scorecard by_goal/by_task aggregate, and what tokens-per-accepted-goal would still miss",
+  "spec": "Goal T-0260 needs one metric: tokens per accepted goal = all tokens spent across evaluated goals (Planner session and decision runs, scouts, executors including Codex, reviews, spec reviews, Jev calls, retries, failed and superseded tasks, handovers) divided by accepted goals, with cached input separate and reasoning tokens not double counted. Inventory, with path:line for each claim:\n1. Run records: orchestrator/bus.py log_run and every caller (spawn.py, executor.py): which fields exist per role and provider (usd, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, cached_input_tokens, reasoning_output_tokens, turns, duration_s, executor, account, task, role, complexity). Note where Codex rows carry tokens but no usd and whether reasoning tokens are inside output_tokens for Codex --json usage.\n2. Planner usage: how orchestrator/planner_usage (or whatever module counts transcripts) computes planner_day_tokens; whether it can be attributed to a goal or a session; what planner_runs.json records per decision run.\n3. Jev usage: runs/jev-<date>.jsonl and jev_state.json fields; whether a task or goal id is on each row.\n4. scorecard.py by_task, by_goal, build: exactly which rows and fields feed usd, tokens, waste; what is excluded (tasks without parent, failed or superseded tasks, reviews of superseded tasks, Planner, Jev) and where the float tokens total comes from.\n5. Propose the smallest change set: which fields to add to log_run rows, which new aggregation (per goal: tokens by role, cached vs uncached, jev tokens, planner tokens, failed-task tokens) and where the accepted-goal count comes from (goal task done with merged children, PR opened).\nReport as a table source / path:line / fields / goal attribution / gaps, then the proposal, then confidence per finding. Under 1,500 tokens.",
+  "inputs": [],
+  "acceptance": [
+    "every claim carries path:line",
+    "table covers bus.log_run callers, planner usage, planner_runs, jev logs, scorecard aggregations",
+    "proposal names the fields to add and the aggregation, with a formula for tokens per accepted goal",
+    "result under 1,500 tokens with a confidence per finding"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/jev.py",
+    "orchestrator/cli.py",
+    "orchestrator/goals.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 12,
+    "timeout_s": 600
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0261",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "bus.log_run just appends **fields + ts to runs/<date>.jsonl; no fixed schema, no reasoning/turns fields required",
+        "evidence": [
+          "orchestrator/bus.py:206-211 (goal/T-0260)"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "spawn.py (Claude workers) logs usd, turns, input/output/cache_read/cache_creation_input_tokens; no reasoning field",
+        "evidence": [
+          "orchestrator/spawn.py:171-174 (goal/T-0260)"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "executor.py Codex rows never include usd (all 3 log_run calls omit it); _tokens() maps only input/output/cached_input_tokens to cache_read_input_tokens, no reasoning key extracted anywhere in repo",
+        "evidence": [
+          "orchestrator/executor.py:65-70,98-99,112-113,116-117 (goal/T-0260)"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "'reasoning' never appears in the repo on any branch -- reasoning tokens are untracked; unknown if Codex nests them in output_tokens",
+        "evidence": [
+          "git grep reasoning across all branches: no hits"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "task/T-0261's own worktree checkout predates jev.py/planner_runs.py/scorecard by_task+by_goal -- those live on goal/T-0109 onward and current goal/T-0260; findings below read goal/T-0260",
+        "evidence": [
+          "orchestrator/scorecard.py has no by_task/by_goal in task/T-0261 checkout vs goal/T-0260:orchestrator/scorecard.py:266,334"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Planner transcript usage lives in planner_usage.json {account: {day_tokens,...}}, pool-wide daily, not per-goal/session; scorecard.planner_footer sums it, never attributed to a goal",
+        "evidence": [
+          "orchestrator/scorecard.py:326-332 (goal/T-0260, _planner_usage_totals/planner_footer)"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "planner_runs.json records one row per (goal_id,kind,payload_key) decision run with goal_id + optional usd; no token field written, only usd sometimes present",
+        "evidence": [
+          "orchestrator/planner_runs.py:79-88,219-247 (goal/T-0260); scorecard.py:305-311 reads r['usd'] only"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Jev usage rows (runs/jev/<date>.jsonl) carry caller/input_tokens/model/latency_ms/ok/votes -- no task or goal id; gate.jsonl rows do carry task id",
+        "evidence": [
+          "orchestrator/jev.py:151-156 (_log_usage, goal/T-0260); scorecard.py:196-224 (_gate_stats keyed on task)"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "scorecard.by_task sums usd + tokens(=in+out+cache_read//10) + wall_s per task from runs/*.jsonl by task field; runs_no_usd counts lines missing usd (all Codex rows)",
+        "evidence": [
+          "orchestrator/scorecard.py:239-264 (goal/T-0260)"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "scorecard.by_goal rolls task totals up by parent id into role buckets (execute/review/spec_review/scout/other), adds gate calls/waste/blocked and turns, and that goal's own planner_runs rows (n_runs, usd) -- but excludes any task without a parent, and never includes Planner transcript tokens or Jev question tokens in the per-goal total",
+        "evidence": [
+          "orchestrator/scorecard.py:334-373 (goal/T-0260)"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Failed/superseded tasks are not filtered out of by_task/by_goal -- every task with any run line and a parent is included regardless of status, so failed-task spend is already counted, but a task with 0 runs (e.g. never dispatched) is silently absent from totals dict",
+        "evidence": [
+          "orchestrator/scorecard.py:239-264,334-365 (goal/T-0260) -- no status filter present"
+        ],
+        "confidence": 0.6,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Goal 'accepted' signal available today: goals.py builds pr_url from the goal task's result via PR_URL_RE, plus merged=[children with merged_into] -- that is the natural accepted-goal predicate (pr_url present, or goal task status done with all children merged)",
+        "evidence": [
+          "orchestrator/goals.py:464-477 (goal/T-0260)"
+        ],
+        "confidence": 0.65,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Does Codex --json usage ever emit a distinct reasoning_output_tokens field, or is reasoning always folded into output_tokens? No repo evidence either way -- needs an actual codex exec --json sample."
+    ],
+    "suggested_next": [
+      "Add fields to log_run: reasoning_output_tokens (pass through if Codex/Claude usage exposes it, else 0), goal_id (denormalize parent onto every run row so jev/planner rows can carry it too), jev_input_tokens split from worker tokens.",
+      "Give jev._log_usage and planner_runs records a goal_id field (jev already gets caller=task/goal context at call site; planner_runs already has goal_id -- just add tokens alongside usd).",
+      "New aggregation: scorecard.tokens_per_accepted_goal() = (sum by_goal total_tokens for goals with pr_url set) + jev tokens attributed via new goal_id + planner_usage tokens apportioned by goal-day overlap, all with cache_read counted once (not re-added into input) and reasoning kept as its own bucket, divided by count(goals with pr_url).",
+      "Accepted-goal count: len([g for g in goals.py list if closable(g)['pr_url'] is not None]) -- reuse existing PR_URL_RE extraction rather than inventing a new status."
+    ],
+    "blocked": null,
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789844415.354801,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0261",
+      "claimed_at": 1789844415.354479
+    },
+    {
+      "ts": 1789844415.356357,
+      "account": "B"
+    },
+    {
+      "ts": 1789844415.386009,
+      "pid": 46413,
+      "account": "B"
+    },
+    {
+      "ts": 1789844531.30245,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "bus.log_run just appends **fields + ts to runs/<date>.jsonl; no fixed schema, no reasoning/turns fields required",
+            "evidence": [
+              "orchestrator/bus.py:206-211 (goal/T-0260)"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "spawn.py (Claude workers) logs usd, turns, input/output/cache_read/cache_creation_input_tokens; no reasoning field",
+            "evidence": [
+              "orchestrator/spawn.py:171-174 (goal/T-0260)"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "executor.py Codex rows never include usd (all 3 log_run calls omit it); _tokens() maps only input/output/cached_input_tokens to cache_read_input_tokens, no reasoning key extracted anywhere in repo",
+            "evidence": [
+              "orchestrator/executor.py:65-70,98-99,112-113,116-117 (goal/T-0260)"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "'reasoning' never appears in the repo on any branch -- reasoning tokens are untracked; unknown if Codex nests them in output_tokens",
+            "evidence": [
+              "git grep reasoning across all branches: no hits"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "task/T-0261's own worktree checkout predates jev.py/planner_runs.py/scorecard by_task+by_goal -- those live on goal/T-0109 onward and current goal/T-0260; findings below read goal/T-0260",
+            "evidence": [
+              "orchestrator/scorecard.py has no by_task/by_goal in task/T-0261 checkout vs goal/T-0260:orchestrator/scorecard.py:266,334"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Planner transcript usage lives in planner_usage.json {account: {day_tokens,...}}, pool-wide daily, not per-goal/session; scorecard.planner_footer sums it, never attributed to a goal",
+            "evidence": [
+              "orchestrator/scorecard.py:326-332 (goal/T-0260, _planner_usage_totals/planner_footer)"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "planner_runs.json records one row per (goal_id,kind,payload_key) decision run with goal_id + optional usd; no token field written, only usd sometimes present",
+            "evidence": [
+              "orchestrator/planner_runs.py:79-88,219-247 (goal/T-0260); scorecard.py:305-311 reads r['usd'] only"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Jev usage rows (runs/jev/<date>.jsonl) carry caller/input_tokens/model/latency_ms/ok/votes -- no task or goal id; gate.jsonl rows do carry task id",
+            "evidence": [
+              "orchestrator/jev.py:151-156 (_log_usage, goal/T-0260); scorecard.py:196-224 (_gate_stats keyed on task)"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "scorecard.by_task sums usd + tokens(=in+out+cache_read//10) + wall_s per task from runs/*.jsonl by task field; runs_no_usd counts lines missing usd (all Codex rows)",
+            "evidence": [
+              "orchestrator/scorecard.py:239-264 (goal/T-0260)"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "scorecard.by_goal rolls task totals up by parent id into role buckets (execute/review/spec_review/scout/other), adds gate calls/waste/blocked and turns, and that goal's own planner_runs rows (n_runs, usd) -- but excludes any task without a parent, and never includes Planner transcript tokens or Jev question tokens in the per-goal total",
+            "evidence": [
+              "orchestrator/scorecard.py:334-373 (goal/T-0260)"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Failed/superseded tasks are not filtered out of by_task/by_goal -- every task with any run line and a parent is included regardless of status, so failed-task spend is already counted, but a task with 0 runs (e.g. never dispatched) is silently absent from totals dict",
+            "evidence": [
+              "orchestrator/scorecard.py:239-264,334-365 (goal/T-0260) -- no status filter present"
+            ],
+            "confidence": 0.6,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Goal 'accepted' signal available today: goals.py builds pr_url from the goal task's result via PR_URL_RE, plus merged=[children with merged_into] -- that is the natural accepted-goal predicate (pr_url present, or goal task status done with all children merged)",
+            "evidence": [
+              "orchestrator/goals.py:464-477 (goal/T-0260)"
+            ],
+            "confidence": 0.65,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Does Codex --json usage ever emit a distinct reasoning_output_tokens field, or is reasoning always folded into output_tokens? No repo evidence either way -- needs an actual codex exec --json sample."
+        ],
+        "suggested_next": [
+          "Add fields to log_run: reasoning_output_tokens (pass through if Codex/Claude usage exposes it, else 0), goal_id (denormalize parent onto every run row so jev/planner rows can carry it too), jev_input_tokens split from worker tokens.",
+          "Give jev._log_usage and planner_runs records a goal_id field (jev already gets caller=task/goal context at call site; planner_runs already has goal_id -- just add tokens alongside usd).",
+          "New aggregation: scorecard.tokens_per_accepted_goal() = (sum by_goal total_tokens for goals with pr_url set) + jev tokens attributed via new goal_id + planner_usage tokens apportioned by goal-day overlap, all with cache_read counted once (not re-added into input) and reasoning kept as its own bucket, divided by count(goals with pr_url).",
+          "Accepted-goal count: len([g for g in goals.py list if closable(g)['pr_url'] is not None]) -- reuse existing PR_URL_RE extraction rather than inventing a new status."
+        ],
+        "blocked": null,
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789844415.354479,
+  "account": "B",
+  "pid": 46413
+}

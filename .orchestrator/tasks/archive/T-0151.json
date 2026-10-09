@@ -1,0 +1,114 @@
+{
+  "id": "T-0151",
+  "parent": "T-0109",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "D1 fix round 1: two-review policy without deadlocks, second review never on the executor's model, CLAUDE.md threshold, merged_at on the source task",
+  "spec": "Fix round for T-0120 (branch task/T-0120, commit cf7ad84). Work in this task's worktree, cut from task/T-0120. Review T-0150 (opus) requested changes; items come from it. Do not widen scope.\n\n1 HIGH daemon.py merge_reviewed (\u2248line 387): the required review count for a source task must come from what gate() actually created, not from complexity alone. Compute expected = 1 if (t.result or {}).get(\"orphaned\") or complexity < TWO_REVIEWS_FROM else 2, and put the same rule in one helper `reviews_expected(t)` used by both gate() and merge_reviewed(). An orphaned complexity-7 task with one approve then merges. Test: orphaned complexity-7 task, one review approve \u2192 merged.\n\n2 HIGH daemon.py merge_reviewed (\u2248line 389): never wait forever on a sibling that cannot finish. If any sibling review has status failed \u2192 stamp src \"review_held_at\", status held, hold_reason \"review failed: <sibling id>\", notify once (the Planner re-spawns). If a sibling is held \u2192 same with hold_reason \"review held: <sibling id>\". Only siblings in queued/running keep the wait. Test: complexity-7 task, one approve + one failed \u2192 src held with that hold_reason; no merge.\n\n3 HIGH daemon.py gate() second review tier (\u2248line 302): the second review for complexity >= TWO_REVIEWS_FROM must never run on the model that executed. Rule: if the executor is a Claude tier (executor field startswith \"claude:\"), both reviews run on review_tier(t) (the non-executing tier) and the second one carries constraints {\"avoid_account\": <first review's account or assigned_to account>, \"second_review\": true}; if the executor is Codex, the second review runs on _other_tier(first tier) as now. Update the docstring to state exactly this and the pool.toml [review] comment to promise \"second review on a different model than the executor; different account when possible\" (drop the unqualified \"other account with the other model\" claim). Do NOT change spawn.run_worker (out of scope); avoid_account is recorded for the Planner and for a later spawn change. Test: executor claude:opus, complexity 7 \u2192 both review tasks have tier sonnet; executor \"astra\" \u2192 tiers differ.\n\n4 MED CLAUDE.md (repo root) line that says the daemon routes \"complexity \u22655 through a spec review first\": change 5 to 6 and add \"(pool.toml [review].spec_review_min)\". tests/test_daemon.py module docstring: same 5 \u2192 6. Nothing else in CLAUDE.md changes.\n\n5 LOW daemon.py merge_reviewed (\u2248line 395): stamp \"merged_at\" on the SOURCE task (src[\"id\"]) before merge.merge, not on the review task, so a conflict is attempted once per task; already_merged/stale logic unchanged. Adjust existing tests that asserted the stamp on the review task.\n\nNo new dependency. Commit on the task branch when green. Finish with: summary, files changed, failures-only test output.",
+  "inputs": [
+    "T-0120",
+    "T-0150"
+  ],
+  "acceptance": [
+    "reviews_expected(t) drives both gate() and merge_reviewed(); an orphaned complexity-7 task merges on its single approve (test)",
+    "A failed or held sibling review holds the source task with a hold_reason naming the sibling and notifies once; no unbounded wait (test)",
+    "For a Claude-executed complexity-7 task both reviews use the non-executing tier and the second carries constraints.avoid_account and second_review; for a Codex-executed one the tiers differ (test); docstring and pool.toml comment match the code",
+    "CLAUDE.md and the tests/test_daemon.py docstring say complexity 6 for spec review, pointing at pool.toml [review].spec_review_min",
+    "merged_at is stamped on the source task before merge.merge (tests adjusted)",
+    "uv run python -m unittest discover -q tests green; no new dependency; only the four scoped files change; committed on the task branch"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "tests/test_daemon.py",
+    ".orchestrator/pool.toml",
+    "CLAUDE.md"
+  ],
+  "depends_on": [
+    "T-0120"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "no_new_dependencies": true,
+    "test_file": "tests/test_daemon.py",
+    "fix_round_for": "T-0120",
+    "worktree_base": "task/T-0120"
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0151",
+  "codex_thread": null,
+  "result": {
+    "summary": "## Summary\n\nImplemented all five review items from T-0150 in `orchestrator/daemon.py`, `tests/test_daemon.py`, and `.orchestrator/pool.toml`:\n\n1. **`reviews_expected(t)` helper** \u2014 single source of truth for review count (1 if orphaned or complexity < `TWO_REVIEWS_FROM`, else 2), now used by both `gate()` and `merge_reviewed()`. An orphaned complexity-7 task creates exactly one review and merges on its single approve.\n2. **`merge_reviewed()`** now detects a `failed` or `held` sibling review and immediately holds the source task with `hold_reason` naming the sibling (`\"review failed: <id>\"` / `\"review held: <id>\"`), notifying once \u2014 no more unbounded waiting. Only `queued`/`running` siblings still block.\n3. **`gate()`'s second-review tier logic** \u2014 for a Claude-tier executor (`executor` startswith `\"claude:\"`), both reviews now use `review_tier(t)` (the non-executing tier), and the second carries `constraints.avoid_account` (from the first review's `account`/`assigned_to`) and `constraints.second_review=true`. Codex-executed tasks keep the old `_other_tier()` split. Docstrings on `gate()`/`reviews_expected()` and the `pool.toml [review]` comment updated to state this exactly.\n4. **CLAUDE.md** and the `tests/test_daemon.py` module docstring: `\u22655` \u2192 `\u22656 (pool.toml [review].spec_review_min)`.\n5. **`merged_at`** is now stamped on the source task (`src[\"id\"]`) before `merge.merge`, not the review task; adjusted `test_review_verdict_drives_merge_or_hold`-adjacent coverage with a new dedicated test.\n\nAdded tests: `test_two_reviews_claude_executor_same_non_executing_tier`, `test_orphaned_high_complexity_merges_on_single_approve`, `test_sibling_review_failed_holds_source_without_waiting`, `test_sibling_review_held_holds_source_without_waiting`, `test_merged_at_stamped_on_source_task`; updated `test_two_reviews_for_high_complexity_merge_waits_for_both` to use a Codex executor (since Claude-executor now yields matching tiers, not split ones).\n\n`tests/test_daemon.py` alone: **52/52 pass**.\n\n## Blocker \u2014 did not commit\n\n`uv run python -m unittest discover -q tests` has **1 failure** outside the scoped files:\n\n```\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nAssertionError: '1. S[690 chars]ity \u22655 through a spec review first, gates on d[1385 chars]cts.' != '1. S[690 chars]ity \u22656 (pool.toml [review].spec_review_min) th[1422 chars]cts.'\n```\n\nThis test asserts `.orchestrator/prompts/planner.md`'s \"Always\" section is byte-identical to CLAUDE.md's. Item 4's required CLAUDE.md edit necessarily breaks that equality. I tried to make the matching edit to `planner.md` and `.claude/hooks/scope-guard.sh` blocked it as outside T-0151's declared scope (`orchestrator/daemon.py`, `tests/test_daemon.py`, `.orchestrator/pool.toml`, `CLAUDE.md`).\n\nThis makes \"tests green\" and \"only the four scoped files change\" mutually exclusive as currently specified \u2014 I didn't force a resolution either way. Options for",
+    "executed_by": "claude:sonnet",
+    "review": "other account, different model; label PR same-family-review",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789740243.6127381,
+      "executor": "claude:sonnet"
+    },
+    {
+      "ts": 1789740243.6154199,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0151",
+      "claimed_at": 1789740243.6152651
+    },
+    {
+      "ts": 1789740243.623163,
+      "pid": 39327,
+      "account": "A"
+    },
+    {
+      "ts": 1789740615.902099,
+      "status": "done",
+      "result": {
+        "summary": "## Summary\n\nImplemented all five review items from T-0150 in `orchestrator/daemon.py`, `tests/test_daemon.py`, and `.orchestrator/pool.toml`:\n\n1. **`reviews_expected(t)` helper** \u2014 single source of truth for review count (1 if orphaned or complexity < `TWO_REVIEWS_FROM`, else 2), now used by both `gate()` and `merge_reviewed()`. An orphaned complexity-7 task creates exactly one review and merges on its single approve.\n2. **`merge_reviewed()`** now detects a `failed` or `held` sibling review and immediately holds the source task with `hold_reason` naming the sibling (`\"review failed: <id>\"` / `\"review held: <id>\"`), notifying once \u2014 no more unbounded waiting. Only `queued`/`running` siblings still block.\n3. **`gate()`'s second-review tier logic** \u2014 for a Claude-tier executor (`executor` startswith `\"claude:\"`), both reviews now use `review_tier(t)` (the non-executing tier), and the second carries `constraints.avoid_account` (from the first review's `account`/`assigned_to`) and `constraints.second_review=true`. Codex-executed tasks keep the old `_other_tier()` split. Docstrings on `gate()`/`reviews_expected()` and the `pool.toml [review]` comment updated to state this exactly.\n4. **CLAUDE.md** and the `tests/test_daemon.py` module docstring: `\u22655` \u2192 `\u22656 (pool.toml [review].spec_review_min)`.\n5. **`merged_at`** is now stamped on the source task (`src[\"id\"]`) before `merge.merge`, not the review task; adjusted `test_review_verdict_drives_merge_or_hold`-adjacent coverage with a new dedicated test.\n\nAdded tests: `test_two_reviews_claude_executor_same_non_executing_tier`, `test_orphaned_high_complexity_merges_on_single_approve`, `test_sibling_review_failed_holds_source_without_waiting`, `test_sibling_review_held_holds_source_without_waiting`, `test_merged_at_stamped_on_source_task`; updated `test_two_reviews_for_high_complexity_merge_waits_for_both` to use a Codex executor (since Claude-executor now yields matching tiers, not split ones).\n\n`tests/test_daemon.py` alone: **52/52 pass**.\n\n## Blocker \u2014 did not commit\n\n`uv run python -m unittest discover -q tests` has **1 failure** outside the scoped files:\n\n```\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nAssertionError: '1. S[690 chars]ity \u22655 through a spec review first, gates on d[1385 chars]cts.' != '1. S[690 chars]ity \u22656 (pool.toml [review].spec_review_min) th[1422 chars]cts.'\n```\n\nThis test asserts `.orchestrator/prompts/planner.md`'s \"Always\" section is byte-identical to CLAUDE.md's. Item 4's required CLAUDE.md edit necessarily breaks that equality. I tried to make the matching edit to `planner.md` and `.claude/hooks/scope-guard.sh` blocked it as outside T-0151's declared scope (`orchestrator/daemon.py`, `tests/test_daemon.py`, `.orchestrator/pool.toml`, `CLAUDE.md`).\n\nThis makes \"tests green\" and \"only the four scoped files change\" mutually exclusive as currently specified \u2014 I didn't force a resolution either way. Options for",
+        "executed_by": "claude:sonnet",
+        "review": "other account, different model; label PR same-family-review",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789740650.8889759,
+      "pipeline": {
+        "gated_at": 1789740650.888855
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '1. S[690 chars]ity \u22655 through a spec review first, gates on d[1385 chars]cts.' != '1. S[690 chars]ity \u22656 (pool.toml [review].spec_review_min) th[1422 chars]cts.'\nFAILED (failures=1)\n"
+      }
+    },
+    {
+      "ts": 1789753314.395037,
+      "status": "done",
+      "merged_into": "goal/T-0109",
+      "hold_reason": null,
+      "merged_via": "T-0169 (D1 fix-round chain, rebased)"
+    }
+  ],
+  "executor": "claude:sonnet",
+  "claimed_at": 1789740243.6152651,
+  "pid": 39327,
+  "account": "A",
+  "pipeline": {
+    "gated_at": 1789740650.888855
+  },
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nFAIL: test_planner_md_matches_claude_md_lists (test_goals.PlannerPromptAndConfig.test_planner_md_matches_claude_md_lists)\nTraceback (most recent call last):\nAssertionError: '1. S[690 chars]ity \u22655 through a spec review first, gates on d[1385 chars]cts.' != '1. S[690 chars]ity \u22656 (pool.toml [review].spec_review_min) th[1422 chars]cts.'\nFAILED (failures=1)\n"
+  },
+  "merged_into": "goal/T-0109",
+  "merged_via": "T-0169 (D1 fix-round chain, rebased)"
+}

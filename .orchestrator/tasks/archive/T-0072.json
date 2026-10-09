@@ -1,0 +1,163 @@
+{
+  "id": "T-0072",
+  "parent": "T-0065",
+  "role": "review",
+  "tier": "opus",
+  "complexity": 4,
+  "title": "review (other model): Add `orchestrator install <target>` \u2014 scaffold a target repo",
+  "spec": "Review the diff of task T-0070 (branch task/T-0070, worktree wt/T-0070) against its acceptance criteria. The code was written by claude:sonnet as the Codex fallback, so this review must come from a different model (opus) on the other account. Check especially: idempotency (second run never overwrites plan.md, pool.toml, memory, tests.sh, existing settings.json), the .mcp*.json rewrite (uv run --project <orch_repo>, env ORCH_ROOT = target, github entry untouched), protected-paths.txt rewritten to the target's own hooks/settings/protected-paths, executable bits on hooks and tests.sh, .gitignore lines appended exactly once, and that nothing in the orchestrator package's own behaviour changed. Verdict: approve or request_changes with concrete findings citing path:line.",
+  "inputs": [
+    "T-0070"
+  ],
+  "acceptance": [
+    "Verdict approve or request_changes posted with findings citing path:line",
+    "Each of the five acceptance criteria of T-0070 is marked met or not met with evidence from the diff or a test run"
+  ],
+  "scope": [
+    "orchestrator/install.py",
+    "orchestrator/cli.py",
+    "tests/test_install.py",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "failed",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0072",
+  "codex_thread": null,
+  "result": {
+    "verdict": "approve",
+    "summary": "All five T-0070 acceptance criteria met. (1) MET: install into a scratch repo creates .orchestrator/{pool.toml,prompts,protected-paths.txt,memory,plan.md,tasks/.gitkeep}, executable .claude/hooks, .claude/settings.json, .claude/skills, skills/, and .mcp.planner.json with args[:3]==['run','--project',<orch_repo>] and env.ORCH_ROOT==target (tests/test_install.py:11-38; verified live against /tmp/rev-target). Criterion names '.mcp.json' but that file has no orchestrator entry (.mcp.json:1-5); the planner config is the right target. (2) MET: tests/test_install.py:40-61 plus live run \u2014 Makefile with test/lint/typecheck yields executable .orchestrator/tests.sh (mode 0755), no Makefile yields none, existing settings.json kept byte-identical with settings.orchestrator.json + note. (3) MET: second live run emitted 0 'created' lines; pool.toml/plan.md/memory byte-identical; target protected-paths.txt lines 15-17 name /private/tmp/rev-target/...; .gitignore gained each IGNORE_LINE once. (4) MET: `uv run orchestrator install /nonexistent-xyz` and a non-git dir both exit 2 with one line on stderr. (5) MET: `uv run python -m unittest discover -q tests` \u2192 Ran 92 tests, OK. Findings below are non-blocking.",
+    "comments": [
+      {
+        "path": "orchestrator/install.py",
+        "line": 54,
+        "issue": "_rewrite_protected_paths drops exactly len(replacements)=3 lines after the '# the guardrails themselves' header with no check that those 3 lines are the ones it means. If that block ever gains or loses an entry, install silently eats the '# system' comment / a /System line, or leaves a stale ~/code/orchestrator path in the target's guardrail file. Assert the dropped lines all start with str(orch_repo), or drop until the next '#' line.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/install.py",
+        "line": 43,
+        "issue": "The rewrite replaces rather than adds: the target's protected-paths.txt no longer protects the orchestrator repo's own .claude/hooks, settings.json and protected-paths.txt, yet agents running with ORCH_ROOT=target execute exactly that code (uv run --project <orch_repo>). Keeping the source repo's three lines and appending the target's would close the hole. Spec-mandated as written, so not blocking.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/install.py",
+        "line": 142,
+        "issue": "settings.orchestrator.json is written via create_if_absent, so it is 'kept' forever once created, while .claude/hooks/* and skills/** are always updated. After a hook-wiring change in the orchestrator, a target that has its own settings.json silently keeps stale orchestrator settings and the report gives no hint. The spec's never-overwrite list is plan.md/memory/pool.toml/tests.sh/existing settings.json \u2014 settings.orchestrator.json is not on it and should be copied always.",
+        "severity": "med"
+      },
+      {
+        "path": "orchestrator/install.py",
+        "line": 7,
+        "issue": "PACKAGE_REPO = parents[1] resolves to the worktree when install is run from wt/T-xxxx (the normal Planner working dir). The target then gets 'uv run --project /\u2026/wt/T-xxxx' baked into every .mcp*.json, which breaks the moment the worktree is removed after merge. Resolve the main checkout (git rev-parse --path-format=absolute --git-common-dir, strip /.git) or refuse to install from a linked worktree.",
+        "severity": "med"
+      },
+      {
+        "path": "tests/test_install.py",
+        "line": 78,
+        "issue": "The dedupe assertion is vacuous: _harness.scratch_repo seeds .gitignore with 'wt/' already, so count('wt/')==1 holds whether or not install dedupes. Assert on a line install actually appends (e.g. 'graphify-out/') after two runs to exercise the no-duplicate path.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/install.py",
+        "line": 100,
+        "issue": "The scaffold omits CLAUDE.md and AGENTS.md, so a target started per the README's next step has no Planner role file and Codex worktrees under the target have no AGENTS.md. planner-prompt.sh re-injects Planner mode per message, which covers most of it, but the executor side is uncovered. Consider a header-only CLAUDE.md/AGENTS.md (kept if present).",
+        "severity": "low"
+      },
+      {
+        "path": "tests/test_install.py",
+        "line": 93,
+        "issue": "sys.argv is assigned globally and never restored; any later test in the same process that reads sys.argv sees the install invocation. Wrap in unittest.mock.patch.object(sys, 'argv', [...]).",
+        "severity": "low"
+      }
+    ],
+    "confidence": 0.85,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789730372.4002922,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0072",
+      "claimed_at": 1789730372.3999732
+    },
+    {
+      "ts": 1789730372.426889,
+      "pid": 53746,
+      "account": "A"
+    },
+    {
+      "ts": 1789730571.709495,
+      "status": "done",
+      "result": {
+        "verdict": "approve",
+        "summary": "All five T-0070 acceptance criteria met. (1) MET: install into a scratch repo creates .orchestrator/{pool.toml,prompts,protected-paths.txt,memory,plan.md,tasks/.gitkeep}, executable .claude/hooks, .claude/settings.json, .claude/skills, skills/, and .mcp.planner.json with args[:3]==['run','--project',<orch_repo>] and env.ORCH_ROOT==target (tests/test_install.py:11-38; verified live against /tmp/rev-target). Criterion names '.mcp.json' but that file has no orchestrator entry (.mcp.json:1-5); the planner config is the right target. (2) MET: tests/test_install.py:40-61 plus live run \u2014 Makefile with test/lint/typecheck yields executable .orchestrator/tests.sh (mode 0755), no Makefile yields none, existing settings.json kept byte-identical with settings.orchestrator.json + note. (3) MET: second live run emitted 0 'created' lines; pool.toml/plan.md/memory byte-identical; target protected-paths.txt lines 15-17 name /private/tmp/rev-target/...; .gitignore gained each IGNORE_LINE once. (4) MET: `uv run orchestrator install /nonexistent-xyz` and a non-git dir both exit 2 with one line on stderr. (5) MET: `uv run python -m unittest discover -q tests` \u2192 Ran 92 tests, OK. Findings below are non-blocking.",
+        "comments": [
+          {
+            "path": "orchestrator/install.py",
+            "line": 54,
+            "issue": "_rewrite_protected_paths drops exactly len(replacements)=3 lines after the '# the guardrails themselves' header with no check that those 3 lines are the ones it means. If that block ever gains or loses an entry, install silently eats the '# system' comment / a /System line, or leaves a stale ~/code/orchestrator path in the target's guardrail file. Assert the dropped lines all start with str(orch_repo), or drop until the next '#' line.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/install.py",
+            "line": 43,
+            "issue": "The rewrite replaces rather than adds: the target's protected-paths.txt no longer protects the orchestrator repo's own .claude/hooks, settings.json and protected-paths.txt, yet agents running with ORCH_ROOT=target execute exactly that code (uv run --project <orch_repo>). Keeping the source repo's three lines and appending the target's would close the hole. Spec-mandated as written, so not blocking.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/install.py",
+            "line": 142,
+            "issue": "settings.orchestrator.json is written via create_if_absent, so it is 'kept' forever once created, while .claude/hooks/* and skills/** are always updated. After a hook-wiring change in the orchestrator, a target that has its own settings.json silently keeps stale orchestrator settings and the report gives no hint. The spec's never-overwrite list is plan.md/memory/pool.toml/tests.sh/existing settings.json \u2014 settings.orchestrator.json is not on it and should be copied always.",
+            "severity": "med"
+          },
+          {
+            "path": "orchestrator/install.py",
+            "line": 7,
+            "issue": "PACKAGE_REPO = parents[1] resolves to the worktree when install is run from wt/T-xxxx (the normal Planner working dir). The target then gets 'uv run --project /\u2026/wt/T-xxxx' baked into every .mcp*.json, which breaks the moment the worktree is removed after merge. Resolve the main checkout (git rev-parse --path-format=absolute --git-common-dir, strip /.git) or refuse to install from a linked worktree.",
+            "severity": "med"
+          },
+          {
+            "path": "tests/test_install.py",
+            "line": 78,
+            "issue": "The dedupe assertion is vacuous: _harness.scratch_repo seeds .gitignore with 'wt/' already, so count('wt/')==1 holds whether or not install dedupes. Assert on a line install actually appends (e.g. 'graphify-out/') after two runs to exercise the no-duplicate path.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/install.py",
+            "line": 100,
+            "issue": "The scaffold omits CLAUDE.md and AGENTS.md, so a target started per the README's next step has no Planner role file and Codex worktrees under the target have no AGENTS.md. planner-prompt.sh re-injects Planner mode per message, which covers most of it, but the executor side is uncovered. Consider a header-only CLAUDE.md/AGENTS.md (kept if present).",
+            "severity": "low"
+          },
+          {
+            "path": "tests/test_install.py",
+            "line": 93,
+            "issue": "sys.argv is assigned globally and never restored; any later test in the same process that reads sys.argv sees the install invocation. Wrap in unittest.mock.patch.object(sys, 'argv', [...]).",
+            "severity": "low"
+          }
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789730586.4935172,
+      "status": "failed",
+      "reason": "post_result failed: 'reason'"
+    }
+  ],
+  "claimed_at": 1789730372.3999732,
+  "pid": 53746,
+  "account": "A",
+  "reason": "post_result failed: 'reason'"
+}

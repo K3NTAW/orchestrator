@@ -1,0 +1,253 @@
+{
+  "id": "T-0850",
+  "created_at": 1790104434.800664,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "spec review: Active path 1: context_router active sends the routed evidence packet to execute and review workers (byte change gated by mode), with recovery logging",
+  "spec": "Today (T-0800) context_router mode \"active\" is treated as shadow with a one-time warning in spawn._shadow_route / the packet builders. Build the real active branch. Facts: spawn._packet_body assembles sections (objective, acceptance, base, write_scope, read_scope, constraints, relevant_tests, symbols, gotchas, decisions, verify, evidence, dependencies) and caps at 4800 chars; the shadow path builds Evidence candidates and context_router.route()/render() produce a routed \"## evidence (routed v1)\" block plus per-item levels; review_packet does the same for the diff. The eval suite (orchestrator context-eval, T-0841) checks seven fixture categories.\nDo:\n1. Active for execute: when promotion.mode(\"context_router\") == \"active\", the sections symbols, gotchas, decisions, evidence and read_scope are REPLACED by the routed rendering of their candidates (HIDE items omitted, SHORT one-liners, LONG summaries, FULL verbatim), while objective, acceptance, base, write_scope, constraints, relevant_tests, verify and dependencies stay exactly as today (hard constraints: task contract and failing output are never routed away). The 4800-char cap still applies after routing; the packet header records \"routed v1 active\".\n2. Active for review and security_review: the diff stays FULL for in-scope files; prior review findings and previous results follow the routed levels; the security section is never routed away.\n3. Recovery logging (P21 context_recovery_rate): when a worker running under an active packet later reads a file whose evidence was HIDE or SHORT (jev_gate read_economy classification sees the Read), record a decision_log row kind \"evidence_reuse\" with reason \"recovery_read\" and the evidence id; context_scorecard exposes recovery_rate = recovery reads / hidden items per role; `scorecard --economy` shows it.\n4. Safety: active is refused (falls back to shadow with a notify line) when the last .orchestrator/context_eval.json is missing, older than 7 days, or suite_passed is false. Document this in docs/context-economy/05-context-router.md (Active section) with the revert path (mode back to shadow).\nTests (unittest): tests/test_spawn.py::test_execute_packet_active_replaces_routed_sections_only (objective/acceptance/write_scope identical to shadow; symbols/gotchas replaced by the routed block; HIDE items absent), ::test_review_packet_active_keeps_diff_and_security_section, ::test_active_refused_without_passing_context_eval (mode active + no context_eval.json \u2192 packet equals shadow packet and a notify line mentions the refusal); tests/test_context_scorecard.py::test_recovery_rate_from_evidence_reuse_rows. context-eval must still pass in both modes (add an \"active\" column to its table: routed packet text length).\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.",
+  "inputs": [
+    "T-0845"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_packet_active_replaces_routed_sections_only passes",
+    "tests/test_spawn.py::test_review_packet_active_keeps_diff_and_security_section passes",
+    "tests/test_spawn.py::test_active_refused_without_passing_context_eval passes",
+    "tests/test_context_scorecard.py::test_recovery_rate_from_evidence_reuse_rows passes",
+    "`uv run orchestrator context-eval` exits 0 with the active column; docs/context-economy/05-context-router.md has an Active section; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/context_router.py",
+    "orchestrator/context_eval.py",
+    "orchestrator/context_scorecard.py",
+    "orchestrator/jev_gate.py",
+    "tests/test_spawn.py",
+    "tests/test_context_scorecard.py",
+    "tests/test_context_eval.py",
+    "docs/context-economy/05-context-router.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0850",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The 'symbols' section (spawn.py:398-412, list built at 298-317) has no dedicated evidence type in _packet_body's candidate list \u2014 only full-file source_chunk evidence exists for scope files (lines 423-426), which is always FULL for in-scope files per context_router._choice's 'in_scope_file' rule. Replacing 'symbols' (today a compact name+lineno list) with 'routed rendering of its candidates' means injecting up to 12000 chars of verbatim source per scope file into every execute packet \u2014 content never shown today \u2014 and those FULL items are hard constraints in decision_row, so the existing 4800-char trim loop (which only pops lines from sections named in `trimmable`, not FULL/hard-constraint items) may be unable to bring the packet back under cap.",
+        "severity": "high",
+        "line": 407
+      },
+      {
+        "path": "orchestrator/jev_gate.py",
+        "issue": "read_economy.classify(call, history) is called at line 372 without evidence= or head_sha=, so the 'evidence_available' classification path (read_economy.py's _has_evidence) is currently dead code in production. Point 3 assumes jev_gate can already tell whether a Read hits HIDE/SHORT evidence, but classify() only returns a binary evidence_available/not, not a level \u2014 detecting 'HIDE or SHORT' requires new wiring (thread the task's EvidencePool + head_sha into the gate, then cross-reference the latest context_selection decision_log row's per-item levels for that task). None of this wiring is described, and no acceptance test exercises jev_gate itself \u2014 only context_scorecard's aggregation of pre-fabricated decision rows is tested, so an executor could satisfy every acceptance test while leaving point 3's actual detection unimplemented.",
+        "severity": "high",
+        "line": 372
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Point 2 gives no section name/location for where routed 'prior review findings and previous results' should render in review_packet \u2014 unlike point 1's explicit five-section list for execute. The only existing section that carries prior review content is 'fix-round context' (lines 647-661), which is conditional on fix_round_for and today shows raw comment JSON, not review_finding/previous_result evidence. The acceptance test test_review_packet_active_keeps_diff_and_security_section only checks diff+security presence, so this ambiguity has no verifiable acceptance target.",
+        "severity": "high",
+        "line": 613
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "The cap-trim loop (lines 463-482) pops one trailing line at a time from a section's `lines` list, assuming independent bullet lines. Once a replaced section's lines are a routed LONG/FULL block containing a fenced code segment (context_router._text emits ```` ```\\ncontent\\n``` ````), popping the last line first removes the closing fence, leaving an unterminated code block in the packet body for every subsequent trim iteration.",
+        "severity": "medium",
+        "line": 472
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Point 1 requires the packet header to record 'routed v1 active', but packet()'s header (lines 544-548) and packet_run_meta's parser (lines 507-517, including the legacy `pool.toml@(\\S+) gotchas@(\\S+)` sub-match) have a fixed shape. The spec doesn't say where the new marker is inserted, risking either breaking the legacy sources sub-match or being silently unparsed by packet_run_meta.",
+        "severity": "medium",
+        "line": 548
+      },
+      {
+        "path": "orchestrator/promotion.py",
+        "issue": "collect() already computes a 'context_recovery_rate' field (this file, recovery_rows filter) keyed on decision_log kind 'read_economy' \u2014 a kind jev_gate never actually writes (it writes kind='action_gate' at jev_gate.py:392). The new spec adds a second, differently-named recovery signal (kind 'evidence_reuse') consumed by context_scorecard. Two divergently-named, non-overlapping 'recovery rate' computations will coexist without reconciliation, which is confusing for anyone reading scorecard output.",
+        "severity": "low",
+        "line": 194
+      }
+    ],
+    "suggested_spec_changes": [
+      "For execute: name the exact evidence source_type each replaced section draws from (symbols vs read_scope both currently map to source_chunk candidates with no disambiguation), and either cap FULL in-scope-source rendering outside the 4800 budget or drop 'symbols' from the replaced-section list.",
+      "For review/security_review: name the exact section (new or existing) that receives the routed findings/results block, and add an acceptance assertion that routed content actually appears there.",
+      "Specify the jev_gate wiring (EvidencePool + head_sha threaded into read_economy.classify, plus a level lookup against the task's context_selection decision row) needed before claiming recovery detection 'sees the Read', and add an acceptance test that exercises jev_gate's detection directly, not only context_scorecard's aggregation of synthetic rows.",
+      "Specify exactly where 'routed v1 active' is inserted in the packet header so packet_run_meta's existing sources-regex still parses correctly.",
+      "Have the cap-trim loop treat a routed section's rendering as an atomic block (trim by removing lowest-priority whole items, not trailing lines) so fenced code segments can't be left unterminated."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790104439.1291049,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0850",
+      "claimed_at": 1790104439.126246
+    },
+    {
+      "ts": 1790104439.140058,
+      "account": "B"
+    },
+    {
+      "ts": 1790104441.896404,
+      "pid": 45542,
+      "account": "B"
+    },
+    {
+      "ts": 1790104621.9572349,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The 'symbols' section (spawn.py:398-412, list built at 298-317) has no dedicated evidence type in _packet_body's candidate list \u2014 only full-file source_chunk evidence exists for scope files (lines 423-426), which is always FULL for in-scope files per context_router._choice's 'in_scope_file' rule. Replacing 'symbols' (today a compact name+lineno list) with 'routed rendering of its candidates' means injecting up to 12000 chars of verbatim source per scope file into every execute packet \u2014 content never shown today \u2014 and those FULL items are hard constraints in decision_row, so the existing 4800-char trim loop (which only pops lines from sections named in `trimmable`, not FULL/hard-constraint items) may be unable to bring the packet back under cap.",
+            "severity": "high",
+            "line": 407
+          },
+          {
+            "path": "orchestrator/jev_gate.py",
+            "issue": "read_economy.classify(call, history) is called at line 372 without evidence= or head_sha=, so the 'evidence_available' classification path (read_economy.py's _has_evidence) is currently dead code in production. Point 3 assumes jev_gate can already tell whether a Read hits HIDE/SHORT evidence, but classify() only returns a binary evidence_available/not, not a level \u2014 detecting 'HIDE or SHORT' requires new wiring (thread the task's EvidencePool + head_sha into the gate, then cross-reference the latest context_selection decision_log row's per-item levels for that task). None of this wiring is described, and no acceptance test exercises jev_gate itself \u2014 only context_scorecard's aggregation of pre-fabricated decision rows is tested, so an executor could satisfy every acceptance test while leaving point 3's actual detection unimplemented.",
+            "severity": "high",
+            "line": 372
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Point 2 gives no section name/location for where routed 'prior review findings and previous results' should render in review_packet \u2014 unlike point 1's explicit five-section list for execute. The only existing section that carries prior review content is 'fix-round context' (lines 647-661), which is conditional on fix_round_for and today shows raw comment JSON, not review_finding/previous_result evidence. The acceptance test test_review_packet_active_keeps_diff_and_security_section only checks diff+security presence, so this ambiguity has no verifiable acceptance target.",
+            "severity": "high",
+            "line": 613
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "The cap-trim loop (lines 463-482) pops one trailing line at a time from a section's `lines` list, assuming independent bullet lines. Once a replaced section's lines are a routed LONG/FULL block containing a fenced code segment (context_router._text emits ```` ```\\ncontent\\n``` ````), popping the last line first removes the closing fence, leaving an unterminated code block in the packet body for every subsequent trim iteration.",
+            "severity": "medium",
+            "line": 472
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Point 1 requires the packet header to record 'routed v1 active', but packet()'s header (lines 544-548) and packet_run_meta's parser (lines 507-517, including the legacy `pool.toml@(\\S+) gotchas@(\\S+)` sub-match) have a fixed shape. The spec doesn't say where the new marker is inserted, risking either breaking the legacy sources sub-match or being silently unparsed by packet_run_meta.",
+            "severity": "medium",
+            "line": 548
+          },
+          {
+            "path": "orchestrator/promotion.py",
+            "issue": "collect() already computes a 'context_recovery_rate' field (this file, recovery_rows filter) keyed on decision_log kind 'read_economy' \u2014 a kind jev_gate never actually writes (it writes kind='action_gate' at jev_gate.py:392). The new spec adds a second, differently-named recovery signal (kind 'evidence_reuse') consumed by context_scorecard. Two divergently-named, non-overlapping 'recovery rate' computations will coexist without reconciliation, which is confusing for anyone reading scorecard output.",
+            "severity": "low",
+            "line": 194
+          }
+        ],
+        "suggested_spec_changes": [
+          "For execute: name the exact evidence source_type each replaced section draws from (symbols vs read_scope both currently map to source_chunk candidates with no disambiguation), and either cap FULL in-scope-source rendering outside the 4800 budget or drop 'symbols' from the replaced-section list.",
+          "For review/security_review: name the exact section (new or existing) that receives the routed findings/results block, and add an acceptance assertion that routed content actually appears there.",
+          "Specify the jev_gate wiring (EvidencePool + head_sha threaded into read_economy.classify, plus a level lookup against the task's context_selection decision row) needed before claiming recovery detection 'sees the Read', and add an acceptance test that exercises jev_gate's detection directly, not only context_scorecard's aggregation of synthetic rows.",
+          "Specify exactly where 'routed v1 active' is inserted in the packet header so packet_run_meta's existing sources-regex still parses correctly.",
+          "Have the cap-trim loop treat a routed section's rendering as an atomic block (trim by removing lowest-priority whole items, not trailing lines) so fenced code segments can't be left unterminated."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790104621.96012,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The 'symbols' section (spawn.py:398-412, list built at 298-317) has no dedicated evidence type in _packet_body's candidate list \u2014 only full-file source_chunk evidence exists for scope files (lines 423-426), which is always FULL for in-scope files per context_router._choice's 'in_scope_file' rule. Replacing 'symbols' (today a compact name+lineno list) with 'routed rendering of its candidates' means injecting up to 12000 chars of verbatim source per scope file into every execute packet \u2014 content never shown today \u2014 and those FULL items are hard constraints in decision_row, so the existing 4800-char trim loop (which only pops lines from sections named in `trimmable`, not FULL/hard-constraint items) may be unable to bring the packet back under cap.",
+          "severity": "high",
+          "line": 407
+        },
+        {
+          "path": "orchestrator/jev_gate.py",
+          "issue": "read_economy.classify(call, history) is called at line 372 without evidence= or head_sha=, so the 'evidence_available' classification path (read_economy.py's _has_evidence) is currently dead code in production. Point 3 assumes jev_gate can already tell whether a Read hits HIDE/SHORT evidence, but classify() only returns a binary evidence_available/not, not a level \u2014 detecting 'HIDE or SHORT' requires new wiring (thread the task's EvidencePool + head_sha into the gate, then cross-reference the latest context_selection decision_log row's per-item levels for that task). None of this wiring is described, and no acceptance test exercises jev_gate itself \u2014 only context_scorecard's aggregation of pre-fabricated decision rows is tested, so an executor could satisfy every acceptance test while leaving point 3's actual detection unimplemented.",
+          "severity": "high",
+          "line": 372
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Point 2 gives no section name/location for where routed 'prior review findings and previous results' should render in review_packet \u2014 unlike point 1's explicit five-section list for execute. The only existing section that carries prior review content is 'fix-round context' (lines 647-661), which is conditional on fix_round_for and today shows raw comment JSON, not review_finding/previous_result evidence. The acceptance test test_review_packet_active_keeps_diff_and_security_section only checks diff+security presence, so this ambiguity has no verifiable acceptance target.",
+          "severity": "high",
+          "line": 613
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "The cap-trim loop (lines 463-482) pops one trailing line at a time from a section's `lines` list, assuming independent bullet lines. Once a replaced section's lines are a routed LONG/FULL block containing a fenced code segment (context_router._text emits ```` ```\\ncontent\\n``` ````), popping the last line first removes the closing fence, leaving an unterminated code block in the packet body for every subsequent trim iteration.",
+          "severity": "medium",
+          "line": 472
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Point 1 requires the packet header to record 'routed v1 active', but packet()'s header (lines 544-548) and packet_run_meta's parser (lines 507-517, including the legacy `pool.toml@(\\S+) gotchas@(\\S+)` sub-match) have a fixed shape. The spec doesn't say where the new marker is inserted, risking either breaking the legacy sources sub-match or being silently unparsed by packet_run_meta.",
+          "severity": "medium",
+          "line": 548
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "collect() already computes a 'context_recovery_rate' field (this file, recovery_rows filter) keyed on decision_log kind 'read_economy' \u2014 a kind jev_gate never actually writes (it writes kind='action_gate' at jev_gate.py:392). The new spec adds a second, differently-named recovery signal (kind 'evidence_reuse') consumed by context_scorecard. Two divergently-named, non-overlapping 'recovery rate' computations will coexist without reconciliation, which is confusing for anyone reading scorecard output.",
+          "severity": "low",
+          "line": 194
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790104439.126246,
+  "account": "B",
+  "pid": 45542,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The 'symbols' section (spawn.py:398-412, list built at 298-317) has no dedicated evidence type in _packet_body's candidate list \u2014 only full-file source_chunk evidence exists for scope files (lines 423-426), which is always FULL for in-scope files per context_router._choice's 'in_scope_file' rule. Replacing 'symbols' (today a compact name+lineno list) with 'routed rendering of its candidates' means injecting up to 12000 chars of verbatim source per scope file into every execute packet \u2014 content never shown today \u2014 and those FULL items are hard constraints in decision_row, so the existing 4800-char trim loop (which only pops lines from sections named in `trimmable`, not FULL/hard-constraint items) may be unable to bring the packet back under cap.",
+      "severity": "high",
+      "line": 407
+    },
+    {
+      "path": "orchestrator/jev_gate.py",
+      "issue": "read_economy.classify(call, history) is called at line 372 without evidence= or head_sha=, so the 'evidence_available' classification path (read_economy.py's _has_evidence) is currently dead code in production. Point 3 assumes jev_gate can already tell whether a Read hits HIDE/SHORT evidence, but classify() only returns a binary evidence_available/not, not a level \u2014 detecting 'HIDE or SHORT' requires new wiring (thread the task's EvidencePool + head_sha into the gate, then cross-reference the latest context_selection decision_log row's per-item levels for that task). None of this wiring is described, and no acceptance test exercises jev_gate itself \u2014 only context_scorecard's aggregation of pre-fabricated decision rows is tested, so an executor could satisfy every acceptance test while leaving point 3's actual detection unimplemented.",
+      "severity": "high",
+      "line": 372
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Point 2 gives no section name/location for where routed 'prior review findings and previous results' should render in review_packet \u2014 unlike point 1's explicit five-section list for execute. The only existing section that carries prior review content is 'fix-round context' (lines 647-661), which is conditional on fix_round_for and today shows raw comment JSON, not review_finding/previous_result evidence. The acceptance test test_review_packet_active_keeps_diff_and_security_section only checks diff+security presence, so this ambiguity has no verifiable acceptance target.",
+      "severity": "high",
+      "line": 613
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "The cap-trim loop (lines 463-482) pops one trailing line at a time from a section's `lines` list, assuming independent bullet lines. Once a replaced section's lines are a routed LONG/FULL block containing a fenced code segment (context_router._text emits ```` ```\\ncontent\\n``` ````), popping the last line first removes the closing fence, leaving an unterminated code block in the packet body for every subsequent trim iteration.",
+      "severity": "medium",
+      "line": 472
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Point 1 requires the packet header to record 'routed v1 active', but packet()'s header (lines 544-548) and packet_run_meta's parser (lines 507-517, including the legacy `pool.toml@(\\S+) gotchas@(\\S+)` sub-match) have a fixed shape. The spec doesn't say where the new marker is inserted, risking either breaking the legacy sources sub-match or being silently unparsed by packet_run_meta.",
+      "severity": "medium",
+      "line": 548
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "collect() already computes a 'context_recovery_rate' field (this file, recovery_rows filter) keyed on decision_log kind 'read_economy' \u2014 a kind jev_gate never actually writes (it writes kind='action_gate' at jev_gate.py:392). The new spec adds a second, differently-named recovery signal (kind 'evidence_reuse') consumed by context_scorecard. Two divergently-named, non-overlapping 'recovery rate' computations will coexist without reconciliation, which is confusing for anyone reading scorecard output.",
+      "severity": "low",
+      "line": 194
+    }
+  ]
+}

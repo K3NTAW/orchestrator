@@ -1,0 +1,181 @@
+{
+  "id": "T-0840",
+  "created_at": 1790100861.2513862,
+  "parent": "T-0760",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: P21/P27/P28/P30/P31 closing the loop: context evaluation suite over fixture tasks (seven categories, both modes), promotion evidence for the shadow features from the scorecards, and the unified `orchestrator scorecard --economy` view (v2)",
+  "spec": "Depends on the shadow features being merged: T-0800 (context router wiring), T-0802 (tool disclosure), T-0814 (conditional instructions), T-0831 (handoffs), T-0809 (read economy). Facts: promotion.evaluate needs {n, first_pass_delta, fix_rounds_delta, gate_success_delta, review_findings_delta, accepted_cost_delta, accepted_tokens_delta, latency_delta, security_ok}; context_scorecard, handoff_scorecard, read_economy and tool_catalog expose per-role/per-class rows; decision_log rows carry every shadow decision; the harness (tests/_harness.py) gives a temp ORCH_ROOT.\nDo:\n1. orchestrator/context_eval.py (new): fixture task builders for the seven P31 categories (localized_fix, cross_cutting, security, test_failure, documentation, review, repeated_fix_round), each a small synthetic worktree built under a temp dir (a few python files, a test file, a failing-output blob, an .md file) so no network or model is needed. `run(category, root)` builds the execute (or review) packet with every feature mode off and again with the modes in shadow, then reads the shadow meta (routed_tokens, routed_reduction_ratio, routed_hidden, instruction_tokens_modular, tool_tokens_minimal) and returns {\"category\", \"candidate_tokens\", \"presented_tokens\", \"routed_tokens\", \"reduction\", \"hidden\", \"instruction_delta\", \"tool_delta\", \"expectation\": {\"min_reduction\", \"max_reduction\"}, \"within_expectation\": bool, \"must_keep\": [...], \"kept\": bool}. Expectations from the brief: localized_fix large reduction (\u22650.4), cross_cutting modest (0.1\u20130.4), security keeps security instructions and security-path evidence FULL (kept check), test_failure keeps failing output and the named tests FULL, documentation summaries over full chunks (no source_chunk FULL), review packet has diff + acceptance + interfaces and no implementation transcript, repeated_fix_round reuses prior evidence (evidence ids overlap with the first round \u2265 0.8). Every number is deterministic (chars//4).\n2. `orchestrator context-eval` CLI: runs all categories, prints a table, exits 1 when any within_expectation or kept is False (so it can gate a future active flip); `--json`.\n3. promotion.py evidence loaders for context_router, tool_disclosure, conditional_instructions, handoff_routing: n = number of runs carrying that feature's shadow keys (from runs jsonl context objects / decision rows), accepted_tokens_delta = -(avg reduction) as the efficiency signal ONLY when the context-eval suite passed in the same report (P21: shadow cannot show quality deltas because packets are unchanged; set first_pass_delta etc. to None and add reason \"shadow_quality_unmeasured\" so evaluate() returns stay, never promote, until an active A/B exists); context_recovery_rate placeholder from read_economy (evidence_available reads that happened after HIDE decisions for the same path, per task) reported as a number with n.\n4. `orchestrator scorecard --economy`: one view joining context (P27), tool economy (P28), handoffs (P29) and read economy per role and task class, plus the promotion report for the four features and the last context-eval result; `--json`.\n5. docs/context-economy/10-evaluation.md (\u226480 lines): the seven fixtures and their expectations, how to read --economy, what promotion needs before any mode goes active (the P30 list: sample size, non-inferior quality, measurable efficiency, recovery rate low), the revert paths per feature.\nTests (unittest): tests/test_context_eval.py::test_localized_fix_reduces_and_keeps_scope_full, ::test_security_fixture_keeps_security_evidence_full, ::test_test_failure_fixture_keeps_failing_output_full, ::test_documentation_fixture_has_no_full_source_chunks, ::test_repeated_fix_round_reuses_evidence, ::test_cli_exit_code_reflects_expectations; tests/test_promotion.py::test_shadow_features_never_promote_without_quality_evidence.\nDo not ask questions; decide and note decisions in the result. Never quote double-brace placeholder tokens literally.\n\nSPEC v2 (2026-09-22 20:40) after spec review T-0838 (request_changes), binding on top of v1:\n- promotion.evaluate(): for the four shadow features (context_router, tool_disclosure, conditional_instructions, handoff_routing) any None among first_pass_delta / fix_rounds_delta / gate_success_delta / review_findings_delta caps the recommendation at \"stay\" with reason \"shadow_quality_unmeasured\", regardless of cost or token deltas. Test tests/test_promotion.py::test_shadow_features_never_promote_without_quality_evidence asserts exactly that path (all quality deltas None, accepted_tokens_delta negative, n above min_samples \u2192 stay).\n- Packet building in both modes, exact mechanism: orchestrator/spawn.py is added to scope; spawn.packet(task, worktree, *, cfg=None) and the internal builders that read Pool().cfg accept an explicit cfg override (when given, no Pool() construction; existing callers unchanged). context_eval.run builds the packet twice with two cfg dicts derived from the harness pool.toml (modes off vs shadow) and never mutates the global pool.toml. Add tests/test_spawn.py::test_packet_accepts_cfg_override (same fixture task, cfg with context_router off vs shadow: identical packet text, shadow meta only in shadow).\n- context_scorecard.build(): add a per-(role, task_class) grouping (task_class via attribution.task_class of the run's task, \"unknown\" when the task is gone) mirroring read_economy.summary and handoff_scorecard.by_start, so --economy joins on (role, task_class) across all four sources.\n- Tool economy (P28) figures in --economy come from context_scorecard's existing tool_tokens_disclosed / tool_tokens_minimal / tool_reduction fields; tool_catalog.py is not a dependency and stays out of scope.\n- tests/test_context_scorecard.py exists (six tests after T-0800/T-0814); extend it in place and keep every current test green.",
+  "inputs": [
+    "T-0839"
+  ],
+  "acceptance": [
+    "tests/test_context_eval.py::test_localized_fix_reduces_and_keeps_scope_full passes",
+    "tests/test_context_eval.py::test_security_fixture_keeps_security_evidence_full passes",
+    "tests/test_context_eval.py::test_test_failure_fixture_keeps_failing_output_full passes",
+    "tests/test_context_eval.py::test_documentation_fixture_has_no_full_source_chunks passes",
+    "tests/test_context_eval.py::test_repeated_fix_round_reuses_evidence passes",
+    "tests/test_context_eval.py::test_cli_exit_code_reflects_expectations passes",
+    "tests/test_promotion.py::test_shadow_features_never_promote_without_quality_evidence passes",
+    "`uv run orchestrator context-eval` and `uv run orchestrator scorecard --economy` run; docs/context-economy/10-evaluation.md exists; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_spawn.py::test_packet_accepts_cfg_override passes"
+  ],
+  "scope": [
+    "orchestrator/context_eval.py",
+    "orchestrator/promotion.py",
+    "orchestrator/cli.py",
+    "orchestrator/context_scorecard.py",
+    "tests/test_context_eval.py",
+    "tests/test_promotion.py",
+    "docs/context-economy/10-evaluation.md",
+    "orchestrator/spawn.py",
+    "tests/test_spawn.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0840",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/evidence.py",
+        "issue": "context_eval.run(category, root) is specced to build fixtures 'under a temp dir', but spawn.py's shadow path (_shadow_route -> decision_log.record and evidence.EvidencePool, whose path is STATE/'evidence'/f'{goal}.jsonl') always writes to the global STATE = ROOT/'.orchestrator', not to the fixture's `root`. STATE is fixed at process-import time from ORCH_ROOT and nothing in the spec redirects it per-call. Under the test harness this is masked because ORCH_ROOT already points at a temp dir, but running the real `uv run orchestrator context-eval` CLI on a live orchestrator checkout will write synthetic decision_log rows and evidence-pool files for fake fixture task ids into the production .orchestrator state on every invocation, corrupting the exact telemetry (context_router/tool_disclosure/conditional_instructions decision rows, runs jsonl context objects) that promotion.py and context_scorecard.py read for real shadow evidence. No item addresses isolating or cleaning up these writes for a live run.",
+        "severity": "high",
+        "line": 108
+      },
+      {
+        "path": "orchestrator/promotion.py",
+        "issue": "Item 3 requires accepted_tokens_delta to be set for context_router/tool_disclosure/conditional_instructions/handoff_routing 'ONLY when the context-eval suite passed in the same report', and item 4 requires `scorecard --economy` to show 'the last context-eval result'. Neither collect(feature, root) nor report(cfg, root) has a parameter or documented artifact carrying a context-eval pass/fail signal between commands, and the CLI in item 2 only 'prints a table' / supports --json, with no specified persistence file (contrast orchestrator/bench.py, which persists STATE/'bench.json' for exactly this kind of cross-command reuse). No acceptance test exercises 'suite passed' gating accepted_tokens_delta, or 'last context-eval result' appearing in --economy, so this requirement cannot be verified and an executor has no defined insertion point to satisfy it correctly.",
+        "severity": "high",
+        "line": 251
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Spec v2 says packet() and 'the internal builders that read Pool().cfg' accept an explicit cfg override, but only tests/test_spawn.py::test_packet_accepts_cfg_override is listed, which exercises packet() alone. review_packet() independently constructs Pool().cfg three times (security_paths at 627, review_diff_chars at 665, and the shadow-route cfg at 670), and the context_eval 'review' category fixture (diff + acceptance + interfaces, no implementation transcript) requires building a review packet in both off/shadow modes without touching the real pool.toml \u2014 impossible unless review_packet also takes a cfg override. Without a named test for it, an executor can pass the single acceptance test while leaving review_packet dependent on global Pool() state, breaking determinism for the 'review' fixture category.",
+        "severity": "med",
+        "line": 627
+      }
+    ],
+    "suggested_spec_changes": [
+      "Specify how decision_log/evidence writes triggered by shadow packet-building during context_eval are isolated from production STATE for a live `orchestrator context-eval` run (e.g. context_eval.run must set/override STATE or ORCH_ROOT for the duration of the call, or the CLI must require/enforce a --root pointing at a scratch orchestrator root) \u2014 and add an acceptance test asserting no writes land under the live .orchestrator directory.",
+      "Name the persistence artifact for context-eval results (e.g. STATE/'context_eval.json', written by the CLI after each run) and thread a 'suite_passed' value from that artifact into promotion.collect()/evaluate() for the four shadow features and into context_scorecard/--economy's 'last context-eval result'; add a test asserting accepted_tokens_delta is None when no context-eval report exists or it failed.",
+      "Extend test_spawn.py::test_packet_accepts_cfg_override (or add a sibling test) to also cover review_packet(task, cfg=...) so the 'review' category fixture's cfg override is actually verified, not just packet()'s."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790100864.009875,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0840",
+      "claimed_at": 1790100864.00952
+    },
+    {
+      "ts": 1790100864.011393,
+      "account": "A"
+    },
+    {
+      "ts": 1790100865.240345,
+      "pid": 70505,
+      "account": "A"
+    },
+    {
+      "ts": 1790101085.97969,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/evidence.py",
+            "issue": "context_eval.run(category, root) is specced to build fixtures 'under a temp dir', but spawn.py's shadow path (_shadow_route -> decision_log.record and evidence.EvidencePool, whose path is STATE/'evidence'/f'{goal}.jsonl') always writes to the global STATE = ROOT/'.orchestrator', not to the fixture's `root`. STATE is fixed at process-import time from ORCH_ROOT and nothing in the spec redirects it per-call. Under the test harness this is masked because ORCH_ROOT already points at a temp dir, but running the real `uv run orchestrator context-eval` CLI on a live orchestrator checkout will write synthetic decision_log rows and evidence-pool files for fake fixture task ids into the production .orchestrator state on every invocation, corrupting the exact telemetry (context_router/tool_disclosure/conditional_instructions decision rows, runs jsonl context objects) that promotion.py and context_scorecard.py read for real shadow evidence. No item addresses isolating or cleaning up these writes for a live run.",
+            "severity": "high",
+            "line": 108
+          },
+          {
+            "path": "orchestrator/promotion.py",
+            "issue": "Item 3 requires accepted_tokens_delta to be set for context_router/tool_disclosure/conditional_instructions/handoff_routing 'ONLY when the context-eval suite passed in the same report', and item 4 requires `scorecard --economy` to show 'the last context-eval result'. Neither collect(feature, root) nor report(cfg, root) has a parameter or documented artifact carrying a context-eval pass/fail signal between commands, and the CLI in item 2 only 'prints a table' / supports --json, with no specified persistence file (contrast orchestrator/bench.py, which persists STATE/'bench.json' for exactly this kind of cross-command reuse). No acceptance test exercises 'suite passed' gating accepted_tokens_delta, or 'last context-eval result' appearing in --economy, so this requirement cannot be verified and an executor has no defined insertion point to satisfy it correctly.",
+            "severity": "high",
+            "line": 251
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Spec v2 says packet() and 'the internal builders that read Pool().cfg' accept an explicit cfg override, but only tests/test_spawn.py::test_packet_accepts_cfg_override is listed, which exercises packet() alone. review_packet() independently constructs Pool().cfg three times (security_paths at 627, review_diff_chars at 665, and the shadow-route cfg at 670), and the context_eval 'review' category fixture (diff + acceptance + interfaces, no implementation transcript) requires building a review packet in both off/shadow modes without touching the real pool.toml \u2014 impossible unless review_packet also takes a cfg override. Without a named test for it, an executor can pass the single acceptance test while leaving review_packet dependent on global Pool() state, breaking determinism for the 'review' fixture category.",
+            "severity": "med",
+            "line": 627
+          }
+        ],
+        "suggested_spec_changes": [
+          "Specify how decision_log/evidence writes triggered by shadow packet-building during context_eval are isolated from production STATE for a live `orchestrator context-eval` run (e.g. context_eval.run must set/override STATE or ORCH_ROOT for the duration of the call, or the CLI must require/enforce a --root pointing at a scratch orchestrator root) \u2014 and add an acceptance test asserting no writes land under the live .orchestrator directory.",
+          "Name the persistence artifact for context-eval results (e.g. STATE/'context_eval.json', written by the CLI after each run) and thread a 'suite_passed' value from that artifact into promotion.collect()/evaluate() for the four shadow features and into context_scorecard/--economy's 'last context-eval result'; add a test asserting accepted_tokens_delta is None when no context-eval report exists or it failed.",
+          "Extend test_spawn.py::test_packet_accepts_cfg_override (or add a sibling test) to also cover review_packet(task, cfg=...) so the 'review' category fixture's cfg override is actually verified, not just packet()'s."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790101085.9818869,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/evidence.py",
+          "issue": "context_eval.run(category, root) is specced to build fixtures 'under a temp dir', but spawn.py's shadow path (_shadow_route -> decision_log.record and evidence.EvidencePool, whose path is STATE/'evidence'/f'{goal}.jsonl') always writes to the global STATE = ROOT/'.orchestrator', not to the fixture's `root`. STATE is fixed at process-import time from ORCH_ROOT and nothing in the spec redirects it per-call. Under the test harness this is masked because ORCH_ROOT already points at a temp dir, but running the real `uv run orchestrator context-eval` CLI on a live orchestrator checkout will write synthetic decision_log rows and evidence-pool files for fake fixture task ids into the production .orchestrator state on every invocation, corrupting the exact telemetry (context_router/tool_disclosure/conditional_instructions decision rows, runs jsonl context objects) that promotion.py and context_scorecard.py read for real shadow evidence. No item addresses isolating or cleaning up these writes for a live run.",
+          "severity": "high",
+          "line": 108
+        },
+        {
+          "path": "orchestrator/promotion.py",
+          "issue": "Item 3 requires accepted_tokens_delta to be set for context_router/tool_disclosure/conditional_instructions/handoff_routing 'ONLY when the context-eval suite passed in the same report', and item 4 requires `scorecard --economy` to show 'the last context-eval result'. Neither collect(feature, root) nor report(cfg, root) has a parameter or documented artifact carrying a context-eval pass/fail signal between commands, and the CLI in item 2 only 'prints a table' / supports --json, with no specified persistence file (contrast orchestrator/bench.py, which persists STATE/'bench.json' for exactly this kind of cross-command reuse). No acceptance test exercises 'suite passed' gating accepted_tokens_delta, or 'last context-eval result' appearing in --economy, so this requirement cannot be verified and an executor has no defined insertion point to satisfy it correctly.",
+          "severity": "high",
+          "line": 251
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Spec v2 says packet() and 'the internal builders that read Pool().cfg' accept an explicit cfg override, but only tests/test_spawn.py::test_packet_accepts_cfg_override is listed, which exercises packet() alone. review_packet() independently constructs Pool().cfg three times (security_paths at 627, review_diff_chars at 665, and the shadow-route cfg at 670), and the context_eval 'review' category fixture (diff + acceptance + interfaces, no implementation transcript) requires building a review packet in both off/shadow modes without touching the real pool.toml \u2014 impossible unless review_packet also takes a cfg override. Without a named test for it, an executor can pass the single acceptance test while leaving review_packet dependent on global Pool() state, breaking determinism for the 'review' fixture category.",
+          "severity": "med",
+          "line": 627
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1790100864.00952,
+  "account": "A",
+  "pid": 70505,
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/evidence.py",
+      "issue": "context_eval.run(category, root) is specced to build fixtures 'under a temp dir', but spawn.py's shadow path (_shadow_route -> decision_log.record and evidence.EvidencePool, whose path is STATE/'evidence'/f'{goal}.jsonl') always writes to the global STATE = ROOT/'.orchestrator', not to the fixture's `root`. STATE is fixed at process-import time from ORCH_ROOT and nothing in the spec redirects it per-call. Under the test harness this is masked because ORCH_ROOT already points at a temp dir, but running the real `uv run orchestrator context-eval` CLI on a live orchestrator checkout will write synthetic decision_log rows and evidence-pool files for fake fixture task ids into the production .orchestrator state on every invocation, corrupting the exact telemetry (context_router/tool_disclosure/conditional_instructions decision rows, runs jsonl context objects) that promotion.py and context_scorecard.py read for real shadow evidence. No item addresses isolating or cleaning up these writes for a live run.",
+      "severity": "high",
+      "line": 108
+    },
+    {
+      "path": "orchestrator/promotion.py",
+      "issue": "Item 3 requires accepted_tokens_delta to be set for context_router/tool_disclosure/conditional_instructions/handoff_routing 'ONLY when the context-eval suite passed in the same report', and item 4 requires `scorecard --economy` to show 'the last context-eval result'. Neither collect(feature, root) nor report(cfg, root) has a parameter or documented artifact carrying a context-eval pass/fail signal between commands, and the CLI in item 2 only 'prints a table' / supports --json, with no specified persistence file (contrast orchestrator/bench.py, which persists STATE/'bench.json' for exactly this kind of cross-command reuse). No acceptance test exercises 'suite passed' gating accepted_tokens_delta, or 'last context-eval result' appearing in --economy, so this requirement cannot be verified and an executor has no defined insertion point to satisfy it correctly.",
+      "severity": "high",
+      "line": 251
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Spec v2 says packet() and 'the internal builders that read Pool().cfg' accept an explicit cfg override, but only tests/test_spawn.py::test_packet_accepts_cfg_override is listed, which exercises packet() alone. review_packet() independently constructs Pool().cfg three times (security_paths at 627, review_diff_chars at 665, and the shadow-route cfg at 670), and the context_eval 'review' category fixture (diff + acceptance + interfaces, no implementation transcript) requires building a review packet in both off/shadow modes without touching the real pool.toml \u2014 impossible unless review_packet also takes a cfg override. Without a named test for it, an executor can pass the single acceptance test while leaving review_packet dependent on global Pool() state, breaking determinism for the 'review' fixture category.",
+      "severity": "med",
+      "line": 627
+    }
+  ]
+}

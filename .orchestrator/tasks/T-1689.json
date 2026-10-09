@@ -1,0 +1,188 @@
+{
+  "id": "T-1689",
+  "created_at": 1791322033.124809,
+  "parent": "T-1667",
+  "role": "execute",
+  "tier": "opus",
+  "complexity": 6,
+  "title": "review packets for fix rounds cover the whole lineage diff; fix-only approvals do not count for the merge",
+  "spec": "Reviews of fix rounds must cover the whole change, not only the fix commit.\n\nEvidence 2026-10-06: the watchdog (T-1679 -> fix T-1682) and auto-merge (T-1678 -> fixes T-1681, T-1683) each reached\n\"approved\" through reviews of a fix round only (T-1684, T-1685, T-1686); each review saw just the fix's diff (a test or\none prompt line) and said so, while ~700-900 lines of security-path code had never been reviewed. Independent full-diff\nreviews then found 3 high-severity defects in each. A review spec that told the reviewer to read the full diff was\nignored because the packet showed only the fix diff.\n\nChange orchestrator/spawn.py review_packet() (~line 1082) and whatever computes the diff range for a review of a task:\n1. For a review whose input task has constraints.fix_round_for (follow the chain to the root execute task), the packet's\n   diff is the whole lineage: from the merge-base with the goal branch (or origin/main when there is no goal branch) to\n   the fix's head, i.e. everything that will land, not the fix commit alone. Keep the fix-only diff as a second, labelled\n   section (\"this round's change\") when it fits.\n2. If the lineage diff exceeds the packet budget, include the file list with per-file stats and the instruction to read\n   the rest with `git diff <base>..<head> -- <file>`, naming the exact range; never silently truncate to the fix diff.\n3. The daemon's review gate counts only reviews whose packet covered the lineage: stamp pipeline.review_range =\n   \"<base>..<head>\" on the review task and, in merge_reviewed (daemon.py), ignore an approval whose review_range base is\n   not the lineage base. Older reviews without the stamp count as today.\nTests in tests/test_spawn.py and tests/test_daemon.py: test_fix_round_review_packet_covers_lineage,\ntest_lineage_diff_over_budget_lists_files_and_range, test_merge_ignores_fix_only_approval,\ntest_plain_task_review_unchanged.\n",
+  "inputs": [],
+  "acceptance": [
+    "the four named tests exist and pass",
+    "a review of a fix round shows origin/goal base..fix head, with the fix-only diff as a labelled extra section"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 50,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "high-risk"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791322271.990387,
+      "pipeline": {
+        "first_ready_at": 1791322271.9752069
+      }
+    },
+    {
+      "ts": 1791322274.855388,
+      "pipeline": {
+        "first_ready_at": 1791322271.9752069,
+        "spec_review_at": 1791322274.8553228,
+        "spec_review_at_lease": 1791323174.8553228
+      }
+    },
+    {
+      "ts": 1791322274.867063,
+      "pipeline": {
+        "first_ready_at": 1791322271.9752069,
+        "spec_review_at": 1791322274.8553228,
+        "spec_review_at_lease": 1791323174.8553228,
+        "spec_review_at_done": 1791322274.867
+      }
+    },
+    {
+      "ts": 1791322346.610362,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1744,
+          "issue": "The spec never mentions that scoped_diff() ends with `-- *src[\"scope\"]`. A fix task's scope is narrow (a test or one prompt file), and the fix worktree is already cut from task/<parent> (spawn.py:301). So `goal/<parent>...HEAD` would already include the parent's commits, and the pathspec is probably why the packet showed only the fix's files. Changing only the base would leave the diff narrow. The lineage diff has to use the union of scopes across the chain, or no pathspec at all. That choice is unspecified.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1752,
+          "issue": "scoped_diff silently cuts output at `[:40000]`, and review_packet then applies a second budget of at most 8000 chars minus other sections. For a 700-900 line lineage the first cut discards files before bounded_diff or any file list is built. That is the silent truncation item 2 forbids. The file list has to come from `git diff --numstat <base>..<head>`, not from the already truncated text.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1166,
+          "issue": "bounded_diff walks hunks in order and drops later files entirely. Its marker only reports a count of omitted lines, with no per-file stats and no per-file range. Item 2 therefore needs a new numstat-based helper that always fits inside the 8000-char packet. The spec also doesn't say how the lineage diff and the labelled 'this round's change' section share that one small budget, or which gets priority.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1594,
+          "issue": "Ignoring a fix-only approval leaves approved short of needed, with nothing pending and nothing stuck. The code falls through to the final branch and holds the task with 'review state unknown: ' and an empty id list. Nothing opens a lineage review, so the task is stuck until the Planner steps in. The spec has to say what happens to an ignored approval: open a fresh lineage review via _open_reviews, or hold with an explicit reason such as 'review range not lineage base'.",
+          "severity": "high"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1255,
+          "issue": "Where review_range is stamped is unspecified. _open_reviews already stamps reviewed_sha from the task's HEAD at creation, and the packet is built later at spawn time. Stamping in the packet builder lets the stamp drift from the head the reviewer actually saw, and risks never being written if the spawn path is skipped. Stamp it in _open_reviews, using one shared helper that computes (base, head). Have review_packet read that stamp instead of recomputing it.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1585,
+          "issue": "The lineage base is merge-base(goal/<parent>, head). It moves if the goal branch is merged into the task branch or the branch is rebased after the review was stamped. Comparing the stamped base to a recomputed one would then reject valid approvals, and reviewed_sha handling doesn't cover that case. The spec should say whether the comparison is against the base recomputed at merge time or a base pinned on the root task. It should also say how the head-moved void path interacts with it.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1140,
+          "issue": "Chain walking has no failure behaviour. A missing ancestor (bus.get raises KeyError), a cycle, a root without a worktree, or git failing on merge-base would each need a decision. The spec doesn't say to fail closed (hold or flag the review as lineage-unavailable), so an implementer will likely fall back silently to the fix-only diff, which is the exact defect being fixed. Other code does follow the chain with a seen-set (strategy.py:45, failures.py:16), so a shared root-resolver already exists to reuse.",
+          "severity": "med"
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "line": 1088,
+          "issue": "raw_diff also feeds the semantic security regex, the 'changed tests' list, and the evidence source_chunk candidates handed to _shadow_route. Swapping in the lineage diff changes security triggers, routed evidence and the shadow-route inputs. test_plain_task_review_unchanged only covers plain tasks, so nothing checks that this coupling behaves correctly for fix rounds.",
+          "severity": "low"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "line": 0,
+          "issue": "The acceptance bullets are weaker than the spec. They don't require testing the stamp (review_range written on the review task), an unstamped legacy approval still counting, a stamped approval with the right base counting, or the empty-lineage and chain-failure cases. As written, test_merge_ignores_fix_only_approval can pass with a trivially wrong implementation.",
+          "severity": "low"
+        }
+      ]
+    },
+    {
+      "ts": 1791322403.8600068,
+      "status": "superseded",
+      "reason": "respec v2 filed as T-1691"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1791322271.9752069,
+    "spec_review_at": 1791322274.8553228,
+    "spec_review_at_lease": 1791323174.8553228,
+    "spec_review_at_done": 1791322274.867
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1744,
+      "issue": "The spec never mentions that scoped_diff() ends with `-- *src[\"scope\"]`. A fix task's scope is narrow (a test or one prompt file), and the fix worktree is already cut from task/<parent> (spawn.py:301). So `goal/<parent>...HEAD` would already include the parent's commits, and the pathspec is probably why the packet showed only the fix's files. Changing only the base would leave the diff narrow. The lineage diff has to use the union of scopes across the chain, or no pathspec at all. That choice is unspecified.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1752,
+      "issue": "scoped_diff silently cuts output at `[:40000]`, and review_packet then applies a second budget of at most 8000 chars minus other sections. For a 700-900 line lineage the first cut discards files before bounded_diff or any file list is built. That is the silent truncation item 2 forbids. The file list has to come from `git diff --numstat <base>..<head>`, not from the already truncated text.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1166,
+      "issue": "bounded_diff walks hunks in order and drops later files entirely. Its marker only reports a count of omitted lines, with no per-file stats and no per-file range. Item 2 therefore needs a new numstat-based helper that always fits inside the 8000-char packet. The spec also doesn't say how the lineage diff and the labelled 'this round's change' section share that one small budget, or which gets priority.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1594,
+      "issue": "Ignoring a fix-only approval leaves approved short of needed, with nothing pending and nothing stuck. The code falls through to the final branch and holds the task with 'review state unknown: ' and an empty id list. Nothing opens a lineage review, so the task is stuck until the Planner steps in. The spec has to say what happens to an ignored approval: open a fresh lineage review via _open_reviews, or hold with an explicit reason such as 'review range not lineage base'.",
+      "severity": "high"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1255,
+      "issue": "Where review_range is stamped is unspecified. _open_reviews already stamps reviewed_sha from the task's HEAD at creation, and the packet is built later at spawn time. Stamping in the packet builder lets the stamp drift from the head the reviewer actually saw, and risks never being written if the spawn path is skipped. Stamp it in _open_reviews, using one shared helper that computes (base, head). Have review_packet read that stamp instead of recomputing it.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1585,
+      "issue": "The lineage base is merge-base(goal/<parent>, head). It moves if the goal branch is merged into the task branch or the branch is rebased after the review was stamped. Comparing the stamped base to a recomputed one would then reject valid approvals, and reviewed_sha handling doesn't cover that case. The spec should say whether the comparison is against the base recomputed at merge time or a base pinned on the root task. It should also say how the head-moved void path interacts with it.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1140,
+      "issue": "Chain walking has no failure behaviour. A missing ancestor (bus.get raises KeyError), a cycle, a root without a worktree, or git failing on merge-base would each need a decision. The spec doesn't say to fail closed (hold or flag the review as lineage-unavailable), so an implementer will likely fall back silently to the fix-only diff, which is the exact defect being fixed. Other code does follow the chain with a seen-set (strategy.py:45, failures.py:16), so a shared root-resolver already exists to reuse.",
+      "severity": "med"
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "line": 1088,
+      "issue": "raw_diff also feeds the semantic security regex, the 'changed tests' list, and the evidence source_chunk candidates handed to _shadow_route. Swapping in the lineage diff changes security triggers, routed evidence and the shadow-route inputs. test_plain_task_review_unchanged only covers plain tasks, so nothing checks that this coupling behaves correctly for fix rounds.",
+      "severity": "low"
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "line": 0,
+      "issue": "The acceptance bullets are weaker than the spec. They don't require testing the stamp (review_range written on the review task), an unstamped legacy approval still counting, a stamped approval with the right base counting, or the empty-lineage and chain-failure cases. As written, test_merge_ignores_fix_only_approval can pass with a trivially wrong implementation.",
+      "severity": "low"
+    }
+  ],
+  "reason": "respec v2 filed as T-1691"
+}

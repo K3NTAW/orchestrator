@@ -1,0 +1,1334 @@
+{
+  "id": "T-1132",
+  "created_at": 1790165634.49559,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 6,
+  "title": "S2h external skill hardening: structured risk report at inspection (scripts, endpoints, tools, credential references, dependencies, filesystem) gating quarantined to testing (P21)",
+  "spec": "orchestrator/skill_discovery.inspect(): extend the report with risk = {scripts: [{path, shebang or extension, executable bit}], endpoints: [hosts and URLs found in any file], tools: [names from the skill frontmatter allowed-tools or tools fields and Bash/shell mentions], credential_refs: [environment variable names matching KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH and mentions of dotenv or credential files, names only], dependencies: [packages from requirements, pyproject, package.json, pip or npm install lines], filesystem: [absolute paths, home-directory references, recursive delete or chmod commands], scan: the context_scanner verdict per file from S1d, level: low|medium|high with reasons}. Level rules: high when scan is blocked anywhere, or an endpoint plus a credential_ref both appear, or a recursive delete or permission change appears, or a dependency is installed from a URL or git source; medium when any script, endpoint, dependency or credential_ref exists; low otherwise. The report is persisted in the existing findings.json (no new file). orchestrator/skills_registry.transition(): a quarantined skill may move to testing only when its latest inspection report exists, its content hash matches, and level is not high and scan is not blocked; otherwise raise ValueError naming the reasons unless the transition reason starts with 'human-reviewed:' (record that in the state document). CLI: `orchestrator skills inspect <id>` prints the risk report; `skills list` shows the level. Docs: docs/hermes-hardening/14-skill-hardening.md.\nSpec review T-1122 folded in: (1) No new file: the risk report is a new top-level key risk inside the existing findings.json (the file the tests already assert), so the content-hash listings in inspect(), check_upstream() and skills_registry._testing_findings() need no change; drop every mention of inspection.json. (2) The level gate WRAPS the existing _testing_findings() control rather than replacing it: the old blocks (block-severity finding, presence of a script) stay exactly as today, the new rule adds a block when level is high or scan_overall is blocked, and the existing 'override:' reason prefix keeps working alongside 'human-reviewed:' (both bypass, both recorded in the state document with the reason). (3) rollback() re-enters testing through the same wrapped gate, so both paths apply one bar; existing tests at tests/test_skill_discovery.py that assert findings.json content equality keep passing (extend their expected dicts with the risk key where they compare whole reports).\nSpec review T-1129 folded in: (a) the base text now says findings.json only. (b) rollback(): the bypass check looks at the ORIGINAL transition reason recorded in the state document for the last quarantined-to-testing move (the 'rollback: ' prefix that rollback() prepends never hides it), so a skill approved with override: or human-reviewed: rolls back into testing without re-approval, while one never approved is blocked; test both. (c) `skills list` prints '-' in the level column for any skill without a quarantine findings.json (builtin, active, never inspected). (d) risk.scan is the same dict object inspect() already computed for the top-level scan key (copied by reference, never recomputed).\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_skill_discovery.py::test_risk_report_levels_from_fixture_skills (a benign skill low, a script-plus-endpoint skill medium, an endpoint-plus-credential skill high, a blocked-scan skill high)",
+    "tests/test_skills_registry.py::test_quarantined_to_testing_blocked_on_high_risk_unless_human_reviewed",
+    "tests/test_skills_registry.py::test_transition_requires_matching_inspection_hash",
+    "tests/test_cli.py::test_skills_inspect_prints_risk_level",
+    "tests/test_skills_registry.py::test_rollback_uses_the_same_wrapped_gate (a high-risk skill cannot re-enter testing via rollback without an override or human-reviewed reason; a script-only skill is still blocked as before)",
+    "tests/test_skills_registry.py::test_rollback_keeps_original_override_reason (an override-approved skill rolls back into testing; a never-approved high-risk skill is blocked)",
+    "tests/test_cli.py::test_skills_list_level_dash_without_report",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    "tests/test_skill_discovery.py",
+    "tests/test_skills_registry.py",
+    "tests/test_cli.py",
+    "docs/hermes-hardening/14-skill-hardening.md"
+  ],
+  "depends_on": [
+    "T-1037"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1132",
+  "codex_thread": "01a0ce35-17dd-74b2-8d9f-14bcf41e2a56",
+  "result": {
+    "summary": "Summary: Implemented structured external-skill risk inspection and testing gates. Affected unittest modules pass 68/68; full gate remained red before the final targeted fix, and the two-run limit prevented rerunning it.\n\nFiles changed: 7 scoped files, 207 insertions, 9 deletions.\n\nCommit: `515f5722f10a3341838ef5293c4507ab0b8d7e5e`\n\nFailures-only test output:\n```text\nFAIL: test_rollback_uses_the_same_wrapped_gate (test_skills_registry.SkillsRegistryTests.test_rollback_uses_the_same_wrapped_gate)\nAssertionError: ValueError not raised\nFAILED (failures=1)\n```\n\nThe failure was addressed before commit by restoring extension-based scripts to the legacy script gate. Worktree is clean.",
+    "executed_by": "codex:sol",
+    "thread": "01a0ce35-17dd-74b2-8d9f-14bcf41e2a56",
+    "usage": {
+      "input_tokens": 1308077,
+      "cached_input_tokens": 1260544,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 9245,
+      "reasoning_output_tokens": 1462,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790165634.49737,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 19:25: spec reviews T-1122 and T-1129 folded in; two rounds reviewed, Planner approves (waiver)"
+    },
+    {
+      "ts": 1790165642.853191,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138
+      }
+    },
+    {
+      "ts": 1790165919.310807,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588
+      }
+    },
+    {
+      "ts": 1790165922.390889,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717
+      }
+    },
+    {
+      "ts": 1790165979.0830069,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        }
+      }
+    },
+    {
+      "ts": 1790165980.911733,
+      "packet_meta": {
+        "chars": 6178,
+        "est_tokens": 1544,
+        "presented_tokens": 1544,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "d354d25b92298ee7be60fe3172271c07a4794ca84a53c7bf4b7eab03eb6a6392"
+          },
+          "objective": {
+            "chars": 4405,
+            "est_tokens": 1101,
+            "sha256": "8652118feaa06111760bb2d432f1a10a4a06c5480ec9294acc407e1885ff6e13"
+          },
+          "acceptance": {
+            "chars": 965,
+            "est_tokens": 241,
+            "sha256": "001029b2638d6f9967e45390fe0f6613294bd0106a4b72909dbae082c5e67b37"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "79e710d62d4a5d0e07684e5cafa1e856b486e0a2a7a8e5c46cd7bdfb28e6546c"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "e8d9fa98176b",
+        "version": "e8d9fa98176b",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@5a6f02b2b0f6 gotchas@c5bdb17fc457 memory@notes over cap by 1378 chars: acceptance kept whole routed=active",
+        "policy_version": "5a6f02b2b0f6",
+        "gotchas": "c5bdb17fc457",
+        "candidate_tokens": 2764,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 20385,
+        "routed_reduction_ratio": 0.9488898198575618,
+        "routed_hidden": 11,
+        "routed_ambiguous": 23,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "2a47923ce3e1",
+          "ad9f89848aa7",
+          "b5793e01a39f",
+          "4a1a165349cd",
+          "3d088f53751b",
+          "32494169bd86",
+          "4b0f301e30e4",
+          "39cb853e1607",
+          "5976af860df5",
+          "3136da5e7d65",
+          "65d6eae44393",
+          "dbc22db138df",
+          "1d9034f98bd6",
+          "0bd1d23147d4",
+          "d0fbb0eef6a9",
+          "d0844cdc7c5a",
+          "6942d7f0a335",
+          "504365aa02ad",
+          "c671db96e06b",
+          "577182308232",
+          "61119e9809f6",
+          "2dd1b2d1fec6",
+          "9f525aa78aa2",
+          "8a17e2cb8ff0",
+          "f916dfaa1ede",
+          "4238ba4472ce",
+          "b265fe1c47dc",
+          "b0cb75820225",
+          "eea77ce82d1b",
+          "8bd8958a0378",
+          "629a44d94ec7",
+          "11389dd6501d",
+          "991c5f838f54",
+          "a11d12c369c9",
+          "ccec3f8cb121",
+          "8477fc0444be",
+          "31149768f58a",
+          "5e9c98298a5c",
+          "feab7e6ba7b1",
+          "df0e47d16e10",
+          "6aac71d14992",
+          "8f938ad31ca7",
+          "121e784604f1",
+          "511dd0945877",
+          "988709d10d34",
+          "b329b24153d1",
+          "7f3628b36812",
+          "5d16230ef695",
+          "1ffe72528b7f",
+          "35cad6f19587",
+          "ad81279bec87",
+          "049c8156afa5",
+          "f9e8d28a8da7",
+          "cb815ee43028"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790165980.9131231,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1132",
+      "claimed_at": 1790165980.912958
+    },
+    {
+      "ts": 1790165980.914338,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1790166537.487824,
+      "codex_thread": "01a0ce35-17dd-74b2-8d9f-14bcf41e2a56",
+      "codex_thread_head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+    },
+    {
+      "ts": 1790166537.495104,
+      "packet_meta": {
+        "chars": 6178,
+        "est_tokens": 1544,
+        "presented_tokens": 1544,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "d354d25b92298ee7be60fe3172271c07a4794ca84a53c7bf4b7eab03eb6a6392"
+          },
+          "objective": {
+            "chars": 4405,
+            "est_tokens": 1101,
+            "sha256": "8652118feaa06111760bb2d432f1a10a4a06c5480ec9294acc407e1885ff6e13"
+          },
+          "acceptance": {
+            "chars": 965,
+            "est_tokens": 241,
+            "sha256": "001029b2638d6f9967e45390fe0f6613294bd0106a4b72909dbae082c5e67b37"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 235,
+            "est_tokens": 58,
+            "sha256": "79e710d62d4a5d0e07684e5cafa1e856b486e0a2a7a8e5c46cd7bdfb28e6546c"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "e8d9fa98176b",
+        "version": "e8d9fa98176b",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@5a6f02b2b0f6 gotchas@c5bdb17fc457 memory@notes over cap by 1378 chars: acceptance kept whole routed=active",
+        "policy_version": "5a6f02b2b0f6",
+        "gotchas": "c5bdb17fc457",
+        "candidate_tokens": 2764,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 20385,
+        "routed_reduction_ratio": 0.9488898198575618,
+        "routed_hidden": 11,
+        "routed_ambiguous": 23,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "2a47923ce3e1",
+          "ad9f89848aa7",
+          "b5793e01a39f",
+          "4a1a165349cd",
+          "3d088f53751b",
+          "32494169bd86",
+          "4b0f301e30e4",
+          "39cb853e1607",
+          "5976af860df5",
+          "3136da5e7d65",
+          "65d6eae44393",
+          "dbc22db138df",
+          "1d9034f98bd6",
+          "0bd1d23147d4",
+          "d0fbb0eef6a9",
+          "d0844cdc7c5a",
+          "6942d7f0a335",
+          "504365aa02ad",
+          "c671db96e06b",
+          "577182308232",
+          "61119e9809f6",
+          "2dd1b2d1fec6",
+          "9f525aa78aa2",
+          "8a17e2cb8ff0",
+          "f916dfaa1ede",
+          "4238ba4472ce",
+          "b265fe1c47dc",
+          "b0cb75820225",
+          "eea77ce82d1b",
+          "8bd8958a0378",
+          "629a44d94ec7",
+          "11389dd6501d",
+          "991c5f838f54",
+          "a11d12c369c9",
+          "ccec3f8cb121",
+          "8477fc0444be",
+          "31149768f58a",
+          "5e9c98298a5c",
+          "feab7e6ba7b1",
+          "df0e47d16e10",
+          "6aac71d14992",
+          "8f938ad31ca7",
+          "121e784604f1",
+          "511dd0945877",
+          "988709d10d34",
+          "b329b24153d1",
+          "7f3628b36812",
+          "5d16230ef695",
+          "1ffe72528b7f",
+          "35cad6f19587",
+          "ad81279bec87",
+          "049c8156afa5",
+          "f9e8d28a8da7",
+          "cb815ee43028"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790166537.5155818,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790166537.524678,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented structured external-skill risk inspection and testing gates. Affected unittest modules pass 68/68; full gate remained red before the final targeted fix, and the two-run limit prevented rerunning it.\n\nFiles changed: 7 scoped files, 207 insertions, 9 deletions.\n\nCommit: `515f5722f10a3341838ef5293c4507ab0b8d7e5e`\n\nFailures-only test output:\n```text\nFAIL: test_rollback_uses_the_same_wrapped_gate (test_skills_registry.SkillsRegistryTests.test_rollback_uses_the_same_wrapped_gate)\nAssertionError: ValueError not raised\nFAILED (failures=1)\n```\n\nThe failure was addressed before commit by restoring extension-based scripts to the legacy script gate. Worktree is clean.",
+        "executed_by": "codex:sol",
+        "thread": "01a0ce35-17dd-74b2-8d9f-14bcf41e2a56",
+        "usage": {
+          "input_tokens": 1308077,
+          "cached_input_tokens": 1260544,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9245,
+          "reasoning_output_tokens": 1462,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790166540.0918431,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790166653.245543,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790166653.532091,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1132",
+          "goal_head": "goal/T-0991",
+          "moved_count": 10,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "docs/hermes-hardening/15-harness-depth.md",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/harness_depth.py",
+            "orchestrator/promotion.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_harness_depth.py",
+            "tests/test_promotion.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790166653.53168,
+          "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+        }
+      }
+    },
+    {
+      "ts": 1790166653.660506,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1132",
+          "goal_head": "goal/T-0991",
+          "moved_count": 10,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "docs/hermes-hardening/15-harness-depth.md",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/harness_depth.py",
+            "orchestrator/promotion.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_harness_depth.py",
+            "tests/test_promotion.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790166653.53168,
+          "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+        },
+        "reviewed_sha": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+      }
+    },
+    {
+      "ts": 1790166653.669048,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1132",
+          "goal_head": "goal/T-0991",
+          "moved_count": 10,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "docs/hermes-hardening/15-harness-depth.md",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/harness_depth.py",
+            "orchestrator/promotion.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_harness_depth.py",
+            "tests/test_promotion.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790166653.53168,
+          "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+        },
+        "reviewed_sha": "515f5722f10a3341838ef5293c4507ab0b8d7e5e",
+        "gated_at_done": 1790166653.668886
+      }
+    },
+    {
+      "ts": 1790166881.837614,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790167017.1981828,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1132",
+          "goal_head": "goal/T-0991",
+          "moved_count": 10,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "docs/hermes-hardening/15-harness-depth.md",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/harness_depth.py",
+            "orchestrator/promotion.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_harness_depth.py",
+            "tests/test_promotion.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790166653.53168,
+          "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+        },
+        "reviewed_sha": "515f5722f10a3341838ef5293c4507ab0b8d7e5e",
+        "gated_at_done": 1790166653.668886,
+        "merged_at": 1790167017.1979551,
+        "merged_at_lease": 1790167917.1979551
+      }
+    },
+    {
+      "ts": 1790167128.744734,
+      "status": "done",
+      "merged_into": "goal/T-0991",
+      "sha": "10121f9bc7a234e9b37d2c1158c784b65c8b9421",
+      "merged_at": 1790167128.743917,
+      "changed_files": [
+        "docs/hermes-hardening/14-skill-hardening.md",
+        "orchestrator/cli.py",
+        "orchestrator/skill_discovery.py",
+        "orchestrator/skills_registry.py",
+        "tests/test_cli.py",
+        "tests/test_skill_discovery.py",
+        "tests/test_skills_registry.py"
+      ],
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1132",
+          "goal_head": "goal/T-0991",
+          "moved_count": 10,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "docs/hermes-hardening/15-harness-depth.md",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/harness_depth.py",
+            "orchestrator/promotion.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_harness_depth.py",
+            "tests/test_promotion.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790166653.53168,
+          "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+        },
+        "reviewed_sha": "515f5722f10a3341838ef5293c4507ab0b8d7e5e",
+        "gated_at_done": 1790166653.668886,
+        "merged_at": 1790167017.1979551,
+        "merged_at_lease": 1790167917.1979551
+      }
+    },
+    {
+      "ts": 1790167129.390333,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1132",
+          "goal_head": "goal/T-0991",
+          "moved_count": 10,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "docs/hermes-hardening/15-harness-depth.md",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/harness_depth.py",
+            "orchestrator/promotion.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_harness_depth.py",
+            "tests/test_promotion.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790166653.53168,
+          "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+        },
+        "reviewed_sha": "515f5722f10a3341838ef5293c4507ab0b8d7e5e",
+        "gated_at_done": 1790166653.668886,
+        "merged_at": 1790167017.1979551,
+        "merged_at_lease": 1790167917.1979551,
+        "accepted_at": 1790167129.389787
+      }
+    },
+    {
+      "ts": 1790167129.4795651,
+      "pipeline": {
+        "first_ready_at": 1790165642.853138,
+        "dispatched_at": 1790165919.3107588,
+        "dispatched_at_lease": 1790166819.3107588,
+        "dispatched_at_done": 1790165922.390717,
+        "handoff": {
+          "baseline": "sol",
+          "selected": "sol",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790165979.082783
+        },
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.0,
+            "sol": 1.031439393939394
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790166653.245316,
+        "gated_at_lease": 1790167553.245316,
+        "first_green_at": 1790166653.244631,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1132",
+          "goal_head": "goal/T-0991",
+          "moved_count": 10,
+          "stale_paths": [
+            ".orchestrator/pool.toml",
+            "docs/hermes-hardening/15-harness-depth.md",
+            "orchestrator/daemon.py",
+            "orchestrator/decision_log.py",
+            "orchestrator/harness_depth.py",
+            "orchestrator/promotion.py",
+            "orchestrator/spawn.py",
+            "tests/test_daemon.py",
+            "tests/test_harness_depth.py",
+            "tests/test_promotion.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790166653.53168,
+          "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+        },
+        "reviewed_sha": "515f5722f10a3341838ef5293c4507ab0b8d7e5e",
+        "gated_at_done": 1790166653.668886,
+        "merged_at": 1790167017.1979551,
+        "merged_at_lease": 1790167917.1979551,
+        "accepted_at": 1790167129.389787,
+        "merged_at_done": 1790167129.479378
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 19:25: spec reviews T-1122 and T-1129 folded in; two rounds reviewed, Planner approves (waiver)",
+  "pipeline": {
+    "first_ready_at": 1790165642.853138,
+    "dispatched_at": 1790165919.3107588,
+    "dispatched_at_lease": 1790166819.3107588,
+    "dispatched_at_done": 1790165922.390717,
+    "handoff": {
+      "baseline": "sol",
+      "selected": "sol",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790165979.082783
+    },
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "cbcefc0a4ce51e8d0684ded44c2415e654c8e60d",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.0,
+        "sol": 1.031439393939394
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790166653.245316,
+    "gated_at_lease": 1790167553.245316,
+    "first_green_at": 1790166653.244631,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1132",
+      "goal_head": "goal/T-0991",
+      "moved_count": 10,
+      "stale_paths": [
+        ".orchestrator/pool.toml",
+        "docs/hermes-hardening/15-harness-depth.md",
+        "orchestrator/daemon.py",
+        "orchestrator/decision_log.py",
+        "orchestrator/harness_depth.py",
+        "orchestrator/promotion.py",
+        "orchestrator/spawn.py",
+        "tests/test_daemon.py",
+        "tests/test_harness_depth.py",
+        "tests/test_promotion.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790166653.53168,
+      "head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e"
+    },
+    "reviewed_sha": "515f5722f10a3341838ef5293c4507ab0b8d7e5e",
+    "gated_at_done": 1790166653.668886,
+    "merged_at": 1790167017.1979551,
+    "merged_at_lease": 1790167917.1979551,
+    "accepted_at": 1790167129.389787,
+    "merged_at_done": 1790167129.479378
+  },
+  "packet_meta": {
+    "chars": 6178,
+    "est_tokens": 1544,
+    "presented_tokens": 1544,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "d354d25b92298ee7be60fe3172271c07a4794ca84a53c7bf4b7eab03eb6a6392"
+      },
+      "objective": {
+        "chars": 4405,
+        "est_tokens": 1101,
+        "sha256": "8652118feaa06111760bb2d432f1a10a4a06c5480ec9294acc407e1885ff6e13"
+      },
+      "acceptance": {
+        "chars": 965,
+        "est_tokens": 241,
+        "sha256": "001029b2638d6f9967e45390fe0f6613294bd0106a4b72909dbae082c5e67b37"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+      },
+      "write_scope": {
+        "chars": 235,
+        "est_tokens": 58,
+        "sha256": "79e710d62d4a5d0e07684e5cafa1e856b486e0a2a7a8e5c46cd7bdfb28e6546c"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "e8d9fa98176b",
+    "version": "e8d9fa98176b",
+    "candidate_known": true,
+    "base": "1acfc3b30612",
+    "sources": "pool.toml@5a6f02b2b0f6 gotchas@c5bdb17fc457 memory@notes over cap by 1378 chars: acceptance kept whole routed=active",
+    "policy_version": "5a6f02b2b0f6",
+    "gotchas": "c5bdb17fc457",
+    "candidate_tokens": 2764,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 20385,
+    "routed_reduction_ratio": 0.9488898198575618,
+    "routed_hidden": 11,
+    "routed_ambiguous": 23,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "2a47923ce3e1",
+      "ad9f89848aa7",
+      "b5793e01a39f",
+      "4a1a165349cd",
+      "3d088f53751b",
+      "32494169bd86",
+      "4b0f301e30e4",
+      "39cb853e1607",
+      "5976af860df5",
+      "3136da5e7d65",
+      "65d6eae44393",
+      "dbc22db138df",
+      "1d9034f98bd6",
+      "0bd1d23147d4",
+      "d0fbb0eef6a9",
+      "d0844cdc7c5a",
+      "6942d7f0a335",
+      "504365aa02ad",
+      "c671db96e06b",
+      "577182308232",
+      "61119e9809f6",
+      "2dd1b2d1fec6",
+      "9f525aa78aa2",
+      "8a17e2cb8ff0",
+      "f916dfaa1ede",
+      "4238ba4472ce",
+      "b265fe1c47dc",
+      "b0cb75820225",
+      "eea77ce82d1b",
+      "8bd8958a0378",
+      "629a44d94ec7",
+      "11389dd6501d",
+      "991c5f838f54",
+      "a11d12c369c9",
+      "ccec3f8cb121",
+      "8477fc0444be",
+      "31149768f58a",
+      "5e9c98298a5c",
+      "feab7e6ba7b1",
+      "df0e47d16e10",
+      "6aac71d14992",
+      "8f938ad31ca7",
+      "121e784604f1",
+      "511dd0945877",
+      "988709d10d34",
+      "b329b24153d1",
+      "7f3628b36812",
+      "5d16230ef695",
+      "1ffe72528b7f",
+      "35cad6f19587",
+      "ad81279bec87",
+      "049c8156afa5",
+      "f9e8d28a8da7",
+      "cb815ee43028"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790165980.912958,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "515f5722f10a3341838ef5293c4507ab0b8d7e5e",
+  "review_verdict": "approve",
+  "merged_into": "goal/T-0991",
+  "sha": "10121f9bc7a234e9b37d2c1158c784b65c8b9421",
+  "merged_at": 1790167128.743917,
+  "changed_files": [
+    "docs/hermes-hardening/14-skill-hardening.md",
+    "orchestrator/cli.py",
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "tests/test_cli.py",
+    "tests/test_skill_discovery.py",
+    "tests/test_skills_registry.py"
+  ]
+}

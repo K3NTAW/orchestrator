@@ -1,0 +1,48 @@
+{
+  "id": "T-0106",
+  "parent": "T-0073",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "C-O5: executor image and host runbook \u2014 Dockerfile, compose file and the human steps to log the accounts in, with nothing secret in the repo",
+  "spec": "Why: the executor runs on kenta-server (Ubuntu 20.04, Docker) in its own container so Claude Code, Codex, uv, git and gh get a current userland and the credentials live in mounted host files. Dockerfile: FROM ubuntu:24.04; install ca-certificates, curl, git, gh (GitHub CLI apt repo), python3, uv (official installer), Claude Code via the native installer documented at code.claude.com/docs/en/setup (not npm), Codex CLI from the openai/codex GitHub release for linux x86_64 (pin the version in an ARG with a comment on how to bump; verify `codex --version` in the build); copy this repo to /opt/orchestrator and `uv sync --frozen`; entrypoint `uv run orchestrator serve --host 0.0.0.0 --port 8090`; non-root user `orch` with HOME=/home/orch. docker-compose.executor.yml: service `orchestrator-executor`, build ., volumes ./work:/work, ${ORCH_CREDS}/claude-a:/home/orch/.claude-a, ${ORCH_CREDS}/claude-b:/home/orch/.claude-b, ${ORCH_CREDS}/codex:/home/orch/.codex, ${ORCH_CREDS}/gh:/home/orch/.config/gh; env_file ./executor.env (gitignored; holds ORCH_SERVICE_TOKEN, CLAUDE_OAUTH_TOKEN_A, CLAUDE_OAUTH_TOKEN_B, ORCH_NOTIFY_URL, GH_READ_TOKEN); healthcheck curl /healthz; restart unless-stopped; no published ports (reached on the home docker network by the kgpt module). .dockerignore: wt/, .venv/, .orchestrator/runs, .orchestrator/bus.sqlite*, graphify-out/. docs/executor-host.md runbook, written for the human: prerequisites; create the creds dirs on the host; on the laptop run `CLAUDE_CONFIG_DIR=~/.claude-a claude setup-token` and the same for b, paste each token into executor.env (never into git); `codex login --device-auth` inside the container once (docker compose run --rm orchestrator-executor codex login --device-auth) so auth.json lands in the mounted volume; `gh auth login` likewise; pool.toml on the host: set oauth_token_env = \"CLAUDE_OAUTH_TOKEN_A\" / \"_B\" (from C-O2a) and role secrets to env: form; repos.toml entry for kgpt; smoke test with curl against /healthz and a POST /goals on a scratch repo; how to rotate a token; what to check when a goal does not start (planner log path). Add executor.env to .gitignore. README.md: link the runbook from \"Use on a project\".\n(Recreated from T-0099: depends_on re-pointed at the recreated C-O4)",
+  "inputs": [],
+  "acceptance": [
+    "`docker build .` succeeds locally (record the image size in the task result) and `docker run --rm <image> sh -c 'claude --version && codex --version && uv --version && gh --version'` prints four versions",
+    "docker-compose.executor.yml validates with `docker compose -f docker-compose.executor.yml config` given a dummy executor.env, publishes no ports, and mounts exactly the four credential dirs plus ./work",
+    "docs/executor-host.md contains every human step above, and the words token, secret or password never appear next to a value anywhere in the diff; executor.env is in .gitignore",
+    "`uv run python -m unittest discover -q tests` still green (tests/test_install.py may assert the new .dockerignore lines are NOT copied to targets)"
+  ],
+  "scope": [
+    "Dockerfile",
+    "docker-compose.executor.yml",
+    ".dockerignore",
+    "docs/executor-host.md",
+    ".gitignore",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0079",
+    "T-0105"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "no_new_dependencies": true,
+    "recreated_from": "T-0099"
+  },
+  "status": "failed",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1789734726.881187,
+      "status": "failed",
+      "reason": "superseded by T-0117: re-pointed at the recreated C-O4"
+    }
+  ],
+  "reason": "superseded by T-0117: re-pointed at the recreated C-O4"
+}

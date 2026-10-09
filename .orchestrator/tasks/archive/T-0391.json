@@ -1,0 +1,113 @@
+{
+  "id": "T-0391",
+  "parent": "T-0353",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: H5b: ensure_worktree reuses an existing task branch and spawn_scout reports spawn errors; dispatch re-spawns queued review and spec_review tasks whose worker died; handover snapshot rewritten only when goal state changed",
+  "spec": "Build on goal/T-0353 after H6 (T-0359) and H8 (T-0360) so daemon.py and spawn.py rebase cleanly. Evidence (gotchas 2026-09-19 23:18 and 2026-09-20 12:40): review T-0332 was requeued by reconcile_dead with reason \"process died; requeued\" and never ran again because daemon.dispatch iterates queued execute tasks only; spawn_scout(T-0354) answered \"spawned\" three times while ensure_worktree (spawn.py:60-71) failed on git worktree add -b for a branch left by an earlier dead spawn; handover.write runs every 15 minutes and rewrote plan.md 6 times on 2026-09-19 without state changes.\n1. spawn.ensure_worktree: when wt/<id> is missing but branch task/<id> exists, run git worktree add wt/<id> task/<id> (no -b); when the worktree exists but is not registered (stale), git worktree prune first. Errors propagate: mcp.spawn_scout, spawn_review and spawn_spec_review reply {status: error, reason} instead of \"spawned\" when the spawn thread fails before the claim, and the failure is logged as a run row with outcome spawn_error.\n2. daemon.dispatch: after the execute loop, re-spawn queued review and spec_review tasks whose pipeline is empty and whose events show a \"process died\" requeue (or that were never claimed for longer than [daemon].respawn_after_s, default 120), respecting free Claude worker slots; stamp respawned_at in pipeline to do it once per requeue.\n3. handover.write: compute a snapshot hash over the goal state it renders (task ids, statuses, hold reasons, merged_into); rewrite plan.md only when the hash differs from the last written one (kept in handover_state.json); the daemon still ticks every 15 minutes but an unchanged state produces no write and no commit churn.\nTests: tests/test_spawn.py::test_ensure_worktree_reuses_existing_task_branch; tests/test_mcp.py::test_spawn_scout_reports_error_when_worktree_fails; tests/test_daemon.py::test_dispatch_respawns_requeued_review_once, ::test_dispatch_respawns_unclaimed_spec_review_after_delay; tests/test_handover.py::test_unchanged_state_writes_nothing. Keep every existing test green; .claude/hooks/tests-green.sh exits 0; git add -A and commit with the task id; report sha and failures only.",
+  "inputs": [
+    "T-0363"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_ensure_worktree_reuses_existing_task_branch passes",
+    "tests/test_mcp.py::test_spawn_scout_reports_error_when_worktree_fails passes",
+    "tests/test_daemon.py::test_dispatch_respawns_requeued_review_once and ::test_dispatch_respawns_unclaimed_spec_review_after_delay pass",
+    "tests/test_handover.py::test_unchanged_state_writes_nothing passes",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/mcp.py",
+    "orchestrator/daemon.py",
+    "orchestrator/handover.py",
+    "tests/test_spawn.py",
+    "tests/test_mcp.py",
+    "tests/test_daemon.py",
+    "tests/test_handover.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0391",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "comments": [
+      {
+        "path": "tests/",
+        "line": 0,
+        "issue": "None of the five acceptance-criteria tests exist anywhere in the repo (test_ensure_worktree_reuses_existing_task_branch, test_spawn_scout_reports_error_when_worktree_fails, test_dispatch_respawns_requeued_review_once, test_dispatch_respawns_unclaimed_spec_review_after_delay, test_unchanged_state_writes_nothing). They'd fail pytest collection outright. The diff only touched two pre-existing tests in test_handover.py.",
+        "severity": "high"
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "line": 561,
+        "issue": "`if pipeline or pipeline.get(\"respawned_at\"): continue` is dead-code logic equivalent to `if pipeline: continue` \u2014 it blocks respawn for any task with leftover unrelated pipeline keys (e.g. a stale spec_review_error/dispatch_error stamp), not just tasks already marked respawned_at, defeating the stated per-requeue-stamp purpose.",
+        "severity": "med"
+      }
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789906823.264597,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0391",
+      "claimed_at": 1789906823.26413
+    },
+    {
+      "ts": 1789906823.26594,
+      "account": "B"
+    },
+    {
+      "ts": 1789906823.3102841,
+      "pid": 64325,
+      "account": "B"
+    },
+    {
+      "ts": 1789907049.821152,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "comments": [
+          {
+            "path": "tests/",
+            "line": 0,
+            "issue": "None of the five acceptance-criteria tests exist anywhere in the repo (test_ensure_worktree_reuses_existing_task_branch, test_spawn_scout_reports_error_when_worktree_fails, test_dispatch_respawns_requeued_review_once, test_dispatch_respawns_unclaimed_spec_review_after_delay, test_unchanged_state_writes_nothing). They'd fail pytest collection outright. The diff only touched two pre-existing tests in test_handover.py.",
+            "severity": "high"
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "line": 561,
+            "issue": "`if pipeline or pipeline.get(\"respawned_at\"): continue` is dead-code logic equivalent to `if pipeline: continue` \u2014 it blocks respawn for any task with leftover unrelated pipeline keys (e.g. a stale spec_review_error/dispatch_error stamp), not just tasks already marked respawned_at, defeating the stated per-requeue-stamp purpose.",
+            "severity": "med"
+          }
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789907049.823728,
+      "review_verdict": "request_changes"
+    }
+  ],
+  "claimed_at": 1789906823.26413,
+  "account": "B",
+  "pid": 64325,
+  "review_verdict": "request_changes"
+}

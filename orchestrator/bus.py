@@ -1,5 +1,5 @@
 """Task bus: SQLite hot index + one JSON file per task (git-backed via the orchestrator-state worktree)."""
-import atexit, contextlib, fcntl, hashlib, json, re, sqlite3, subprocess, sys, threading, time
+import atexit, contextlib, fcntl, hashlib, json, os, re, sqlite3, subprocess, sys, threading, time
 from datetime import date
 from pathlib import Path
 from . import ROOT, STATE
@@ -7,6 +7,12 @@ from . import ROOT, STATE
 TASKS = STATE / "tasks"
 RUNS = STATE / "runs"
 MAX_RESULT_CHARS = 6000  # ~1,500 tokens
+ARCHIVE_DIR = "archive"
+ARCHIVE_AFTER_S = 7 * 86400
+CLOSED_STATUSES = {"done", "merged", "superseded", "failed"}
+# Bound at import: bus renames are bus-internal plumbing, so a caller that patches os.replace to count its own
+# writes (handover's unchanged-state check) does not also count every bus._save.
+_replace = os.replace
 ROLES = {"scout", "triage", "execute", "review", "challenge", "spec_review"}
 STATUSES = {"queued", "held", "running", "done", "failed"}
 
@@ -74,11 +80,19 @@ def db():
 
 
 def _save(t):
+    """Write-then-rename so a reader never sees a half-written file; an active snapshot sees the write too."""
     with locked():
         TASKS.mkdir(parents=True, exist_ok=True)
-        (TASKS / f"{t['id']}.json").write_text(json.dumps(t, indent=2) + "\n")
+        text = json.dumps(t, indent=2) + "\n"
+        path = TASKS / f"{t['id']}.json"
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(text)
+        _replace(tmp, path)
         db().execute("insert or replace into tasks values(?,?,?,?,?,?)",
                      (t["id"], t["status"], t["role"], t["tier"], t.get("assigned_to"), time.time()))
+        snap = _snapshot
+        if snap is not None:
+            snap.put(json.loads(text))
 
 
 def _event(tid, kind, data=None):
@@ -86,15 +100,19 @@ def _event(tid, kind, data=None):
 
 
 def get(tid):
+    """One task from disk; an archived id falls back to tasks/archive/."""
     with locked():
         p = TASKS / f"{tid}.json"
         if not p.exists():
-            raise KeyError(tid)
+            p = TASKS / ARCHIVE_DIR / f"{tid}.json"
+            if not p.exists():
+                raise KeyError(tid)
         return json.loads(p.read_text())
 
 
 def next_id():
-    ids = sorted(int(p.stem[2:]) for p in TASKS.glob("T-*.json")) if TASKS.exists() else []
+    paths = [*TASKS.glob("T-*.json"), *(TASKS / ARCHIVE_DIR).glob("T-*.json")] if TASKS.exists() else []
+    ids = sorted(int(p.stem[2:]) for p in paths)
     return f"T-{(ids[-1] + 1) if ids else 1:04d}"
 
 
@@ -246,30 +264,210 @@ def _compact_row(t):
 
 
 def read(tid=None, status=None, status_not=None, role=None, compact=False, *, parent=None, ids=None):
+    """Hot tasks (archived ones are skipped). Inside snapshot() on the owning thread this filters the in-memory
+    snapshot; otherwise it scans the files under one bus lock instead of one flock per task."""
     if tid:
         return get(tid)
+    snap = _active_snapshot()
+    if snap is not None:
+        filtered = snap.select(status=status, status_not=status_not, role=role, parent=parent, ids=ids)
+    else:
+        filtered = [t for t in _scan(ids) if (parent is None or t.get("parent") == parent)
+                    and (status is None or t["status"] == status)
+                    and (status_not is None or t["status"] != status_not) and (role is None or t["role"] == role)]
+    return [_compact_row(t) for t in filtered] if compact else filtered
+
+
+def _scan(ids=None):
     rows = [(task_id,) for task_id in sorted(set(ids))] if ids is not None else db().execute("select id from tasks order by id").fetchall()
     out = []
     skipped = 0
-    for row in rows:
-        task_id = row[0]
-        if not isinstance(task_id, str) or not re.fullmatch(r"T-[0-9]+", task_id):
-            skipped += 1
-            continue
-        try:
-            task = get(task_id)
-            if not isinstance(task, dict) or not {"id", "status", "role"} <= task.keys():
+    with locked():
+        for row in rows:
+            task_id = row[0]
+            if not isinstance(task_id, str) or not re.fullmatch(r"T-[0-9]+", task_id):
                 skipped += 1
                 continue
-            out.append(task)
-        except (KeyError, OSError, ValueError, TypeError):
-            skipped += 1
+            try:
+                task = _load_hot(task_id) if ids is None else get(task_id)
+                if not isinstance(task, dict) or not {"id", "status", "role"} <= task.keys():
+                    skipped += 1
+                    continue
+                out.append(task)
+            except (KeyError, OSError, ValueError, TypeError):
+                skipped += 1
     if skipped:
         print(f"bus.read: skipped {skipped} unreadable rows", file=sys.stderr)
-    filtered = [t for t in out if (parent is None or t.get("parent") == parent)
-                and (status is None or t["status"] == status)
-                and (status_not is None or t["status"] != status_not) and (role is None or t["role"] == role)]
-    return [_compact_row(t) for t in filtered] if compact else filtered
+    return out
+
+
+_parsed = {}
+
+
+def _load_hot(task_id):
+    """A hot task, reusing the last parse while the file's (mtime, size, inode) is unchanged: json.loads of the
+    multi-MB event logs dominates a scan. _save replaces files by rename, so every write re-parses. The caller
+    gets its own top-level dict; nested values are shared with the cache and must not be mutated in place."""
+    path = TASKS / f"{task_id}.json"
+    st = path.stat()   # FileNotFoundError (an OSError) for an index row without a hot file
+    key = (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
+    cached = _parsed.get(task_id)
+    if cached is None or cached[0] != key:
+        cached = _parsed[task_id] = (key, json.loads(path.read_text()))
+    return dict(cached[1])
+
+
+class Snapshot:
+    """One in-memory copy of the hot set for a daemon tick, indexed by id, status, role, parent and inputs[0].
+    _save writes through, so a stage sees its own (and its worker threads') writes; other processes' writes show
+    up next tick. Rows handed out are shallow copies."""
+
+    def __init__(self, tasks):
+        self.by_id = {t["id"]: t for t in tasks}
+        self._index = None
+
+    def put(self, task):
+        with _snapshot_lock:
+            self.by_id[task["id"]] = task
+            self._index = None
+
+    def drop(self, tid):
+        with _snapshot_lock:
+            self.by_id.pop(tid, None)
+            self._index = None
+
+    def index(self):
+        with _snapshot_lock:
+            if self._index is None:
+                idx = {"all": [], "status": {}, "role": {}, "parent": {}, "input": {}}
+                for tid in sorted(self.by_id):
+                    t = self.by_id[tid]
+                    idx["all"].append(t)
+                    idx["status"].setdefault(t.get("status"), []).append(t)
+                    idx["role"].setdefault(t.get("role"), []).append(t)
+                    idx["parent"].setdefault(t.get("parent"), []).append(t)
+                    first = (t.get("inputs") or [None])[0]
+                    if isinstance(first, str):
+                        idx["input"].setdefault(first, []).append(t)
+                self._index = idx
+            return self._index
+
+    def select(self, status=None, status_not=None, role=None, parent=None, ids=None, input0=None):
+        idx = self.index()
+        if ids is not None:
+            pool = [self.by_id[i] for i in sorted(set(ids)) if i in self.by_id]
+        elif input0 is not None:
+            pool = idx["input"].get(input0, [])
+        elif parent is not None:
+            pool = idx["parent"].get(parent, [])
+        elif status is not None:
+            pool = idx["status"].get(status, [])
+        elif role is not None:
+            pool = idx["role"].get(role, [])
+        else:
+            pool = idx["all"]
+        return [dict(t) for t in pool if (parent is None or t.get("parent") == parent)
+                and (status is None or t.get("status") == status)
+                and (status_not is None or t.get("status") != status_not) and (role is None or t.get("role") == role)
+                and (input0 is None or (t.get("inputs") or [None])[0] == input0)]
+
+
+_snapshot = None
+_snapshot_owner = None
+_snapshot_lock = threading.RLock()
+
+
+def _active_snapshot():
+    snap = _snapshot
+    return snap if snap is not None and _snapshot_owner == threading.get_ident() else None
+
+
+@contextlib.contextmanager
+def snapshot():
+    """Read the bus once (one bus.read()) and serve every later read() on this thread from that copy until exit.
+    Nested use reuses the outer snapshot."""
+    global _snapshot, _snapshot_owner
+    if _active_snapshot() is not None:
+        yield _snapshot
+        return
+    if _snapshot is not None:   # another thread holds one; read straight from disk
+        yield Snapshot(read())
+        return
+    snap = Snapshot(read())
+    _snapshot, _snapshot_owner = snap, threading.get_ident()
+    try:
+        yield snap
+    finally:
+        _snapshot, _snapshot_owner = None, None
+
+
+def children(tid, role=None):
+    """Tasks whose inputs[0] is tid (reviews, spec reviews), from the active snapshot when there is one."""
+    snap = _active_snapshot()
+    if snap is not None:
+        return snap.select(role=role, input0=tid)
+    return [t for t in read(role=role) if (t.get("inputs") or [])[:1] == [tid]]
+
+
+def _last_touched(t):
+    stamps = [t.get("created_at") or 0]
+    stamps += [e.get("ts") or 0 for e in t.get("events") or [] if isinstance(e, dict)]
+    return max(s for s in stamps if isinstance(s, (int, float)))
+
+
+def archive_candidates(tasks, now=None, max_age_s=ARCHIVE_AFTER_S):
+    """Closed, non-goal tasks untouched for max_age_s whose parent goal is done."""
+    now = time.time() if now is None else now
+    by_id = {t["id"]: t for t in tasks}
+    out = []
+    for t in tasks:
+        if t.get("status") not in CLOSED_STATUSES or (t.get("constraints") or {}).get("goal"):
+            continue
+        goal = by_id.get(t.get("parent"))
+        if goal is None:
+            try:
+                goal = get(t["parent"]) if t.get("parent") else None
+            except (KeyError, OSError, ValueError):
+                goal = None
+        if not goal or goal.get("status") != "done":
+            continue
+        if now - _last_touched(t) >= max_age_s:
+            out.append(t["id"])
+    return out
+
+
+def archive(tasks=None, now=None, max_age_s=ARCHIVE_AFTER_S):
+    """Move old closed tasks to tasks/archive/ (a move, never a delete) and drop their index rows, so read()
+    skips them while get() still finds them. Returns the archived ids."""
+    tasks = read() if tasks is None else tasks
+    ids = archive_candidates(tasks, now, max_age_s)
+    if not ids:
+        return []
+    moved = []
+    with locked():
+        dest = TASKS / ARCHIVE_DIR
+        dest.mkdir(parents=True, exist_ok=True)
+        for tid in ids:
+            src = TASKS / f"{tid}.json"
+            if not src.exists():
+                continue
+            _replace(src, dest / src.name)
+            moved.append(tid)
+        c = db()
+        c.execute("begin")   # one transaction, not one commit per row
+        try:
+            c.executemany("delete from tasks where id=?", [(tid,) for tid in moved])
+        except BaseException:
+            c.execute("rollback")
+            raise
+        c.execute("commit")
+        for tid in moved:
+            _parsed.pop(tid, None)
+            if _snapshot is not None:
+                _snapshot.drop(tid)
+    if moved:
+        print(f"bus.archive: moved {len(moved)} closed tasks to {dest}", file=sys.stderr)
+    return moved
 
 
 def reindex():

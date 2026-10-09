@@ -1,0 +1,384 @@
+{
+  "id": "T-0446",
+  "parent": "T-0445",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 5,
+  "title": "Scout I-S1 (telemetry inventory at Phase H code, READ wt/goal-T-0353): every field where tokens, usd, calls, turns, timestamps and outcomes are recorded per role, what scorecard computes today, and the field-by-field gap against the P0 metric list",
+  "spec": "Read-only. Work in /Users/k3ntaw/code/orchestrator/wt/goal-T-0353 (Phase H head 0d7bf09; the main checkout is older, ignore it). Program: .orchestrator/phase-i-program.md section P0. Deliver a matrix, one line per item, each with path:line.\n1. Recording points: bus.log_run and every caller (spawn.run_worker, executor.start/reply, jev usage, planner_usage from transcripts, goals.launch_planner, planner_runs records): which fields each row carries today (role, task, goal, executor/model, tier, account, in/out/cache tokens, usd, turns, calls, attempt, decision kind/key, route reason, client/policy version, started/finished timestamps, exit status), and which rows lack which fields. Where memory recall and Jev usage are or are not recorded.\n2. Outcome stamps: pipeline stamps and bus events that mark creation, dispatch, first gate pass (gated_at), gate_red, review verdicts, fix-round lineage (constraints.fix_round_for, auto_round), merge (merged_at, merged_into), acceptance (PR); which of these carry timestamps usable for time-to-first-green and time-to-accepted.\n3. Scorecard today: what build/by_task/by_goal/by_role/--planner compute (tokens per accepted goal G1b, waste and turns E4, median/max H1, premium usage H2, fix rounds, Jev buckets), their input files and exact formulas; existing tests in tests/test_scorecard.py that pin them.\n4. Gap table: for each P0 metric (tokens per accepted task, per accepted goal, tokens to first green, first-pass success rate, fix-round rate, avg fix rounds, fix-round tokens, cost per accepted task/goal, calls and turns per accepted task, time to first green, time to accepted, model distribution, pipeline amplification with the Planner/Scout/Execution/Fix/Spec review/Code review/Jev/Other breakdown, attribution by complexity band and task type, unknown bucket) say: computable now from existing rows (formula) / needs a new field (which row, which writer) / needs a new stamp. Name the smallest set of new fields.\nOutput under 1,500 tokens, confidence per section, provenance repo.",
+  "inputs": [],
+  "acceptance": [
+    "matrix of recording points with fields present and missing, each with path:line",
+    "outcome stamps and their timestamps listed with path:line",
+    "scorecard formulas and pinning tests listed",
+    "gap table covering every P0 metric with computable-now / new-field / new-stamp and the smallest new-field set"
+  ],
+  "scope": [
+    "orchestrator/bus.py",
+    "orchestrator/scorecard.py",
+    "orchestrator/spawn.py",
+    "orchestrator/executor.py",
+    "orchestrator/daemon.py",
+    "orchestrator/planner_runs.py",
+    "orchestrator/goals.py",
+    "orchestrator/jev.py",
+    "orchestrator/jev_gate.py",
+    "orchestrator/cli.py",
+    "tests/test_scorecard.py",
+    ".orchestrator/runs/"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 30,
+    "timeout_s": 1200,
+    "cwd": "wt/goal-T-0353"
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0446",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "bus.log_run appends one JSON line to runs/<date>.jsonl per call; fields kept: attempt, decision_kind, payload_key, route, route_reason, client_version, policy_version (dropped if None), plus goal_id/provider auto-set when task exists",
+        "evidence": [
+          "orchestrator/bus.py:269-284"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "spawn.run_claude (Claude workers) logs task,role,tier,account,duration_s,outcome,usd,turns,provider=claude,executor,complexity,packet_meta + raw usage(input/output/cache_read_input_tokens); on no_cli/rate_limit rows usd/turns/tokens are absent",
+        "evidence": [
+          "orchestrator/spawn.py:409-439"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "executor._run (Codex) logs task,role=execute,tier=executor id,account=codex,provider=codex,duration_s,outcome,executor,complexity + normalized tokens via _tokens(); no usd field at all (Codex rows never carry cost)",
+        "evidence": [
+          "orchestrator/executor.py:107-140"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "mcp._bg only logs a spawn_error row (task,role,tier,complexity,outcome,reason) on worktree-creation failure; the success path spawns a thread and logs nothing itself, relying on spawn.run_worker's own log_run calls",
+        "evidence": [
+          "orchestrator/mcp.py:50-58"
+        ],
+        "confidence": 0.75,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "planner_runs logs role=planner_decision with tier=planner, account, provider=claude, usd, tokens, raw usage+normalized, launch_id/route/reason/evidence/cheaper_steps/decision_requested/policy_version/prompt_hash/payload_key, route_reason, decision_kind, attempt, started_at, session_id -- richest row shape of any caller; rows are skipped entirely (never call log_run) when log missing, log unreadable, no JSON found, or usage empty (usage_logged=False)",
+        "evidence": [
+          "orchestrator/planner_runs.py:570-609"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "goals.launch_planner starts the Planner session but does not itself call bus.log_run; Planner's own token usage is captured later by planner_runs (transcript-derived) and separately by pool._save_planner_account into planner_usage.json (day_tokens/window_tokens), a pool-wide daily tally not tied to a goal/task",
+        "evidence": [
+          "orchestrator/goals.py:322,430",
+          "orchestrator/scorecard.py:448-459"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Jev gate/rank usage never goes through bus.log_run: gate calls write to runs/jev/gate.jsonl (jev_gate.py) and generic Jev usage writes to runs/jev/<date>.jsonl (jev.py), both keyed on caller not role/task-role, so by_task/by_goal must read them as a separate code path, not via the runs/*.jsonl reader",
+        "evidence": [
+          "orchestrator/jev.py:7-10,20",
+          "orchestrator/jev_gate.py:16"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Memory recall (claude-mem/recall.sh) is not recorded anywhere in runs/*.jsonl or bus fields -- no log_run caller or bus.update field for recall cost/hits exists in bus.py, daemon.py, planner_runs.py, or mcp.py",
+        "evidence": [
+          "orchestrator/bus.py:269-284 (no recall caller found)"
+        ],
+        "confidence": 0.6,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Outcome stamps live in task.pipeline{} written by daemon.stamp/complete: dispatched_at, spec_review_at/spec_review_held_at, gated_at (held on gate_red/no-commit/missing worktree, else success), review_held_at, merged_at, plus *_done and *_lease companions; all are time.time() epoch floats usable for time-to-first-green (created_at proxy via bus_events min ts, or task file mtime) through gated_at, and time-to-accepted through merged_at or PR open",
+        "evidence": [
+          "orchestrator/daemon.py:268-292,534-538,801-842,948-958"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Fix-round lineage: constraints.fix_round_for names the held ancestor task, constraints.auto_round is the round number; daemon counts rounds via sum() over the chain, and on merge the ancestor is marked merged_into the same target as its fix-round descendant",
+        "evidence": [
+          "orchestrator/daemon.py:150,172,197-198,863-870"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "created_at is not a stored task field; daemon derives it ad hoc from min(bus_events timestamps) falling back to the task JSON file's mtime, only inside the respawn check, not exposed for scorecard use",
+        "evidence": [
+          "orchestrator/daemon.py:576-581"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Acceptance/PR stamp: task_pr_url/goals reads pr_url off the goal task; planner_runs._open_pr calls gh pr create and stores pr_url in the goal-closed result, but there is no pipeline timestamp for PR-open time, only merged_at per child task",
+        "evidence": [
+          "orchestrator/goals.py:467,479",
+          "orchestrator/planner_runs.py:1262-1322"
+        ],
+        "confidence": 0.7,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "scorecard.build() (--by executor/tier) computes per-executor merged/failed/rounds_avg/usd/tokens/held_usage_limit from runs/*.jsonl (execute rows only) joined to tasks/T-*.json (merged_into, status, rounds, review_verdict, complexity band); it has no goal or per-role breakdown",
+        "evidence": [
+          "orchestrator/scorecard.py:186-249"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Where exactly is task.created_at expected to be stamped \u2014 bus_create_task or daemon's first tick?",
+      "Is memory-recall cost intentionally out of scope for P0, or a real gap to fill?"
+    ],
+    "suggested_next": [
+      "Add pipeline.created_at stamp in bus.py's task-creation path",
+      "Add turns + estimated usd to executor.py's Codex log_run call",
+      "Wire JEV_USD_PER_M into by_goal's jev_by_goal to get Jev cost, not just tokens"
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 11508,
+      "trimmed": {
+        "findings": 12
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789918563.6323788,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0446",
+      "claimed_at": 1789918563.632025
+    },
+    {
+      "ts": 1789918563.63361,
+      "account": "B"
+    },
+    {
+      "ts": 1789918563.665292,
+      "pid": 58910,
+      "account": "B"
+    },
+    {
+      "ts": 1789918696.746521,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "bus.log_run appends one JSON line to runs/<date>.jsonl per call; fields kept: attempt, decision_kind, payload_key, route, route_reason, client_version, policy_version (dropped if None), plus goal_id/provider auto-set when task exists",
+            "evidence": [
+              "orchestrator/bus.py:269-284"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "spawn.run_claude (Claude workers) logs task,role,tier,account,duration_s,outcome,usd,turns,provider=claude,executor,complexity,packet_meta + raw usage(input/output/cache_read_input_tokens); on no_cli/rate_limit rows usd/turns/tokens are absent",
+            "evidence": [
+              "orchestrator/spawn.py:409-439"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "executor._run (Codex) logs task,role=execute,tier=executor id,account=codex,provider=codex,duration_s,outcome,executor,complexity + normalized tokens via _tokens(); no usd field at all (Codex rows never carry cost)",
+            "evidence": [
+              "orchestrator/executor.py:107-140"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "mcp._bg only logs a spawn_error row (task,role,tier,complexity,outcome,reason) on worktree-creation failure; the success path spawns a thread and logs nothing itself, relying on spawn.run_worker's own log_run calls",
+            "evidence": [
+              "orchestrator/mcp.py:50-58"
+            ],
+            "confidence": 0.75,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "planner_runs logs role=planner_decision with tier=planner, account, provider=claude, usd, tokens, raw usage+normalized, launch_id/route/reason/evidence/cheaper_steps/decision_requested/policy_version/prompt_hash/payload_key, route_reason, decision_kind, attempt, started_at, session_id -- richest row shape of any caller; rows are skipped entirely (never call log_run) when log missing, log unreadable, no JSON found, or usage empty (usage_logged=False)",
+            "evidence": [
+              "orchestrator/planner_runs.py:570-609"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "goals.launch_planner starts the Planner session but does not itself call bus.log_run; Planner's own token usage is captured later by planner_runs (transcript-derived) and separately by pool._save_planner_account into planner_usage.json (day_tokens/window_tokens), a pool-wide daily tally not tied to a goal/task",
+            "evidence": [
+              "orchestrator/goals.py:322,430",
+              "orchestrator/scorecard.py:448-459"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Jev gate/rank usage never goes through bus.log_run: gate calls write to runs/jev/gate.jsonl (jev_gate.py) and generic Jev usage writes to runs/jev/<date>.jsonl (jev.py), both keyed on caller not role/task-role, so by_task/by_goal must read them as a separate code path, not via the runs/*.jsonl reader",
+            "evidence": [
+              "orchestrator/jev.py:7-10,20",
+              "orchestrator/jev_gate.py:16"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Memory recall (claude-mem/recall.sh) is not recorded anywhere in runs/*.jsonl or bus fields -- no log_run caller or bus.update field for recall cost/hits exists in bus.py, daemon.py, planner_runs.py, or mcp.py",
+            "evidence": [
+              "orchestrator/bus.py:269-284 (no recall caller found)"
+            ],
+            "confidence": 0.6,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Outcome stamps live in task.pipeline{} written by daemon.stamp/complete: dispatched_at, spec_review_at/spec_review_held_at, gated_at (held on gate_red/no-commit/missing worktree, else success), review_held_at, merged_at, plus *_done and *_lease companions; all are time.time() epoch floats usable for time-to-first-green (created_at proxy via bus_events min ts, or task file mtime) through gated_at, and time-to-accepted through merged_at or PR open",
+            "evidence": [
+              "orchestrator/daemon.py:268-292,534-538,801-842,948-958"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Fix-round lineage: constraints.fix_round_for names the held ancestor task, constraints.auto_round is the round number; daemon counts rounds via sum() over the chain, and on merge the ancestor is marked merged_into the same target as its fix-round descendant",
+            "evidence": [
+              "orchestrator/daemon.py:150,172,197-198,863-870"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "created_at is not a stored task field; daemon derives it ad hoc from min(bus_events timestamps) falling back to the task JSON file's mtime, only inside the respawn check, not exposed for scorecard use",
+            "evidence": [
+              "orchestrator/daemon.py:576-581"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Acceptance/PR stamp: task_pr_url/goals reads pr_url off the goal task; planner_runs._open_pr calls gh pr create and stores pr_url in the goal-closed result, but there is no pipeline timestamp for PR-open time, only merged_at per child task",
+            "evidence": [
+              "orchestrator/goals.py:467,479",
+              "orchestrator/planner_runs.py:1262-1322"
+            ],
+            "confidence": 0.7,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "scorecard.build() (--by executor/tier) computes per-executor merged/failed/rounds_avg/usd/tokens/held_usage_limit from runs/*.jsonl (execute rows only) joined to tasks/T-*.json (merged_into, status, rounds, review_verdict, complexity band); it has no goal or per-role breakdown",
+            "evidence": [
+              "orchestrator/scorecard.py:186-249"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Where exactly is task.created_at expected to be stamped \u2014 bus_create_task or daemon's first tick?",
+          "Is memory-recall cost intentionally out of scope for P0, or a real gap to fill?"
+        ],
+        "suggested_next": [
+          "Add pipeline.created_at stamp in bus.py's task-creation path",
+          "Add turns + estimated usd to executor.py's Codex log_run call",
+          "Wire JEV_USD_PER_M into by_goal's jev_by_goal to get Jev cost, not just tokens"
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 11508,
+          "trimmed": {
+            "findings": 12
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789918563.632025,
+  "account": "B",
+  "pid": 58910
+}

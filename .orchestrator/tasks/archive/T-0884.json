@@ -1,0 +1,947 @@
+{
+  "id": "T-0884",
+  "created_at": 1790109049.1493871,
+  "parent": "T-0861",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S7: external skill discovery, quarantine and static security inspection (metadata first, no execution): `orchestrator skills discover|inspect|import`, provenance preserved, quarantined skills invisible to routing (v3)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P3, P4, P31, P32, P33, P34 (P37 stage 7). Depends on T-0863 (skills_registry with states discovered/quarantined/testing and state.json history, provenance field, content hash). Nothing here executes external content; discovery retrieves static text only.\nDo:\n1. orchestrator/skill_discovery.py (new). Sources: (a) a local path (another repository checkout) scanned for SKILL.md files under skills/, .claude/skills/, .codex/skills/; (b) a GitHub repository given as owner/repo[@ref] read through the GitHub contents API with `gh api` (static file retrieval only; no clone, no checkout, no script execution; a hard cap of 50 files and 200 KB per skill; unreachable or rate-limited \u2192 recorded error, never an exception into the CLI). Each candidate becomes a registry record with provenance \"external\" (or \"repository\" for a local path inside a trusted repo listed in pool.toml `[skills] trusted_repos`), trust \"untrusted\", state \"discovered\", and the P32 provenance block: source_repo, source_path, source_commit (the ref's sha), retrieved_at, license (from a LICENSE file when present, else None), content_hash, modifications [] (filled by compaction later). The skill body is stored under STATE/skills/quarantine/<id>/ (never under skills/ or .claude/skills), so it cannot be loaded by any worker.\n2. `orchestrator skills discover <path|owner/repo[@ref]>` lists the candidates and stores them as discovered; `orchestrator skills quarantine <id>` moves discovered \u2192 quarantined (P2 transition with reason); import of a builtin path is refused (already registered).\n3. Static inspection (P4): `skill_discovery.inspect(id)` runs deterministic checks over the quarantined text and any scripts/ files: shell commands and script files (any executable or fenced shell block), network access (curl, wget, http(s) URLs, raw sockets, pip/npm install, package managers), file writes outside the task worktree (absolute paths, ~, /etc, .git), credential access (env var names containing KEY/TOKEN/SECRET/PASSWORD, keychain, 1password, .env), MCP dependencies (mcp__ tool ids, server names), destructive operations (rm -rf, git push --force, reset --hard, DROP, truncate), prompt-injection and hidden instructions (phrases like \"ignore previous\", \"you are now\", \"system prompt\", HTML comments, zero-width or bidi characters, base64 blobs), unexpected external endpoints (domains not in an allowlist from pool.toml `[skills] allowed_domains`). Output: a findings list with severity (info/warn/block) and line references; a \"block\" finding forbids the quarantined \u2192 testing transition (registry.transition refuses with the finding ids until a human override reason starting \"override:\" is given, recorded in history). Model review is NOT called here (Stage 9/10 may add a Jev or sonnet judgement for warn-level findings).\n4. Invisibility guarantee: skills_registry.candidates and skill_router (when merged) only consider state active (and shadow for shadow logging); discovered/quarantined/testing skills never appear; test it with a quarantined copy of trace-callers under a new id.\n5. Update detection (P33, minimal): `orchestrator skills check-upstream <id>` re-fetches the source at the recorded ref's branch head, compares content_hash, and when different creates a new candidate version record in state discovered with a diff summary (lines added/removed); the local version is never replaced.\n6. docs/skill-intelligence/07-external.md (\u226470 lines): the flow discover \u2192 quarantine \u2192 inspect \u2192 (Stage 5/10) testing \u2192 shadow \u2192 active, the static checks table, what is refused, the P34 invariants sentence (skills are capability modules, not policy authorities), revert path (delete the quarantine folder and the state entries).\nTests (unittest, `import _harness` first, no network: patch the gh api call with a fake returning fixture files): tests/test_skill_discovery.py::test_local_path_discovery_records_provenance_and_stores_in_quarantine_dir, ::test_github_discovery_uses_static_contents_api_and_caps, ::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions, ::test_block_finding_prevents_testing_transition_without_override, ::test_quarantined_skill_never_in_candidates, ::test_check_upstream_creates_candidate_version_not_replace. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 00:55) after spec review T-0881 (request_changes), binding on top of v1:\n- skills_registry.py owns the record shape: SkillRecord gains an optional `provenance_info` dict with keys source_repo, source_path, source_commit, retrieved_at, license, modifications (None for builtins); skill_discovery.py fills it and skills_registry persists/reads it like any other field. For discovered and quarantined records the derived fields roles, task_classes, tools, est_tokens_l0/l1/l2, security_class and output_contract default to empty lists / 0 / \"unknown\" / \"\" and are NOT computed with the builtin P6 parsing helpers; only description (frontmatter or first heading), content_hash and provenance_info are filled at discovery. est_tokens_l2 is set to body chars // 4 as a plain size measure.\n- Inspection persistence: skill_discovery.inspect(id) writes STATE/skills/quarantine/<id>/findings.json = {\"inspected_at\", \"content_hash\", \"findings\": [{\"id\", \"severity\", \"check\", \"line\", \"excerpt\"}], \"max_severity\"}. skills_registry.transition() reads that file when the transition is quarantined \u2192 testing: refused with the block finding ids when max_severity == \"block\" and the given reason does not start with \"override:\"; when it does, the override and the finding ids are appended to the history entry. A missing findings.json also refuses the transition (reason \"not inspected\"). The check lives in transition() right after the ALLOWED_TRANSITIONS validation.\n- Trusted-repository provenance is deterministic: for a local path, run `git -C <path> remote get-url origin`, normalise to owner/repo (strip .git, https/ssh forms), and compare with pool.toml `[skills] trusted_repos` entries (owner/repo strings); a match gives provenance \"repository\", anything else (no remote, no match) gives \"external\". Test both branches with a temporary git repo whose origin is set to a fixture URL.\n- Add tests/test_skill_discovery.py::test_discovered_records_have_empty_derived_fields_and_provenance_info and ::test_transition_refuses_uninspected_quarantined_skill.\n\nSPEC v3 (2026-09-23 01:10) after spec review T-0883 (round 2; both points folded in, further review waived by the Planner, verdict set to approve):\n- Discovered, quarantined and testing records live in their own store STATE/skills/discovered.json (same record shape); skills_registry.sync() touches only provenance \"builtin\" records in registry.json and its \"source removed\" cleanup never sees or marks discovery records. Reads that need every record (list, show, candidates, transition, state) merge both stores; ids are unique across stores (the discovery id is f\"external/{owner}-{repo}/{name}\" or f\"repository/{owner}-{repo}/{name}\"). Test: tests/test_skill_discovery.py::test_sync_never_disables_discovered_records.\n- discover is idempotent: the dedup key is (source_repo, source_path); a re-run against an unchanged source updates retrieved_at only; a changed content_hash creates a new version entry in the same record's history (versions list with content_hash and retrieved_at) instead of a new id, and leaves the state untouched. Test: tests/test_skill_discovery.py::test_discover_rerun_is_idempotent_and_versions_on_change.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_skill_discovery.py::test_local_path_discovery_records_provenance_and_stores_in_quarantine_dir passes",
+    "tests/test_skill_discovery.py::test_github_discovery_uses_static_contents_api_and_caps passes",
+    "tests/test_skill_discovery.py::test_inspect_flags_shell_network_credentials_destructive_and_hidden_instructions passes",
+    "tests/test_skill_discovery.py::test_block_finding_prevents_testing_transition_without_override passes",
+    "tests/test_skill_discovery.py::test_quarantined_skill_never_in_candidates passes",
+    "tests/test_skill_discovery.py::test_check_upstream_creates_candidate_version_not_replace passes",
+    "docs/skill-intelligence/07-external.md exists; `uv run orchestrator skills discover skills` (local path) runs and refuses builtins; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_skill_discovery.py::test_discovered_records_have_empty_derived_fields_and_provenance_info passes",
+    "tests/test_skill_discovery.py::test_transition_refuses_uninspected_quarantined_skill passes",
+    "tests/test_skill_discovery.py::test_sync_never_disables_discovered_records passes",
+    "tests/test_skill_discovery.py::test_discover_rerun_is_idempotent_and_versions_on_change passes"
+  ],
+  "scope": [
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    ".orchestrator/pool.toml",
+    "tests/test_skill_discovery.py",
+    "docs/skill-intelligence/07-external.md"
+  ],
+  "depends_on": [
+    "T-0867"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 70,
+    "timeout_s": 3600,
+    "task_class": "security",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0884",
+  "codex_thread": "01a0cad1-340e-7753-92e3-4bbc88d32d2b",
+  "result": {
+    "summary": "Implemented external discovery, quarantine, static inspection, and upstream version detection.\nGate passed: 1,135 tests. Commit: `6d043a9`. Working tree clean.\nFailures-only test output: empty.\n\n```text\n.orchestrator/pool.toml                 |   6 +\ndocs/skill-intelligence/07-external.md  |  57 ++++++\norchestrator/cli.py                     |  19 +-\norchestrator/skill_discovery.py         | 343 +++++++++++++++++++++++++++++++++\norchestrator/skills_registry.py         |  42 ++++-\ntests/test_skill_discovery.py           | 208 ++++++++++++++++++++\n6 files changed, 667 insertions(+), 8 deletions(-)\n```",
+    "executed_by": "codex:astra",
+    "thread": "01a0cad1-340e-7753-92e3-4bbc88d32d2b",
+    "usage": {
+      "input_tokens": 702132,
+      "cached_input_tokens": 658304,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 12878,
+      "reasoning_output_tokens": 1009,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790109049.15074,
+      "spec_review_verdict": "approve",
+      "reason": "Planner 01:10: two spec-review rounds (T-0881, T-0883); round-2 points folded into v3; further review waived"
+    },
+    {
+      "ts": 1790109078.618828,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787
+      }
+    },
+    {
+      "ts": 1790109078.6204128,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363
+      }
+    },
+    {
+      "ts": 1790109079.9105349,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422
+      }
+    },
+    {
+      "ts": 1790109100.964944,
+      "packet_meta": {
+        "chars": 9878,
+        "est_tokens": 2469,
+        "presented_tokens": 2469,
+        "sections": {
+          "_preamble": {
+            "chars": 150,
+            "est_tokens": 37,
+            "sha256": "3d8bc761450d4062bdd0a8bcb2af498cdb571d3e1f3d2f604e36ec20e8f20c53"
+          },
+          "objective": {
+            "chars": 7860,
+            "est_tokens": 1965,
+            "sha256": "770f1d752511f005ae37a1c86f4a029bc9db4d4e8878449a89ac545294e89a64"
+          },
+          "acceptance": {
+            "chars": 1186,
+            "est_tokens": 296,
+            "sha256": "d06e7a61e0d2d629eb8682f3b1230c658ecd5c5692d347d67c94ffa8849fedf8"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "0e66deee631bb9311c0b8f55d5bed181f423bc91704c19b18c15549dc55e4b36"
+          },
+          "write_scope": {
+            "chars": 204,
+            "est_tokens": 51,
+            "sha256": "e64390e0c9f94f3f75fe97b627ca593e7e07462de4e6a7c81ac164f20aebf952"
+          },
+          "read_scope": {
+            "chars": 83,
+            "est_tokens": 20,
+            "sha256": "062f00381dc0d4eddd16f0465243ce4f560a21f3b14d79e31ccae620ecee1b14"
+          },
+          "constraints": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "127a2cf0cdce536c48d97853a60ae9f7b0262c4628945e02a71ad84b67861ade"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "2b2d705f7f84",
+        "version": "2b2d705f7f84",
+        "candidate_known": true,
+        "base": "7e3eadedfe7d",
+        "sources": "pool.toml@6169e347305f gotchas@226789eae8a0 memory@notes over cap by 5078 chars: acceptance kept whole",
+        "policy_version": "6169e347305f",
+        "gotchas": "226789eae8a0",
+        "candidate_tokens": 2793,
+        "routed_tokens": 8616,
+        "routed_reduction_ratio": 0.9603209986625055,
+        "routed_hidden": 9,
+        "routed_ambiguous": 11,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "b2523b93d8ab",
+          "01133081f603",
+          "0fd16d9e2222",
+          "c3d4f845256f",
+          "e1563cc721f9",
+          "e749109d2aa9",
+          "c409ba400541",
+          "20de2d4ba995",
+          "b3108cdd5ee3",
+          "8425d5ef74f1",
+          "1902f8e4ba13",
+          "eafcb875d0ef",
+          "d765df6393f6",
+          "4a9aa53e5a1d",
+          "6f6b02dad815",
+          "5e477bc24d0f",
+          "280dbae272ec",
+          "9ea39468a2ec",
+          "1b1c40564390",
+          "8c06b286d685",
+          "3fe3dda78868",
+          "958b1faea4d5",
+          "37196a567575",
+          "4dcaeec747cd",
+          "934738a664ae",
+          "fe751aae1ab9",
+          "07388206153a",
+          "a16abfb315e6",
+          "d39b396dffed",
+          "8f938ad31ca7",
+          "e1f55ae2b248"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401
+      }
+    },
+    {
+      "ts": 1790109100.966509,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0884",
+      "claimed_at": 1790109100.9663749
+    },
+    {
+      "ts": 1790109100.967315,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790109619.7311502,
+      "codex_thread": "01a0cad1-340e-7753-92e3-4bbc88d32d2b",
+      "codex_thread_head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+    },
+    {
+      "ts": 1790109619.740191,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        }
+      }
+    },
+    {
+      "ts": 1790109619.7437298,
+      "status": "done",
+      "result": {
+        "summary": "Implemented external discovery, quarantine, static inspection, and upstream version detection.\nGate passed: 1,135 tests. Commit: `6d043a9`. Working tree clean.\nFailures-only test output: empty.\n\n```text\n.orchestrator/pool.toml                 |   6 +\ndocs/skill-intelligence/07-external.md  |  57 ++++++\norchestrator/cli.py                     |  19 +-\norchestrator/skill_discovery.py         | 343 +++++++++++++++++++++++++++++++++\norchestrator/skills_registry.py         |  42 ++++-\ntests/test_skill_discovery.py           | 208 ++++++++++++++++++++\n6 files changed, 667 insertions(+), 8 deletions(-)\n```",
+        "executed_by": "codex:astra",
+        "thread": "01a0cad1-340e-7753-92e3-4bbc88d32d2b",
+        "usage": {
+          "input_tokens": 702132,
+          "cached_input_tokens": 658304,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 12878,
+          "reasoning_output_tokens": 1009,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790109629.964111,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790109731.0074089,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790109731.4093282,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        }
+      }
+    },
+    {
+      "ts": 1790109731.4868639,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        },
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+      }
+    },
+    {
+      "ts": 1790109731.497251,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        },
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+        "gated_at_done": 1790109731.497053
+      }
+    },
+    {
+      "ts": 1790109897.178153,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790109905.684453,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        },
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+        "gated_at_done": 1790109731.497053,
+        "review_held_at": 1790109905.684298
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0885 (request_changes)"
+    },
+    {
+      "ts": 1790109906.50207,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        },
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+        "gated_at_done": 1790109731.497053,
+        "review_held_at": 1790109905.684298,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790109906.8792078,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        },
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+        "gated_at_done": 1790109731.497053,
+        "review_held_at": 1790109905.684298,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790109905.684453": true
+        }
+      }
+    },
+    {
+      "ts": 1790110123.073642,
+      "codex_thread": "01a0cad1-340e-7753-92e3-4bbc88d32d2b",
+      "codex_thread_head": "cd35e1d0425108b48c5d469c383d812d51ad9d78"
+    },
+    {
+      "ts": 1790110123.0793312,
+      "rounds": 1
+    },
+    {
+      "ts": 1790110226.0667388,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        },
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+        "gated_at_done": 1790109731.497053,
+        "review_held_at": 1790109905.684298,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790109905.684453": true
+        },
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790110456.918708,
+      "status": "done",
+      "merged_into": "goal/T-0861",
+      "merged_via": "fix round T-0886 cd35e1d0425108b48c5d469c383d812d51ad9d78",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790109078.618787,
+        "dispatched_at": 1790109078.620363,
+        "dispatched_at_lease": 1790109978.620363,
+        "dispatched_at_done": 1790109079.910422,
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "terra",
+          "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+          "adjustment": {
+            "astra": 1.0,
+            "luna": 1.0,
+            "terra": 1.053125,
+            "sol": 1.0
+          },
+          "mode": "shadow"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790109731.0072582,
+        "gated_at_lease": 1790110631.0072582,
+        "first_green_at": 1790109731.006457,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0884",
+          "goal_head": "goal/T-0861",
+          "moved_count": 0,
+          "stale_paths": [],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790109731.408999,
+          "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+        },
+        "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+        "gated_at_done": 1790109731.497053,
+        "review_held_at": 1790109905.684298,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790109905.684453": true
+        },
+        "lineage_fix_rounds": 1,
+        "accepted_at": 1790110456.916883
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner 01:10: two spec-review rounds (T-0881, T-0883); round-2 points folded into v3; further review waived",
+  "pipeline": {
+    "first_ready_at": 1790109078.618787,
+    "dispatched_at": 1790109078.620363,
+    "dispatched_at_lease": 1790109978.620363,
+    "dispatched_at_done": 1790109079.910422,
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "terra",
+      "key": "17c5004a1ed3fcea62797b0b69f40da46fa61e0a",
+      "adjustment": {
+        "astra": 1.0,
+        "luna": 1.0,
+        "terra": 1.053125,
+        "sol": 1.0
+      },
+      "mode": "shadow"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790109731.0072582,
+    "gated_at_lease": 1790110631.0072582,
+    "first_green_at": 1790109731.006457,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0884",
+      "goal_head": "goal/T-0861",
+      "moved_count": 0,
+      "stale_paths": [],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790109731.408999,
+      "head": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c"
+    },
+    "reviewed_sha": "6d043a9c325140180f4a840ee8cbefbbe4d9d63c",
+    "gated_at_done": 1790109731.497053,
+    "review_held_at": 1790109905.684298,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790109905.684453": true
+    },
+    "lineage_fix_rounds": 1,
+    "accepted_at": 1790110456.916883
+  },
+  "packet_meta": {
+    "chars": 9878,
+    "est_tokens": 2469,
+    "presented_tokens": 2469,
+    "sections": {
+      "_preamble": {
+        "chars": 150,
+        "est_tokens": 37,
+        "sha256": "3d8bc761450d4062bdd0a8bcb2af498cdb571d3e1f3d2f604e36ec20e8f20c53"
+      },
+      "objective": {
+        "chars": 7860,
+        "est_tokens": 1965,
+        "sha256": "770f1d752511f005ae37a1c86f4a029bc9db4d4e8878449a89ac545294e89a64"
+      },
+      "acceptance": {
+        "chars": 1186,
+        "est_tokens": 296,
+        "sha256": "d06e7a61e0d2d629eb8682f3b1230c658ecd5c5692d347d67c94ffa8849fedf8"
+      },
+      "base": {
+        "chars": 105,
+        "est_tokens": 26,
+        "sha256": "0e66deee631bb9311c0b8f55d5bed181f423bc91704c19b18c15549dc55e4b36"
+      },
+      "write_scope": {
+        "chars": 204,
+        "est_tokens": 51,
+        "sha256": "e64390e0c9f94f3f75fe97b627ca593e7e07462de4e6a7c81ac164f20aebf952"
+      },
+      "read_scope": {
+        "chars": 83,
+        "est_tokens": 20,
+        "sha256": "062f00381dc0d4eddd16f0465243ce4f560a21f3b14d79e31ccae620ecee1b14"
+      },
+      "constraints": {
+        "chars": 119,
+        "est_tokens": 29,
+        "sha256": "127a2cf0cdce536c48d97853a60ae9f7b0262c4628945e02a71ad84b67861ade"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "2b2d705f7f84",
+    "version": "2b2d705f7f84",
+    "candidate_known": true,
+    "base": "7e3eadedfe7d",
+    "sources": "pool.toml@6169e347305f gotchas@226789eae8a0 memory@notes over cap by 5078 chars: acceptance kept whole",
+    "policy_version": "6169e347305f",
+    "gotchas": "226789eae8a0",
+    "candidate_tokens": 2793,
+    "routed_tokens": 8616,
+    "routed_reduction_ratio": 0.9603209986625055,
+    "routed_hidden": 9,
+    "routed_ambiguous": 11,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "b2523b93d8ab",
+      "01133081f603",
+      "0fd16d9e2222",
+      "c3d4f845256f",
+      "e1563cc721f9",
+      "e749109d2aa9",
+      "c409ba400541",
+      "20de2d4ba995",
+      "b3108cdd5ee3",
+      "8425d5ef74f1",
+      "1902f8e4ba13",
+      "eafcb875d0ef",
+      "d765df6393f6",
+      "4a9aa53e5a1d",
+      "6f6b02dad815",
+      "5e477bc24d0f",
+      "280dbae272ec",
+      "9ea39468a2ec",
+      "1b1c40564390",
+      "8c06b286d685",
+      "3fe3dda78868",
+      "958b1faea4d5",
+      "37196a567575",
+      "4dcaeec747cd",
+      "934738a664ae",
+      "fe751aae1ab9",
+      "07388206153a",
+      "a16abfb315e6",
+      "d39b396dffed",
+      "8f938ad31ca7",
+      "e1f55ae2b248"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401
+  },
+  "claimed_at": 1790109100.9663749,
+  "rounds": 1,
+  "executor": "astra",
+  "codex_thread_head": "cd35e1d0425108b48c5d469c383d812d51ad9d78",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0861",
+  "merged_via": "fix round T-0886 cd35e1d0425108b48c5d469c383d812d51ad9d78"
+}

@@ -1,0 +1,567 @@
+{
+  "id": "T-0564",
+  "created_at": 1789970857.999342,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "sol",
+  "complexity": 5,
+  "title": "R1: orchestrator/duration.py \u2014 empirical task-duration estimates with robust statistics and deterministic cold-start priors (AP P5)",
+  "spec": "Why: critical_path.est_duration_s (orchestrator/critical_path.py:15-24) only knows COLD_START_S per band or a caller-supplied durations dict; nothing computes empirical durations, so critical-path ranking and waves use crude assumptions (AP P5, brief .orchestrator/roadmap-completion-program.md P2).\nWhat: new module orchestrator/duration.py, pure, no daemon changes.\n- actual_s(task) -> float|None: pipeline.gated_at - pipeline.claimed_at (same definition as scorecard.parallelism, scorecard.py:1481), else sum of runs duration_s rows for role execute if given rows; None when unknown.\n- history(root=STATE) -> list of {task, task_class (attribution.task_class), executor (task.executor or tier), band (attribution.band), actual_s} over merged execute tasks (merged_into set) with a known actual_s; tolerate missing/malformed task files.\n- estimate(task, root=STATE, cfg=None) -> {\"est_s\", \"source\", \"n\", \"band\", \"task_class\", \"executor\"}; evidence ladder, first level with n >= min_samples wins: (task_class, executor, band) -> class_executor; (task_class, band) -> band_class; (band) -> band; else cold_start = critical_path.COLD_START_S[band]. Statistic: median when n < 10, otherwise trimmed median dropping trim fraction from each tail (default 0.1). cfg from pool_config()['scheduler']: duration_mode = \"empirical\"|\"cold_start\" (default empirical; cold_start forces priors), duration_min_samples (default 5), duration_trim (default 0.1); unknown mode -> empirical.\n- durations_for(tasks, root=STATE, cfg=None) -> {task_id: est_s} keyed by task id (critical_path.est_duration_s reads task-id keys first), plus explain_for(tasks, ...) -> {task_id: estimate dict} for telemetry.\n- prediction_error(predicted_s, actual_s) -> {\"abs_s\", \"ratio\"} or None.\nNo pool.toml edit (defaults in code). Docstrings state the ladder. Bus reads via bus.read/bus.get or the tasks directory under root.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_duration.py::test_cold_start_uses_band_prior_when_no_history \u2014 no merged tasks: estimate returns COLD_START_S for the band with source cold_start and n 0",
+    "tests/test_duration.py::test_sufficient_history_uses_class_executor_median \u2014 6 merged tasks of the same class, executor and band return their median with source class_executor and n 6",
+    "tests/test_duration.py::test_sparse_history_falls_back_down_the_ladder \u2014 2 class_executor samples and 5 band samples yield source band, never false precision from the 2",
+    "tests/test_duration.py::test_trimmed_median_resists_outliers \u2014 12 samples with two 50x outliers estimate within 10 percent of the clean median",
+    "tests/test_duration.py::test_explain_for_records_source_and_sample_size \u2014 explain_for returns est_s, source, n, band, task_class for every task and durations_for keys match task ids; duration_mode cold_start forces priors"
+  ],
+  "scope": [
+    "orchestrator/duration.py",
+    "tests/test_duration.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800,
+    "task_class": "unfamiliar",
+    "route": "straightforward",
+    "read_scope": [
+      "orchestrator/critical_path.py",
+      "orchestrator/attribution.py",
+      "orchestrator/scorecard.py",
+      "orchestrator/bus.py",
+      "orchestrator/__init__.py",
+      "tests/test_critical_path.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "durations dict: {task_id: seconds}; estimate() -> {est_s, source in task_history|class_executor|band_class|band|cold_start, n, band, task_class, executor}; actual_s(task) -> float|None; prediction_error(predicted_s, actual_s) -> {abs_s, ratio}|None; config keys under [scheduler]: duration_mode, duration_min_samples, duration_trim, all defaulted in code"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0564",
+  "codex_thread": "01a0c294-45c0-7e23-a545-5a7c2aa28bcb",
+  "result": {
+    "summary": "Implemented empirical duration estimation with robust statistics, fallback ladder, cold-start mode, telemetry explanations, and prediction errors.\n\nFiles changed: `orchestrator/duration.py`, `tests/test_duration.py`  \nGate: `tests-green: OK` \u2014 822 tests; focused duration tests: 5 passed  \nCommit: `f77f3ec944b622bd5a2b501b8399e585311f1564`  \nFailures-only output: empty",
+    "executed_by": "codex:sol",
+    "thread": "01a0c294-45c0-7e23-a545-5a7c2aa28bcb",
+    "usage": {
+      "input_tokens": 794753,
+      "cached_input_tokens": 764800,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 8130,
+      "reasoning_output_tokens": 1158,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789970885.201317,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282
+      }
+    },
+    {
+      "ts": 1789970885.202431,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388
+      }
+    },
+    {
+      "ts": 1789970885.916058,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127
+      }
+    },
+    {
+      "ts": 1789970892.084827,
+      "packet_meta": {
+        "chars": 4767,
+        "est_tokens": 1191,
+        "hash": "dfce7b49e806",
+        "version": "dfce7b49e806",
+        "base": "8c6e2aecf245",
+        "sources": "pool.toml@dd1847e523fe gotchas@9fdf96d37f8b memory@notes",
+        "policy_version": "dd1847e523fe",
+        "gotchas": "9fdf96d37f8b"
+      }
+    },
+    {
+      "ts": 1789970892.0860002,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0564",
+      "claimed_at": 1789970892.085889
+    },
+    {
+      "ts": 1789970892.086905,
+      "rounds": 0,
+      "executor": "sol",
+      "tier": "sol"
+    },
+    {
+      "ts": 1789971264.650382,
+      "codex_thread": "01a0c294-45c0-7e23-a545-5a7c2aa28bcb",
+      "codex_thread_head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+    },
+    {
+      "ts": 1789971264.6541598,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        }
+      }
+    },
+    {
+      "ts": 1789971264.656551,
+      "status": "done",
+      "result": {
+        "summary": "Implemented empirical duration estimation with robust statistics, fallback ladder, cold-start mode, telemetry explanations, and prediction errors.\n\nFiles changed: `orchestrator/duration.py`, `tests/test_duration.py`  \nGate: `tests-green: OK` \u2014 822 tests; focused duration tests: 5 passed  \nCommit: `f77f3ec944b622bd5a2b501b8399e585311f1564`  \nFailures-only output: empty",
+        "executed_by": "codex:sol",
+        "thread": "01a0c294-45c0-7e23-a545-5a7c2aa28bcb",
+        "usage": {
+          "input_tokens": 794753,
+          "cached_input_tokens": 764800,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 8130,
+          "reasoning_output_tokens": 1158,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789971295.8198981,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789971390.775682,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789971390.810128,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        }
+      }
+    },
+    {
+      "ts": 1789971391.076305,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+      }
+    },
+    {
+      "ts": 1789971391.082759,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+        "gated_at_done": 1789971391.082635
+      }
+    },
+    {
+      "ts": 1789971517.1974888,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+        "gated_at_done": 1789971391.082635,
+        "review_held_at": 1789971517.197355
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-0583"
+    },
+    {
+      "ts": 1789971517.4516459,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+        "gated_at_done": 1789971391.082635,
+        "review_held_at": 1789971517.197355,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1789971517.481458,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+        "gated_at_done": 1789971391.082635,
+        "review_held_at": 1789971517.197355,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971517.1974888": true
+        }
+      }
+    },
+    {
+      "ts": 1789972102.820823,
+      "status": "done",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789972213.487365,
+      "status": "done",
+      "hold_reason": null
+    },
+    {
+      "ts": 1789972324.9626062,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+        "gated_at_done": 1789971391.082635,
+        "review_held_at": 1789971517.197355,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971517.1974888": true
+        },
+        "merged_at": 1789972324.96243,
+        "merged_at_lease": 1789973224.96243
+      }
+    },
+    {
+      "ts": 1789972413.9548311,
+      "status": "done",
+      "merged_into": "goal/T-0561",
+      "sha": "e5590c08d1f45af62a557b501dfb6ff7dac448b1"
+    },
+    {
+      "ts": 1789972414.389014,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+        "gated_at_done": 1789971391.082635,
+        "review_held_at": 1789971517.197355,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971517.1974888": true
+        },
+        "merged_at": 1789972324.96243,
+        "merged_at_lease": 1789973224.96243,
+        "accepted_at": 1789972414.388751
+      }
+    },
+    {
+      "ts": 1789972414.4820921,
+      "pipeline": {
+        "first_ready_at": 1789970885.201282,
+        "dispatched_at": 1789970885.202388,
+        "dispatched_at_lease": 1789971785.202388,
+        "dispatched_at_done": 1789970885.915127,
+        "jev_route": {
+          "baseline": "sol",
+          "hypothetical": "sol",
+          "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789971390.775539,
+        "gated_at_lease": 1789972290.775539,
+        "first_green_at": 1789971390.7746408,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-0564",
+          "goal_head": "goal/T-0561",
+          "moved_count": 0,
+          "stale_paths": [],
+          "risk": "unknown",
+          "checked_at": 1789971390.80979,
+          "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+        },
+        "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+        "gated_at_done": 1789971391.082635,
+        "review_held_at": 1789971517.197355,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1789971517.1974888": true
+        },
+        "merged_at": 1789972324.96243,
+        "merged_at_lease": 1789973224.96243,
+        "accepted_at": 1789972414.388751,
+        "merged_at_done": 1789972414.481973
+      }
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789970885.201282,
+    "dispatched_at": 1789970885.202388,
+    "dispatched_at_lease": 1789971785.202388,
+    "dispatched_at_done": 1789970885.915127,
+    "jev_route": {
+      "baseline": "sol",
+      "hypothetical": "sol",
+      "key": "193a4b5ea7b99238bb8b294757b865de5aa4a7ed"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789971390.775539,
+    "gated_at_lease": 1789972290.775539,
+    "first_green_at": 1789971390.7746408,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-0564",
+      "goal_head": "goal/T-0561",
+      "moved_count": 0,
+      "stale_paths": [],
+      "risk": "unknown",
+      "checked_at": 1789971390.80979,
+      "head": "f77f3ec944b622bd5a2b501b8399e585311f1564"
+    },
+    "reviewed_sha": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+    "gated_at_done": 1789971391.082635,
+    "review_held_at": 1789971517.197355,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1789971517.1974888": true
+    },
+    "merged_at": 1789972324.96243,
+    "merged_at_lease": 1789973224.96243,
+    "accepted_at": 1789972414.388751,
+    "merged_at_done": 1789972414.481973
+  },
+  "packet_meta": {
+    "chars": 4767,
+    "est_tokens": 1191,
+    "hash": "dfce7b49e806",
+    "version": "dfce7b49e806",
+    "base": "8c6e2aecf245",
+    "sources": "pool.toml@dd1847e523fe gotchas@9fdf96d37f8b memory@notes",
+    "policy_version": "dd1847e523fe",
+    "gotchas": "9fdf96d37f8b"
+  },
+  "claimed_at": 1789970892.085889,
+  "rounds": 0,
+  "executor": "sol",
+  "codex_thread_head": "f77f3ec944b622bd5a2b501b8399e585311f1564",
+  "hold_reason": null,
+  "merged_into": "goal/T-0561",
+  "sha": "e5590c08d1f45af62a557b501dfb6ff7dac448b1"
+}

@@ -1,0 +1,185 @@
+{
+  "id": "T-0804",
+  "created_at": 1790087435.6771588,
+  "parent": "T-0760",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: Deterministic context win 1: send spec, acceptance and scope once per execute prompt (packet only), all three render call sites (v2)",
+  "spec": "P0 audit finding (docs/context-economy/00-audit.md, plan.md): every execute prompt carries spec, acceptance and scope twice: once inside the packet built by spawn._packet_body (sections objective \"- discovery: {spec}\", acceptance, write_scope; spawn.py ~286-305) and again as literal lines in .orchestrator/prompts/execute.md (the three lines starting \"Spec:\", \"Acceptance:\" and \"Scope (only these paths):\", each holding the double-brace placeholder of the same name). The P1 telemetry (merged before this task; context field on runs, per-section meta) is the before/after measure.\nDo:\n1. .orchestrator/prompts/execute.md: remove the three literal lines. Replace with one line: \"The packet above is the task contract: implement the ## objective, satisfy every line of ## acceptance, and edit only paths listed in ## write_scope.\" Keep every other instruction line verbatim (gate loop, commit, unittest rules, _harness rule, dependencies, tool-call budget).\n2. spawn.render: execute no longer needs spec/acceptance/scope kwargs. Update the three call sites so they pass only packet= (spawn.py:773-774 run_worker, daemon.py:561 _dispatch_fresh_fix, daemon.py:853 dispatch). render()'s unfilled-placeholder check must still pass (no leftover double-brace tokens) and extra kwargs must not be silently required; if any call site appends more text after render (spawn.py:774 `+ \\`), keep that text.\n3. Packet guarantee: _packet_body must keep objective (with the full spec), acceptance and write_scope untrimmable even when the packet is over the 4800-char cap (they already are: trimmable = dependencies, evidence, decisions, gotchas, symbols, relevant_tests). Add a regression test that a task with a 9000-char spec and 6 acceptance lines still has every acceptance line and the full spec text and every scope path in the rendered execute prompt exactly once.\n4. Fix-round path: _dispatch_fresh_fix renders execute for the fix task; the fix task's spec is the fix-round spec (failures + acceptance). Verify the packet's objective carries it and nothing is lost; the repair delta path (executor.reply) is unaffected.\n5. Update P1 telemetry expectations if a test in tests/test_spawn.py or tests/test_daemon.py asserts on instruction tokens or on the literal \"Spec:\" line; adjust the expected numbers, never weaken the assertion shape.\n6. Record the measured delta in docs/context-economy/03-dedup-execute-prompt.md (\u226430 lines): chars and est_tokens of the execute prompt for one representative task before and after (use spawn.packet_run_meta or the P1 section meta on a fixture task), and the revert path (git revert the commit).\nTests: tests/test_spawn.py::test_execute_prompt_carries_contract_once (spec, each acceptance line and each scope path appear exactly once in the rendered prompt; no \"Spec:\" literal); tests/test_daemon.py::test_fresh_fix_prompt_renders_without_contract_kwargs (the fresh-fix render path succeeds and the prompt contains the fix spec once). Do not ask questions; decide and note decisions in the result.\n\nv2 (2026-09-22 16:35): re-filed because v1's spec quoted literal double-brace placeholders, which spawn.render rejects (unfilled_placeholder); never quote them in a spec.",
+  "inputs": [
+    "T-0799"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_prompt_carries_contract_once passes",
+    "tests/test_daemon.py::test_fresh_fix_prompt_renders_without_contract_kwargs passes",
+    ".orchestrator/prompts/execute.md has no double-brace spec, double-brace acceptance or double-brace scope placeholders and all three render call sites pass only packet=",
+    "docs/context-economy/03-dedup-execute-prompt.md records before/after chars and est_tokens; .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    ".orchestrator/prompts/execute.md",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py",
+    "docs/context-economy/03-dedup-execute-prompt.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0804",
+  "codex_thread": null,
+  "result": {
+    "summary": "Diff matches the spec: execute.md's three duplicate Spec/Acceptance/Scope lines are replaced by the single contract line verbatim as specified, all other instruction lines are untouched, and the three production render call sites (spawn.py run_worker, daemon.py _dispatch_fresh_fix, daemon.py dispatch) now pass only packet= while spawn.py:823's trailing fallback-executor text appended after render() is preserved. The removed _packet_body block that previously popped the '- discovery: {spec}' line off the objective when the packet exceeded the 4800-char cap was a genuine latent bug against the untrimmable guarantee (objective, i.e. the full spec, was in fact trimmable before this commit); removing it is necessary and correct, and the new test_execute_prompt_carries_contract_once regression test (9000-char spec, 6 acceptance lines, 3 scope paths) exercises exactly that path and would have failed before this change. test_fresh_fix_prompt_renders_without_contract_kwargs confirms the fresh-fix path renders with only packet= and preserves the fix spec once. instruction_tokens assertions in test_daemon.py/test_spawn.py compute expected values dynamically from the rendered prompt rather than hardcoding numbers, so they don't need adjustment. All 6 changed files are within declared scope, no out-of-scope diff hunks. docs/context-economy/03-dedup-execute-prompt.md is 16 lines (within the \u226430 budget) and states a plausible before/after char delta with a revert path. Only a low-severity nit: a few test files still pass now-unused spec/acceptance/scope kwargs to render(\"execute\", ...), which is harmless dead code, not a defect.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "tests/test_executor.py",
+        "line": 45,
+        "issue": "spec/acceptance/scope kwargs are still passed to spawn.render(\"execute\", ...) here and at line 302, and tests/test_spawn.py:85-88 (test_render_flags_unfilled_placeholder) does the same. Harmless since render() only requires kwargs matching placeholders actually present in the template and silently ignores extras, so these tests still pass green, but they're now dead parameters left over from the pre-dedup contract and slightly misstate what render(\"execute\", ...) needs.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "8b591f946087",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790087435.678425,
+      "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920"
+    },
+    {
+      "ts": 1790087632.575906,
+      "pipeline": {
+        "respawned_at": 1790087632.5056472
+      }
+    },
+    {
+      "ts": 1790089359.75525,
+      "pipeline": {
+        "respawned_at": 1790089359.68878,
+        "respawn_count": 1
+      }
+    },
+    {
+      "ts": 1790089366.7703822,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0804",
+      "claimed_at": 1790089366.769963
+    },
+    {
+      "ts": 1790089366.7720551,
+      "account": "B"
+    },
+    {
+      "ts": 1790089368.052044,
+      "pid": 27078,
+      "account": "B"
+    },
+    {
+      "ts": 1790089502.327328,
+      "status": "done",
+      "result": {
+        "summary": "Diff matches the spec: execute.md's three duplicate Spec/Acceptance/Scope lines are replaced by the single contract line verbatim as specified, all other instruction lines are untouched, and the three production render call sites (spawn.py run_worker, daemon.py _dispatch_fresh_fix, daemon.py dispatch) now pass only packet= while spawn.py:823's trailing fallback-executor text appended after render() is preserved. The removed _packet_body block that previously popped the '- discovery: {spec}' line off the objective when the packet exceeded the 4800-char cap was a genuine latent bug against the untrimmable guarantee (objective, i.e. the full spec, was in fact trimmable before this commit); removing it is necessary and correct, and the new test_execute_prompt_carries_contract_once regression test (9000-char spec, 6 acceptance lines, 3 scope paths) exercises exactly that path and would have failed before this change. test_fresh_fix_prompt_renders_without_contract_kwargs confirms the fresh-fix path renders with only packet= and preserves the fix spec once. instruction_tokens assertions in test_daemon.py/test_spawn.py compute expected values dynamically from the rendered prompt rather than hardcoding numbers, so they don't need adjustment. All 6 changed files are within declared scope, no out-of-scope diff hunks. docs/context-economy/03-dedup-execute-prompt.md is 16 lines (within the \u226430 budget) and states a plausible before/after char delta with a revert path. Only a low-severity nit: a few test files still pass now-unused spec/acceptance/scope kwargs to render(\"execute\", ...), which is harmless dead code, not a defect.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "tests/test_executor.py",
+            "line": 45,
+            "issue": "spec/acceptance/scope kwargs are still passed to spawn.render(\"execute\", ...) here and at line 302, and tests/test_spawn.py:85-88 (test_render_flags_unfilled_placeholder) does the same. Harmless since render() only requires kwargs matching placeholders actually present in the template and silently ignores extras, so these tests still pass green, but they're now dead parameters left over from the pre-dedup contract and slightly misstate what render(\"execute\", ...) needs.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "8b591f946087",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790089502.328934,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790089502.394749,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 1,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 1,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+        "packet_version": "8b591f946087",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 1,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 1,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+      "packet_version": "8b591f946087",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+  "pipeline": {
+    "respawned_at": 1790089359.68878,
+    "respawn_count": 1
+  },
+  "claimed_at": 1790089366.769963,
+  "account": "B",
+  "pid": 27078,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 1,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 1,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "364c84f4316cbf79e835e8a6b0f3fc18cd04a920",
+    "packet_version": "8b591f946087",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 1,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 1,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "8b591f946087",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

@@ -1,0 +1,193 @@
+{
+  "id": "T-0076",
+  "parent": "T-0073",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout C3: kgpt module contract and per-user connection pattern \u2014 design the `orchestrator` module's tools, tiers, view and connection table",
+  "spec": "Read-only scout over /Users/k3ntaw/code/kgpt. Read modules/_template/* and SPEC.md section 7 (module contract) and section 10 (security), kernel/kgpt_kernel/github.py (connections pattern), kernel/migrations/versions/0018_github_connections.py, gateway routes and web Settings code for connecting GitHub (grep github in gateway/kgpt_gateway/routes and clients/web/src), docs/handbook/07-permissions.md, 08-modules.md, 16-google.md (another per-user connection), and how a module's `views` render in the client (grep views, overview in clients/web/src and kernel). Report: (1) the per-user connection pattern end to end (table, RLS, kernel functions, route, Settings UI) so an `orchestrator_connections(user_id, endpoint, label)` table can copy it; (2) the module contract fields and what the kernel enforces (tools list, tiers, untrusted, autonomy caps in tiers.py MAX_AUTONOMY); (3) how a module view is defined and rendered, and whether a module can contribute a panel inside Cowork or only a tab; (4) propose the tool set with tiers: list_goals (READ), goal_status (READ), start_goal(project_id, goal) WRITE_EXTERNAL, cancel_goal WRITE_EXTERNAL, and the fields each returns; explain how a proposal for start_goal reads to the user; (5) how the module reaches per-user state: does the kernel pass the calling user to a module tool (grep 'calling user', owner, user_id in module server.py files, see commit 93d80dc 'Propagate the calling user to owned-data modules'). Cite path:line, one confidence per finding.",
+  "inputs": [],
+  "acceptance": [
+    "Result documents the per-user connection pattern with path:line for table, kernel, route and UI",
+    "Result states how the calling user reaches a module tool, with evidence",
+    "Result proposes tools, tiers and view with the returned fields"
+  ],
+  "scope": [
+    "/Users/k3ntaw/code/kgpt/**"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0076",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "Per-user connection pattern (GitHub, the closer model for a new `orchestrator_connections` table): one owned Postgres table with a `user_id` column defaulted to the current transaction's bound user, RLS forcing `own_rows`, and grant to the restricted `kgpt_app` role. Migration 0018 creates `kernel.github_connections(id, installation_id, account, connected_at, user_id uuid NOT NULL DEFAULT CURRENT_USER_DEFAULT REFERENCES kernel.users(id))`, a unique index on `(user_id, installation_id)`, `ENABLE/FORCE ROW LEVEL SECURITY`, a `USING/WITH CHECK (user_id = CURRENT_USER_DEFAULT)` policy, and a GRANT to `kgpt_app`. The table is also registered in `OWNED_AFTER_0012` so ownership checks cover it.",
+        "evidence": [
+          "kernel/migrations/versions/0018_github_connections.py:29-58",
+          "kernel/kgpt_kernel/ownership.py:58 (CURRENT_USER_DEFAULT)",
+          "kernel/kgpt_kernel/ownership.py:68 (APP_ROLE)",
+          "kernel/kgpt_kernel/ownership.py:79-87 (OWNED_AFTER_0012 lists kernel.github_connections and kernel.google_connections)"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "The kernel-side module for a connection (github.py) never talks to the third-party API itself \u2014 it only owns the row (connect/connections/disconnect/installation_for) and raises `NotConnected` with a user-facing setup message when there is nothing or an ambiguous choice. `installation_for()` auto-picks when there's exactly one connection, else requires an explicit id, else refuses. This is the shape to copy for `orchestrator_connections(user_id, endpoint, label)`: a kernel module owning the table, a module's server.py calling into it, no credential material duplicated in the module.",
+        "evidence": [
+          "kernel/kgpt_kernel/github.py:67-153"
+        ],
+        "confidence": 0.92,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Gateway route pattern for a connection differs by auth style: Google (OAuth, browser redirect) has a full gateway router (/google/connection, /authorize, /callback, DELETE /connection) that reads CURRENT_USER, stores CSRF `state` in Redis keyed by user, and calls `google.connect(...)`. GitHub (App-installation based) has **no equivalent gateway route** in the current codebase \u2014 `connections.connect()` in kernel/kgpt_kernel/github.py is never called from any gateway route or webhook handler; grepping the repo for callers only turns up the migration, the ownership list, and tests. The handbook (15-github.md) describes a 'Settings shows the installations... you say which is yours' UI step, but Settings.tsx only wires `<GoogleAccount />`, no GitHub component exists in clients/web/src.",
+        "evidence": [
+          "gateway/kgpt_gateway/routes/google.py:70-166 (full OAuth flow)",
+          "docs/handbook/15-github.md:57-59 (documented but unimplemented Settings step)",
+          "clients/web/src/tabs/Settings.tsx:1-4,74-79 (only GoogleAccount imported/rendered)",
+          "grep for 'connections.connect' across gateway/, modules/github/, kernel/ returns no route caller (only migration/ownership/tests)"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "Web Settings UI pattern to copy (Google is the complete reference, not GitHub): a component queries a `/{service}/connection` status endpoint, shows 'Connect X' as a plain `<a href=\"/{service}/authorize\">` anchor (not a fetch, since the endpoint 307-redirects the browser), reads a `?{service}=<outcome>` query param on mount to show a one-line result banner and strips it from the URL, and offers Reconnect/Disconnect. For `orchestrator_connections(user_id, endpoint, label)` \u2014 likely a bearer/API-key style connection rather than OAuth \u2014 the closer template is actually a plain form (endpoint URL + label + optional token) POSTed via `useMutation`, since there's no third-party consent redirect involved; GoogleAccount.tsx's status/connected/disconnect skeleton still applies.",
+        "evidence": [
+          "clients/web/src/components/GoogleAccount.tsx:39-204",
+          "gateway/kgpt_gateway/routes/google.py:70-110"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Is there a webhook or manual admin flow intended to call kernel/kgpt_kernel/github.py:connect() at all, or is GitHub connection currently dead code / a documented-but-unbuilt feature? Worth confirming with whoever owns modules/github before treating it as a working reference.",
+      "Should orchestrator_connections use bearer-token auth (stored encrypted like Google's refresh token, kernel/kgpt_kernel/google.py) or an installation-id style pointer (like GitHub) \u2014 this depends on what 'endpoint' authenticates as, which wasn't specified in the task."
+    ],
+    "suggested_next": [
+      "Read kernel/kgpt_kernel/google.py to see the encrypted-refresh-token storage pattern in full, since a bearer/API-key based orchestrator connection is closer to that than to GitHub's installation-id pointer.",
+      "Confirm whether the new module should apply UserContextMiddleware in the same way as health/finance (kernel/kgpt_kernel/mcp/user_context.py) before writing server.py."
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 12351,
+      "trimmed": {
+        "findings": 6
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789731866.0585458,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0076",
+      "claimed_at": 1789731866.058188
+    },
+    {
+      "ts": 1789731866.100415,
+      "pid": 67831,
+      "account": "A"
+    },
+    {
+      "ts": 1789732023.736694,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "Per-user connection pattern (GitHub, the closer model for a new `orchestrator_connections` table): one owned Postgres table with a `user_id` column defaulted to the current transaction's bound user, RLS forcing `own_rows`, and grant to the restricted `kgpt_app` role. Migration 0018 creates `kernel.github_connections(id, installation_id, account, connected_at, user_id uuid NOT NULL DEFAULT CURRENT_USER_DEFAULT REFERENCES kernel.users(id))`, a unique index on `(user_id, installation_id)`, `ENABLE/FORCE ROW LEVEL SECURITY`, a `USING/WITH CHECK (user_id = CURRENT_USER_DEFAULT)` policy, and a GRANT to `kgpt_app`. The table is also registered in `OWNED_AFTER_0012` so ownership checks cover it.",
+            "evidence": [
+              "kernel/migrations/versions/0018_github_connections.py:29-58",
+              "kernel/kgpt_kernel/ownership.py:58 (CURRENT_USER_DEFAULT)",
+              "kernel/kgpt_kernel/ownership.py:68 (APP_ROLE)",
+              "kernel/kgpt_kernel/ownership.py:79-87 (OWNED_AFTER_0012 lists kernel.github_connections and kernel.google_connections)"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "The kernel-side module for a connection (github.py) never talks to the third-party API itself \u2014 it only owns the row (connect/connections/disconnect/installation_for) and raises `NotConnected` with a user-facing setup message when there is nothing or an ambiguous choice. `installation_for()` auto-picks when there's exactly one connection, else requires an explicit id, else refuses. This is the shape to copy for `orchestrator_connections(user_id, endpoint, label)`: a kernel module owning the table, a module's server.py calling into it, no credential material duplicated in the module.",
+            "evidence": [
+              "kernel/kgpt_kernel/github.py:67-153"
+            ],
+            "confidence": 0.92,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Gateway route pattern for a connection differs by auth style: Google (OAuth, browser redirect) has a full gateway router (/google/connection, /authorize, /callback, DELETE /connection) that reads CURRENT_USER, stores CSRF `state` in Redis keyed by user, and calls `google.connect(...)`. GitHub (App-installation based) has **no equivalent gateway route** in the current codebase \u2014 `connections.connect()` in kernel/kgpt_kernel/github.py is never called from any gateway route or webhook handler; grepping the repo for callers only turns up the migration, the ownership list, and tests. The handbook (15-github.md) describes a 'Settings shows the installations... you say which is yours' UI step, but Settings.tsx only wires `<GoogleAccount />`, no GitHub component exists in clients/web/src.",
+            "evidence": [
+              "gateway/kgpt_gateway/routes/google.py:70-166 (full OAuth flow)",
+              "docs/handbook/15-github.md:57-59 (documented but unimplemented Settings step)",
+              "clients/web/src/tabs/Settings.tsx:1-4,74-79 (only GoogleAccount imported/rendered)",
+              "grep for 'connections.connect' across gateway/, modules/github/, kernel/ returns no route caller (only migration/ownership/tests)"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "Web Settings UI pattern to copy (Google is the complete reference, not GitHub): a component queries a `/{service}/connection` status endpoint, shows 'Connect X' as a plain `<a href=\"/{service}/authorize\">` anchor (not a fetch, since the endpoint 307-redirects the browser), reads a `?{service}=<outcome>` query param on mount to show a one-line result banner and strips it from the URL, and offers Reconnect/Disconnect. For `orchestrator_connections(user_id, endpoint, label)` \u2014 likely a bearer/API-key style connection rather than OAuth \u2014 the closer template is actually a plain form (endpoint URL + label + optional token) POSTed via `useMutation`, since there's no third-party consent redirect involved; GoogleAccount.tsx's status/connected/disconnect skeleton still applies.",
+            "evidence": [
+              "clients/web/src/components/GoogleAccount.tsx:39-204",
+              "gateway/kgpt_gateway/routes/google.py:70-110"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Is there a webhook or manual admin flow intended to call kernel/kgpt_kernel/github.py:connect() at all, or is GitHub connection currently dead code / a documented-but-unbuilt feature? Worth confirming with whoever owns modules/github before treating it as a working reference.",
+          "Should orchestrator_connections use bearer-token auth (stored encrypted like Google's refresh token, kernel/kgpt_kernel/google.py) or an installation-id style pointer (like GitHub) \u2014 this depends on what 'endpoint' authenticates as, which wasn't specified in the task."
+        ],
+        "suggested_next": [
+          "Read kernel/kgpt_kernel/google.py to see the encrypted-refresh-token storage pattern in full, since a bearer/API-key based orchestrator connection is closer to that than to GitHub's installation-id pointer.",
+          "Confirm whether the new module should apply UserContextMiddleware in the same way as health/finance (kernel/kgpt_kernel/mcp/user_context.py) before writing server.py."
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 12351,
+          "trimmed": {
+            "findings": 6
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789731866.058188,
+  "pid": 67831,
+  "account": "A"
+}

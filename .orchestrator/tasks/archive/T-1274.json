@@ -1,0 +1,1995 @@
+{
+  "id": "T-1274",
+  "created_at": 1790176220.015688,
+  "parent": "T-0991",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 7,
+  "title": "S2f2 steering_policy in shadow: deterministic triggers (dependency merged, stuck, out-of-scope, repeated gate failure, security concern) produce decision_log rows kind steering; promotion feature steering_policy (P14)",
+  "spec": "Create orchestrator/steering_policy.py. evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg) -> {\"action\": \"continue\"|\"steer\"|\"cancel\", \"trigger\": name|None, \"reasons\": [...], \"message\": text|None}. Triggers, deterministic, in this order: security_concern (a merged sibling changed a security path the task reads: from stale_evidence stale_paths matching [review] security_paths); dependency_changed (stale_evidence risk medium or high on the task's read scope); stuck (no registry event for [steering].stuck_after_s, default 900, while status running); out_of_scope (registry tool events touching paths outside write_scope and read_scope more than [steering].out_of_scope_events, default 3); repeated_failure (two gate reds with the same failure signature on this lineage). Action: steer for dependency_changed, out_of_scope, repeated_failure; cancel for security_concern when the task is not on the critical path, else steer; continue otherwise. The message names the trigger, lists the changed paths or the repeated failure, and never restates the spec. daemon tick: for every running execute task compute evaluate and record decision_log rows kind steering (add to KINDS) with candidates continue/steer/cancel, hard constraints, deterministic evidence, selected, mode; [steering].mode = \"shadow\" (dated comment; off|shadow|active). Active: call worker_control.steer or cancel with the message; shadow: rows only; never more than one steering per task per [steering].min_interval_s (default 1800). promotion FEATURES entry steering_policy with criteria: at least 20 shadow rows with a steer or cancel candidate and, once active, fewer fix rounds per task than the shadow baseline with no rise in token cost. Docs: docs/hermes-hardening/12-steering-policy.md.\nSpec review T-1262 folded in: (1) Inputs defined: gate_history = the list of daemon.failure_signature values of every gate-red round in the task's lineage (the fix_round_for chain up to the root), repeated_failure fires when the last two are equal; out_of_scope uses the worktree's `git status --porcelain` paths (not registry tool payloads): a path is outside scope when it matches no write_scope or read_scope entry by fnmatch (glob entries) or path prefix (directory entries); the count threshold applies to distinct paths. (2) evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, critical, now): critical is computed by the daemon as 'task is first in critical_path.rank over running plus ready tasks'; cancel is chosen only when critical is False AND the worktree has no commits beyond its base; any exception or missing input inside evaluate yields continue (fail closed) with reason evaluation_error. (3) daemon.tick wraps worker_control.steer/cancel in try/except: a failure writes a steering row with outcome error and does not consume the interval. (4) Interval and dedupe from persisted state: the last steering decision_log row for the task (bounded read of the last 500 rows) defines min_interval_s; a shadow row is written only when (trigger, evidence hash) differs from the task's last row, so ticks do not flood rows. (5) [steering] section is new: defaults live in code (mode shadow, stuck_after_s 900, out_of_scope_events 3, min_interval_s 1800); steering_policy.mode(cfg) validates and falls back to off on unknown values with invalid_config on the row; tests/test_pool.py gets a validation case (scope). (6) decision_log: steering rows carry trigger, severity, critical, action, evidence_hash, message_chars (never the message text) and the standard candidates/hard_constraints/deterministic/reason/selected/mode fields; tests/test_decision_log.py (scope) updates any KINDS count assertions. (7) promotion.collect gains a steering_policy branch: n, steer and cancel counts, mean fix rounds of steered versus non-steered tasks over the window (from constraints.fix_round_for on the bus). (8) security_paths empty in [review] means fail closed: every orchestrator/*.py counts as a security path, mirroring the daemon. (9) Tests: shadow asserts steer and cancel are never called (unittest.mock); active calls once and respects min_interval_s; the error path writes an error row.\nSpec review T-1268 folded in (final, overrides earlier wording): (1) Final signature: evaluate(task, *, tasks, registry_doc, stale_evidence, gate_history, cfg, critical, now) -> dict; the daemon and the tests use exactly this. (2) gate_history = [t['constraints']['failure_signature'] for every task in the fix_round_for chain (root included) whose pipeline.gate_reds > 0], newest last; failures.failure_signature is never recomputed. (3) out_of_scope: one `git status --porcelain -z` per running task per tick with a 5 s timeout (timeout, missing worktree or non-zero exit -> the trigger is skipped with reason git_unavailable); rename entries take the new path; paths under __pycache__, *.pyc, .orchestrator/, .venv/, node_modules/ and the worktree's .git are ignored. The no-commits guard is `git rev-list --count <merge-base with goal/<parent>>..HEAD` == 0 with the same timeout rule. (4) stale_evidence is the dict stale.evidence() returns on this branch (keys stale_paths, risk, risk_reasons, signals, moved_count, graph); cite it in the docstring and build fixtures from that shape; a missing key yields continue with reason missing_input. (5) Interval and dedupe: the interval clock counts only steering rows with mode active and outcome not error; shadow rows never start it; dedupe on (trigger, evidence_hash) applies only while the interval is running; after it expires a new row (and in active mode a new steer) is allowed even with unchanged evidence. (6) Active safety: skip tasks whose registry status is steering or cancelling, or whose pipeline.steer_epoch is newer than the registry epoch (steer in flight); a worker that exits between evaluate and the action is caught and logged as outcome worker_gone; critical uses the same critical_path.rank input the scheduler's wave order uses (pass the daemon's ranked list in). Cancel is SHADOW-ONLY in this task: in active mode the policy may steer but never cancels (a cancel candidate is logged and downgraded to steer), until a later promotion decision enables it. (7) decision_log gains a validator for kind steering (required keys: trigger, severity, critical, action, evidence_hash, message_chars plus the standard fields; a key named message is rejected); the omission test asserts message_chars is present and the message string is absent from the serialized row; every KINDS count assertion in the suite is updated.\nRepository rules: unittest (not pytest), tests/_harness.py single ORCH_ROOT fixture; every acceptance test id tests/test_<module>.py::test_name is a method def test_name(self) in a unittest.TestCase. No new third-party dependencies. Never write secret values to any file or log; test fixtures use synthetic names and values that are not credential-shaped. Do not quote template placeholder tokens (double braces) anywhere in code comments or docs. Shadow-first: a new adaptive path never changes what a worker sees until its mode is active; shadow only writes decision_log or runs rows. Run .claude/hooks/tests-green.sh . until green; the base suite must stay green. Do not ask questions: decide, and note decisions in the result summary. The interface contracts of the stage 1 modules are in .orchestrator/plan.md (section GOAL T-0991) and in docs/hermes-hardening/0*.md on this branch; read the merged module before building on it.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_steering_policy.py::test_triggers_in_order_and_actions (each trigger from fixtures yields the documented action and message)",
+    "tests/test_steering_policy.py::test_min_interval_and_critical_path_rule",
+    "tests/test_daemon.py::test_tick_records_steering_rows_in_shadow_without_calling_worker_control",
+    "tests/test_promotion.py::test_steering_policy_feature_registered",
+    "tests/test_daemon.py::test_active_steering_calls_once_respects_interval_and_logs_errors",
+    "tests/test_pool.py::test_steering_section_defaults_and_invalid_mode_falls_back",
+    "tests/test_decision_log.py::test_steering_rows_omit_message_text",
+    "tests/test_steering_policy.py::test_git_status_rules_timeout_and_ignored_paths",
+    "tests/test_daemon.py::test_active_mode_never_cancels_and_skips_in_flight_steers",
+    ".claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    "orchestrator/steering_policy.py",
+    "orchestrator/daemon.py",
+    "orchestrator/decision_log.py",
+    "orchestrator/promotion.py",
+    ".orchestrator/pool.toml",
+    "tests/test_steering_policy.py",
+    "tests/test_daemon.py",
+    "tests/test_promotion.py",
+    "docs/hermes-hardening/12-steering-policy.md",
+    "tests/test_pool.py",
+    "tests/test_decision_log.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 90,
+    "timeout_s": 3600,
+    "task_class": "feature",
+    "route": "spec_review"
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1274",
+  "codex_thread": "01a0cee1-8471-7510-bd39-93b64620f663",
+  "result": {
+    "summary": "Implemented shadow-first steering, active safety guards, persisted intervals, promotion metrics, and tests.\nGate: **PASS \u2014 1,432 tests**. Commit: `ef7e252`. Worktree clean.\nFailures-only test output: empty.\n\nFiles changed: policy, daemon, decision log, promotion, pool config, documentation, and five test modules.\n\n```text\n11 files changed, 727 insertions(+), 3 deletions(-)\n```",
+    "executed_by": "codex:astra",
+    "thread": "01a0cee1-8471-7510-bd39-93b64620f663",
+    "usage": {
+      "input_tokens": 1646018,
+      "cached_input_tokens": 1580928,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 11499,
+      "reasoning_output_tokens": 2331
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790176220.0176,
+      "spec_review_verdict": "approve",
+      "reason": "Planner: approval carried over from T-1270 (two rounds reviewed)"
+    },
+    {
+      "ts": 1790176229.124405,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356
+      }
+    },
+    {
+      "ts": 1790176229.1255732,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "dispatched_at": 1790176229.1255271,
+        "dispatched_at_lease": 1790177129.1255271
+      }
+    },
+    {
+      "ts": 1790176233.712785,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "dispatched_at": 1790176229.1255271,
+        "dispatched_at_lease": 1790177129.1255271,
+        "dispatched_at_done": 1790176233.712726
+      }
+    },
+    {
+      "ts": 1790176304.065442,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356
+      }
+    },
+    {
+      "ts": 1790176313.307285,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176313.30655
+        }
+      }
+    },
+    {
+      "ts": 1790176321.462039,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176313.30655
+        },
+        "dispatch_error": "'routed-findings'"
+      }
+    },
+    {
+      "ts": 1790176321.463681,
+      "status": "failed",
+      "result": {
+        "reason": "dispatch error: 'routed-findings'",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790176486.846892,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176313.30655
+        }
+      },
+      "result": null,
+      "reason": "Planner: re-queued after the context router went back to shadow (trim bug workaround)"
+    },
+    {
+      "ts": 1790176544.3928618,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176313.30655
+        },
+        "dispatched_at": 1790176544.392757,
+        "dispatched_at_lease": 1790177444.392757
+      }
+    },
+    {
+      "ts": 1790176551.019434,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176313.30655
+        },
+        "dispatched_at": 1790176544.392757,
+        "dispatched_at_lease": 1790177444.392757,
+        "dispatched_at_done": 1790176551.019107
+      }
+    },
+    {
+      "ts": 1790176725.42227,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176725.419442
+        },
+        "dispatched_at": 1790176544.392757,
+        "dispatched_at_lease": 1790177444.392757,
+        "dispatched_at_done": 1790176551.019107
+      }
+    },
+    {
+      "ts": 1790176734.426332,
+      "packet_meta": {
+        "chars": 9597,
+        "est_tokens": 2399,
+        "presented_tokens": 2399,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "d139e81318d16f4a44e893b8afdc48b56b6a075562637e3d7aba396be6a1aae4"
+          },
+          "objective": {
+            "chars": 7765,
+            "est_tokens": 1941,
+            "sha256": "33cbae3be9bd092c555140fe53a034b730740daa363a7a5a3fed890bb1f0669e"
+          },
+          "acceptance": {
+            "chars": 830,
+            "est_tokens": 207,
+            "sha256": "1f624f93931f013ac913258670ee8907a20833702f739b03ae32638553038177"
+          },
+          "base": {
+            "chars": 105,
+            "est_tokens": 26,
+            "sha256": "a19777e474fd74482faa88032f614271eab32993fd2159e2c3256851f128a269"
+          },
+          "write_scope": {
+            "chars": 336,
+            "est_tokens": 84,
+            "sha256": "eb2aa856251a0f5075d01ca59963b60e737923933e163f93b5ccac1dc64f5d5c"
+          },
+          "read_scope": {
+            "chars": 108,
+            "est_tokens": 27,
+            "sha256": "fc6be9d41e583b5f58c5fc72154f3e330ca9a34e4130810df26b41b1df167e9f"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "577cfba094a9",
+        "version": "577cfba094a9",
+        "candidate_known": true,
+        "base": "1acfc3b30612",
+        "sources": "pool.toml@5b2b882ec40d gotchas@fc804c810003 memory@notes over cap by 4797 chars: acceptance kept whole routed=shadow",
+        "policy_version": "5b2b882ec40d",
+        "gotchas": "fc804c810003",
+        "candidate_tokens": 3402,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "shadow",
+        "routed_tokens": 24812,
+        "routed_reduction_ratio": 0.9492329469375264,
+        "routed_hidden": 3,
+        "routed_ambiguous": 25,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "07068b8c49d5",
+          "98243600b482",
+          "669097b374b1",
+          "c5e02445f6fd",
+          "d1bf38e4ab20",
+          "5210b06b4ab7",
+          "3b16d924f9db",
+          "c028c19b1379",
+          "13ece8e0df85",
+          "38ecf8103553",
+          "8005afe6ec3a",
+          "17210891e218",
+          "5f0cea5b19ed",
+          "7844bc2591a4",
+          "bc691347e557",
+          "80648deefba0",
+          "c7db5c48f348",
+          "0906ebbd2ce1",
+          "83c76b85e0f1",
+          "6f6b02dad815",
+          "d0844cdc7c5a",
+          "0b5c02e51f28",
+          "504365aa02ad",
+          "cb22d9f34171",
+          "2d2ddb34990d",
+          "d7c19588c81d",
+          "97fd6e4c4100",
+          "ec0d5ae975a0",
+          "234ab0dcb439",
+          "99e6fc9601ea",
+          "7cce4d5841bf",
+          "97c57ec2cc5f",
+          "714ca0074e5b",
+          "794fa77bacad",
+          "d6db610f67e4",
+          "4c846f8d08fd",
+          "267060f197dc",
+          "f55b51cfb88f",
+          "6c675a491143",
+          "a0dba9b5a13a",
+          "e146114ba8ec",
+          "cd2ca5b8db6f",
+          "3037c6d26ebe",
+          "89e16c7c78ed",
+          "18558590f472",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "1507347f3a7c",
+          "967e86dc8567",
+          "917be66a27c5",
+          "e175a2554b06",
+          "cc3f3bcac15a",
+          "ae61acc3156e",
+          "a48883e9da6e",
+          "a98276b73bf8"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "active"
+      }
+    },
+    {
+      "ts": 1790176734.42907,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1274",
+      "claimed_at": 1790176734.428472
+    },
+    {
+      "ts": 1790176734.4310899,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790177024.038177,
+      "status": "queued",
+      "hold_reason": null,
+      "pid": null,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176725.419442
+        }
+      },
+      "reason": "Planner: worker orphaned by the daemon restart; re-queued (worktree kept)"
+    },
+    {
+      "ts": 1790177196.43908,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176725.419442
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987
+      }
+    },
+    {
+      "ts": 1790177201.918401,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790176725.419442
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234
+      }
+    },
+    {
+      "ts": 1790177280.981399,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234
+      }
+    },
+    {
+      "ts": 1790177281.093001,
+      "packet_meta": {
+        "chars": 9511,
+        "est_tokens": 2377,
+        "presented_tokens": 2377,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "53e670c3732e18f2a3726bf03160545dba4b9c431278c65a17e423c40289adc9"
+          },
+          "objective": {
+            "chars": 7765,
+            "est_tokens": 1941,
+            "sha256": "33cbae3be9bd092c555140fe53a034b730740daa363a7a5a3fed890bb1f0669e"
+          },
+          "acceptance": {
+            "chars": 830,
+            "est_tokens": 207,
+            "sha256": "1f624f93931f013ac913258670ee8907a20833702f739b03ae32638553038177"
+          },
+          "base": {
+            "chars": 112,
+            "est_tokens": 28,
+            "sha256": "16723c554ab29494ac81cf7a99ff4db402cceacad5453bb852369d269f5903da"
+          },
+          "write_scope": {
+            "chars": 336,
+            "est_tokens": 84,
+            "sha256": "eb2aa856251a0f5075d01ca59963b60e737923933e163f93b5ccac1dc64f5d5c"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "8c790a1ba563",
+        "version": "8c790a1ba563",
+        "candidate_known": true,
+        "base": "c3fabbd21a40",
+        "sources": "pool.toml@28e5fc3ca227 gotchas@fc804c810003 memory@notes over cap by 4711 chars: acceptance kept whole routed=active",
+        "policy_version": "28e5fc3ca227",
+        "gotchas": "fc804c810003",
+        "candidate_tokens": 3729,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 27042,
+        "routed_reduction_ratio": 0.9374934997399896,
+        "routed_hidden": 16,
+        "routed_ambiguous": 12,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "07068b8c49d5",
+          "98243600b482",
+          "669097b374b1",
+          "c5e02445f6fd",
+          "d1bf38e4ab20",
+          "5210b06b4ab7",
+          "3b16d924f9db",
+          "c028c19b1379",
+          "13ece8e0df85",
+          "38ecf8103553",
+          "8005afe6ec3a",
+          "339a4895fe63",
+          "4da0e0bbc3ea",
+          "4be247d785d9",
+          "9d0db0ac57ff",
+          "8bafe2f88600",
+          "1b48c880e972",
+          "b78efbf3c59d",
+          "0906ebbd2ce1",
+          "825d5c24d32a",
+          "6f6b02dad815",
+          "d0844cdc7c5a",
+          "f1ca2898f843",
+          "504365aa02ad",
+          "5d3e74587cab",
+          "2d2ddb34990d",
+          "d7c19588c81d",
+          "97fd6e4c4100",
+          "ec0d5ae975a0",
+          "234ab0dcb439",
+          "99e6fc9601ea",
+          "7cce4d5841bf",
+          "97c57ec2cc5f",
+          "714ca0074e5b",
+          "794fa77bacad",
+          "d6db610f67e4",
+          "4c846f8d08fd",
+          "267060f197dc",
+          "e146114ba8ec",
+          "cd2ca5b8db6f",
+          "3037c6d26ebe",
+          "89e16c7c78ed",
+          "18558590f472",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "1507347f3a7c",
+          "967e86dc8567",
+          "917be66a27c5",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790177281.094327,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1274",
+      "claimed_at": 1790177281.094154
+    },
+    {
+      "ts": 1790177281.0954921,
+      "rounds": 0,
+      "executor": "astra",
+      "tier": "astra"
+    },
+    {
+      "ts": 1790177776.1684961,
+      "codex_thread": "01a0cee1-8471-7510-bd39-93b64620f663",
+      "codex_thread_head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+    },
+    {
+      "ts": 1790177776.173249,
+      "packet_meta": {
+        "chars": 9511,
+        "est_tokens": 2377,
+        "presented_tokens": 2377,
+        "sections": {
+          "_preamble": {
+            "chars": 164,
+            "est_tokens": 41,
+            "sha256": "53e670c3732e18f2a3726bf03160545dba4b9c431278c65a17e423c40289adc9"
+          },
+          "objective": {
+            "chars": 7765,
+            "est_tokens": 1941,
+            "sha256": "33cbae3be9bd092c555140fe53a034b730740daa363a7a5a3fed890bb1f0669e"
+          },
+          "acceptance": {
+            "chars": 830,
+            "est_tokens": 207,
+            "sha256": "1f624f93931f013ac913258670ee8907a20833702f739b03ae32638553038177"
+          },
+          "base": {
+            "chars": 112,
+            "est_tokens": 28,
+            "sha256": "16723c554ab29494ac81cf7a99ff4db402cceacad5453bb852369d269f5903da"
+          },
+          "write_scope": {
+            "chars": 336,
+            "est_tokens": 84,
+            "sha256": "eb2aa856251a0f5075d01ca59963b60e737923933e163f93b5ccac1dc64f5d5c"
+          },
+          "read_scope": {
+            "chars": 15,
+            "est_tokens": 3,
+            "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+          },
+          "constraints": {
+            "chars": 118,
+            "est_tokens": 29,
+            "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+          },
+          "relevant_tests": {
+            "chars": 19,
+            "est_tokens": 4,
+            "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+          },
+          "symbols": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+          },
+          "gotchas": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+          },
+          "decisions": {
+            "chars": 14,
+            "est_tokens": 3,
+            "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+          },
+          "verify": {
+            "chars": 102,
+            "est_tokens": 25,
+            "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+          },
+          "evidence": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+          }
+        },
+        "hash": "8c790a1ba563",
+        "version": "8c790a1ba563",
+        "candidate_known": true,
+        "base": "c3fabbd21a40",
+        "sources": "pool.toml@28e5fc3ca227 gotchas@fc804c810003 memory@notes over cap by 4711 chars: acceptance kept whole routed=active",
+        "policy_version": "28e5fc3ca227",
+        "gotchas": "fc804c810003",
+        "candidate_tokens": 3729,
+        "skill_tokens_presented_l2": 0,
+        "routed_mode": "active",
+        "routed_tokens": 27042,
+        "routed_reduction_ratio": 0.9374934997399896,
+        "routed_hidden": 16,
+        "routed_ambiguous": 12,
+        "routed_rules_version": "v1",
+        "evidence_ids": [
+          "07068b8c49d5",
+          "98243600b482",
+          "669097b374b1",
+          "c5e02445f6fd",
+          "d1bf38e4ab20",
+          "5210b06b4ab7",
+          "3b16d924f9db",
+          "c028c19b1379",
+          "13ece8e0df85",
+          "38ecf8103553",
+          "8005afe6ec3a",
+          "339a4895fe63",
+          "4da0e0bbc3ea",
+          "4be247d785d9",
+          "9d0db0ac57ff",
+          "8bafe2f88600",
+          "1b48c880e972",
+          "b78efbf3c59d",
+          "0906ebbd2ce1",
+          "825d5c24d32a",
+          "6f6b02dad815",
+          "d0844cdc7c5a",
+          "f1ca2898f843",
+          "504365aa02ad",
+          "5d3e74587cab",
+          "2d2ddb34990d",
+          "d7c19588c81d",
+          "97fd6e4c4100",
+          "ec0d5ae975a0",
+          "234ab0dcb439",
+          "99e6fc9601ea",
+          "7cce4d5841bf",
+          "97c57ec2cc5f",
+          "714ca0074e5b",
+          "794fa77bacad",
+          "d6db610f67e4",
+          "4c846f8d08fd",
+          "267060f197dc",
+          "e146114ba8ec",
+          "cd2ca5b8db6f",
+          "3037c6d26ebe",
+          "89e16c7c78ed",
+          "18558590f472",
+          "4b20ac430c64",
+          "4e6a2070bda4",
+          "a36f287997e8",
+          "1507347f3a7c",
+          "967e86dc8567",
+          "917be66a27c5",
+          "e175a2554b06",
+          "575022ff3493",
+          "cc3f3bcac15a",
+          "ae61acc3156e"
+        ],
+        "instruction_tokens": 401,
+        "instruction_tokens_modular": 401,
+        "skills_exposed": [
+          "executor/implement-spec"
+        ],
+        "skill_tokens_l0": 25,
+        "skills_selected": [],
+        "skill_tokens_selected_l0": 0,
+        "skill_tokens_selected_l2": 0,
+        "skill_routing_mode": "shadow",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790177776.186084,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        }
+      }
+    },
+    {
+      "ts": 1790177776.189413,
+      "status": "done",
+      "result": {
+        "summary": "Implemented shadow-first steering, active safety guards, persisted intervals, promotion metrics, and tests.\nGate: **PASS \u2014 1,432 tests**. Commit: `ef7e252`. Worktree clean.\nFailures-only test output: empty.\n\nFiles changed: policy, daemon, decision log, promotion, pool config, documentation, and five test modules.\n\n```text\n11 files changed, 727 insertions(+), 3 deletions(-)\n```",
+        "executed_by": "codex:astra",
+        "thread": "01a0cee1-8471-7510-bd39-93b64620f663",
+        "usage": {
+          "input_tokens": 1646018,
+          "cached_input_tokens": 1580928,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 11499,
+          "reasoning_output_tokens": 2331
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790177795.6557708,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1790177925.421244,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1790177925.964747,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        }
+      }
+    },
+    {
+      "ts": 1790177926.091302,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c"
+      }
+    },
+    {
+      "ts": 1790177926.098954,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709
+      }
+    },
+    {
+      "ts": 1790177992.3778188,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "review_held_at": 1790177992.377589
+      },
+      "status": "held",
+      "hold_reason": "reviews failed: T-1290"
+    },
+    {
+      "ts": 1790177992.868782,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "review_held_at": 1790177992.377589,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790177992.9842649,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "review_held_at": 1790177992.377589,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        }
+      }
+    },
+    {
+      "ts": 1790178108.3195882,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1790178144.627651,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        }
+      },
+      "status": "done",
+      "hold_reason": null
+    },
+    {
+      "ts": 1790178217.0798059,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        },
+        "review_held_at": 1790178217.079454
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-1290 (request_changes)"
+    },
+    {
+      "ts": 1790178570.670211,
+      "codex_thread": "01a0cee1-8471-7510-bd39-93b64620f663",
+      "codex_thread_head": "84d4cbb7fec871238ca97a9ca54c573a6dc31b46"
+    },
+    {
+      "ts": 1790178570.683855,
+      "rounds": 1
+    },
+    {
+      "ts": 1790178729.2062879,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        },
+        "review_held_at": 1790178217.079454,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1790179331.934722,
+      "codex_thread": "01a0cee1-8471-7510-bd39-93b64620f663",
+      "codex_thread_head": "93a856ae757366dd0626e8abec9d04197b9b7407"
+    },
+    {
+      "ts": 1790179331.9436429,
+      "rounds": 2
+    },
+    {
+      "ts": 1790179468.151701,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        },
+        "review_held_at": 1790178217.079454,
+        "lineage_fix_rounds": 2
+      }
+    },
+    {
+      "ts": 1790179807.1672902,
+      "codex_thread": "01a0cee1-8471-7510-bd39-93b64620f663",
+      "codex_thread_head": "25bb9b60c8fc1ee22b574896d1282be7609d3b22"
+    },
+    {
+      "ts": 1790179807.179568,
+      "rounds": 3
+    },
+    {
+      "ts": 1790179938.8158789,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        },
+        "review_held_at": 1790178217.079454,
+        "lineage_fix_rounds": 3
+      }
+    },
+    {
+      "ts": 1790180586.855414,
+      "status": "done",
+      "hold_reason": null,
+      "merged_into": "goal/T-0991",
+      "merged_via": "fix_round:T-1305",
+      "reason": "Planner: fix round 3 T-1305 merged by hand after the rebase hold (review T-1304 folded, final review approve); root marked merged"
+    },
+    {
+      "ts": 1790180808.76863,
+      "status": "done",
+      "merged_into": "goal/T-0991",
+      "merged_via": "fix round T-1291 7850da1fa27d96767dee48f87461d0d9e95d020c",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        },
+        "review_held_at": 1790178217.079454,
+        "lineage_fix_rounds": 3,
+        "accepted_at": 1790180808.766272
+      }
+    },
+    {
+      "ts": 1790180945.2591848,
+      "status": "done",
+      "merged_into": "goal/T-0991",
+      "merged_via": "fix round T-1299 7850da1fa27d96767dee48f87461d0d9e95d020c",
+      "hold_reason": null,
+      "pipeline": {
+        "first_ready_at": 1790176229.124356,
+        "handoff": {
+          "baseline": "astra",
+          "selected": "astra",
+          "switched": false,
+          "gain": 0.0,
+          "reason": "allocation_active",
+          "ts": 1790177280.980761
+        },
+        "dispatched_at": 1790177196.438987,
+        "dispatched_at_lease": 1790178096.438987,
+        "dispatched_at_done": 1790177201.918234,
+        "skills_used": [],
+        "jev_route": {
+          "baseline": "astra",
+          "hypothetical": "astra",
+          "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+          "adjustment": {
+            "astra": 1.0
+          },
+          "mode": "active"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1790177925.4209962,
+        "gated_at_lease": 1790178825.4209962,
+        "first_green_at": 1790177925.420029,
+        "gate_reds": 0,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "stale_check": {
+          "base": "task/T-1274",
+          "goal_head": "goal/T-0991",
+          "moved_count": 2,
+          "stale_paths": [
+            "orchestrator/spawn.py",
+            "tests/test_spawn.py"
+          ],
+          "signals": {
+            "scoped_files_changed": [],
+            "changed_files_moved": [],
+            "tests_changed": [],
+            "interface_changed": [],
+            "graph_relationships": [],
+            "dependency_changed": [],
+            "overlapping_merge": []
+          },
+          "risk": "none",
+          "risk_reasons": [],
+          "graph": "stale",
+          "checked_at": 1790177925.964254,
+          "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+        },
+        "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+        "gated_at_done": 1790177926.0987709,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790177992.3778188": true
+        },
+        "review_held_at": 1790178217.079454,
+        "lineage_fix_rounds": 3,
+        "accepted_at": 1790180808.766272
+      }
+    }
+  ],
+  "spec_review_verdict": "approve",
+  "reason": "Planner: fix round 3 T-1305 merged by hand after the rebase hold (review T-1304 folded, final review approve); root marked merged",
+  "pipeline": {
+    "first_ready_at": 1790176229.124356,
+    "handoff": {
+      "baseline": "astra",
+      "selected": "astra",
+      "switched": false,
+      "gain": 0.0,
+      "reason": "allocation_active",
+      "ts": 1790177280.980761
+    },
+    "dispatched_at": 1790177196.438987,
+    "dispatched_at_lease": 1790178096.438987,
+    "dispatched_at_done": 1790177201.918234,
+    "skills_used": [],
+    "jev_route": {
+      "baseline": "astra",
+      "hypothetical": "astra",
+      "key": "ce40fdf082016430e5dccded443b8994776c6bc9",
+      "adjustment": {
+        "astra": 1.0
+      },
+      "mode": "active"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1790177925.4209962,
+    "gated_at_lease": 1790178825.4209962,
+    "first_green_at": 1790177925.420029,
+    "gate_reds": 0,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "stale_check": {
+      "base": "task/T-1274",
+      "goal_head": "goal/T-0991",
+      "moved_count": 2,
+      "stale_paths": [
+        "orchestrator/spawn.py",
+        "tests/test_spawn.py"
+      ],
+      "signals": {
+        "scoped_files_changed": [],
+        "changed_files_moved": [],
+        "tests_changed": [],
+        "interface_changed": [],
+        "graph_relationships": [],
+        "dependency_changed": [],
+        "overlapping_merge": []
+      },
+      "risk": "none",
+      "risk_reasons": [],
+      "graph": "stale",
+      "checked_at": 1790177925.964254,
+      "head": "ef7e25270801371bee75cf3c8c105520bffe663c"
+    },
+    "reviewed_sha": "ef7e25270801371bee75cf3c8c105520bffe663c",
+    "gated_at_done": 1790177926.0987709,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790177992.3778188": true
+    },
+    "review_held_at": 1790178217.079454,
+    "lineage_fix_rounds": 3,
+    "accepted_at": 1790180808.766272
+  },
+  "hold_reason": null,
+  "pid": null,
+  "packet_meta": {
+    "chars": 9511,
+    "est_tokens": 2377,
+    "presented_tokens": 2377,
+    "sections": {
+      "_preamble": {
+        "chars": 164,
+        "est_tokens": 41,
+        "sha256": "53e670c3732e18f2a3726bf03160545dba4b9c431278c65a17e423c40289adc9"
+      },
+      "objective": {
+        "chars": 7765,
+        "est_tokens": 1941,
+        "sha256": "33cbae3be9bd092c555140fe53a034b730740daa363a7a5a3fed890bb1f0669e"
+      },
+      "acceptance": {
+        "chars": 830,
+        "est_tokens": 207,
+        "sha256": "1f624f93931f013ac913258670ee8907a20833702f739b03ae32638553038177"
+      },
+      "base": {
+        "chars": 112,
+        "est_tokens": 28,
+        "sha256": "16723c554ab29494ac81cf7a99ff4db402cceacad5453bb852369d269f5903da"
+      },
+      "write_scope": {
+        "chars": 336,
+        "est_tokens": 84,
+        "sha256": "eb2aa856251a0f5075d01ca59963b60e737923933e163f93b5ccac1dc64f5d5c"
+      },
+      "read_scope": {
+        "chars": 15,
+        "est_tokens": 3,
+        "sha256": "5ba6b663cb35b4b7530d0a5b76d78f7b5c270adc77b9220bceaa72358d21f5ff"
+      },
+      "constraints": {
+        "chars": 118,
+        "est_tokens": 29,
+        "sha256": "1a2f10271c75a4ac82457840d06d30b5e4627f1e0466ebc5eb15458ef9ba9c6f"
+      },
+      "relevant_tests": {
+        "chars": 19,
+        "est_tokens": 4,
+        "sha256": "2bbd4d344e45096df74e2d03c0bbcc4c1f60b8f9b4237fe5488ffe39e8d8e007"
+      },
+      "symbols": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "c293a57bf2986b79c37e7023eb301b36d46585d48d2abdf77cd7039eac674dcc"
+      },
+      "gotchas": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "7c670b1b070b09a99e8a1eeaa8bd3ba82a90e5c2107972c30df9c5356b3228c7"
+      },
+      "decisions": {
+        "chars": 14,
+        "est_tokens": 3,
+        "sha256": "6e20e8e7b5529980e6c61cfcee7a3f6a30d7563f443c19b179a29dbd5acc1125"
+      },
+      "verify": {
+        "chars": 102,
+        "est_tokens": 25,
+        "sha256": "67b8c5735d9f1bb7d89849f69178de377441bca5491fea17c21a0ab934e75c8a"
+      },
+      "evidence": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "8183020adcccc2230233d51594ada7a491a854834ae78dba6bfa5d7c8f1a2381"
+      }
+    },
+    "hash": "8c790a1ba563",
+    "version": "8c790a1ba563",
+    "candidate_known": true,
+    "base": "c3fabbd21a40",
+    "sources": "pool.toml@28e5fc3ca227 gotchas@fc804c810003 memory@notes over cap by 4711 chars: acceptance kept whole routed=active",
+    "policy_version": "28e5fc3ca227",
+    "gotchas": "fc804c810003",
+    "candidate_tokens": 3729,
+    "skill_tokens_presented_l2": 0,
+    "routed_mode": "active",
+    "routed_tokens": 27042,
+    "routed_reduction_ratio": 0.9374934997399896,
+    "routed_hidden": 16,
+    "routed_ambiguous": 12,
+    "routed_rules_version": "v1",
+    "evidence_ids": [
+      "07068b8c49d5",
+      "98243600b482",
+      "669097b374b1",
+      "c5e02445f6fd",
+      "d1bf38e4ab20",
+      "5210b06b4ab7",
+      "3b16d924f9db",
+      "c028c19b1379",
+      "13ece8e0df85",
+      "38ecf8103553",
+      "8005afe6ec3a",
+      "339a4895fe63",
+      "4da0e0bbc3ea",
+      "4be247d785d9",
+      "9d0db0ac57ff",
+      "8bafe2f88600",
+      "1b48c880e972",
+      "b78efbf3c59d",
+      "0906ebbd2ce1",
+      "825d5c24d32a",
+      "6f6b02dad815",
+      "d0844cdc7c5a",
+      "f1ca2898f843",
+      "504365aa02ad",
+      "5d3e74587cab",
+      "2d2ddb34990d",
+      "d7c19588c81d",
+      "97fd6e4c4100",
+      "ec0d5ae975a0",
+      "234ab0dcb439",
+      "99e6fc9601ea",
+      "7cce4d5841bf",
+      "97c57ec2cc5f",
+      "714ca0074e5b",
+      "794fa77bacad",
+      "d6db610f67e4",
+      "4c846f8d08fd",
+      "267060f197dc",
+      "e146114ba8ec",
+      "cd2ca5b8db6f",
+      "3037c6d26ebe",
+      "89e16c7c78ed",
+      "18558590f472",
+      "4b20ac430c64",
+      "4e6a2070bda4",
+      "a36f287997e8",
+      "1507347f3a7c",
+      "967e86dc8567",
+      "917be66a27c5",
+      "e175a2554b06",
+      "575022ff3493",
+      "cc3f3bcac15a",
+      "ae61acc3156e"
+    ],
+    "instruction_tokens": 401,
+    "instruction_tokens_modular": 401,
+    "skills_exposed": [
+      "executor/implement-spec"
+    ],
+    "skill_tokens_l0": 25,
+    "skills_selected": [],
+    "skill_tokens_selected_l0": 0,
+    "skill_tokens_selected_l2": 0,
+    "skill_routing_mode": "shadow",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790177281.094154,
+  "rounds": 3,
+  "executor": "astra",
+  "codex_thread_head": "25bb9b60c8fc1ee22b574896d1282be7609d3b22",
+  "review_verdict": "request_changes",
+  "merged_into": "goal/T-0991",
+  "merged_via": "fix round T-1299 7850da1fa27d96767dee48f87461d0d9e95d020c"
+}

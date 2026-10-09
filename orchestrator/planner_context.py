@@ -1,11 +1,55 @@
 """Read the current Planner transcript's context usage for the prompt hook."""
 import json
+import re
+import subprocess
+import time
 from pathlib import Path
 
 from .pool import encode_project_dir
 
 
 DEFAULT_HANDOVER_CONTEXT_TOKENS = 300000
+DEFAULT_PLAN_MAX_CHARS = 12000
+AUTO_HANDOVER_BAND_TOKENS = 100000
+COMPACT_HEADER = ("Session compacted; continue in place. Planner mode: goals go through "
+                  "Skill(orchestrate); never edit source; see CLAUDE.md.")
+COMPACT_FOOTER = ("Full state: .orchestrator/plan.md; history: "
+                  ".orchestrator/plan-log.md (do not read by default).")
+_HANDOVER_HEADING_RE = re.compile(r"(?m)^## Auto-handover ")
+_HANDOVER_END_RE = re.compile(r"(?m)^<!-- end auto-handover -->$")
+
+
+def _plan_without_handover(plan):
+    matches = list(_HANDOVER_HEADING_RE.finditer(plan))
+    if not matches:
+        return plan
+    heading = matches[-1]
+    marker = _HANDOVER_END_RE.search(plan, heading.end())
+    end = marker.end() if marker else len(plan)
+    return plan[:heading.start()] + plan[end:]
+
+
+def compact_brief(root, limit=4000) -> str:
+    """Return the current Planner state suitable for a post-compaction hook."""
+    path = Path(root) / ".orchestrator" / "plan.md"
+    try:
+        plan = path.read_text()
+    except (FileNotFoundError, OSError, UnicodeError):
+        return f"{COMPACT_HEADER}\nplan.md missing; run the resume skill."
+
+    lines = plan.splitlines(keepends=True)
+    now = next((index for index, line in enumerate(lines) if line.startswith("## Now")), None)
+    if now is not None:
+        end = next((index for index in range(now + 1, len(lines))
+                    if lines[index].startswith("## ")), len(lines))
+        text = "".join(lines[now:end])
+    else:
+        text = plan
+    if len(text) > limit:
+        cut = text.rfind("\n", 0, limit + 1)
+        cut = cut if cut >= 0 else limit
+        text = text[:cut].rstrip("\n") + "\n[cut; read .orchestrator/plan.md]"
+    return f"{COMPACT_HEADER}\n{text}\n{COMPACT_FOOTER}"
 
 
 def _transcript_path(config_dir: Path, root: Path, *, transcript=None, session_id=None):
@@ -80,36 +124,87 @@ def user_turns(transcript) -> int:
         return 0
 
 
-def _last_handover(root):
-    path = Path(root) / ".orchestrator" / "checkpoint" / "handover-session.json"
+def _handover_state_path(root):
+    return Path(root) / ".orchestrator" / "handover_state.json"
+
+
+def _auto_handover_band(root, session_id):
     try:
-        record = json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        bands = json.loads(_handover_state_path(root).read_text()).get("auto_handover_bands", {})
+    except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError):
         return None
-    return record if isinstance(record, dict) else None
+    band = bands.get(session_id) if isinstance(bands, dict) else None
+    return band if isinstance(band, int) else None
+
+
+def _save_auto_handover_band(root, session_id, band):
+    path = _handover_state_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    bands = data.get("auto_handover_bands")
+    bands = bands if isinstance(bands, dict) else {}
+    bands[session_id] = band
+    data["auto_handover_bands"] = bands
+    path.write_text(json.dumps(data, indent=1))
+
+
+def _start_handover(root, session_id):
+    """Run `orchestrator handover` detached: its Jev ranking can outlast the hook's 3 s alarm."""
+    runs = Path(root) / ".orchestrator" / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    log = runs / f"handover-{time.strftime('%Y%m%dT%H%M%S')}.log"
+    with log.open("ab") as stream:
+        subprocess.Popen(["uv", "run", "orchestrator", "handover", "--reason", "context", "--session-id", session_id],
+                         cwd=str(root), stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                         start_new_session=True)
 
 
 def hook_message(cfg, config_dir: Path, root: Path, *, transcript=None, session_id=None) -> str | None:
-    """Return the one-line handover instruction when the configured limit is reached."""
+    """Return the hook's one-line notices. Over the limit with a known session, start the handover
+    automatically, at most once per session per AUTO_HANDOVER_BAND_TOKENS band above the threshold, and
+    report it only on that message; without a session id, fall back to the manual instruction."""
     tokens = context_tokens(config_dir, root, transcript=transcript, session_id=session_id)
     planner = cfg.get("planner", {})
     threshold = planner.get("handover_context_tokens", DEFAULT_HANDOVER_CONTEXT_TOKENS)
+    messages = []
+    plan_max = planner.get("plan_max_chars", DEFAULT_PLAN_MAX_CHARS)
+    plan_path = Path(root) / ".orchestrator" / "plan.md"
+    try:
+        plan_chars = len(_plan_without_handover(plan_path.read_text()))
+    except (FileNotFoundError, OSError, UnicodeError):
+        plan_chars = None
+    if isinstance(plan_max, int) and plan_max > 0 and plan_chars is not None and plan_chars > plan_max:
+        messages.append(f"plan.md is {plan_chars} chars (max {plan_max}): move history to "
+                        ".orchestrator/plan-log.md and keep ## Now current.")
+
     if tokens is None or not isinstance(threshold, int) or threshold == 0 or tokens < threshold:
-        return None
+        return "\n".join(messages) or None
     if transcript is not None or session_id is not None:
         grace = planner.get("handover_grace_turns", 12)
         if isinstance(grace, int) and user_turns(_transcript_path(
                 config_dir, root, transcript=transcript, session_id=session_id)) < grace:
-            return None
-    record = _last_handover(root)
-    if session_id is not None and record and record.get("session_id") == session_id:
-        recorded_tokens = record.get("tokens_at")
-        if isinstance(recorded_tokens, int) and tokens - recorded_tokens <= planner.get("handover_regrow_tokens", 20000):
-            stamp = record.get("ts")
-            from datetime import datetime
-            when = datetime.fromtimestamp(stamp).strftime("%H:%M") if isinstance(stamp, (int, float)) else "??:??"
-            return f"handover written {when}; restart with f orch"
-    command = "uv run orchestrator handover --reason context"
+            return "\n".join(messages) or None
     if session_id is not None:
-        command += f" --session-id {session_id}"
-    return f"Planner context is {tokens} tokens (threshold {threshold}); hand over now: {command}"
+        band = (tokens - threshold) // AUTO_HANDOVER_BAND_TOKENS
+        last = _auto_handover_band(root, session_id)
+        if last is not None and last >= band:
+            return "\n".join(messages) or None
+        try:
+            _save_auto_handover_band(root, session_id, band)
+            _start_handover(root, session_id)
+        except Exception as exc:
+            messages.append(f"Context {tokens} tokens: auto handover failed ({type(exc).__name__}: {' '.join(str(exc).split())}).")
+        else:
+            messages.append(f"Context {tokens} tokens: handover started (auto) to write the checkpoint: "
+                            f"uv run orchestrator handover --reason context --session-id {session_id}; "
+                            "keep working, the session compacts in place (auto-compact or /compact).")
+        return "\n".join(messages)
+    messages.append(f"Planner context is {tokens} tokens (threshold {threshold}); write the checkpoint: "
+                    "uv run orchestrator handover --reason context; then keep working, "
+                    "the session compacts in place (auto-compact or /compact).")
+    return "\n".join(messages)

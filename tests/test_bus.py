@@ -550,6 +550,44 @@ class Bus(BusSandbox):
                                  {"notice": "201 rows; pass parent=<goal id> or ids=[...] to narrow"})
 
 
+class HotSet(BusSandbox):
+    def test_read_takes_lock_once(self):
+        for n in range(5):
+            bus.create_task(f"t{n}", "s", ["ok"], ["x.py"])
+        with patch.object(bus.fcntl, "flock", wraps=bus.fcntl.flock) as flock:
+            rows = bus.read()
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(flock.call_count, 1)
+
+    def test_archive_moves_old_closed_tasks_and_get_still_finds_them(self):
+        old = time.time() - 8 * 86400
+        goal = bus.create_task("goal", "s", ["ok"], ["x.py"], constraints={"goal": True})["id"]
+        open_goal = bus.create_task("open goal", "s", ["ok"], ["x.py"], constraints={"goal": True})["id"]
+        def child(status, parent, created_at):
+            t = bus.create_task(status, "s", ["ok"], ["x.py"], role="execute", parent=parent)
+            t.update(status=status, created_at=created_at, events=[{"ts": created_at, "status": status}])
+            bus._save(t)
+            return t["id"]
+        stale = child("done", goal, old)
+        failed = child("failed", goal, old)
+        recent = child("done", goal, time.time())
+        queued = child("queued", goal, old)
+        under_open = child("done", open_goal, old)
+        bus.update(goal, status="done")
+
+        moved = bus.archive()
+
+        self.assertEqual(moved, [stale, failed])
+        self.assertTrue((bus.TASKS / "archive" / f"{stale}.json").exists())
+        self.assertFalse((bus.TASKS / f"{stale}.json").exists())
+        hot = {t["id"] for t in bus.read()}
+        self.assertEqual(hot, {goal, open_goal, recent, queued, under_open})
+        self.assertEqual(bus.get(stale)["status"], "done")
+        self.assertEqual(bus.get(failed)["status"], "failed")
+        self.assertEqual(bus.next_id(), f"T-{int(under_open[2:]) + 1:04d}")
+        self.assertEqual(bus.archive(), [])
+
+
 class ContextLog(BusSandbox):
     def test_log_run_carries_routed_keys(self):
         routed = {"routed_tokens": 12, "routed_reduction_ratio": .4, "routed_hidden": 2,

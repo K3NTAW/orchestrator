@@ -1,0 +1,185 @@
+{
+  "id": "T-0957",
+  "created_at": 1790120444.293407,
+  "parent": "T-0861",
+  "role": "review",
+  "tier": "sonnet",
+  "complexity": 7,
+  "title": "review: S8: learned skill proposals: detect repeated successful procedures across tasks, synthesise an evidence-backed draft skill into the quarantine store (never active), with source tasks, counterexamples and confidence; one-off behaviour never becomes a candidate (v3)",
+  "spec": "Program brief .orchestrator/roadmap-skills.md P20, P21, P22 (version on change), P36 learned-skills tests (P37 stage 8). Depends on T-0938 (skill_scorecard.usage_rows with lineage outcomes and dimensions) and T-0884 (discovery store STATE/skills/discovered.json + quarantine dir, provenance_info, inspect gate). Facts: run rows carry role, task, skills_used, context (packet sections), outcome; the Jev gate log carries per-call tool/tool_target per task; memory holds dated decisions and gotchas; the Planner writes specs with recurring instruction sentences; fix rounds carry failure kinds.\nDo:\n1. orchestrator/skill_learning.py (new). `patterns(root, since_s=None, min_support=3)` mines three deterministic sources: (a) tool-call sequences per task from the gate log (tool + normalised target: path stem, script path, command verb) collapsed into an ordered signature per role; (b) recurring instruction sentences across execute/scout/review specs (sentences \u2265 8 words appearing in \u2265 min_support distinct tasks, case-folded); (c) recurring fix strategies (fix-round specs whose Planner note or failure kind repeats). A pattern qualifies only when it appears in \u2265 min_support distinct tasks of which \u2265 80% reached merged/accepted; each pattern records support tasks, success count, failures (tasks where it appeared and the lineage failed: the counterexamples), roles, task classes, and confidence = successes / support capped by min(1, support / 10).\n2. `propose(pattern, root)` synthesises a draft SKILL.md in the P6 structure (Trigger from the task classes and title keywords of the support tasks; Objective from the shared spec sentence; Procedure from the tool sequence rendered as steps; Tools from the sequence; Evidence requirements from the packet sections those tasks used most; Output contract from the role's result shape; Stop conditions and Failure/recovery from the fix-round evidence) plus frontmatter provenance \"learned\" and a `provenance_info` block {source_tasks, successes, failures, procedure_signature, confidence, synthesised_at}. The draft is written ONLY to STATE/skills/quarantine/learned/<slug>/SKILL.md and registered in discovered.json with state \"discovered\" then \"quarantined\" (P2 transitions with reason \"learned proposal\"), never under skills/ and never active; the inspect gate (T-0884) applies before any transition into testing. A proposal is refused (reason recorded) when support < min_support or confidence < 0.6.\n3. Re-proposal and versions: proposing the same procedure_signature again updates the existing learned record (history entry, new content_hash version) instead of creating a duplicate; a pattern whose later evidence drops below the thresholds marks the record \"stale evidence\" in history.\n4. CLI: `orchestrator skills learn [--since 30d] [--min-support 3] [--propose]` lists qualifying patterns; with --propose writes the drafts and prints the ids. `orchestrator skills show <id>` renders the draft with its evidence block.\n5. docs/skill-intelligence/09-learned.md (\u226470 lines): the three pattern sources, thresholds, what a draft contains, the path to shadow/active (inspect \u2192 testing \u2192 S10 promotion), what is never automatic, revert path (delete the quarantine folder entries).\nTests (unittest, `import _harness` first; fixtures seed gate rows, specs and run rows in the harness root): tests/test_skill_learning.py::test_repeated_successful_sequence_becomes_pattern_with_support_and_counterexamples, ::test_one_off_behaviour_never_qualifies, ::test_propose_writes_quarantined_draft_never_active (draft under the quarantine dir; skills_registry.candidates never returns it; state quarantined), ::test_reproposal_updates_version_not_duplicate, ::test_low_confidence_refused_with_reason, ::test_cli_learn_lists_and_proposes. Never quote double-brace placeholder tokens literally. Do not ask questions; decide and note decisions in the result.\n\nSPEC v2 (2026-09-23 08:30) after spec review T-0949 (request_changes), binding on top of v1:\n- Confidence = successes / support (a fully successful pattern at the default min_support 3 scores 1.0 and clears the 0.6 bar); evidence strength = min(1, support / 10) is a SEPARATE reported field used only for ordering and shown in the draft's evidence block, never for refusal.\n- Persistence: propose() uses a dedicated write path in skill_learning.py (`_store_learned(record)`) that writes to discovered.json with provenance \"learned\"; skill_discovery._store's dedup lookup guards the source_repo/source_path read (records without them are skipped by that dedup), and learned dedup is by procedure_signature only. Test: tests/test_skill_learning.py::test_learned_records_coexist_with_external_records_in_store.\n- CLI: reuse the existing `orchestrator skills show <id>` (it dumps the record incl. provenance_info, which carries the evidence block); no new subparser. The learned-specific listing is `orchestrator skills learn` only.\n\nSPEC v3 (2026-09-23 08:55) after spec review T-0953 (round 2; both points folded in, further review waived by the Planner, verdict set to approve):\n- _store_learned(record) also seeds the state.json entry for the new skill id (state \"discovered\", trust \"untrusted\", since now, history []) before propose() calls skills_registry.transition(id, \"quarantined\", \"learned proposal\"); without the seed the transition would raise KeyError. Test tests/test_skill_learning.py::test_propose_writes_quarantined_draft_never_active asserts the state.json entry and the history entry for the transition.\n- tests/test_skill_discovery.py and tests/test_skills_registry.py already exist and cover _store and transition/rollback; the dedup-guard change in _store must keep both suites green (listed in acceptance).",
+  "inputs": [
+    "T-0954"
+  ],
+  "acceptance": [
+    "tests/test_skill_learning.py::test_repeated_successful_sequence_becomes_pattern_with_support_and_counterexamples passes",
+    "tests/test_skill_learning.py::test_one_off_behaviour_never_qualifies passes",
+    "tests/test_skill_learning.py::test_propose_writes_quarantined_draft_never_active passes",
+    "tests/test_skill_learning.py::test_reproposal_updates_version_not_duplicate passes",
+    "tests/test_skill_learning.py::test_low_confidence_refused_with_reason passes",
+    "tests/test_skill_learning.py::test_cli_learn_lists_and_proposes passes",
+    "docs/skill-intelligence/09-learned.md exists; `uv run orchestrator skills learn` runs; .claude/hooks/tests-green.sh exits 0",
+    "tests/test_skill_learning.py::test_learned_records_coexist_with_external_records_in_store passes",
+    "tests/test_skill_discovery.py and tests/test_skills_registry.py stay green"
+  ],
+  "scope": [
+    "orchestrator/skill_learning.py",
+    "orchestrator/skill_discovery.py",
+    "orchestrator/skills_registry.py",
+    "orchestrator/cli.py",
+    "tests/test_skill_learning.py",
+    "docs/skill-intelligence/09-learned.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0957",
+  "codex_thread": null,
+  "result": {
+    "summary": "Traced the full flow against the v2/v3 spec revisions: confidence=successes/support vs. separately-reported evidence_strength=min(1,support/10) matches v2; _store_learned seeds state.json (state discovered, trust untrusted, history []) before propose() calls registry.transition(...,'quarantined',...), avoiding the KeyError v3 called out, and the acceptance test for this is satisfied by tracing through skills_registry.transition/_update_registry_state/load (load() merges registry.json and discovered.json, so the learned record is found post-transition). skill_discovery._store's dedup guard now uses .get(...) defensively, which is exactly the fix needed since learned provenance_info lacks source_repo/source_path keys \u2014 verified against test_learned_records_coexist_with_external_records_in_store. Re-proposal path matches by procedure_signature only, updates id/version/history instead of duplicating. Refusal thresholds (support<min or confidence<0.6) and the CLI wiring (list vs --propose) align with the spec and tests. No violation of any listed acceptance criterion found; only two low-severity robustness/perf nits noted above.",
+    "verdict": "approve",
+    "comments": [
+      {
+        "path": "orchestrator/skill_learning.py",
+        "line": 150,
+        "issue": "Tool-sequence ordering sorts by str(ts) instead of a numeric key. If some gate rows in a task lack ts/at (falling back to the row's insertion-order int) while others carry epoch-float timestamps, or if epoch values ever differ in digit-count, lexicographic comparison of strings like \"1\" vs \"1758598734.5\" can misorder steps and produce a wrong procedure_signature, silently corrupting which pattern gets learned.",
+        "severity": "low"
+      },
+      {
+        "path": "orchestrator/skill_learning.py",
+        "line": 221,
+        "issue": "propose() calls skill_scorecard.usage_rows(root) inside the per-support-task loop, re-reading and re-parsing all usage rows from disk once per task instead of once per pattern. Purely a performance nit (O(n) redundant I/O), not a correctness issue for the given tests.",
+        "severity": "low"
+      }
+    ],
+    "packet_version": "f572d5762085",
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790120444.294237,
+      "reviewed_sha": "5de936e3826d957455af0ef30b1ac5f2b43e1c88"
+    },
+    {
+      "ts": 1790120448.139055,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0957",
+      "claimed_at": 1790120448.079073
+    },
+    {
+      "ts": 1790120448.140673,
+      "account": "B"
+    },
+    {
+      "ts": 1790120449.228065,
+      "pid": 2881,
+      "account": "B"
+    },
+    {
+      "ts": 1790120619.284841,
+      "status": "done",
+      "result": {
+        "summary": "Traced the full flow against the v2/v3 spec revisions: confidence=successes/support vs. separately-reported evidence_strength=min(1,support/10) matches v2; _store_learned seeds state.json (state discovered, trust untrusted, history []) before propose() calls registry.transition(...,'quarantined',...), avoiding the KeyError v3 called out, and the acceptance test for this is satisfied by tracing through skills_registry.transition/_update_registry_state/load (load() merges registry.json and discovered.json, so the learned record is found post-transition). skill_discovery._store's dedup guard now uses .get(...) defensively, which is exactly the fix needed since learned provenance_info lacks source_repo/source_path keys \u2014 verified against test_learned_records_coexist_with_external_records_in_store. Re-proposal path matches by procedure_signature only, updates id/version/history instead of duplicating. Refusal thresholds (support<min or confidence<0.6) and the CLI wiring (list vs --propose) align with the spec and tests. No violation of any listed acceptance criterion found; only two low-severity robustness/perf nits noted above.",
+        "verdict": "approve",
+        "comments": [
+          {
+            "path": "orchestrator/skill_learning.py",
+            "line": 150,
+            "issue": "Tool-sequence ordering sorts by str(ts) instead of a numeric key. If some gate rows in a task lack ts/at (falling back to the row's insertion-order int) while others carry epoch-float timestamps, or if epoch values ever differ in digit-count, lexicographic comparison of strings like \"1\" vs \"1758598734.5\" can misorder steps and produce a wrong procedure_signature, silently corrupting which pattern gets learned.",
+            "severity": "low"
+          },
+          {
+            "path": "orchestrator/skill_learning.py",
+            "line": 221,
+            "issue": "propose() calls skill_scorecard.usage_rows(root) inside the per-support-task loop, re-reading and re-parsing all usage rows from disk once per task instead of once per pattern. Purely a performance nit (O(n) redundant I/O), not a correctness issue for the given tests.",
+            "severity": "low"
+          }
+        ],
+        "packet_version": "f572d5762085",
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790120619.2858062,
+      "review_verdict": "approve"
+    },
+    {
+      "ts": 1790120619.3454049,
+      "review_facts": {
+        "verdict": "approve",
+        "findings_count": 2,
+        "findings_by_severity": {
+          "high": 0,
+          "med": 0,
+          "low": 2,
+          "other": 0
+        },
+        "reviewer_role": "general",
+        "checklist_used": true,
+        "reviewed_sha": "5de936e3826d957455af0ef30b1ac5f2b43e1c88",
+        "packet_version": "f572d5762085",
+        "review_pass_index": 1,
+        "reviews_expected": 1
+      },
+      "verdict": "approve",
+      "findings_count": 2,
+      "findings_by_severity": {
+        "high": 0,
+        "med": 0,
+        "low": 2,
+        "other": 0
+      },
+      "reviewer_role": "general",
+      "checklist_used": true,
+      "reviewed_sha": "5de936e3826d957455af0ef30b1ac5f2b43e1c88",
+      "packet_version": "f572d5762085",
+      "review_pass_index": 1,
+      "reviews_expected": 1
+    }
+  ],
+  "reviewed_sha": "5de936e3826d957455af0ef30b1ac5f2b43e1c88",
+  "claimed_at": 1790120448.079073,
+  "account": "B",
+  "pid": 2881,
+  "review_verdict": "approve",
+  "review_facts": {
+    "verdict": "approve",
+    "findings_count": 2,
+    "findings_by_severity": {
+      "high": 0,
+      "med": 0,
+      "low": 2,
+      "other": 0
+    },
+    "reviewer_role": "general",
+    "checklist_used": true,
+    "reviewed_sha": "5de936e3826d957455af0ef30b1ac5f2b43e1c88",
+    "packet_version": "f572d5762085",
+    "review_pass_index": 1,
+    "reviews_expected": 1
+  },
+  "verdict": "approve",
+  "findings_count": 2,
+  "findings_by_severity": {
+    "high": 0,
+    "med": 0,
+    "low": 2,
+    "other": 0
+  },
+  "reviewer_role": "general",
+  "checklist_used": true,
+  "packet_version": "f572d5762085",
+  "review_pass_index": 1,
+  "reviews_expected": 1
+}

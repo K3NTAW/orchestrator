@@ -1,0 +1,154 @@
+{
+  "id": "T-0277",
+  "parent": "T-0260",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 5,
+  "title": "G8: semantic review triggers (authorization, migrations, public interfaces, dependencies) next to security_paths, and review approval bound to the reviewed commit and re-assessed after a rebase that changes the diff",
+  "spec": "Depends on G7 (T-0272, daemon.py) and G2b (T-0267, merge.py). Today daemon.gate() decides the review policy from changed_paths against [review].security_paths globs only; a review's verdict is stored as review_verdict on the review task and on the source task without the commit it looked at; merge_reviewed() then calls merge.merge, which rebases the task branch onto goal/<parent> and runs tests, so a rebase with real conflicts resolved or with semantic drift still merges under the old approval. The analysis: security-path review alone misses consequential changes; add semantic triggers; bind approval to the reviewed changes and reassess after meaningful rebase changes.\nChange:\n1. pool.toml [review] gains semantic_paths (globs, defaults: pyproject.toml, uv.lock, Dockerfile*, docker/**, **/migrations/**, orchestrator/serve.py, orchestrator/mcp.py, orchestrator/bus_mcp.py, orchestrator/cli.py) and semantic_patterns (regexes matched against added lines of the diff, defaults: authorization words such as bearer, token, authenticate, authorize, permission; ALTER TABLE or create table; __all__ =; @mcp.tool or add_parser(; def with a public name whose signature changed is out of scope). daemon.gate() evaluates security_paths first (unchanged), then semantic_paths, then semantic_patterns over `git diff <base>..<head>` added lines; review_reason records semantic_path:<glob> or semantic_pattern:<name>; one review on security_review_tier with the checklist, same as security paths.\n2. Binding: when the daemon creates a review task it stores reviewed_sha = the task branch head on the review task and pipeline.reviewed_sha on the source task; merge_reviewed() checks the branch head before merging: if it moved past reviewed_sha, the approval is void: reset reviews_expected accounting, spawn a fresh review (notify), do not merge. In merge.merge, after the rebase, compute the diff hash of goal..branch before and after the rebase (git diff with --stat and content hashed); if the rebased diff differs from the reviewed diff (conflicts resolved or rebase altered hunks) and the task had a review, stop before the fast-forward and return status 'rebase_changed_diff' so merge_reviewed holds the task with hold_reason 'merge rebase_changed_diff' for a re-review; a clean rebase that only moves the base keeps the approval.\n3. README Pipeline: semantic triggers and the binding rule; pool.toml comments.\nTests in tests/test_daemon.py: test_semantic_path_triggers_review, test_semantic_pattern_triggers_review, test_review_records_reviewed_sha, test_head_moved_after_approval_spawns_new_review; tests/test_merge.py::test_rebase_changing_diff_returns_status, ::test_clean_rebase_keeps_approval.",
+  "inputs": [
+    "T-0263"
+  ],
+  "acceptance": [
+    "tests/test_daemon.py::test_semantic_path_triggers_review, ::test_semantic_pattern_triggers_review, ::test_review_records_reviewed_sha, ::test_head_moved_after_approval_spawns_new_review pass",
+    "tests/test_merge.py::test_rebase_changing_diff_returns_status, ::test_clean_rebase_keeps_approval pass",
+    "pool.toml [review] documents semantic_paths and semantic_patterns; README updated",
+    "Existing tests pass; .claude/hooks/tests-green.sh exits 0 in the worktree"
+  ],
+  "scope": [
+    "orchestrator/daemon.py",
+    "orchestrator/merge.py",
+    ".orchestrator/pool.toml",
+    "tests/test_daemon.py",
+    "tests/test_merge.py",
+    "README.md"
+  ],
+  "depends_on": [
+    "T-0272",
+    "T-0267"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 1800
+  },
+  "status": "done",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0277",
+  "codex_thread": "01a0bb8e-0c00-7891-a0bb-2c86f3bf135e",
+  "result": {
+    "summary": "Summary: Implemented semantic review triggers, approval SHA binding, branch-movement re-review, and rebase diff validation. Commit: `d85335f`.\n\nFiles changed:\n\n- `orchestrator/daemon.py`\n- `orchestrator/merge.py`\n- `.orchestrator/pool.toml`\n- `README.md`\n\nTests:\n\n- Scoped suites: 114 tests passed.\n- `.claude/hooks/tests-green.sh`: exit 0.\n- `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent; failures-only output: empty.",
+    "executed_by": "codex:luna",
+    "thread": "01a0bb8e-0c00-7891-a0bb-2c86f3bf135e",
+    "usage": {
+      "input_tokens": 2042580,
+      "cached_input_tokens": 1959168,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 11680,
+      "reasoning_output_tokens": 3977
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789853042.2788951,
+      "pipeline": {
+        "dispatched_at": 1789853042.2788548
+      }
+    },
+    {
+      "ts": 1789853043.484015,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0277",
+      "claimed_at": 1789853043.483683
+    },
+    {
+      "ts": 1789853043.485127,
+      "rounds": 0,
+      "executor": "luna",
+      "tier": "luna"
+    },
+    {
+      "ts": 1789853407.947592,
+      "codex_thread": "01a0bb8e-0c00-7891-a0bb-2c86f3bf135e"
+    },
+    {
+      "ts": 1789853407.949771,
+      "status": "done",
+      "result": {
+        "summary": "Summary: Implemented semantic review triggers, approval SHA binding, branch-movement re-review, and rebase diff validation. Commit: `d85335f`.\n\nFiles changed:\n\n- `orchestrator/daemon.py`\n- `orchestrator/merge.py`\n- `.orchestrator/pool.toml`\n- `README.md`\n\nTests:\n\n- Scoped suites: 114 tests passed.\n- `.claude/hooks/tests-green.sh`: exit 0.\n- `scripts/tests_green.sh` and `scripts/failures_only.sh` are absent; failures-only output: empty.",
+        "executed_by": "codex:luna",
+        "thread": "01a0bb8e-0c00-7891-a0bb-2c86f3bf135e",
+        "usage": {
+          "input_tokens": 2042580,
+          "cached_input_tokens": 1959168,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 11680,
+          "reasoning_output_tokens": 3977
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789853521.096983,
+      "pipeline": {
+        "dispatched_at": 1789853042.2788548,
+        "gated_at": 1789853521.0968919,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py"
+      }
+    },
+    {
+      "ts": 1789853584.267961,
+      "codex_thread": "01a0bb8e-0c00-7891-a0bb-2c86f3bf135e"
+    },
+    {
+      "ts": 1789853584.271617,
+      "rounds": 1
+    },
+    {
+      "ts": 1789853682.1468632,
+      "review_verdict": "request_changes"
+    },
+    {
+      "ts": 1789853707.9841,
+      "pipeline": {
+        "dispatched_at": 1789853042.2788548,
+        "gated_at": 1789853521.0968919,
+        "reviews_expected": 1,
+        "review_reason": "security_paths:orchestrator/*.py",
+        "review_held_at": 1789853707.98401
+      },
+      "status": "held",
+      "hold_reason": "review request_changes: T-0346 (request_changes)"
+    },
+    {
+      "ts": 1789854805.572883,
+      "status": "done",
+      "merged_into": "goal/T-0260",
+      "merged_via": "fix round T-0351 2ca1517",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "dispatched_at": 1789853042.2788548,
+    "gated_at": 1789853521.0968919,
+    "reviews_expected": 1,
+    "review_reason": "security_paths:orchestrator/*.py",
+    "review_held_at": 1789853707.98401
+  },
+  "claimed_at": 1789853043.483683,
+  "rounds": 1,
+  "executor": "luna",
+  "review_verdict": "request_changes",
+  "hold_reason": null,
+  "merged_into": "goal/T-0260",
+  "merged_via": "fix round T-0351 2ca1517"
+}

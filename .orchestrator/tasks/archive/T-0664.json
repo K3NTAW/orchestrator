@@ -1,0 +1,340 @@
+{
+  "id": "T-0664",
+  "created_at": 1789987929.485754,
+  "parent": "T-0561",
+  "role": "execute",
+  "tier": "terra",
+  "complexity": 3,
+  "title": "R20 v2: document every new scheduler, routing, allocation, strategy, speculation and promotion key in pool.toml at its in-code default, and carry the executor/review prompt rules onto the goal branch",
+  "spec": "v2: the v1 spec text contained a literal double-brace placeholder that the prompt renderer rejects; this text spells it out in words instead. Why: the roadmap modules merged in this goal read their configuration from pool.toml tables with defaults in code ([scheduler] duration_*/reserve_imminent/concurrency_mode/merge_pressure_*/jev_*; [jev.routing] max_adjustment, evidence_floor_n; [jev.points]; [allocation]; [strategy]; [speculation]; [promotion]). Nothing in pool.toml shows them, so an operator cannot see what is tunable or which mode a feature runs in (brief P15/P16: configuration and activation state must be visible). The Planner also changed three prompts on the main checkout (unittest.TestCase and _harness rules for executors, JSON-only review verdicts) that the goal branch must carry so the PR is self-contained.\nWhat (config and prompt text only; no Python):\n1. .orchestrator/pool.toml: add the keys below with exactly the in-code defaults and a one-line comment each; behaviour must not change (a test asserts the parsed values equal the module defaults). Under the existing [scheduler] table: duration_mode = \"empirical\", duration_min_samples = 5, duration_trim = 0.1, reserve_imminent = true, concurrency_mode = \"adaptive\", merge_pressure_mode = \"observe\", merge_queue_elevated = 3, merge_queue_saturated = 5, merge_conflicts_saturated = 2, jev_mode = \"shadow\", jev_max_pairs = 8, jev_cache_ttl_s = 3600, jev_cache_max_entries = 200. Under [jev.routing]: max_adjustment = 0.25, evidence_floor_n = 10. New tables: [jev.points] scout_necessity = \"shadow\", context_escalation = \"shadow\", review_escalation = \"shadow\", planner_relaunch = \"shadow\"; [allocation] mode = \"shadow\", min_samples = 5, latency_weight_usd_per_hour = 2.0, critical_factor = 1.0, non_critical_factor = 0.25; [strategy] mode = \"shadow\", min_samples = 10; [speculation] mode = \"off\", min_fix_round_p = 0.5, min_samples = 5, min_retry_cost_usd = 1.0; [promotion] min_samples = 20. Read each module (duration, capacity, concurrency, merge_pressure, jev_sched, jev_route, jev_points, allocation, strategy, speculation, promotion) to confirm the default names and values before writing; if a module's default differs from this list, the module wins and the spec value is corrected in the file with a note in the commit message.\n2. .orchestrator/prompts/execute.md: after the line beginning \"No new dependencies\" insert, verbatim: \"Tests: this repo runs unittest, not pytest. Every acceptance test id tests/test_<module>.py::test_name must be a method `def test_name(self)` inside a `unittest.TestCase` subclass in that file, named exactly as listed. Module-level `def test_*` functions and pytest fixtures (tmp_path, monkeypatch) are not collected and fail the gate; use tempfile.TemporaryDirectory and unittest.mock instead. Every tests/test_*.py begins with `import _harness` exactly like the existing tests (tests/_harness.py points ORCH_ROOT at one shared temporary root for the whole suite); never import it under another module path or create a second orchestrator state root, or unrelated hook and memory tests in the same run fail.\" placed before that \"No new dependencies\" line.\n3. .orchestrator/prompts/fix-delta.md: after the \"the assertion_lines placeholder line (the template line that consists of that name wrapped in double curly braces)\" line insert, verbatim: \"Tests: this repo runs unittest, not pytest. A failure \"missing: test not defined\" or \"not collected by unittest\" means the named test must be a `def test_name(self)` method inside a `unittest.TestCase` subclass in that file; module-level functions and pytest fixtures (tmp_path) are not collected. Use tempfile.TemporaryDirectory.\"\n4. .orchestrator/prompts/review.md: after the \"Return ONLY JSON\" line insert, verbatim: \"Your entire final message must be that one JSON object: no prose before or after it, no markdown code fences. Put any explanation inside a \"summary\" string field of the same object. A message with text outside the JSON object is not parseable and fails the review.\"\nTests (unittest.TestCase methods, tests/test_pool.py): parse .orchestrator/pool.toml with tomllib and assert the listed keys exist with the listed values and that [scheduler].mode, [jev.routing].mode stay \"shadow\" and [speculation].mode is \"off\".",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py::test_pool_toml_documents_roadmap_defaults \u2014 tomllib parse of .orchestrator/pool.toml yields every listed key with the listed default, [scheduler].mode and [jev.routing].mode shadow, [speculation].mode off",
+    "the three prompt files contain the inserted paragraphs verbatim (grep for 'unittest.TestCase', 'import _harness' and 'no markdown code fences' succeeds) and .claude/hooks/tests-green.sh exits 0"
+  ],
+  "scope": [
+    ".orchestrator/pool.toml",
+    ".orchestrator/prompts/execute.md",
+    ".orchestrator/prompts/fix-delta.md",
+    ".orchestrator/prompts/review.md",
+    "tests/test_pool.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 30,
+    "timeout_s": 1200,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "read_scope": [
+      ".orchestrator/pool.toml",
+      ".orchestrator/prompts/",
+      "orchestrator/duration.py",
+      "orchestrator/capacity.py",
+      "orchestrator/concurrency.py",
+      "orchestrator/merge_pressure.py",
+      "orchestrator/jev_sched.py",
+      "orchestrator/jev_route.py",
+      "orchestrator/jev_points.py",
+      "orchestrator/allocation.py",
+      "orchestrator/strategy.py",
+      "orchestrator/speculation.py",
+      "orchestrator/promotion.py",
+      "tests/test_pool.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "pool.toml keys and values exactly as listed unless a module default differs; prompt insertions verbatim; no Python module changes"
+  },
+  "status": "failed",
+  "assigned_to": "codex",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0664",
+  "codex_thread": "01a0c398-791f-73b3-8eb7-ba04b32fc371",
+  "result": {
+    "summary": "Gate: `.claude/hooks/tests-green.sh .` passed.\n\nCommit: `e083613ac630410ac04f6f092a4b112b1e1a62e9` (`T-0664 document roadmap pool defaults`)\n\nFailures-only output: empty.",
+    "executed_by": "codex:terra",
+    "thread": "01a0c398-791f-73b3-8eb7-ba04b32fc371",
+    "usage": {
+      "input_tokens": 386639,
+      "cached_input_tokens": 324864,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 6431,
+      "reasoning_output_tokens": 837,
+      "est_usd_source": "tokens"
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789987936.3304808,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444
+      }
+    },
+    {
+      "ts": 1789987936.3325498,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507
+      }
+    },
+    {
+      "ts": 1789987937.117955,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507,
+        "dispatched_at_done": 1789987937.1168609
+      }
+    },
+    {
+      "ts": 1789987944.263114,
+      "packet_meta": {
+        "chars": 2007,
+        "est_tokens": 501,
+        "hash": "0f31cca5812d",
+        "version": "0f31cca5812d",
+        "base": "58ee5d1a72d6",
+        "sources": "pool.toml@449b76c28a8a gotchas@8ff203ae5490 memory@notes",
+        "policy_version": "449b76c28a8a",
+        "gotchas": "8ff203ae5490"
+      }
+    },
+    {
+      "ts": 1789987944.264386,
+      "status": "running",
+      "assigned_to": "codex",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0664",
+      "claimed_at": 1789987944.264274
+    },
+    {
+      "ts": 1789987944.2651122,
+      "rounds": 0,
+      "executor": "terra",
+      "tier": "terra"
+    },
+    {
+      "ts": 1789988227.392788,
+      "codex_thread": "01a0c398-791f-73b3-8eb7-ba04b32fc371",
+      "codex_thread_head": "e083613ac630410ac04f6f092a4b112b1e1a62e9"
+    },
+    {
+      "ts": 1789988227.396986,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507,
+        "dispatched_at_done": 1789987937.1168609,
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "3faf9e34700494bd3ac994f38df502c55d4588ee"
+        }
+      }
+    },
+    {
+      "ts": 1789988227.399076,
+      "status": "done",
+      "result": {
+        "summary": "Gate: `.claude/hooks/tests-green.sh .` passed.\n\nCommit: `e083613ac630410ac04f6f092a4b112b1e1a62e9` (`T-0664 document roadmap pool defaults`)\n\nFailures-only output: empty.",
+        "executed_by": "codex:terra",
+        "thread": "01a0c398-791f-73b3-8eb7-ba04b32fc371",
+        "usage": {
+          "input_tokens": 386639,
+          "cached_input_tokens": 324864,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6431,
+          "reasoning_output_tokens": 837,
+          "est_usd_source": "tokens"
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789988246.842651,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507,
+        "dispatched_at_done": 1789987937.1168609,
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "3faf9e34700494bd3ac994f38df502c55d4588ee"
+        },
+        "gate_attempts": 1
+      }
+    },
+    {
+      "ts": 1789988343.336256,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507,
+        "dispatched_at_done": 1789987937.1168609,
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "3faf9e34700494bd3ac994f38df502c55d4588ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789988343.336141,
+        "gate_reds": 1
+      },
+      "status": "held",
+      "hold_reason": "gate_red",
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_pool_toml_jev_routing_table_follows_jev (test_jev_route.JevRoute.test_pool_toml_jev_routing_table_follows_jev)\nTraceback (most recent call last):\nAssertionError: 'max_adjustment = 0.25' != 'cache_max_entries = 500'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-0664/.orchestrator/runs/tests/T-0664-20260921-125903.log\n"
+      }
+    },
+    {
+      "ts": 1789988343.77608,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_pool_toml_jev_routing_table_follows_jev (test_jev_route.JevRoute.test_pool_toml_jev_routing_table_follows_jev)\nTraceback (most recent call last):\nAssertionError: 'max_adjustment = 0.25' != 'cache_max_entries = 500'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-0664/.orchestrator/runs/tests/T-0664-20260921-125903.log\n",
+        "rejected_ids": [
+          "(failures=1)"
+        ]
+      }
+    },
+    {
+      "ts": 1789988343.887447,
+      "resume_hint": {
+        "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_pool_toml_jev_routing_table_follows_jev (test_jev_route.JevRoute.test_pool_toml_jev_routing_table_follows_jev)\nTraceback (most recent call last):\nAssertionError: 'max_adjustment = 0.25' != 'cache_max_entries = 500'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-0664/.orchestrator/runs/tests/T-0664-20260921-125903.log\n",
+        "flaky_runs": [
+          {
+            "ids": [
+              "test_jev_route.JevRoute.test_pool_toml_jev_routing_table_follows_jev"
+            ],
+            "returncode": 1,
+            "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_jev_route (unittest.loader._FailedTest.test_jev_route)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_jev_route\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_jev_route'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+          }
+        ]
+      }
+    },
+    {
+      "ts": 1789988343.889091,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507,
+        "dispatched_at_done": 1789987937.1168609,
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "3faf9e34700494bd3ac994f38df502c55d4588ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789988343.336141,
+        "gate_reds": 1,
+        "failure_kind": "code_defect"
+      }
+    },
+    {
+      "ts": 1789988343.936629,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507,
+        "dispatched_at_done": 1789987937.1168609,
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "3faf9e34700494bd3ac994f38df502c55d4588ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789988343.336141,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789988343.336256"
+      }
+    },
+    {
+      "ts": 1789988503.53535,
+      "codex_thread": "01a0c398-791f-73b3-8eb7-ba04b32fc371",
+      "codex_thread_head": "ca45b93ea276eaa3575a5a889d10b78912936d6f"
+    },
+    {
+      "ts": 1789988503.540095,
+      "rounds": 1
+    },
+    {
+      "ts": 1789988625.7865942,
+      "pipeline": {
+        "first_ready_at": 1789987936.330444,
+        "dispatched_at": 1789987936.332507,
+        "dispatched_at_lease": 1789988836.332507,
+        "dispatched_at_done": 1789987937.1168609,
+        "jev_route": {
+          "baseline": "terra",
+          "hypothetical": "terra",
+          "key": "3faf9e34700494bd3ac994f38df502c55d4588ee"
+        },
+        "gate_attempts": 1,
+        "gated_at": 1789988343.336141,
+        "gate_reds": 1,
+        "failure_kind": "code_defect",
+        "auto_fix_hold_key": "1789988343.336256",
+        "first_green_at": 1789988625.780066,
+        "lineage_fix_rounds": 1
+      }
+    },
+    {
+      "ts": 1789993613.8535948,
+      "status": "failed",
+      "reason": "superseded: the review of a diff touching the prompt files cannot render (the diff context contains template placeholders and spawn.render rejects any remaining double-brace token); R20 v3 documents p",
+      "hold_reason": null
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1789987936.330444,
+    "dispatched_at": 1789987936.332507,
+    "dispatched_at_lease": 1789988836.332507,
+    "dispatched_at_done": 1789987937.1168609,
+    "jev_route": {
+      "baseline": "terra",
+      "hypothetical": "terra",
+      "key": "3faf9e34700494bd3ac994f38df502c55d4588ee"
+    },
+    "gate_attempts": 1,
+    "gated_at": 1789988343.336141,
+    "gate_reds": 1,
+    "failure_kind": "code_defect",
+    "auto_fix_hold_key": "1789988343.336256",
+    "first_green_at": 1789988625.780066,
+    "lineage_fix_rounds": 1
+  },
+  "packet_meta": {
+    "chars": 2007,
+    "est_tokens": 501,
+    "hash": "0f31cca5812d",
+    "version": "0f31cca5812d",
+    "base": "58ee5d1a72d6",
+    "sources": "pool.toml@449b76c28a8a gotchas@8ff203ae5490 memory@notes",
+    "policy_version": "449b76c28a8a",
+    "gotchas": "8ff203ae5490"
+  },
+  "claimed_at": 1789987944.264274,
+  "rounds": 1,
+  "executor": "terra",
+  "codex_thread_head": "ca45b93ea276eaa3575a5a889d10b78912936d6f",
+  "hold_reason": null,
+  "resume_hint": {
+    "failures": "tests-green: FAILED. Failures only:\nTraceback (most recent call last):\n    raise RuntimeError(\"boom\")\nRuntimeError: boom\nFAIL: test_pool_toml_jev_routing_table_follows_jev (test_jev_route.JevRoute.test_pool_toml_jev_routing_table_follows_jev)\nTraceback (most recent call last):\nAssertionError: 'max_adjustment = 0.25' != 'cache_max_entries = 500'\nFAILED (failures=1)\n/Users/k3ntaw/code/orchestrator/wt/T-0664/.orchestrator/runs/tests/T-0664-20260921-125903.log\n",
+    "flaky_runs": [
+      {
+        "ids": [
+          "test_jev_route.JevRoute.test_pool_toml_jev_routing_table_follows_jev"
+        ],
+        "returncode": 1,
+        "output": "warning: `VIRTUAL_ENV=/Users/k3ntaw/code/orchestrator/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead\nE\n======================================================================\nERROR: test_jev_route (unittest.loader._FailedTest.test_jev_route)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_jev_route\nTraceback (most recent call last):\n  File \"/Users/k3ntaw/.local/share/uv/python/cpython-3.13.13-macos-aarch64-none/lib/python3.13/unittest/loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\nModuleNotFoundError: No module named 'test_jev_route'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+      }
+    ]
+  },
+  "reason": "superseded: the review of a diff touching the prompt files cannot render (the diff context contains template placeholders and spawn.render rejects any remaining double-brace token); R20 v3 documents p"
+}

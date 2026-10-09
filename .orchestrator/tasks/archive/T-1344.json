@@ -1,0 +1,231 @@
+{
+  "id": "T-1344",
+  "created_at": 1790191469.014752,
+  "parent": "T-1334",
+  "role": "execute",
+  "tier": "astra",
+  "complexity": 6,
+  "title": "S1 v4: executor_identity resolves any executor field to provider/model; review rule compares models with None guard",
+  "spec": "Respec of T-1341 after spec review T-1342 (request_changes: wrong import name and wrong function). Goal T-1334: [[executors]] provider-agnostic; S2 (T-1343) wires dispatch. S1 adds no provider=\"claude\" row to pool.toml (the Planner adds one only after S2 merges), so today's routing, dispatch and reviews are unchanged. Rollback: git revert restores review_tier(t), _security_review_tier(t), _open_reviews and eligible_executors; no persisted state, no pool.toml field.\n\n1. orchestrator/pool.py: module function executor_identity(field, cfg) -> {\"provider\": \"codex\"|\"claude\"|None, \"model\": str|None}; cfg only, no Pool state, no disk. Row id in cfg[\"executors\"] -> row provider/model. \"claude:<tier>\" (legacy, spawn.py:1564) -> provider \"claude\"; model = cfg[\"models\"].get(tier) only if tier in (\"haiku\",\"sonnet\",\"opus\") and it is a str, else None. None/unknown -> both None. Pool.executor_identity(field) and Pool.is_claude_executor(field) delegate with self.cfg.\n2. pool.py eligible_executors (pool.py:522): claude rows pass every existing check (enabled, roles, cooling, band, roll_day, max_parallel, daily_budget_tasks) and also need headroom on any execute-affinity account: self.pick(\"execute\") called at most once per eligible_executors call, lazily, only when a claude row reaches that check. Codex-only configs never call pick. The concrete account is chosen at dispatch (S2). codex_available (pool.py:590): True iff some eligible row has provider == \"codex\".\n3. orchestrator/daemon.py imports: extend line 13 to `from .pool import Pool, fallback_tier, executor_identity, config as pool_config`; add `import tomllib`. Tests patch daemon.executor_identity and daemon.pool_config.\n4. daemon.review_tier(t, cfg=None) (daemon.py:1070) and _security_review_tier(t, cfg=None) (daemon.py:1136): legacy branches first, unchanged and touching no cfg: review_tier startswith(\"claude:sonnet\") -> \"opus\", startswith(\"claude:opus\") -> \"sonnet\"; _security_review_tier exact f\"claude:{tier}\" -> _other_tier(tier). Then in one try block: cfg = pool_config() if cfg is None; model = executor_identity(t.get(\"executor\"), cfg)[\"model\"]; default_model = cfg[\"models\"].get(default). Swap to _other_tier(default) only when both are str and equal, else default. except (KeyError, TypeError, AttributeError, ValueError, OSError, tomllib.TOMLDecodeError) as exc: print(f\"review_tier: lookup failed ({exc}); failing closed to {other}\", file=sys.stderr); return other.\n5. daemon._open_reviews(t, n_reviews, review_reason, cfg=None) (daemon.py:1212; the tier selection is at daemon.py:1228-1244): pass cfg to every review_tier/_security_review_tier call; replace (t.get(\"executor\") or \"\").startswith(\"claude:\") at daemon.py:1241 with executor_identity(t.get(\"executor\"), cfg or {})[\"provider\"] == \"claude\" or the legacy prefix test (keep legacy true). Callers at daemon.py:1432, 1524, 1625 pass cfg=pool.cfg where a Pool named pool is in scope, else leave None. The second review for a Claude executor stays on review_tier(t, cfg).\n6. Unchanged on purpose (S2 or later): running_claude_workers (daemon.py:470), spawn.py:1508, capacity.eligible_executors_from_snapshot (capacity.py:54), executor.py:279/:487, jev_route.py:226, specialist.py:131. Safe because no claude row exists until after S2.\nTests: one method per scenario; baselines are hard-coded expected values, not a call to the changed code; cfg built in-test (dict), accounts built in-test with \"execute\" affinity; restore patched globals. No new dependencies.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_pool.py::ExecutorIdentity::test_row_id_legacy_tier_and_unknown: a provider=claude row id, a codex row id, 'claude:opus', 'claude:success_floor', an unknown id and None resolve to the expected provider/model",
+    "tests/test_pool.py::ExecutorIdentity::test_claude_row_needs_account_headroom: a claude row is excluded when every execute-affinity account is cooling, included when one has headroom, excluded at max_parallel; Pool.pick called at most once per eligible_executors call and zero times for a codex-only config",
+    "tests/test_pool.py::ExecutorIdentity::test_codex_only_baseline_unchanged: for an in-test codex-only config, codex_available() and pick_executor('execute', c) return hard-coded expected values (with and without task); adding a heavier eligible claude row keeps codex_available() True",
+    "tests/test_daemon.py::ReviewModelRule: separate methods: claude row on the sonnet model -> review_tier opus and _security_review_tier opus; claude row on the opus model -> sonnet, and with daemon.SECURITY_REVIEW_TIER patched to 'opus' -> sonnet; codex row -> sonnet; legacy claude:sonnet -> opus with cfg lacking models.sonnet; unknown, None and model-less claude row keep the default; daemon.executor_identity patched to raise KeyError -> other tier and the stderr line; daemon.pool_config patched to raise OSError with cfg=None -> other tier",
+    "tests/test_daemon.py::ReviewModelRule::test_open_reviews_reads_config_once_and_matches_today: with a codex-only cfg passed in, _open_reviews creates reviews on the hard-coded tiers of today and daemon.pool_config is not called",
+    ".claude/hooks/tests-green.sh wt/<this task> exits 0"
+  ],
+  "scope": [
+    "orchestrator/pool.py",
+    "orchestrator/daemon.py",
+    "tests/test_pool.py",
+    "tests/test_daemon.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 60,
+    "timeout_s": 2400,
+    "task_class": "architectural",
+    "route": "full",
+    "respec_for": "T-1341",
+    "read_scope": [
+      "orchestrator/spawn.py",
+      "orchestrator/executor.py",
+      "orchestrator/capacity.py",
+      "orchestrator/scorecard.py",
+      "tests/_harness.py"
+    ],
+    "interface_contract": "pool.executor_identity(field, cfg) -> {'provider': 'codex'|'claude'|None, 'model': str|None} (cfg-only); Pool.executor_identity(field), Pool.is_claude_executor(field); daemon imports executor_identity and config as pool_config from .pool; daemon.review_tier(t, cfg=None), daemon._security_review_tier(t, cfg=None), daemon._open_reviews(t, n_reviews, review_reason, cfg=None). S2 sets a claude-row task's executor == tier == row id, keeps assigned_to 'claude:<acct>', and teaches capacity.py about claude rows."
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790191476.1539671,
+      "pipeline": {
+        "first_ready_at": 1790191476.153932
+      }
+    },
+    {
+      "ts": 1790191476.260971,
+      "pipeline": {
+        "first_ready_at": 1790191476.153932,
+        "spec_review_at": 1790191476.260923,
+        "spec_review_at_lease": 1790192376.260923
+      }
+    },
+    {
+      "ts": 1790191476.268748,
+      "pipeline": {
+        "first_ready_at": 1790191476.153932,
+        "spec_review_at": 1790191476.260923,
+        "spec_review_at_lease": 1790192376.260923,
+        "spec_review_at_done": 1790191476.2687051
+      }
+    },
+    {
+      "ts": 1790191544.492844,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1070,
+          "severity": "med",
+          "issue": "The new try block calls pool_config() whenever cfg is None, for every task, codex-executed ones included. A config read failure then flips a codex task's review from sonnet to opus and prints a stderr line. Today codex tasks never touch cfg. The legacy claude:* branches are correctly first, but codex, None and unknown executors get a new disk read and a new failure mode. This is also an extra pool.toml read per call from the daemon paths that pass cfg=None."
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1136,
+          "severity": "med",
+          "issue": "The match between the row's model and cfg['models'][default] is a string-equality check that silently falls back to the default. If a claude row's model id is a dated or aliased id that differs from cfg['models']['sonnet'|'opus'], the swap never fires. The reviewer then defaults, possibly to the same model that executed the task, which is the self-review the code exists to prevent. The spec has no visible signal for this case, and no test covers a claude row whose model equals neither tier."
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 1432,
+          "severity": "med",
+          "issue": "Only three callers of _open_reviews are named, and the spec says 'leave None' where no Pool is in scope. cfg=None then triggers a pool_config() disk read on each of review_tier, _security_review_tier and _open_reviews. The 'reads config once' test only covers the case where a cfg is passed in. _open_reviews should load cfg once itself when it is None. Otherwise a cfg=None call makes up to two or three separate reads inside the while loop, and they could see different configs."
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "line": 522,
+          "severity": "med",
+          "issue": "The account-headroom check calls self.pick('execute'), which picks an account but reserves nothing. Two claude rows, or two dispatches in the same pass, both see headroom. The spec says the concrete account is chosen at dispatch (S2), but it does not say who handles the case where headroom disappears between eligibility and dispatch. Once a provider='claude' row exists (after S2), that gap can produce a dispatch to a non-existent account or a silent fallback. Please document it as an S2 contract."
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "line": 590,
+          "severity": "low",
+          "issue": "codex_available currently goes through pick_executor, which includes the scorecard-based pick. Changing it to 'some eligible row has provider codex' is a semantic change. It is also inconsistent with pick_executor, which can return a claude row while codex_available reports True. Callers that then dispatch via pick_executor would take the claude path, which S1 leaves unwired (executor.py:279/:487). The 'safe because no claude row exists' argument holds today. Add a guard test that fails if a claude row is present without S2."
+        },
+        {
+          "path": "orchestrator/pool.py",
+          "line": 26,
+          "severity": "low",
+          "issue": "The spec says 'row id in cfg[\"executors\"]', but cfg['executors'] is a list of row dicts (see the Pool loader at pool.py:159 and pool.py:223), not a mapping. The lookup shape is unspecified. It also does not say what happens on duplicate ids or when the table is absent, where a synthesized LEGACY_EXECUTOR_ID row exists in Pool but not in cfg. In that case executor_identity(cfg) returns None for the legacy codex row while Pool.executors knows it. The delegating Pool.executor_identity should use the same source for both."
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "line": 0,
+          "severity": "low",
+          "issue": "The acceptance ids for test_daemon.py list the class ReviewModelRule with 'separate methods' but do not name them. Only test_open_reviews_reads_config_once_and_matches_today is named exactly. The repo gate requires exact method names, so the unnamed scenarios cannot be verified reliably. The pool.py scenarios are named, but test_pool.py::ExecutorIdentity::test_codex_only_baseline_unchanged bundles several assertions."
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "line": 472,
+          "severity": "low",
+          "issue": "running_claude_workers (line 472) and the executed_by default at line 392 still use the raw 'claude:' prefix, and the review-count docstring at line 1348 still describes the prefix rule. That is safe only if no claude row exists yet, and the spec says so. It should be recorded as an explicit follow-up for S2, because a provider='claude' row id with no 'claude:' prefix would be missed by the running-workers count and could exceed the account capacity limits."
+        }
+      ]
+    },
+    {
+      "ts": 1790191553.3238752,
+      "pipeline": {
+        "first_ready_at": 1790191476.153932,
+        "spec_review_at": 1790191476.260923,
+        "spec_review_at_lease": 1790192376.260923,
+        "spec_review_at_done": 1790191476.2687051,
+        "spec_review_held_at": 1790191553.32382
+      },
+      "status": "held",
+      "hold_reason": "spec_review request_changes"
+    },
+    {
+      "ts": 1790191554.438427,
+      "pipeline": {
+        "first_ready_at": 1790191476.153932,
+        "spec_review_at": 1790191476.260923,
+        "spec_review_at_lease": 1790192376.260923,
+        "spec_review_at_done": 1790191476.2687051,
+        "spec_review_held_at": 1790191553.32382,
+        "failure_kind": "unknown"
+      }
+    },
+    {
+      "ts": 1790191554.5492768,
+      "pipeline": {
+        "first_ready_at": 1790191476.153932,
+        "spec_review_at": 1790191476.260923,
+        "spec_review_at_lease": 1790192376.260923,
+        "spec_review_at_done": 1790191476.2687051,
+        "spec_review_held_at": 1790191553.32382,
+        "failure_kind": "unknown",
+        "auto_fix_skipped": {
+          "1790191553.3238752": true
+        }
+      }
+    },
+    {
+      "ts": 1790191622.781277,
+      "status": "superseded",
+      "hold_reason": "respec T-1347 after spec review T-1345 request_changes"
+    }
+  ],
+  "pipeline": {
+    "first_ready_at": 1790191476.153932,
+    "spec_review_at": 1790191476.260923,
+    "spec_review_at_lease": 1790192376.260923,
+    "spec_review_at_done": 1790191476.2687051,
+    "spec_review_held_at": 1790191553.32382,
+    "failure_kind": "unknown",
+    "auto_fix_skipped": {
+      "1790191553.3238752": true
+    }
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1070,
+      "severity": "med",
+      "issue": "The new try block calls pool_config() whenever cfg is None, for every task, codex-executed ones included. A config read failure then flips a codex task's review from sonnet to opus and prints a stderr line. Today codex tasks never touch cfg. The legacy claude:* branches are correctly first, but codex, None and unknown executors get a new disk read and a new failure mode. This is also an extra pool.toml read per call from the daemon paths that pass cfg=None."
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1136,
+      "severity": "med",
+      "issue": "The match between the row's model and cfg['models'][default] is a string-equality check that silently falls back to the default. If a claude row's model id is a dated or aliased id that differs from cfg['models']['sonnet'|'opus'], the swap never fires. The reviewer then defaults, possibly to the same model that executed the task, which is the self-review the code exists to prevent. The spec has no visible signal for this case, and no test covers a claude row whose model equals neither tier."
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 1432,
+      "severity": "med",
+      "issue": "Only three callers of _open_reviews are named, and the spec says 'leave None' where no Pool is in scope. cfg=None then triggers a pool_config() disk read on each of review_tier, _security_review_tier and _open_reviews. The 'reads config once' test only covers the case where a cfg is passed in. _open_reviews should load cfg once itself when it is None. Otherwise a cfg=None call makes up to two or three separate reads inside the while loop, and they could see different configs."
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "line": 522,
+      "severity": "med",
+      "issue": "The account-headroom check calls self.pick('execute'), which picks an account but reserves nothing. Two claude rows, or two dispatches in the same pass, both see headroom. The spec says the concrete account is chosen at dispatch (S2), but it does not say who handles the case where headroom disappears between eligibility and dispatch. Once a provider='claude' row exists (after S2), that gap can produce a dispatch to a non-existent account or a silent fallback. Please document it as an S2 contract."
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "line": 590,
+      "severity": "low",
+      "issue": "codex_available currently goes through pick_executor, which includes the scorecard-based pick. Changing it to 'some eligible row has provider codex' is a semantic change. It is also inconsistent with pick_executor, which can return a claude row while codex_available reports True. Callers that then dispatch via pick_executor would take the claude path, which S1 leaves unwired (executor.py:279/:487). The 'safe because no claude row exists' argument holds today. Add a guard test that fails if a claude row is present without S2."
+    },
+    {
+      "path": "orchestrator/pool.py",
+      "line": 26,
+      "severity": "low",
+      "issue": "The spec says 'row id in cfg[\"executors\"]', but cfg['executors'] is a list of row dicts (see the Pool loader at pool.py:159 and pool.py:223), not a mapping. The lookup shape is unspecified. It also does not say what happens on duplicate ids or when the table is absent, where a synthesized LEGACY_EXECUTOR_ID row exists in Pool but not in cfg. In that case executor_identity(cfg) returns None for the legacy codex row while Pool.executors knows it. The delegating Pool.executor_identity should use the same source for both."
+    },
+    {
+      "path": "tests/test_daemon.py",
+      "line": 0,
+      "severity": "low",
+      "issue": "The acceptance ids for test_daemon.py list the class ReviewModelRule with 'separate methods' but do not name them. Only test_open_reviews_reads_config_once_and_matches_today is named exactly. The repo gate requires exact method names, so the unnamed scenarios cannot be verified reliably. The pool.py scenarios are named, but test_pool.py::ExecutorIdentity::test_codex_only_baseline_unchanged bundles several assertions."
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "line": 472,
+      "severity": "low",
+      "issue": "running_claude_workers (line 472) and the executed_by default at line 392 still use the raw 'claude:' prefix, and the review-count docstring at line 1348 still describes the prefix rule. That is safe only if no claude row exists yet, and the spec says so. It should be recorded as an explicit follow-up for S2, because a provider='claude' row id with no 'claude:' prefix would be missed by the running-workers count and could exceed the account capacity limits."
+    }
+  ],
+  "hold_reason": "respec T-1347 after spec review T-1345 request_changes"
+}

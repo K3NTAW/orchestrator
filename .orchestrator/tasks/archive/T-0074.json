@@ -1,0 +1,262 @@
+{
+  "id": "T-0074",
+  "parent": "T-0073",
+  "role": "scout",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "Scout C1: how kgpt home-side modules are deployed and reached \u2014 what a new `orchestrator` module needs on kenta-server",
+  "spec": "Read-only scout over /Users/k3ntaw/code/kgpt. Read docker-compose.home.yml, modules/server/module.yaml and modules/server/server.py (the docker-proxy pattern), modules/arr/module.yaml, modules/files/module.yaml, modules/_template/*, kernel code that loads manifests and dispatches tool calls to a module URL (grep runs_on, KGPT_HOME_AVAILABLE, service token, streamable-http, health_check), docs/runbooks/tunnel.md (home tunnel section), docs/handbook/08-modules.md (server module), and infra/ for how the home image is published (ghcr.io/k3ntaw/kgpt:latest) and how home secrets are provided. Report: (1) the exact wiring a home module needs: module.yaml fields, compose service shape, network, healthcheck, tunnel hostname, how the kernel authenticates to it and what env it needs; (2) whether a module can run outside the shared kgpt image (own Dockerfile or a native process) and still be reached, citing the code that resolves the module URL; (3) how a module exposes a view and what the client renders for it (views: overview); (4) how untrusted flags and tiers apply to a module whose tools trigger work on GitHub; (5) constraints of kenta-server from ~/code/homelab/CLAUDE.md (Ubuntu 20.04, N95 4 cores 15 GB, Docker, no repo clone on the server, kgpt-home in /opt/kgpt-home). Cite path:line, one confidence per finding.",
+  "inputs": [],
+  "acceptance": [
+    "Result gives the compose+manifest+kernel wiring for a home module with path:line",
+    "Result states whether a module can run as its own image or native process, with the resolving code cited",
+    "Result lists kenta-server constraints relevant to running claude and codex CLIs there"
+  ],
+  "scope": [
+    "/Users/k3ntaw/code/kgpt/**",
+    "/Users/k3ntaw/code/homelab/**"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0074",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "findings": [
+      {
+        "claim": "A home module's compose service pattern: pull the shared image (`${KGPT_IMAGE:-ghcr.io/k3ntaw/kgpt:latest}`), run `python -m modules.<name>.server`, put it on the `home` bridge network (plus `traefik-global` if it must reach other home services by container name), give it a TCP-connect healthcheck against its own port (not the image's baked-in gateway healthcheck), and add `security_opt: no-new-privileges:true` + `read_only: true` + `tmpfs: [/tmp]`.",
+        "evidence": [
+          "docker-compose.home.yml:20-45",
+          "docker-compose.home.yml:64-100"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "module.yaml for a home module needs: `runs_on: home`, `autonomy` (observe/suggest/act), `mcp.transport: streamable-http`, `mcp.port`, `mcp.url` pointed at the tunnel hostname (pattern `http://home.internal:<port>/mcp` or the module's own default), a `tools:` list where every tool has a `tier` (required, module fails to register without one) and optional `untrusted: true`, a `views:` list (`- id: overview`), a `secrets:` list naming the env vars it needs (module's own `<NAME>_SHARED_SECRET` plus any upstream API keys), and `health_check: /healthz`.",
+        "evidence": [
+          "modules/server/module.yaml:1-53",
+          "modules/_template/module.yaml:1-42",
+          "kernel/kgpt_kernel/modules/manifest.py:69-124"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "`health_check:` in module.yaml is declared in every manifest but is not read anywhere in kernel or gateway code \u2014 `ModuleManifest` (the dataclass parsed from module.yaml) has no `health_check` field at all, so it's inert metadata; the real health signal the kernel/ops care about is reachability of `mcp.url` itself, and the only thing that actually probes a port is the compose-level `healthcheck:` block doing a raw socket connect.",
+        "evidence": [
+          "kernel/kgpt_kernel/modules/manifest.py:55-67",
+          "kernel/kgpt_kernel/modules/manifest.py:112-124",
+          "docker-compose.home.yml:41-47"
+        ],
+        "confidence": 0.85,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "The kernel authenticates to a home module with two independent layers: a Cloudflare Access service token pair (`CF-Access-Client-Id`/`CF-Access-Client-Secret` from `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` env vars) gating the tunnel edge, plus a per-module shared secret sent as `X-KGPT-Module-Secret`, read from an env var named `<MODULE_NAME_UPPER>_SHARED_SECRET`. It also forwards `X-KGPT-User-Id` from a contextvar so RLS-scoped modules see the right user. The module server itself re-checks the shared secret in ASGI middleware with `hmac.compare_digest` and returns 403 if missing/wrong; in prod it refuses to boot at all if its shared secret is unset.",
+        "evidence": [
+          "kernel/kgpt_kernel/mcp/client.py:32-57",
+          "modules/server/server.py:46-79",
+          "modules/server/server.py:289-293"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "A home module reaches the outside world only through cloudflared dialing out (no ports forwarded); it gets one ingress hostname of the form `mcp-<name>.kentawaibel.com` mapped to its compose service (`http://mcp-<name>:<port>`), one DNS label deep because the wildcard cert doesn't cover a second level, and needs an Access policy on that hostname whose only allowed principal is the service token.",
+        "evidence": [
+          "infra/cloudflared/home.yml:1-40",
+          "infra/cloudflared/home.yml:29-38"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "`runs_on: home` modules are additionally gated by `KGPT_HOME_AVAILABLE`: `enabled_manifests()` drops any home module from the registry entirely (not just its tools) when that env var is falsy, specifically so the model isn't offered tools it can't execute and doesn't burn iteration budget hitting a 10s CONNECT_TIMEOUT.",
+        "evidence": [
+          "kernel/kgpt_kernel/modules/manifest.py:149-177",
+          "kernel/kgpt_kernel/mcp/client.py:29"
+        ],
+        "confidence": 0.95,
+        "provenance": [
+          "repo"
+        ]
+      },
+      {
+        "claim": "The kernel resolves a module purely by `manifest.mcp_url` (a plain streamable-http URL, env-interpolated at manifest load) \u2014 `ModuleConnection` opens a fresh `streamable_http_client` HTTP session to that URL for every call, with no code path assuming the target is a container in the same compose file or built from the shared image. Nothing in `register_module_tools`/`discover_module_tools`/`ModuleConnection` requires the target process to run the kgpt Docker image.",
+        "evidence": [
+          "kernel/kgpt_kernel/mcp/client.py:88-144",
+          "kernel/kgpt_kernel/modules/manifest.py:24-31",
+          "kernel/kgpt_kernel/modules/manifest.py:122"
+        ],
+        "confidence": 0.9,
+        "provenance": [
+          "repo"
+        ]
+      }
+    ],
+    "open_questions": [
+      "Whether an `orchestrator` module intended for kenta-server would join the shared kgpt image build (needing a CI change) or ship as its own Dockerfile/native process outside CI \u2014 the manifest/kernel contract supports either, but no existing module demonstrates the 'own Dockerfile, not the shared image' path end-to-end.",
+      "Whether kenta-server's kgpt-home compose stack is pulled/updated by a manual `docker compose pull` or some automation \u2014 no pull/watch mechanism was found in this pass."
+    ],
+    "suggested_next": [
+      "Grep the kgpt repo for any renovate/watchtower/webhook config that auto-updates kenta-server's kgpt-home stack on new ghcr pushes, to know whether a new module reaches the server without manual intervention.",
+      "Check /opt/kgpt-home on kenta-server directly (or homelab docs) for the actual .env file layout backing docker-compose.home.yml, since this scout only read the kgpt repo's compose file, not the deployed env."
+    ],
+    "blocked": null,
+    "truncated": {
+      "reason": "over MAX_RESULT_CHARS",
+      "original_chars": 11592,
+      "trimmed": {
+        "findings": 7
+      }
+    },
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789731865.529686,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0074",
+      "claimed_at": 1789731865.529383
+    },
+    {
+      "ts": 1789731865.559811,
+      "pid": 67782,
+      "account": "A"
+    },
+    {
+      "ts": 1789731975.6347141,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "findings": [
+          {
+            "claim": "A home module's compose service pattern: pull the shared image (`${KGPT_IMAGE:-ghcr.io/k3ntaw/kgpt:latest}`), run `python -m modules.<name>.server`, put it on the `home` bridge network (plus `traefik-global` if it must reach other home services by container name), give it a TCP-connect healthcheck against its own port (not the image's baked-in gateway healthcheck), and add `security_opt: no-new-privileges:true` + `read_only: true` + `tmpfs: [/tmp]`.",
+            "evidence": [
+              "docker-compose.home.yml:20-45",
+              "docker-compose.home.yml:64-100"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "module.yaml for a home module needs: `runs_on: home`, `autonomy` (observe/suggest/act), `mcp.transport: streamable-http`, `mcp.port`, `mcp.url` pointed at the tunnel hostname (pattern `http://home.internal:<port>/mcp` or the module's own default), a `tools:` list where every tool has a `tier` (required, module fails to register without one) and optional `untrusted: true`, a `views:` list (`- id: overview`), a `secrets:` list naming the env vars it needs (module's own `<NAME>_SHARED_SECRET` plus any upstream API keys), and `health_check: /healthz`.",
+            "evidence": [
+              "modules/server/module.yaml:1-53",
+              "modules/_template/module.yaml:1-42",
+              "kernel/kgpt_kernel/modules/manifest.py:69-124"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "`health_check:` in module.yaml is declared in every manifest but is not read anywhere in kernel or gateway code \u2014 `ModuleManifest` (the dataclass parsed from module.yaml) has no `health_check` field at all, so it's inert metadata; the real health signal the kernel/ops care about is reachability of `mcp.url` itself, and the only thing that actually probes a port is the compose-level `healthcheck:` block doing a raw socket connect.",
+            "evidence": [
+              "kernel/kgpt_kernel/modules/manifest.py:55-67",
+              "kernel/kgpt_kernel/modules/manifest.py:112-124",
+              "docker-compose.home.yml:41-47"
+            ],
+            "confidence": 0.85,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "The kernel authenticates to a home module with two independent layers: a Cloudflare Access service token pair (`CF-Access-Client-Id`/`CF-Access-Client-Secret` from `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` env vars) gating the tunnel edge, plus a per-module shared secret sent as `X-KGPT-Module-Secret`, read from an env var named `<MODULE_NAME_UPPER>_SHARED_SECRET`. It also forwards `X-KGPT-User-Id` from a contextvar so RLS-scoped modules see the right user. The module server itself re-checks the shared secret in ASGI middleware with `hmac.compare_digest` and returns 403 if missing/wrong; in prod it refuses to boot at all if its shared secret is unset.",
+            "evidence": [
+              "kernel/kgpt_kernel/mcp/client.py:32-57",
+              "modules/server/server.py:46-79",
+              "modules/server/server.py:289-293"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "A home module reaches the outside world only through cloudflared dialing out (no ports forwarded); it gets one ingress hostname of the form `mcp-<name>.kentawaibel.com` mapped to its compose service (`http://mcp-<name>:<port>`), one DNS label deep because the wildcard cert doesn't cover a second level, and needs an Access policy on that hostname whose only allowed principal is the service token.",
+            "evidence": [
+              "infra/cloudflared/home.yml:1-40",
+              "infra/cloudflared/home.yml:29-38"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "`runs_on: home` modules are additionally gated by `KGPT_HOME_AVAILABLE`: `enabled_manifests()` drops any home module from the registry entirely (not just its tools) when that env var is falsy, specifically so the model isn't offered tools it can't execute and doesn't burn iteration budget hitting a 10s CONNECT_TIMEOUT.",
+            "evidence": [
+              "kernel/kgpt_kernel/modules/manifest.py:149-177",
+              "kernel/kgpt_kernel/mcp/client.py:29"
+            ],
+            "confidence": 0.95,
+            "provenance": [
+              "repo"
+            ]
+          },
+          {
+            "claim": "The kernel resolves a module purely by `manifest.mcp_url` (a plain streamable-http URL, env-interpolated at manifest load) \u2014 `ModuleConnection` opens a fresh `streamable_http_client` HTTP session to that URL for every call, with no code path assuming the target is a container in the same compose file or built from the shared image. Nothing in `register_module_tools`/`discover_module_tools`/`ModuleConnection` requires the target process to run the kgpt Docker image.",
+            "evidence": [
+              "kernel/kgpt_kernel/mcp/client.py:88-144",
+              "kernel/kgpt_kernel/modules/manifest.py:24-31",
+              "kernel/kgpt_kernel/modules/manifest.py:122"
+            ],
+            "confidence": 0.9,
+            "provenance": [
+              "repo"
+            ]
+          }
+        ],
+        "open_questions": [
+          "Whether an `orchestrator` module intended for kenta-server would join the shared kgpt image build (needing a CI change) or ship as its own Dockerfile/native process outside CI \u2014 the manifest/kernel contract supports either, but no existing module demonstrates the 'own Dockerfile, not the shared image' path end-to-end.",
+          "Whether kenta-server's kgpt-home compose stack is pulled/updated by a manual `docker compose pull` or some automation \u2014 no pull/watch mechanism was found in this pass."
+        ],
+        "suggested_next": [
+          "Grep the kgpt repo for any renovate/watchtower/webhook config that auto-updates kenta-server's kgpt-home stack on new ghcr pushes, to know whether a new module reaches the server without manual intervention.",
+          "Check /opt/kgpt-home on kenta-server directly (or homelab docs) for the actual .env file layout backing docker-compose.home.yml, since this scout only read the kgpt repo's compose file, not the deployed env."
+        ],
+        "blocked": null,
+        "truncated": {
+          "reason": "over MAX_RESULT_CHARS",
+          "original_chars": 11592,
+          "trimmed": {
+            "findings": 7
+          }
+        },
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    }
+  ],
+  "claimed_at": 1789731865.529383,
+  "pid": 67782,
+  "account": "A"
+}

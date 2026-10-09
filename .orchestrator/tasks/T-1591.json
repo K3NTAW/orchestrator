@@ -1,0 +1,49 @@
+{
+  "id": "T-1591",
+  "created_at": 1791015044.386646,
+  "parent": "T-1590",
+  "role": "execute",
+  "tier": "luna",
+  "complexity": 4,
+  "title": "LS1: compaction brief for the Planner session and hook text that says compact in place, not restart",
+  "spec": "Why: the Planner session should compact in place (Claude Code auto-compact or /compact, also from Remote Control) instead of restarting with `f orch`. After compaction a SessionStart hook with matcher \"compact\" runs and its stdout is injected into context; this task adds what that hook prints and changes the per-prompt hook text.\n\n1. orchestrator/planner_context.py: add `compact_brief(root, limit=4000) -> str`. Read `<root>/.orchestrator/plan.md`. If it has a `## Now` section (heading line exactly starting `## Now`), take that section up to the next line starting `## ` (or EOF); otherwise take the file from the start. Cap that text at `limit` chars (cut at the last newline before the cap and append a line `[cut; read .orchestrator/plan.md]`). Return: line 1 `Session compacted; continue in place. Planner mode: goals go through Skill(orchestrate); never edit source; see CLAUDE.md.`, then the text, then `Full state: .orchestrator/plan.md; history: .orchestrator/plan-log.md (do not read by default).` Missing or unreadable plan.md returns line 1 plus `plan.md missing; run the resume skill.`.\n2. hook_message (planner_context.py:92): the over-threshold text becomes `Planner context is N tokens (threshold T); write the checkpoint: <command>; then keep working, the session compacts in place (auto-compact or /compact).` The after-handover text (line 111) becomes `handover written HH:MM; the session compacts in place (auto-compact or /compact), no restart needed`. Grace, regrow and session-id logic unchanged.\n3. Plan size nag: when `<root>/.orchestrator/plan.md` exceeds `[planner].plan_max_chars` (default 12000; 0 disables), hook_message also returns the line `plan.md is N chars (max M): move history to .orchestrator/plan-log.md and keep ## Now current.` Joined with a newline when both apply; returned alone when only the size applies (independent of the token threshold).\n4. orchestrator/cli.py:192 and :625: `planner-context --brief` prints compact_brief(ROOT).\n5. New .claude/hooks/planner-compact.sh (executable), modelled on .claude/hooks/planner-prompt.sh: reads stdin JSON, exits 0 silently for task workers (`task_id` non-empty) and when ORCH_PLANNER_MODE=0, otherwise runs `uv run orchestrator planner-context --brief` from orch_root under a 5 s perl alarm, prints its stdout, always exits 0 (fail open). Registration in .claude/settings.json is done by the human; do not touch settings.json.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_planner_context.py::PlannerContextTest::test_compact_brief_now_section passes: a plan.md with '## Now' then '## Other' yields line 1, only the Now section, and the history pointer line",
+    "tests/test_planner_context.py::PlannerContextTest::test_compact_brief_fallback_and_cap passes: no Now section uses the file start; text longer than limit is cut at a newline with the '[cut; read .orchestrator/plan.md]' line; missing plan.md yields the missing line",
+    "tests/test_planner_context.py::PlannerContextTest::test_hook_message_compact_in_place passes: over-threshold and after-handover messages contain 'compacts in place' and neither contains 'f orch'",
+    "tests/test_planner_context.py::PlannerContextTest::test_plan_size_nag passes: plan.md over plan_max_chars returns the nag line below the token threshold; plan_max_chars = 0 disables it",
+    "tests/test_hooks.py::HookTest::test_planner_compact_hook passes: the hook prints the brief for a Planner session, prints nothing for a task worker, and exits 0 when the command fails"
+  ],
+  "scope": [
+    "orchestrator/planner_context.py",
+    "orchestrator/cli.py",
+    ".claude/hooks/planner-compact.sh",
+    "tests/test_planner_context.py",
+    "tests/test_hooks.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2400,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "LS1",
+    "goal_branch": "goal/T-1590",
+    "interface_contract": "planner_context.compact_brief(root, limit=4000) -> str; CLI `orchestrator planner-context --brief`; pool.toml [planner].plan_max_chars (int, default 12000, 0 disables); plan.md convention: a '## Now' section holds current state"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1791015058.225357,
+      "status": "superseded",
+      "hold_reason": "superseded: acceptance named PlannerContextTest/HookTest; the classes are PlannerContext and Hooks; re-filed"
+    }
+  ],
+  "hold_reason": "superseded: acceptance named PlannerContextTest/HookTest; the classes are PlannerContext and Hooks; re-filed"
+}

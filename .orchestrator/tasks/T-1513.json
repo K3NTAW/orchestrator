@@ -1,0 +1,57 @@
+{
+  "id": "T-1513",
+  "created_at": 1790894472.878069,
+  "parent": "T-1403",
+  "role": "execute",
+  "tier": "sonnet",
+  "complexity": 4,
+  "title": "constraints.grant_scope: a fix round may carry extra scope entries that the scope guard, the packet and the daemon dirty-scope check honour, so the Planner widens scope without a respec",
+  "spec": "Goal T-1403, wave 2, plan label E7 (analysis 2026-10-01). Today a fix round inherits the held task's scope\n(daemon.auto_fix_round passes current['scope']); when the fix needs one more file (A1 and A6 in wave 1 died on\npinned tests outside scope) the Planner must supersede and refile the whole task.\n\nFacts (goal/T-1403 at 92c1a98 plus B5 and B8 merged before this task; re-check line numbers):\n- .claude/hooks/scope-guard.sh:7-20 reads `.scope[]` of the task json and blocks Edit/Write outside it (exit 2).\n- scopes.py:14-30 safe_scope(task, worktree) returns task.write_scope or task.scope entries contained in the\n  worktree; spawn.py:812 renders write_scope into the packet from `scope`; daemon.py:1230-1249\n  _dirty_scope_paths(worktree, scope) and the gate's dirty check use task['scope']; several read-only modules\n  (context_router.py:118, evidence.py:51, jev_skills.py:52, memory_hot.py:72, memory_scorecard.py:52,\n  jev_sched.py:87) read scope or write_scope for ranking only and stay as they are.\n- bus.create_task validates scope non-empty (TaskCreated hook); constraints is a free dict.\n\nChange:\n1. scopes.effective_scope(task) -> list: task['scope'] + (task.get('constraints') or {}).get('grant_scope') or\n   [], deduplicated, order kept; grant entries go through the same containment rules as safe_scope. safe_scope\n   uses effective_scope.\n2. scope-guard.sh: also accept globs from `.constraints.grant_scope[]?` (same loop, both lists), and name both\n   lists in the block message.\n3. spawn packet (812): write_scope lists effective_scope; daemon gate dirty check and any other write-time\n   scope read in daemon.py (grep \"\\\\[\\\"scope\\\"\\\\]\" and \".get(\\\"scope\\\")\" in daemon.py and spawn.py) use\n   scopes.effective_scope(task). auto_fix_round keeps copying scope and now also copies constraints.grant_scope\n   (it already spreads constraints).\n4. bus.create_task: when constraints.grant_scope is present, validate it is a list of non-empty relative path\n   strings without '..' (ValueError otherwise) and record it in the creation event; no other bus change.\n\nTests that assert the old behaviour (SPEC RULE): tests/test_scopes.py safe_scope tests (grep 'safe_scope') pass\nunchanged; the hook tests in tests/test_hooks.py or tests/test_scope_guard*.py (grep 'scope-guard' under tests/)\npass unchanged and gain the grant case; tests/test_daemon.py dirty-scope gate tests (grep '_dirty_scope_paths' /\n'executor did not commit'). Run tests/test_scopes.py, tests/test_spawn.py, tests/test_daemon.py, tests/test_bus.py and\nthe hook tests.\n\nDepends on B5 T-1511 (daemon.py chain) and B8 T-1509 (spawn.py chain). Out of scope: mcp.py, executor.py.\n\nWork on the task branch cut from goal/T-1403. Commit first, then run the focused tests in the foreground; never\nbackground a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py\nlike the neighbouring tests.\n\nRe-filed 2026-10-01 (replaces T-1461): depends_on re-pointed to T-1474, T-1476 after the B2v3/B4v3 respecs; the spec, acceptance and scope are unchanged.\n\nRe-filed 2026-10-02 (replaces T-1477): depends_on re-pointed to T-1496, T-1498 after the round-3 respecs (B2v4, B4a/B4b, E12v3); spec, acceptance and scope unchanged.\n\nRe-filed 2026-10-02 00:55 (replaces T-1499): B2 was split into B2a T-1504 and B2b T-1506; B5 re-filed as T-1511 and B8 as T-1509; depends_on re-pointed to T-1511, T-1509; spec, acceptance and scope unchanged.",
+  "inputs": [],
+  "acceptance": [
+    "tests/test_scopes.py::test_effective_scope_includes_grant_scope: passes: scopes.effective_scope of a task with scope ['a/'] and constraints.grant_scope ['tests/test_b.py'] is ['a/', 'tests/test_b.py'], safe_scope keeps the grant entry when it is contained in the worktree and drops '..' entries; a task without grant_scope is unchanged",
+    "tests/test_hooks.py::test_scope_guard_accepts_grant_scope: passes: scope-guard.sh allows a write to a path matched only by constraints.grant_scope and still blocks a path outside both lists with a message naming both",
+    "tests/test_daemon.py::test_gate_dirty_check_and_fix_round_honour_grant_scope: passes: a done execute task with an uncommitted file under its grant_scope is reported by the gate's dirty-scope check (held 'executor did not commit'), and auto_fix_round's fix round carries the parent's constraints.grant_scope",
+    "tests/test_bus.py::test_create_task_validates_grant_scope: passes: bus.create_task rejects grant_scope entries that are not strings, are empty, are absolute or contain '..', and accepts a list of relative paths",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/scopes.py",
+    "orchestrator/spawn.py",
+    "orchestrator/daemon.py",
+    "orchestrator/bus.py",
+    ".claude/hooks/scope-guard.sh",
+    "tests/test_scopes.py",
+    "tests/test_spawn.py",
+    "tests/test_daemon.py",
+    "tests/test_bus.py",
+    "tests/test_hooks.py"
+  ],
+  "depends_on": [
+    "T-1511",
+    "T-1509"
+  ],
+  "constraints": {
+    "read_only": false,
+    "budget_turns": 40,
+    "timeout_s": 2700,
+    "task_class": "mechanical",
+    "route": "straightforward",
+    "plan_label": "E7",
+    "goal_branch": "goal/T-1403",
+    "respec_for": "T-1499"
+  },
+  "status": "superseded",
+  "assigned_to": null,
+  "worktree": null,
+  "codex_thread": null,
+  "result": null,
+  "events": [
+    {
+      "ts": 1790936917.33263,
+      "status": "superseded",
+      "hold_reason": "superseded by T-1555 (E7 re-filed 2026-10-02 11:55, depends_on T-1554,T-1509; test-path example reworded)"
+    }
+  ],
+  "hold_reason": "superseded by T-1555 (E7 re-filed 2026-10-02 11:55, depends_on T-1554,T-1509; test-path example reworded)"
+}

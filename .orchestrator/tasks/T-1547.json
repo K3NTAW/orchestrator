@@ -1,0 +1,662 @@
+{
+  "id": "T-1547",
+  "created_at": 1790934568.1889112,
+  "parent": "T-1403",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: B4b v5 (fix round of T-1491): execute result derived from git state WITHOUT auto-commit; inputs pinned at the claim, one guarded writer, defined return value, head read at the claim stated",
+  "spec": "Goal T-1403, wave 2, plan label B4b-v5. Respec of B4b v4 T-1542 (superseded; spec review request_changes, 2026-10-02 10:10). Still a fix round of T-1491 (constraints.fix_round_for), so its merge stamps T-1491 and B7 T-1494 / B5 T-1511 become ready; cuts from goal/T-1403. This text is the whole contract. The commit-now resume stays DROPPED; auto-commit of leftovers stays PARKED as B4c.\n\nContract from B4a (MERGED): gitutil.head_sha(worktree, timeout=60) -> sha | None (gitutil.py:30) and gitutil.execute_outcome(worktree, parent, scope, *, since=None) -> {ahead, head, dirty_in_scope, dirty_out_of_scope} | None (gitutil.py:40; None for a missing worktree or a HEAD change during the reads). Hold prefix 'execute_incomplete' (B5 maps it to failure kind 'incomplete').\n\nFacts (scout T-1539 plus Planner grep, goal/T-1403 = 5c4ba3d, provenance repo):\nG1 spawn.run_worker (spawn.py:1513-1611): t = dict(bus.get(task_id)) BEFORE the claim and never refreshed. Locals before run_claude: pool, t, role, epoch = t['_launch_epoch'], acct, model = pool.cfg['models'][t['tier']], prompt, allowlist, budget, timeout; for execute t['executor'] = f'claude:{tier}' (1564). The claim line is `bus.claim(task_id, f'claude:{acct.id}', str(ensure_worktree(task_id)))` (1603) and discards the path; t.get('worktree') is None on a fresh launch. The worktree path is Path(ensure_worktree(task_id)) (idempotent, = ROOT/'wt'/task_id); the base branch is base_for(t) (spawn.py:277: 'goal/<parent>', 'task/<fix_round_for>' or 'origin/main'); the scope is t['scope']. run_claude calls: `first = run_claude(pool, acct, t, prompt, model, allowlist, budget, timeout)` (1611) and a second call in the escalation branch (1633).\nG2 Resume path: resume_worker (1755-1759, from worker_control.steer at 283) sets prompt = resume_prompt, t['_resume_session'], model and tools from worker_registry.get; it skips packet/render, pool.reserve, bus.claim and ensure_worktree; run_claude still upserts the registry 'starting' and passes --resume; the result goes through the same status branches.\nG3 Tool escalation (1614-1635): needs disclosure_mode == 'active', a _hidden_tool_request and no pipeline.tool_escalation_used; it writes status running and result None, then replaces r with a second run_claude; the first result is kept only for _combined_usage; nothing touches git between the calls.\nG4 Non-JSON: run_claude calls worker_registry.finish(task_id, 'failed', 'non_json', epoch=epoch) (1381-1383) and returns {'status': 'failed', 'reason': f'non-JSON output (rc={rc}): {text[-500:]}'}, only those two keys (every recorded case is rc=143 with empty text: SIGTERM). run_worker's failed branch: worker_control.write_if_current(task_id, epoch, bus.update, task_id, status='failed', reason=r['reason']) (1711-1716); resume_hint.partial_output only when r['output']['result'] is a str, so never for non-JSON.\nG5 Done path (1655-1660): posted = fit_result({'summary': r['output'].get('result', '')[:3000], 'executed_by': f\"claude:{t['tier']}\", 'review': 'other account, different model; label PR same-family-review'}); posted = contracts.process(task_id, role, posted, cfg=pool.cfg, session=repair_session); write_if_current(task_id, epoch, bus.post_result, task_id, posted, 'done'). No commit or derived_from key today.\nG6 run_worker ends with `return r` (1723) after the finally that calls worker_control.release_if_current(task_id, epoch, pool, release_usage or r or {}). Consumers: daemon.py:1011,1085,1305,1671,1690 and mcp.py:61 run it in threads and discard the value; executor.run_fallback (643-665) discards it; spawn.resume_worker returns it to worker_control.steer (283), which does not branch on status.\nG7 worker_control: write_if_current(task_id, epoch, method, *args, **fields) holds bus.locked() and calls method only when is_current (137-171); is_current(task_id, epoch) is epoch >= pipeline.steer_epoch (default 1; read at 204, written by steer at 272); release_if_current at 207; cancel() emits the registry event 'cancel_requested' (status cancelling), terminates the pid, then under the lock does bus.update(status='held', hold_reason='cancelled', pid=None, result=bounded partial), a pool release and worker_registry.finish(task_id, 'cancelled'); it does not change the epoch.\nG8 bus.locked() (bus.py:20-41) is reentrant per thread through a depth counter (bus._held.depth): nested bus.post_result / bus.update inside a locked block do not take the flock again.\nG9 worker_registry.finish(task_id, status, reason=None, *, epoch=None) (worker_registry.py:186-199): terminal statuses only; under bus.locked(); no write when epoch < the doc epoch or when the doc status is cancelling/cancelled and status != 'cancelled'; 'held' emits a 'held' event then an 'exit' event. worker_registry.upsert(task_id, **fields) (111) takes bus.locked() itself (113) and writes allowed fields including status_reason; worker_registry.get(task_id) (123) takes no lock.\nG10 contracts.process(task_id, role, result, *, cfg=None, session=None, thread=None, preserve=False) (contracts.py:158-184) returns the input unchanged when the contracts mode is off or the role has no schema; otherwise validates, repairs, writes a decision_log 'output_contract' row and returns recovered['result'] when active-mode recovery ran, else the input. Whether recovered['result'] keeps unknown keys is not pinned, so the four derived keys are re-attached after process unconditionally. spawn.fit_result(result, cap=bus.MAX_RESULT_CHARS) (1476) returns the input unchanged when it fits, else a dict copy with summary[:1500] and list values trimmed.\nG11 bus.post_result(tid, result, status='done') (bus.py:212-219) raises ValueError above MAX_RESULT_CHARS (6000), sets confidence/provenance defaults and calls update(tid, status=status, result=result); it does not clear hold_reason. bus.log_run(*, attempt=1, **fields) (359) accepts arbitrary keyword fields; the existing run_worker log_run calls pass no attempt (default 1).\nG12 run_claude never writes the bus task status: inside it only worker_registry.upsert/event and bus.update(pid=, account=, packet_meta=, pipeline=) occur; bus.claim set status running; the escalation branch writes status running explicitly; the non-JSON finish touches the registry only. So the task is still 'running' when derivation runs.\nG13 No code outside worker_registry.py reads status_reason 'non_json' (grep on goal/T-1403: daemon.py, failures.py, scorecard.py, mcp.py, cli.py, executor.py have no hits); worker_registry.reconcile touches only active (non-terminal) entries, and finish already made the entry terminal 'failed'.\nG14 Test seams in tests/test_spawn.py: patch.object(spawn, 'run_claude', side_effect=fn), patch.object(spawn, 'ensure_worktree', return_value=path), patch.object(spawn, 'worker_registry'), patch.object(spawn, 'Pool', return_value=pool); imports `from orchestrator import bus, pool as P, spawn` with _harness TMP and scratch_repo.\n\nChange:\n1. Seams. `from . import gitutil` joins spawn.py's package imports; module attributes `execute_outcome = gitutil.execute_outcome` and `head_sha = gitutil.head_sha` are what run_worker calls (patchable by name). derive = pool.cfg.get('spawn', {}).get('derive_execute_result', False): DEFAULT FALSE until B5 (T-1511) maps execute_incomplete holds; the flip is a one-line follow-up. False means today's behaviour exactly; head_sha is never called.\n2. Claim refactor and inputs pinned. The claim line becomes two lines for every role: `wt = Path(ensure_worktree(task_id))` then `bus.claim(task_id, f'claude:{acct.id}', str(wt))`, so ensure_worktree runs exactly once per launch. Directly after the claim, only when role == 'execute' and derive and resume_task is None: parent = base_for(t); scope = list(t.get('scope') or []); pre_head = head_sha(wt) inside try/except -> None. The head is read at the claim for EVERY such launch, before the outcome is known, because it must precede the run; on the resume path and for other roles none of this runs (G2). Nothing else between the claim and run_claude changes.\n3. worker_control.cancel_or_steer_pending(task_id, epoch) -> bool: True when worker_registry.get(task_id) has status in {'cancelling', 'cancelled', 'steering'}, or bus.get(task_id) is held with hold_reason 'cancelled', or not is_current(task_id, epoch); False otherwise; never raises (missing registry entry -> False).\n4. Trigger. After the final r is known (after the escalation branch, so only the final run_claude result counts; since = pre_head covers both runs on purpose: the first run's commits are the task's work), derivation runs only when role == 'execute' and derive and resume_task is None and pre_head is not None and r['status'] == 'failed' and str(r.get('reason', '')).startswith('non-JSON output') and not cancel_or_steer_pending(task_id, epoch). Every other outcome keeps today's write; the done path never calls execute_outcome. o = execute_outcome(wt, parent, scope, since=pre_head) inside try/except -> None; None -> today's failed write (reason kept).\n5. Decision (no git mutation anywhere). (i) o['ahead'] == 0 -> hold 'execute_incomplete: no commits'; (ii) o['dirty_in_scope'] or o['dirty_out_of_scope'] -> hold 'execute_incomplete: uncommitted changes'; both with resume_hint {'partial_output': r['reason'], 'dirty_in_scope', 'dirty_out_of_scope', 'head'}; (iii) ahead > 0 and clean -> candidate = {'summary': 'derived from git state after ' + r['reason'][:300], 'commit': o['head'], 'executed_by': t['executor'], 'derived_from': 'git_state', 'review': 'derived from git state; other account, different model; label PR same-family-review'}; fitted = fit_result(candidate); processed = contracts.process(task_id, role, fitted, cfg=pool.cfg, session=None); processed = dict(processed); processed.update({k: candidate[k] for k in ('commit', 'derived_from', 'executed_by', 'review')}) (G10); then post_if_current(task_id, epoch, 'done', processed). Documented in the run_worker docstring: rc=143 may be a timeout or an external kill, so 'ahead > 0 and clean' can post a half-finished run as done; this is intentional because the tests-green gate (acceptance-named tests present and green) is the merge bar and the summary, derived_from and review text mark the result as derived for the gate's reviewers.\n6. ONE guarded writer: worker_control.post_if_current(task_id, epoch, status, payload) -> bool. Exactly one outermost entry through the module attribute `bus.locked()`; nested bus calls and worker_registry.upsert re-enter through the depth counter (G8, G9), worker_registry.get takes no lock. Inside the lock: fresh = bus.get(task_id); entry = worker_registry.get(task_id) or {}; return False and write nothing unless fresh['status'] == 'running' (G12: the real path arrives here running) and is_current(task_id, epoch) and entry.get('status') not in {'cancelling', 'cancelled', 'steering'} and not (fresh.get('result') or {}).get('commit') (the EXISTING result's commit; a 'commit' key in payload never blocks). Otherwise, still inside the lock: status 'done' -> bus.post_result(task_id, payload, 'done') then bus.update(task_id, hold_reason=None) (post_result does not clear a stale hold_reason, G11); status 'held' -> bus.update(task_id, status='held', hold_reason=payload['hold_reason'], resume_hint=payload['resume_hint']); then worker_registry.upsert(task_id, status_reason='derived_done' if status == 'done' else 'execute_incomplete') (the registry status stays the terminal 'failed' finish wrote; only status_reason changes; G13: no reader outside worker_registry.py consumes non_json and reconcile skips terminal entries, so the task is never re-handled; say so in the docstring); return True. Both holds (5.i, 5.ii) and the derived done (5.iii) go through it; write_if_current is never used for a derived outcome, so a worker-posted done/held/failed, a cancel or a steer always wins.\n7. After post_if_current returned True: bus.log_run(task=task_id, role='execute', outcome='derived_done' | 'execute_incomplete', executor=t['executor'], tier=t['tier'], account=acct.id, derived_from='git_state') exactly once per derived decision, with no attempt argument (default 1, like the existing run_worker calls, G11); r is replaced by {'status': 'done' | 'held', 'derived_from': 'git_state', 'reason': <original reason>} before `return r` (G6: no consumer branches on it; the finally still releases). When post_if_current returned False: no failed write, no log_run, and run_worker returns {'status': 'superseded', 'reason': <original reason>}; the registry entry stays failed/non_json on purpose (the worker's own post, a cancel or a steer won; reconcile already handled it); the output_contract decision_log row written for the unposted candidate is accepted (both in the run_worker docstring).\n8. Key passthrough is unconditional (item 5), so contracts.py needs no read and no change.\n\nTests (SPEC RULE): tests/test_spawn.py::test_failed_without_reason_key_sets_default_and_resume_hint passes unchanged. The spawn.execute_outcome / spawn.head_sha seams (or a real scratch_repo worktree returned by the ensure_worktree patch; say which per test) are patched only in the new derivation TestCase's setUp, never in every execute TestCase; derive defaults to False so legacy tests never reach them. Cancel/steer signals: registry status through worker_registry.upsert; steer by bumping pipeline.steer_epoch; pre-posted done/held/failed through bus.update or bus.post_result before derivation runs. The lock-entry counter replaces bus.locked with a wrapper that counts only entries made at bus._held.depth == 0 (G8); post_if_current must therefore call bus.locked through the module attribute.\n\nOut of scope: gitutil.py, daemon.py, executor.py, failures.py, contracts.py, worker_registry.py, pool.toml. Rollback: `git revert` of the merge, or [spawn].derive_execute_result = false (the default). Work on the task branch cut from goal/T-1403. Commit first, then run tests/test_spawn.py tests/test_worker_control.py in the foreground; never background a command and never run the full gate. Write tests as unittest.TestCase methods using tests/_harness.py like the neighbouring tests. Locate every insertion point by symbol, never by line number. Every test named in the acceptance must exist in the diff; the gate checks for them by id.",
+  "inputs": [
+    "T-1546"
+  ],
+  "acceptance": [
+    "tests/test_spawn.py::test_execute_result_derived_from_git_state: passes: with derive_execute_result True and run_claude returning {'status': 'failed', 'reason': 'non-JSON output (rc=143): '} (no output key) for an execute task on a fresh launch (ensure_worktree patched to a scratch git worktree and called exactly once, t['worktree'] None): (a) when the run added a commit and the tree is clean, the task is posted done with result.commit == the worktree HEAD, derived_from 'git_state', executed_by == t['executor'], summary starting 'derived from git state after ', review text starting 'derived from git state', hold_reason None, bus.log_run called exactly once with outcome 'derived_done' and no attempt argument, the registry entry status_reason 'derived_done', and run_worker returns {'status': 'done', 'derived_from': 'git_state', ...}; (b) with any uncommitted path, in scope or out, the task is held 'execute_incomplete: uncommitted changes' through post_if_current with resume_hint.dirty_in_scope/dirty_out_of_scope/head and partial_output == the reason text, git status unchanged, registry status_reason 'execute_incomplete', run_worker returns status 'held'; (c) with a pre-existing commit but none since the pre-run head the task is held 'execute_incomplete: no commits'; (d) a run_claude 'done' result never calls execute_outcome, while head_sha was called exactly once, at the claim",
+    "tests/test_spawn.py::test_derivation_skipped_for_cancel_steer_and_legacy_cases: passes: the task is marked failed exactly as before (reason kept, no derived log_run entry, registry stays failed/non_json) when derive_execute_result is False (head_sha never called), when the failed reason does not start with 'non-JSON output', when head_sha returns None, when head_sha or execute_outcome raises, when the registry status is 'cancelling', 'cancelled' or 'steering', and when pipeline.steer_epoch was bumped; a task already held 'cancelled' is left untouched; resume_worker with derive True never calls head_sha; in the tool-escalation case derivation uses the final run_claude result with since equal to the head read before the first run; when the worker already posted done, held or failed before derivation, post_if_current returns False for the done AND both hold outcomes, nothing is written, run_worker returns {'status': 'superseded', ...} and the registry entry stays failed/non_json",
+    "tests/test_worker_control.py::test_post_if_current_single_lock_entry: passes: worker_control.post_if_current(task_id, epoch, status, payload) makes exactly one outermost bus.locked entry (bus.locked replaced by a wrapper counting entries at bus._held.depth == 0), re-reads the task and the registry inside the lock, returns False and writes nothing when is_current is False, when the fresh status is 'done', 'held' or 'failed', when the registry status is cancelling, cancelled or steering, or when the EXISTING result has a commit; otherwise writes inside the lock (post_result for 'done' and hold_reason cleared; bus.update held with hold_reason and resume_hint for 'held'), sets the registry status_reason to 'derived_done' or 'execute_incomplete' while the registry status stays 'failed', and returns True; a payload with its own 'commit' key does not block the write",
+    "tests/test_worker_control.py::test_cancel_or_steer_pending_matrix: passes: cancel_or_steer_pending returns True for registry status cancelling, cancelled and steering, for a task held 'cancelled' and for a stale epoch, False for a running task with a current epoch and a registry entry in 'running', and False without raising for a missing registry entry",
+    ".claude/hooks/tests-green.sh wt/THIS-TASK exits 0"
+  ],
+  "scope": [
+    "orchestrator/spawn.py",
+    "orchestrator/worker_control.py",
+    "tests/test_spawn.py",
+    "tests/test_worker_control.py"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:A",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1547",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Item 7 says that when post_if_current returns False there is no failed write. The guard has a False case where nobody else has written: the task is still 'running' but fresh result.commit is set. An earlier round's result is not cleared on re-claim (a fix round or re-launch, as far as the spec shows). The task then stays 'running' forever with a terminal 'failed' registry entry. reconcile skips terminal entries and the daemon sees nothing to handle. This is a silent stall, and it fires on the very fix-round path this task serves.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "contracts.process, fit_result, bus.post_result (ValueError above 6000 chars after the four keys are re-attached) and post_if_current itself are not guarded. If any of them raises inside run_worker, derivation aborts with the task still 'running' and the registry already 'failed'. Only execute_outcome and head_sha are covered by try/except.",
+        "severity": "high",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "A derived done is posted for any rc=143 with ahead>0 and a clean tree. That includes a timeout, an external kill, or a daemon reaper kill that is not routed through cancel(). The risk is only documented, with the tests-green gate as the sole backstop. The 'running' and registry checks do not detect an external kill. Also, pre_head is read at the claim, so a worktree reused by a fix round could show ahead>0 from the run's partial commits that never ran the acceptance tests.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/worker_control.py",
+        "issue": "post_if_current for status 'held' writes hold_reason and resume_hint through bus.update without checking that the payload keys exist. A KeyError raised inside bus.locked() after post_result has already written leaves a half-applied state. For 'done' there are two separate writes (post_result, then update hold_reason=None). A failure between them leaves a stale hold_reason.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/spawn.py",
+        "issue": "Hidden dependency on B4a semantics. Case (c), 'pre-existing commit but none since pre_head', requires execute_outcome's 'ahead' to be computed from since, not from parent. The spec only lists the signature. If 'ahead' is parent-relative, (c) fails and prior commits get posted as the run's work. The acceptance tests should pin this with a real scratch_repo, not a patched seam.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "tests/test_worker_control.py",
+        "issue": "The single-lock-entry test depends on worker_control reaching bus.locked through the module attribute (for example `from . import bus`). If worker_control imports it another way, the wrapper counter cannot work. The spec should state the import form to verify. The 'registry status stays failed' assertion also needs a registry fixture that already holds a terminal failed entry.",
+        "severity": "low",
+        "line": 0
+      }
+    ],
+    "suggested_spec_changes": [
+      "Where post_if_current returns False, re-read the task. If it is still 'running' and no cancel, steer or worker post occurred, fall back to today's write_if_current failed write with the original reason. Only return 'superseded' with no write when the task is actually terminal or cancel/steer-claimed. Alternatively, drop the existing-result commit guard, or have claim clear a stale result.",
+      "Wrap fit_result, contracts.process, the key re-attach and post_if_current in the same try/except as execute_outcome. On any exception or ValueError, fall back to today's failed write with the original reason. Add a test where contracts.process raises and where the payload is oversized.",
+      "Validate the payload (hold_reason and resume_hint present, size within MAX_RESULT_CHARS) before the first write in post_if_current. Do the 'done' writes so a failure cannot leave a stale hold_reason, for example one bus.update, or check first.",
+      "State that execute_outcome's 'ahead' counts commits after since when since is given, and add a real scratch_repo test for (c) rather than a patched seam.",
+      "Make derived done safer. Either hold with a distinct 'execute_incomplete: killed' reason when the failed reason shows rc=143 and the elapsed time reached the timeout, or at least record the rc and a timeout flag in the derived summary. Add a rollout note that the flag stays False until B5 lands.",
+      "State the exact import form worker_control uses for bus, so that the bus.locked wrapper test is feasible."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1790934572.450262,
+      "packet_meta": {
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 19406,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ]
+      }
+    },
+    {
+      "ts": 1790934572.46261,
+      "packet_meta": {
+        "chars": 18667,
+        "est_tokens": 4666,
+        "presented_tokens": 4666,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7cff22cb83c8ec5c54a972acabab5944f0f8887c5813a3fa25142f92817b40a5"
+          },
+          "spec": {
+            "chars": 14323,
+            "est_tokens": 3580,
+            "sha256": "810b0fd78281d3d05be4ef08da70b8c345a771d511c398dde893b4ad12bf3a74"
+          },
+          "acceptance": {
+            "chars": 3690,
+            "est_tokens": 922,
+            "sha256": "6b2e87109a6994bf15d6af1c8a605f2f9630b6014b38e85a19528ee4666ab323"
+          },
+          "scope": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "360df9cf8fb08c70ce9181f03caadbaa631ebc7800d74c8a68f515084231d658"
+          },
+          "depends_on": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "c87b27006592af33046ae4452267868fac0ed0ce856b8b60af660f7858ac09a3"
+          },
+          "existing tests": {
+            "chars": 284,
+            "est_tokens": 71,
+            "sha256": "22bf54c74ee3ff8461699b8e6b9a336c2494486d4f03372637b620396ffbf3fc"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "3132551fc7b1",
+        "version": "3132551fc7b1",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1546 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 19406,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow"
+      }
+    },
+    {
+      "ts": 1790934573.918999,
+      "status": "running",
+      "assigned_to": "claude:A",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-1547",
+      "claimed_at": 1790934573.918405
+    },
+    {
+      "ts": 1790934573.9208598,
+      "account": "A"
+    },
+    {
+      "ts": 1790934579.0565279,
+      "pid": 59688,
+      "account": "A"
+    },
+    {
+      "ts": 1790934608.1738281,
+      "packet_meta": {
+        "chars": 18667,
+        "est_tokens": 4666,
+        "presented_tokens": 4666,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7cff22cb83c8ec5c54a972acabab5944f0f8887c5813a3fa25142f92817b40a5"
+          },
+          "spec": {
+            "chars": 14323,
+            "est_tokens": 3580,
+            "sha256": "810b0fd78281d3d05be4ef08da70b8c345a771d511c398dde893b4ad12bf3a74"
+          },
+          "acceptance": {
+            "chars": 3690,
+            "est_tokens": 922,
+            "sha256": "6b2e87109a6994bf15d6af1c8a605f2f9630b6014b38e85a19528ee4666ab323"
+          },
+          "scope": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "360df9cf8fb08c70ce9181f03caadbaa631ebc7800d74c8a68f515084231d658"
+          },
+          "depends_on": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "c87b27006592af33046ae4452267868fac0ed0ce856b8b60af660f7858ac09a3"
+          },
+          "existing tests": {
+            "chars": 284,
+            "est_tokens": 71,
+            "sha256": "22bf54c74ee3ff8461699b8e6b9a336c2494486d4f03372637b620396ffbf3fc"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "3132551fc7b1",
+        "version": "3132551fc7b1",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1546 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 19406,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "ad33d7b3-b40a-45e4-9b7c-f0de2eaa339b"
+      }
+    },
+    {
+      "ts": 1790934608.19958,
+      "packet_meta": {
+        "chars": 18667,
+        "est_tokens": 4666,
+        "presented_tokens": 4666,
+        "sections": {
+          "_preamble": {
+            "chars": 69,
+            "est_tokens": 17,
+            "sha256": "7cff22cb83c8ec5c54a972acabab5944f0f8887c5813a3fa25142f92817b40a5"
+          },
+          "spec": {
+            "chars": 14323,
+            "est_tokens": 3580,
+            "sha256": "810b0fd78281d3d05be4ef08da70b8c345a771d511c398dde893b4ad12bf3a74"
+          },
+          "acceptance": {
+            "chars": 3690,
+            "est_tokens": 922,
+            "sha256": "6b2e87109a6994bf15d6af1c8a605f2f9630b6014b38e85a19528ee4666ab323"
+          },
+          "scope": {
+            "chars": 119,
+            "est_tokens": 29,
+            "sha256": "360df9cf8fb08c70ce9181f03caadbaa631ebc7800d74c8a68f515084231d658"
+          },
+          "depends_on": {
+            "chars": 154,
+            "est_tokens": 38,
+            "sha256": "c87b27006592af33046ae4452267868fac0ed0ce856b8b60af660f7858ac09a3"
+          },
+          "existing tests": {
+            "chars": 284,
+            "est_tokens": 71,
+            "sha256": "22bf54c74ee3ff8461699b8e6b9a336c2494486d4f03372637b620396ffbf3fc"
+          },
+          "complexity": {
+            "chars": 16,
+            "est_tokens": 4,
+            "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+          },
+          "tier": {
+            "chars": 12,
+            "est_tokens": 3,
+            "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+          }
+        },
+        "hash": "3132551fc7b1",
+        "version": "3132551fc7b1",
+        "candidate_known": false,
+        "base": "247723642f7a",
+        "sources": "task@T-1546 tree@HEAD",
+        "prefix_sha": "37a97024d931",
+        "prefix_chars": 686,
+        "suffix_chars": 19406,
+        "dynamic_sections": [
+          "spec",
+          "acceptance",
+          "scope",
+          "depends_on",
+          "existing tests",
+          "complexity",
+          "tier",
+          "conditional instructions"
+        ],
+        "instruction_tokens": 357,
+        "instruction_tokens_modular": 357,
+        "role": "spec_review",
+        "tool_tokens_disclosed": 1686,
+        "tool_tokens_minimal": 1686,
+        "tool_allowlist_source": "minimal",
+        "skills_exposed": [
+          "executor/implement-spec",
+          "planner/memory",
+          "planner/orchestrate",
+          "planner/resume",
+          "planner/write-spec",
+          "review/adversarial-review",
+          "review/challenge",
+          "scout/repo-map",
+          "scout/test-gap",
+          "scout/trace-callers",
+          "triage/classify",
+          "triage/compact-memory"
+        ],
+        "skill_tokens_l0": 219,
+        "skills_selected": [
+          "review/adversarial-review"
+        ],
+        "skill_tokens_selected_l0": 16,
+        "skill_tokens_selected_l2": 67,
+        "skill_tokens_presented_l2": 0,
+        "skill_routing_mode": "shadow",
+        "session_id": "ad33d7b3-b40a-45e4-9b7c-f0de2eaa339b",
+        "skills_used": [],
+        "skill_tokens_l2": 0
+      },
+      "pipeline": {
+        "skills_used": []
+      }
+    },
+    {
+      "ts": 1790934609.084331,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Item 7 says that when post_if_current returns False there is no failed write. The guard has a False case where nobody else has written: the task is still 'running' but fresh result.commit is set. An earlier round's result is not cleared on re-claim (a fix round or re-launch, as far as the spec shows). The task then stays 'running' forever with a terminal 'failed' registry entry. reconcile skips terminal entries and the daemon sees nothing to handle. This is a silent stall, and it fires on the very fix-round path this task serves.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "contracts.process, fit_result, bus.post_result (ValueError above 6000 chars after the four keys are re-attached) and post_if_current itself are not guarded. If any of them raises inside run_worker, derivation aborts with the task still 'running' and the registry already 'failed'. Only execute_outcome and head_sha are covered by try/except.",
+            "severity": "high",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "A derived done is posted for any rc=143 with ahead>0 and a clean tree. That includes a timeout, an external kill, or a daemon reaper kill that is not routed through cancel(). The risk is only documented, with the tests-green gate as the sole backstop. The 'running' and registry checks do not detect an external kill. Also, pre_head is read at the claim, so a worktree reused by a fix round could show ahead>0 from the run's partial commits that never ran the acceptance tests.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/worker_control.py",
+            "issue": "post_if_current for status 'held' writes hold_reason and resume_hint through bus.update without checking that the payload keys exist. A KeyError raised inside bus.locked() after post_result has already written leaves a half-applied state. For 'done' there are two separate writes (post_result, then update hold_reason=None). A failure between them leaves a stale hold_reason.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/spawn.py",
+            "issue": "Hidden dependency on B4a semantics. Case (c), 'pre-existing commit but none since pre_head', requires execute_outcome's 'ahead' to be computed from since, not from parent. The spec only lists the signature. If 'ahead' is parent-relative, (c) fails and prior commits get posted as the run's work. The acceptance tests should pin this with a real scratch_repo, not a patched seam.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "tests/test_worker_control.py",
+            "issue": "The single-lock-entry test depends on worker_control reaching bus.locked through the module attribute (for example `from . import bus`). If worker_control imports it another way, the wrapper counter cannot work. The spec should state the import form to verify. The 'registry status stays failed' assertion also needs a registry fixture that already holds a terminal failed entry.",
+            "severity": "low",
+            "line": 0
+          }
+        ],
+        "suggested_spec_changes": [
+          "Where post_if_current returns False, re-read the task. If it is still 'running' and no cancel, steer or worker post occurred, fall back to today's write_if_current failed write with the original reason. Only return 'superseded' with no write when the task is actually terminal or cancel/steer-claimed. Alternatively, drop the existing-result commit guard, or have claim clear a stale result.",
+          "Wrap fit_result, contracts.process, the key re-attach and post_if_current in the same try/except as execute_outcome. On any exception or ValueError, fall back to today's failed write with the original reason. Add a test where contracts.process raises and where the payload is oversized.",
+          "Validate the payload (hold_reason and resume_hint present, size within MAX_RESULT_CHARS) before the first write in post_if_current. Do the 'done' writes so a failure cannot leave a stale hold_reason, for example one bus.update, or check first.",
+          "State that execute_outcome's 'ahead' counts commits after since when since is given, and add a real scratch_repo test for (c) rather than a patched seam.",
+          "Make derived done safer. Either hold with a distinct 'execute_incomplete: killed' reason when the failed reason shows rc=143 and the elapsed time reached the timeout, or at least record the rc and a timeout flag in the derived summary. Add a rollout note that the flag stays False until B5 lands.",
+          "State the exact import form worker_control uses for bus, so that the bus.locked wrapper test is feasible."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1790934609.085838,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Item 7 says that when post_if_current returns False there is no failed write. The guard has a False case where nobody else has written: the task is still 'running' but fresh result.commit is set. An earlier round's result is not cleared on re-claim (a fix round or re-launch, as far as the spec shows). The task then stays 'running' forever with a terminal 'failed' registry entry. reconcile skips terminal entries and the daemon sees nothing to handle. This is a silent stall, and it fires on the very fix-round path this task serves.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "contracts.process, fit_result, bus.post_result (ValueError above 6000 chars after the four keys are re-attached) and post_if_current itself are not guarded. If any of them raises inside run_worker, derivation aborts with the task still 'running' and the registry already 'failed'. Only execute_outcome and head_sha are covered by try/except.",
+          "severity": "high",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "A derived done is posted for any rc=143 with ahead>0 and a clean tree. That includes a timeout, an external kill, or a daemon reaper kill that is not routed through cancel(). The risk is only documented, with the tests-green gate as the sole backstop. The 'running' and registry checks do not detect an external kill. Also, pre_head is read at the claim, so a worktree reused by a fix round could show ahead>0 from the run's partial commits that never ran the acceptance tests.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/worker_control.py",
+          "issue": "post_if_current for status 'held' writes hold_reason and resume_hint through bus.update without checking that the payload keys exist. A KeyError raised inside bus.locked() after post_result has already written leaves a half-applied state. For 'done' there are two separate writes (post_result, then update hold_reason=None). A failure between them leaves a stale hold_reason.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/spawn.py",
+          "issue": "Hidden dependency on B4a semantics. Case (c), 'pre-existing commit but none since pre_head', requires execute_outcome's 'ahead' to be computed from since, not from parent. The spec only lists the signature. If 'ahead' is parent-relative, (c) fails and prior commits get posted as the run's work. The acceptance tests should pin this with a real scratch_repo, not a patched seam.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "tests/test_worker_control.py",
+          "issue": "The single-lock-entry test depends on worker_control reaching bus.locked through the module attribute (for example `from . import bus`). If worker_control imports it another way, the wrapper counter cannot work. The spec should state the import form to verify. The 'registry status stays failed' assertion also needs a registry fixture that already holds a terminal failed entry.",
+          "severity": "low",
+          "line": 0
+        }
+      ]
+    }
+  ],
+  "packet_meta": {
+    "chars": 18667,
+    "est_tokens": 4666,
+    "presented_tokens": 4666,
+    "sections": {
+      "_preamble": {
+        "chars": 69,
+        "est_tokens": 17,
+        "sha256": "7cff22cb83c8ec5c54a972acabab5944f0f8887c5813a3fa25142f92817b40a5"
+      },
+      "spec": {
+        "chars": 14323,
+        "est_tokens": 3580,
+        "sha256": "810b0fd78281d3d05be4ef08da70b8c345a771d511c398dde893b4ad12bf3a74"
+      },
+      "acceptance": {
+        "chars": 3690,
+        "est_tokens": 922,
+        "sha256": "6b2e87109a6994bf15d6af1c8a605f2f9630b6014b38e85a19528ee4666ab323"
+      },
+      "scope": {
+        "chars": 119,
+        "est_tokens": 29,
+        "sha256": "360df9cf8fb08c70ce9181f03caadbaa631ebc7800d74c8a68f515084231d658"
+      },
+      "depends_on": {
+        "chars": 154,
+        "est_tokens": 38,
+        "sha256": "c87b27006592af33046ae4452267868fac0ed0ce856b8b60af660f7858ac09a3"
+      },
+      "existing tests": {
+        "chars": 284,
+        "est_tokens": 71,
+        "sha256": "22bf54c74ee3ff8461699b8e6b9a336c2494486d4f03372637b620396ffbf3fc"
+      },
+      "complexity": {
+        "chars": 16,
+        "est_tokens": 4,
+        "sha256": "980ef79c46d84e83eafaa1b95de4fe0093cfbac7cc9d22d9e5456df74383523c"
+      },
+      "tier": {
+        "chars": 12,
+        "est_tokens": 3,
+        "sha256": "f3170b9573b83cb0aed2288100dd1360a1fff6c7bb13cd6b6615eefa9fe0d302"
+      }
+    },
+    "hash": "3132551fc7b1",
+    "version": "3132551fc7b1",
+    "candidate_known": false,
+    "base": "247723642f7a",
+    "sources": "task@T-1546 tree@HEAD",
+    "prefix_sha": "37a97024d931",
+    "prefix_chars": 686,
+    "suffix_chars": 19406,
+    "dynamic_sections": [
+      "spec",
+      "acceptance",
+      "scope",
+      "depends_on",
+      "existing tests",
+      "complexity",
+      "tier",
+      "conditional instructions"
+    ],
+    "instruction_tokens": 357,
+    "instruction_tokens_modular": 357,
+    "role": "spec_review",
+    "tool_tokens_disclosed": 1686,
+    "tool_tokens_minimal": 1686,
+    "tool_allowlist_source": "minimal",
+    "skills_exposed": [
+      "executor/implement-spec",
+      "planner/memory",
+      "planner/orchestrate",
+      "planner/resume",
+      "planner/write-spec",
+      "review/adversarial-review",
+      "review/challenge",
+      "scout/repo-map",
+      "scout/test-gap",
+      "scout/trace-callers",
+      "triage/classify",
+      "triage/compact-memory"
+    ],
+    "skill_tokens_l0": 219,
+    "skills_selected": [
+      "review/adversarial-review"
+    ],
+    "skill_tokens_selected_l0": 16,
+    "skill_tokens_selected_l2": 67,
+    "skill_tokens_presented_l2": 0,
+    "skill_routing_mode": "shadow",
+    "session_id": "ad33d7b3-b40a-45e4-9b7c-f0de2eaa339b",
+    "skills_used": [],
+    "skill_tokens_l2": 0
+  },
+  "claimed_at": 1790934573.918405,
+  "account": "A",
+  "pid": 59688,
+  "pipeline": {
+    "skills_used": []
+  },
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Item 7 says that when post_if_current returns False there is no failed write. The guard has a False case where nobody else has written: the task is still 'running' but fresh result.commit is set. An earlier round's result is not cleared on re-claim (a fix round or re-launch, as far as the spec shows). The task then stays 'running' forever with a terminal 'failed' registry entry. reconcile skips terminal entries and the daemon sees nothing to handle. This is a silent stall, and it fires on the very fix-round path this task serves.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "contracts.process, fit_result, bus.post_result (ValueError above 6000 chars after the four keys are re-attached) and post_if_current itself are not guarded. If any of them raises inside run_worker, derivation aborts with the task still 'running' and the registry already 'failed'. Only execute_outcome and head_sha are covered by try/except.",
+      "severity": "high",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "A derived done is posted for any rc=143 with ahead>0 and a clean tree. That includes a timeout, an external kill, or a daemon reaper kill that is not routed through cancel(). The risk is only documented, with the tests-green gate as the sole backstop. The 'running' and registry checks do not detect an external kill. Also, pre_head is read at the claim, so a worktree reused by a fix round could show ahead>0 from the run's partial commits that never ran the acceptance tests.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/worker_control.py",
+      "issue": "post_if_current for status 'held' writes hold_reason and resume_hint through bus.update without checking that the payload keys exist. A KeyError raised inside bus.locked() after post_result has already written leaves a half-applied state. For 'done' there are two separate writes (post_result, then update hold_reason=None). A failure between them leaves a stale hold_reason.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/spawn.py",
+      "issue": "Hidden dependency on B4a semantics. Case (c), 'pre-existing commit but none since pre_head', requires execute_outcome's 'ahead' to be computed from since, not from parent. The spec only lists the signature. If 'ahead' is parent-relative, (c) fails and prior commits get posted as the run's work. The acceptance tests should pin this with a real scratch_repo, not a patched seam.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "tests/test_worker_control.py",
+      "issue": "The single-lock-entry test depends on worker_control reaching bus.locked through the module attribute (for example `from . import bus`). If worker_control imports it another way, the wrapper counter cannot work. The spec should state the import form to verify. The 'registry status stays failed' assertion also needs a registry fixture that already holds a terminal failed entry.",
+      "severity": "low",
+      "line": 0
+    }
+  ]
+}

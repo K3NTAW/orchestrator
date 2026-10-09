@@ -1,0 +1,220 @@
+{
+  "id": "T-0182",
+  "parent": "T-0109",
+  "role": "spec_review",
+  "tier": "sonnet",
+  "complexity": 6,
+  "title": "spec review: D3: Planner as a function \u2014 the daemon invokes a fresh headless Planner only at decision points (scouts done, task held, goal closable)",
+  "spec": "Why: the interactive Planner spent about 11.2M tokens on 2026-09-18, most of it re-sending a 250k context on 112 wait notifications. Build on C-O3 v3 (orchestrator/goals.py launches a headless Planner) and C-O7b (handover writes the checkpoint). Implement orchestrator/planner_runs.py: decision_points(root) scans the bus for goals (parentless triage tasks not done) and yields (goal_id, kind, payload) for: \"scouts_done\" when the goal has scout children, all are done or failed, no execute child exists yet and no planner run is recorded for this kind on this goal; \"held\" for each execute child with status held and no planner run recorded for (goal, task, hold_reason); \"closable\" when every execute child is merged, no queued or running children remain, and no run of kind closable exists. run(root, goal_id, kind, payload): if a Planner pid for this root is alive (goals.py identity), skip; else handover.write(f\"decision {kind}\"), then launch exactly like goals.start's launch step but with prompt rendered from .orchestrator/prompts/planner-decision.md ({{kind}}, {{goal_id}}, {{payload}}: \"Read .orchestrator/plan.md and the bus. Decision: <kind>. Do only what this decision needs, write plan.md, and finish.\"), --max-budget-usd from limits.max_budget_usd.get(\"planner_decision\", 3), record {goal_id, kind, payload_key, pid, started_at, log} in .orchestrator/runs/planner_runs.json under the bus lock. daemon.tick(): after the stages, when pool.cfg.get(\"planner\", {}).get(\"autonomous\", False) is true, iterate decision_points and run each (one launch per tick at most). pool.toml: [planner] autonomous = false (the interactive session stays the default until the human flips it) with a comment. Tests in tests/test_planner_runs.py with fixtures from the harness and subprocess.Popen patched: scouts_done_detected_once, held_detected_per_hold_reason, closable_detected, run_skips_when_planner_alive, tick_launches_at_most_one_and_only_when_autonomous. README.md: \"Autonomous mode\" paragraph.\n(Recreated from T-0112: re-pointed at C-O3 v4 and the recreated C-O7b)",
+  "inputs": [
+    "T-0122"
+  ],
+  "acceptance": [
+    "tests/test_planner_runs.py has the five named tests, green",
+    "With [planner] autonomous = false (committed default) tick() launches nothing and existing daemon tests are unchanged and green",
+    "planner_runs.json records one entry per (goal, kind, payload) and a second tick does not relaunch the same decision",
+    "`uv run python -m unittest discover -q tests` green; no new dependency"
+  ],
+  "scope": [
+    "orchestrator/planner_runs.py",
+    "orchestrator/daemon.py",
+    ".orchestrator/prompts/planner-decision.md",
+    "tests/test_planner_runs.py",
+    ".orchestrator/pool.toml",
+    "README.md"
+  ],
+  "depends_on": [],
+  "constraints": {
+    "read_only": true,
+    "budget_turns": 20,
+    "timeout_s": 900
+  },
+  "status": "done",
+  "assigned_to": "claude:B",
+  "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0182",
+  "codex_thread": null,
+  "result": {
+    "summary": "",
+    "verdict": "request_changes",
+    "risks": [
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "orchestrator/handover.py does not exist anywhere in this task's branch (task/T-0182, merge-base with main is 2ae174e). handover.py only landed via T-0119 on goal/T-0073, which has not been merged into goal/T-0109 or this task's base. The spec requires `handover.write(f\"decision {kind}\")` in planner_runs.run(); as written this is an ImportError the moment planner_runs.py is imported, failing every acceptance criterion including 'existing daemon tests unchanged and green'.",
+        "severity": "high",
+        "line": 7
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "The 'Planner alive' skip-check reuses goals.py's identity()/_running_goal(), which only recognize pids recorded in .orchestrator/runs/goals.json \u2014 written exclusively by goals.start(). An interactive/foreground Planner session (exactly the kind that produced the 11.2M-token day this feature targets) is never recorded there, so with [planner] autonomous=true the daemon can launch a second, competing decision Planner into the same repo/worktree while a human-driven session is mid-task, racing commits, plan.md edits and bus writes.",
+        "severity": "high",
+        "line": 259
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "decision_points(root)/run(root, ...) take a root argument that bus.py cannot honor: ROOT/STATE are bound once per-process from ORCH_ROOT (orchestrator/__init__.py), and bus.read()/bus.locked() always act on that single STATE regardless of any root passed in. The spec apes goals.py's repo-generic signature without stating that root must equal ROOT, leaving room for an implementation that assumes real multi-root scanning.",
+        "severity": "med",
+        "line": 481
+      },
+      {
+        "path": "orchestrator/daemon.py",
+        "issue": "run() launches a `claude -p` subprocess with no account parameter and no described check of account cooldown, daily_budget_tokens, or reserve_for_planner before Popen \u2014 unlike goals.start() (validates account_id/budget) and dispatch()/free_slots() elsewhere in daemon.py. Under autonomous mode with several goals hitting decision points in one tick, this can fire against an already-cooling or over-budget account.",
+        "severity": "med",
+        "line": 0
+      },
+      {
+        "path": "orchestrator/goals.py",
+        "issue": "goals.start()'s launch step (env/argv/Popen, including _filter_target_secrets guarding untrusted target pool.toml secrets) is inline in one function with no reusable helper. 'launch exactly like goals.start's launch step' forces planner_runs.py (goals.py itself is out of Scope) to duplicate that block rather than call a shared function, risking a future edit silently dropping the secrets-filter guard from one copy.",
+        "severity": "med",
+        "line": 333
+      }
+    ],
+    "suggested_spec_changes": [
+      "Add a precondition/scope note that this task's worktree must be cut after (or rebased onto) goal/T-0109 having merged T-0119 (handover.py), not just listed in depends_on \u2014 depends_on alone did not guarantee the base branch actually contains the file.",
+      "Specify how 'Planner alive for this goal' is detected for interactive sessions not launched via goals.start(), e.g. by also having the interactive Planner register itself in goals.json on start, or by checking a lock/marker keyed on goal_id that both launch paths write.",
+      "Either drop the root parameter from decision_points/run or explicitly state it is always orchestrator.ROOT for this process and document why the signature still takes it.",
+      "Define which account (and what budget/cooldown gate) planner_decision launches use, analogous to goals.start()'s account_id validation.",
+      "Extract a shared launch-argv/env helper (e.g. in goals.py or a new small module) that both goals.start() and planner_runs.run() call, instead of asking planner_runs.py to re-implement the Popen/secrets-filter logic independently."
+    ],
+    "confidence": 0.0,
+    "provenance": [
+      "repo"
+    ]
+  },
+  "events": [
+    {
+      "ts": 1789755482.228426,
+      "status": "running",
+      "assigned_to": "claude:B",
+      "worktree": "/Users/k3ntaw/code/orchestrator/wt/T-0182",
+      "claimed_at": 1789755482.228062
+    },
+    {
+      "ts": 1789755482.234541,
+      "pid": 60150,
+      "account": "B"
+    },
+    {
+      "ts": 1789755688.662258,
+      "status": "done",
+      "result": {
+        "summary": "",
+        "verdict": "request_changes",
+        "risks": [
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "orchestrator/handover.py does not exist anywhere in this task's branch (task/T-0182, merge-base with main is 2ae174e). handover.py only landed via T-0119 on goal/T-0073, which has not been merged into goal/T-0109 or this task's base. The spec requires `handover.write(f\"decision {kind}\")` in planner_runs.run(); as written this is an ImportError the moment planner_runs.py is imported, failing every acceptance criterion including 'existing daemon tests unchanged and green'.",
+            "severity": "high",
+            "line": 7
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "The 'Planner alive' skip-check reuses goals.py's identity()/_running_goal(), which only recognize pids recorded in .orchestrator/runs/goals.json \u2014 written exclusively by goals.start(). An interactive/foreground Planner session (exactly the kind that produced the 11.2M-token day this feature targets) is never recorded there, so with [planner] autonomous=true the daemon can launch a second, competing decision Planner into the same repo/worktree while a human-driven session is mid-task, racing commits, plan.md edits and bus writes.",
+            "severity": "high",
+            "line": 259
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "decision_points(root)/run(root, ...) take a root argument that bus.py cannot honor: ROOT/STATE are bound once per-process from ORCH_ROOT (orchestrator/__init__.py), and bus.read()/bus.locked() always act on that single STATE regardless of any root passed in. The spec apes goals.py's repo-generic signature without stating that root must equal ROOT, leaving room for an implementation that assumes real multi-root scanning.",
+            "severity": "med",
+            "line": 481
+          },
+          {
+            "path": "orchestrator/daemon.py",
+            "issue": "run() launches a `claude -p` subprocess with no account parameter and no described check of account cooldown, daily_budget_tokens, or reserve_for_planner before Popen \u2014 unlike goals.start() (validates account_id/budget) and dispatch()/free_slots() elsewhere in daemon.py. Under autonomous mode with several goals hitting decision points in one tick, this can fire against an already-cooling or over-budget account.",
+            "severity": "med",
+            "line": 0
+          },
+          {
+            "path": "orchestrator/goals.py",
+            "issue": "goals.start()'s launch step (env/argv/Popen, including _filter_target_secrets guarding untrusted target pool.toml secrets) is inline in one function with no reusable helper. 'launch exactly like goals.start's launch step' forces planner_runs.py (goals.py itself is out of Scope) to duplicate that block rather than call a shared function, risking a future edit silently dropping the secrets-filter guard from one copy.",
+            "severity": "med",
+            "line": 333
+          }
+        ],
+        "suggested_spec_changes": [
+          "Add a precondition/scope note that this task's worktree must be cut after (or rebased onto) goal/T-0109 having merged T-0119 (handover.py), not just listed in depends_on \u2014 depends_on alone did not guarantee the base branch actually contains the file.",
+          "Specify how 'Planner alive for this goal' is detected for interactive sessions not launched via goals.start(), e.g. by also having the interactive Planner register itself in goals.json on start, or by checking a lock/marker keyed on goal_id that both launch paths write.",
+          "Either drop the root parameter from decision_points/run or explicitly state it is always orchestrator.ROOT for this process and document why the signature still takes it.",
+          "Define which account (and what budget/cooldown gate) planner_decision launches use, analogous to goals.start()'s account_id validation.",
+          "Extract a shared launch-argv/env helper (e.g. in goals.py or a new small module) that both goals.start() and planner_runs.run() call, instead of asking planner_runs.py to re-implement the Popen/secrets-filter logic independently."
+        ],
+        "confidence": 0.0,
+        "provenance": [
+          "repo"
+        ]
+      }
+    },
+    {
+      "ts": 1789755688.663672,
+      "spec_review_verdict": "request_changes",
+      "spec_review_risks": [
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "orchestrator/handover.py does not exist anywhere in this task's branch (task/T-0182, merge-base with main is 2ae174e). handover.py only landed via T-0119 on goal/T-0073, which has not been merged into goal/T-0109 or this task's base. The spec requires `handover.write(f\"decision {kind}\")` in planner_runs.run(); as written this is an ImportError the moment planner_runs.py is imported, failing every acceptance criterion including 'existing daemon tests unchanged and green'.",
+          "severity": "high",
+          "line": 7
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "The 'Planner alive' skip-check reuses goals.py's identity()/_running_goal(), which only recognize pids recorded in .orchestrator/runs/goals.json \u2014 written exclusively by goals.start(). An interactive/foreground Planner session (exactly the kind that produced the 11.2M-token day this feature targets) is never recorded there, so with [planner] autonomous=true the daemon can launch a second, competing decision Planner into the same repo/worktree while a human-driven session is mid-task, racing commits, plan.md edits and bus writes.",
+          "severity": "high",
+          "line": 259
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "decision_points(root)/run(root, ...) take a root argument that bus.py cannot honor: ROOT/STATE are bound once per-process from ORCH_ROOT (orchestrator/__init__.py), and bus.read()/bus.locked() always act on that single STATE regardless of any root passed in. The spec apes goals.py's repo-generic signature without stating that root must equal ROOT, leaving room for an implementation that assumes real multi-root scanning.",
+          "severity": "med",
+          "line": 481
+        },
+        {
+          "path": "orchestrator/daemon.py",
+          "issue": "run() launches a `claude -p` subprocess with no account parameter and no described check of account cooldown, daily_budget_tokens, or reserve_for_planner before Popen \u2014 unlike goals.start() (validates account_id/budget) and dispatch()/free_slots() elsewhere in daemon.py. Under autonomous mode with several goals hitting decision points in one tick, this can fire against an already-cooling or over-budget account.",
+          "severity": "med",
+          "line": 0
+        },
+        {
+          "path": "orchestrator/goals.py",
+          "issue": "goals.start()'s launch step (env/argv/Popen, including _filter_target_secrets guarding untrusted target pool.toml secrets) is inline in one function with no reusable helper. 'launch exactly like goals.start's launch step' forces planner_runs.py (goals.py itself is out of Scope) to duplicate that block rather than call a shared function, risking a future edit silently dropping the secrets-filter guard from one copy.",
+          "severity": "med",
+          "line": 333
+        }
+      ]
+    }
+  ],
+  "claimed_at": 1789755482.228062,
+  "pid": 60150,
+  "account": "B",
+  "spec_review_verdict": "request_changes",
+  "spec_review_risks": [
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "orchestrator/handover.py does not exist anywhere in this task's branch (task/T-0182, merge-base with main is 2ae174e). handover.py only landed via T-0119 on goal/T-0073, which has not been merged into goal/T-0109 or this task's base. The spec requires `handover.write(f\"decision {kind}\")` in planner_runs.run(); as written this is an ImportError the moment planner_runs.py is imported, failing every acceptance criterion including 'existing daemon tests unchanged and green'.",
+      "severity": "high",
+      "line": 7
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "The 'Planner alive' skip-check reuses goals.py's identity()/_running_goal(), which only recognize pids recorded in .orchestrator/runs/goals.json \u2014 written exclusively by goals.start(). An interactive/foreground Planner session (exactly the kind that produced the 11.2M-token day this feature targets) is never recorded there, so with [planner] autonomous=true the daemon can launch a second, competing decision Planner into the same repo/worktree while a human-driven session is mid-task, racing commits, plan.md edits and bus writes.",
+      "severity": "high",
+      "line": 259
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "decision_points(root)/run(root, ...) take a root argument that bus.py cannot honor: ROOT/STATE are bound once per-process from ORCH_ROOT (orchestrator/__init__.py), and bus.read()/bus.locked() always act on that single STATE regardless of any root passed in. The spec apes goals.py's repo-generic signature without stating that root must equal ROOT, leaving room for an implementation that assumes real multi-root scanning.",
+      "severity": "med",
+      "line": 481
+    },
+    {
+      "path": "orchestrator/daemon.py",
+      "issue": "run() launches a `claude -p` subprocess with no account parameter and no described check of account cooldown, daily_budget_tokens, or reserve_for_planner before Popen \u2014 unlike goals.start() (validates account_id/budget) and dispatch()/free_slots() elsewhere in daemon.py. Under autonomous mode with several goals hitting decision points in one tick, this can fire against an already-cooling or over-budget account.",
+      "severity": "med",
+      "line": 0
+    },
+    {
+      "path": "orchestrator/goals.py",
+      "issue": "goals.start()'s launch step (env/argv/Popen, including _filter_target_secrets guarding untrusted target pool.toml secrets) is inline in one function with no reusable helper. 'launch exactly like goals.start's launch step' forces planner_runs.py (goals.py itself is out of Scope) to duplicate that block rather than call a shared function, risking a future edit silently dropping the secrets-filter guard from one copy.",
+      "severity": "med",
+      "line": 333
+    }
+  ]
+}
