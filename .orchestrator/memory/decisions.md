@@ -361,3 +361,9 @@ type: decision · goal: T-1334 · tasks: T-1334 · provenance: repo
 - Goal tasks that shipped before [ship].enabled (T-1334, also T-1667, T-1705) stay status=queued on the bus, so the daemon replays a closable_goal decision for them
 - Answer: bus_post_result status=done with goal_closed=true and pr_url=the merged PR; plan commit d2cd953
 outcome: revert path: git revert d2cd953; reset the T-1334 result by hand if the close was wrong
+
+## 2026-10-09 T-1654 closable_goal: PR 41 already merged, bus result backfilled, no new PR
+type: decision · goal: T-1654 · tasks: T-1655,T-1656,T-1657 · provenance: repo
+- github PR 41 — goal/T-1654 merged to main by the human 2026-10-05T21:26Z; origin/goal/T-1654 is an ancestor of main, 0 commits ahead
+- .orchestrator/tasks/T-1654.json — result.pr_url was null after the daemon closed the goal, so the closable_goal packet replayed; backfilled pr_url=PR 41 via bus_post_result on 2026-10-09
+outcome: Goal done on the bus with PR 41 as result. Revert path: bus_post_result T-1654 with the prior result (pr_url null), or git revert the commit.

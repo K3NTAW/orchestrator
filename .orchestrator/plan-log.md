@@ -330,3 +330,4 @@ Later (not filed): LS3 heavy reads in fresh subagents (review triage, respec and
 2026-10-09 T-1391 closable_goal: PR 33 already merged 2026-09-30 (f914a1b); result posted, goal done. Rollback: orchestrator rollback f914a1b49df155c9f26c48d2bd069af6ab75e699
 
 - 2026-10-09 T-1334 closable_goal decision (headless): closed on the bus with PR 27 as result; no new PR, already on main since 2026-09-23 (8e6c68e).
+2026-10-09 T-1654 closable_goal: PR 41 already merged 2026-10-05; result.pr_url backfilled on the bus, goal done, no new PR. Undo: bus_post_result T-1654 with the previous result (pr_url null).
