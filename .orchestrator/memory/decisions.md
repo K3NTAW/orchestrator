@@ -398,3 +398,9 @@ type: decision · goal: T-1745 · tasks: T-1746,T-1748 · provenance: repo
 - T-1746 merged into goal/T-1745 at 6a11de8 after a re-gate; T-1748 (auto fix round 1) made no code change and was superseded 09:37:09; a gate started before the supersede landed at 09:37:43 and set held/gate_red with empty failures
 - daemon._apply_gate_result drops results only for mismatched gate_run_id or merged_into, not for superseded/failed status; follow-up candidate recorded in plan.md
 outcome: noop on the fix-round packet; T-1748 superseded via bus.update under bus.locked(); revert: bus.update('T-1748', status='held', hold_reason='gate_red')
+
+## 2026-10-09 T-1745 closed by the Planner; ship opens the goal PR
+type: decision · goal: T-1745 · tasks: T-1746,T-1747,T-1748 · provenance: repo
+- closable_goal packet: gate green, T-1746 merged (6a11de8), T-1747 review done, T-1748 superseded; routine_close skipped it because all_children_merged was False (review/superseded rows counted)
+- Closed with bus_post_result goal_closed=true, pr_url=null; [ship].enabled is on so ship.py gates the merged tree, pushes goal/T-1745 and opens then merges the PR; no PR opened by hand
+outcome: ship.candidates() lists T-1745; revert: bus.update('T-1745', status='queued', result=None) and drop pipeline.ship

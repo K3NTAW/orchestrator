@@ -2,8 +2,7 @@
 History: .orchestrator/plan-log.md (append-only; do not read by default, grep it). Keep this file under 10k chars. The daemon's auto-handover section must stay LAST: handover.write erases everything after it.
 
 ## Now
-- 2026-10-09 09:55 GOAL T-1745 held_task decision (T-1748 gate_red): noop, no fix round. T-1746 is merged into goal/T-1745 (6a11de8), review T-1747 done, T-1748 made no code change and was superseded at 09:37:09; a late gate result re-held it at 09:37:43 (resume_hint.failures empty, failure_kind unknown, auto_fix_skipped). Re-superseded on the bus. Next: the running daemon closes T-1745 (no live children) and ship opens/merges the goal PR after a green full gate; no PR opened by hand. Revert: bus.update('T-1748', status='held', hold_reason='gate_red').
-- 2026-10-09 03:50 GOAL T-1705 closable_goal decision: no new PR. Shipped as PR 46 (efa6689, 2026-10-08) and PR 47 (0d67556, merged 2026-10-09 03:15); origin/goal/T-1705 is an ancestor of main with 0 commits ahead. Execute children all merged except superseded T-1712/T-1713/T-1715/T-1723; every review done. Closed on the bus (done, result.pr_url = PR 47, goal_closed). Ship re-enabled per the goal acceptance ("ship re-enabled only after merge"): pool.toml [ship].enabled = true. Checked first: daemon pid 72699 started 03:15 from this checkout (editable install, HEAD includes goal/T-1705, Pool() reloads each tick), ship_state.json absent so the window opens at the next tick and goals closed before it (T-1705 included) are ignored; PR 38's goal T-1403 is open, untouched. Revert: enabled = false. Verify next session: .orchestrator/ship_state.json exists; no unexpected revert PR.
+- 2026-10-09 10:05 GOAL T-1745 closable_goal decision: closed on the bus (done, goal_closed, pr_url null). T-1746 merged into goal/T-1745 (6a11de8), review T-1747 done, T-1748 superseded; the daemon's routine_close skipped it because all_children_merged was False (review/superseded rows counted). No PR opened by hand: [ship].enabled is on, ship.candidates() lists T-1745, so ship gates the merged tree, pushes goal/T-1745, opens the PR and merges it. Verify next session: pipeline.ship on T-1745 is shipped with a pr_url, or a hold reason. Revert: bus.update('T-1745', status='queued', result=None).
 - 2026-10-09 T-1334, T-1391, T-1654, T-1658 closed on the bus with their PR urls (27, 33, 41, 43), no new PRs; T-1667 shipped as PR 44.
 - 2026-10-06 GOAL T-1667 (human 'do those'): ship v2, next_goal from roadmap.md, watchdog + claude CLI resolver; shipped as PR 44 (1c72a58). PRs 42/43 merged 2026-10-06. luna daemon restarted with Homebrew bin on PATH (restart_daemons.sh); ai-apprentice daemon autonomous=true.
 - 2026-10-06 POLICY (human): merges to main need no approval when checks pass and a rollback exists; use the subscription until provider limits (pool.toml caps lifted, backup in scratchpad); context handover automatic (T-1659, PR 43). TheSearch: round 2 jingles (6 directions + 2 logos in scratchpad/thesearch-audio/round2) wait for the human's pick; then rewrite pack sections 2-5 and 8 for 16-20 s. Details in plan-log.md.
@@ -25,7 +24,7 @@ PR 38 open (see human decisions). Landed items, open wave 3 T-1640/T-1650, parke
 ## Backlog
 Carried items from the T-1334 plan live in plan-log.md, section Backlog.
 
-## Auto-handover 2026-10-09T09:37:54+02:00 — goal decision
+## Auto-handover 2026-10-09T09:42:37+02:00 — goal decision
 
 [planner].handover_context_tokens is the configured handover threshold.
 ### T-1403 GOAL: full-Claude orchestrator: Opus 5.5 and Sonnet 5.5 executors, Codex kept but off; reliable efficient Claude workers; subagents; wide parallel across three…
@@ -38,18 +37,18 @@ Carried items from the T-1334 plan live in plan-log.md, section Backlog.
 ### T-1703 GOAL: follow-ups from the final T-1667 verification (next_goal close detection, CLI shutdown, stale post-merge gate)
 - other (superseded): T-1704 T-1667 verification follow-ups V1-V4 (next_goal after model close, enabled_at reset, CLI shutdown joins ship, stale post-merge gate)
 ### T-1745 GOAL: a daemon restart never strands a queued task behind a stale dispatch stamp
-- held: T-1748 fix round 1: Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again (hold_reason=gate_red, resume_hint_keys=['failures'])
 - done (not merged): T-1747 review: Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again
 - merged: T-1746 Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again (sha=6a11de85)
+- other (superseded): T-1748 fix round 1: Clear stale dispatched_at on queued tasks whose worker died (daemon restart), so they dispatch again
 
 Worktrees: wt/T-0299, wt/T-0707, wt/T-0823, wt/T-0857, wt/T-0921, wt/T-1392, wt/T-1394, wt/T-1396, wt/T-1397, wt/T-1398, wt/T-1399, wt/T-1400, wt/T-1402, wt/T-1405, wt/T-1410, … and 149 more
 
 Last events:
-- 2026-10-09T09:37:09+02:00 T-1748 update {"status": "superseded", "hold_reason": "T-1746 merged into goal/T-1745 after a 
 - 2026-10-09T09:37:43+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
 - 2026-10-09T09:37:43+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
 - 2026-10-09T09:37:46+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
 - 2026-10-09T09:37:46+02:00 T-1748 update {"pipeline": {"first_ready_at": 1791529070.163502, "dispatched_at": 1791529070.1
+- 2026-10-09T09:40:14+02:00 T-1748 update {"status": "superseded", "hold_reason": "T-1746 merged into goal/T-1745 (6a11de8
 
 Resume: skill resume; re-spawn held spec reviews; dispatch ready execute tasks by hand while Codex cools.
 
