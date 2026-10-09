@@ -3,7 +3,7 @@ or a budget trips, and walk every task one stage forward — dispatch -> gate ->
 without the Planner in the loop. Timeouts are enforced by the spawner itself (subprocess timeout); this loop only
 catches crashes. Every stage stamps `pipeline.<stage>_at` on the task json under the bus lock before it acts, so a
 stage runs at most once no matter how often tick() runs."""
-import contextvars, fcntl, fnmatch, hashlib, inspect, json, os, re, signal, subprocess, sys, threading, time, urllib.request, uuid
+import contextvars, fcntl, fnmatch, functools, hashlib, inspect, json, os, re, signal, subprocess, sys, threading, time, urllib.request, uuid
 import tomllib
 from pathlib import Path
 from . import harness_depth, worker_registry, memory_hot, steering_policy, promotion
@@ -576,6 +576,27 @@ def hold_render_error(task_id, exc):
     notify(f"{task_id}: render_error: {exc}")
 
 
+_LIVE_DISPATCH = {}  # task id -> in-process dispatch calls still running (reply workers nest a fresh dispatch)
+_LIVE_DISPATCH_LOCK = threading.Lock()
+
+
+def _track_dispatch(fn):
+    @functools.wraps(fn)
+    def tracked(task_id, *args, **kwargs):
+        with _LIVE_DISPATCH_LOCK:
+            _LIVE_DISPATCH[task_id] = _LIVE_DISPATCH.get(task_id, 0) + 1
+        try:
+            return fn(task_id, *args, **kwargs)
+        finally:
+            with _LIVE_DISPATCH_LOCK:
+                if _LIVE_DISPATCH.get(task_id, 0) > 1:
+                    _LIVE_DISPATCH[task_id] -= 1
+                else:
+                    _LIVE_DISPATCH.pop(task_id, None)
+    return tracked
+
+
+@_track_dispatch
 def _dispatch_worker(task_id, prompt, executor_id=None, packet_meta=None):
     epoch = worker_control.launch_epoch(task_id)
     routing = None
@@ -674,6 +695,7 @@ def _dispatch_fresh_fix(task_id, reason):
                      spawn.with_instruction_tokens(spawn.packet_run_meta(packet), prompt, packet))
 
 
+@_track_dispatch
 def _dispatch_reply_worker(task_id, parent_id, delta, plan=None):
     try:
         r = executor.reply(parent_id, delta, fix_round_task_id=task_id, plan=plan)
@@ -811,6 +833,52 @@ def _worker_alive(t):
     return any(pid and alive(pid) for pid in (t.get("pid"), registered))
 
 
+STALE_STAMP_GRACE_S = 120
+def _dispatch_live(t):
+    """True when a worker may still own this task's dispatch stamp: an in-process dispatch thread, a live pid on
+    the task, or a non-terminal worker_registry entry whose pid (if any) is alive. A registry entry with no pid
+    yet counts as live: the executor writes it just before Popen."""
+    with _LIVE_DISPATCH_LOCK:
+        if t["id"] in _LIVE_DISPATCH:
+            return True
+    if t.get("pid") and alive(t["pid"]):
+        return True
+    try:
+        doc = worker_registry.get(t["id"])
+    except Exception:
+        return True  # unreadable registry: leave the stamp alone
+    if not doc or doc.get("status") in worker_registry.TERMINAL:
+        return False
+    return not doc.get("pid") or alive(doc["pid"])
+
+
+def _stale_dispatch_stamp(t):
+    pipeline = t.get("pipeline") or {}
+    return (t.get("status") == "queued" and bool(pipeline.get("dispatched_at"))
+            and not pipeline.get("gated_at") and not _dispatch_live(t))
+
+
+def clear_stale_dispatch_stamps(pool, now=None):
+    """A queued task keeps pipeline.dispatched_at when its worker died before claiming it (daemon restart:
+    T-0676 on 2026-10-09, T-0617/T-0618 on 2026-10-08). dispatch() skips any stamped task, and the lease sweep
+    never fires once dispatched_at_done is set, so it would sit forever. After [dispatch].stale_stamp_grace_s
+    with no live worker the stamps are cleared so the next dispatch() picks it up. Returns the cleared ids."""
+    now = now or time.time()
+    grace = (pool.cfg.get("dispatch") or {}).get("stale_stamp_grace_s", STALE_STAMP_GRACE_S)
+    cleared = []
+    for t in bus.read(status="queued", role="execute"):
+        stamped = (t.get("pipeline") or {}).get("dispatched_at")
+        if is_goal(t) or not stamped or now - stamped <= grace or not _stale_dispatch_stamp(t):
+            continue
+        with bus.locked():
+            current = bus.get(t["id"])
+            if (current.get("pipeline") or {}).get("dispatched_at") != stamped or not _stale_dispatch_stamp(current):
+                continue
+            clear_stage(t["id"], "dispatched_at", reason="stale dispatch stamp cleared (worker gone)")
+        cleared.append(t["id"])
+    return cleared
+
+
 def reap_orphaned_reviews(now=None):
     """A review or spec_review left running with no live worker past constraints.timeout_s + ORPHAN_MARGIN_S is
     marked failed so the retry paths respawn it (2026-10-07: spec reviews T-0302/T-0303 sat running with no
@@ -841,6 +909,10 @@ def dispatch(pool):
         reap_orphaned_reviews()
     except Exception as e:
         print(f"[daemon] reap_orphaned_reviews failed: {e}", file=sys.stderr)
+    try:
+        clear_stale_dispatch_stamps(pool)
+    except Exception as e:
+        print(f"[daemon] clear_stale_dispatch_stamps failed: {e}", file=sys.stderr)
     depth_tick = harness_depth.begin_tick(pool, notify, root=bus.STATE)
     scheduler = _load_scheduler_cfg(pool)
     slots = free_slots(pool)
@@ -982,8 +1054,9 @@ def dispatch(pool):
                 entry["reason"] = "fallback_no_tier"
                 continue  # no Claude tier for this complexity (9+): wait for Codex instead of being held later
             if t["id"] not in selected or slots <= 0:
-                entry["reason"] = deferred.get(t["id"], "other" if
-                    (t.get("pipeline") or {}).get("dispatched_at") else capacity_reason)
+                entry["reason"] = deferred.get(t["id"], capacity_reason if
+                    not (t.get("pipeline") or {}).get("dispatched_at") else
+                    "stale_dispatch_stamp" if _stale_dispatch_stamp(t) else "other")
                 continue
             if stamp(t["id"], "dispatched_at", **({"status": "queued"} if t.get("status") == "held" else {})):
                 if depth is not None:
