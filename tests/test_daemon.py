@@ -393,7 +393,8 @@ class Daemon(unittest.TestCase):
         held = self.stamped_task("held", "live/f.py", 600, status="held", hold_reason="budget")
         docs = {registered: {"status": "running", "pid": os.getpid()},
                 starting: {"status": "starting"}}
-        before = {tid: dict(bus.get(tid)["pipeline"])
+        stamps = lambda tid: {k: v for k, v in bus.get(tid)["pipeline"].items() if k.startswith("dispatched_at")}
+        before = {tid: stamps(tid)
                   for tid in (own_pid, registered, starting, in_process, running, held)}
         daemon._LIVE_DISPATCH[in_process] = 1
         try:
@@ -403,7 +404,7 @@ class Daemon(unittest.TestCase):
         finally:
             daemon._LIVE_DISPATCH.pop(in_process, None)
         for tid, pipeline in before.items():
-            self.assertEqual(bus.get(tid)["pipeline"], pipeline, tid)
+            self.assertEqual(stamps(tid), pipeline, tid)
             bus.update(tid, status="done")
 
     def test_skip_reason_names_stale_stamp(self):
@@ -451,7 +452,8 @@ class Daemon(unittest.TestCase):
         candidates = bus.read(status="queued", role="execute")
         self.assertEqual(daemon.eligible(pool, candidates), [first, second])
         self.assertEqual(bus.read(status="queued", role="execute"), candidates)
-        daemon.dispatch(pool)
+        with mock.patch.dict(daemon._LIVE_DISPATCH, {inflight: 1}):  # its worker is still on the way
+            daemon.dispatch(pool)
         wave, = daemon.schedlog.read("waves")
         self.assertEqual(wave["ready"], [first, second])
         self.assertEqual(wave["running"], [inflight])
@@ -793,7 +795,8 @@ class Daemon(unittest.TestCase):
         a = self.scheduler_task("a", "a/file.py")
         b = self.scheduler_task("b", "b/file.py")
         c = self.scheduler_task("c", "c/file.py")
-        daemon.dispatch(pool)
+        with mock.patch.dict(daemon._LIVE_DISPATCH, {running: 1}):
+            daemon.dispatch(pool)
         wave, = daemon.schedlog.read("waves")
         self.assertEqual(wave["running"], [running])
         self.assertEqual(wave["ready"], [a, b, c])
@@ -946,7 +949,8 @@ class Daemon(unittest.TestCase):
         self.assertEqual(entry["action"], "dispatched")
         self.assertEqual(entry["executor"], "claude:sonnet")
         self.assertNotIn("reason", entry)
-        daemon.dispatch(pool)
+        with mock.patch.dict(daemon._LIVE_DISPATCH, {task: 1}):
+            daemon.dispatch(pool)
         self.assertEqual(daemon.schedlog.read("dispatch")[-1]["considered"][0]["reason"], "other")
 
     def test_dispatch_logs_stale_and_spec_review_changes(self):
