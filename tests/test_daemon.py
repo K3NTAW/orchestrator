@@ -4099,6 +4099,100 @@ class Daemon(unittest.TestCase):
         self.assertEqual(bus.get(skipped)["pipeline"]["gate_attempts"], 1)
         self.assertTrue(bus.get(skipped)["pipeline"]["gated_at"])
 
+    def slot_script(self):
+        """A real gate script that marks <worktree>/started and blocks until <worktree>/go exists."""
+        script = self.sandbox / "slot-gate.sh"
+        script.write_text('#!/bin/bash\ntouch "$1/started"\nwhile [ ! -f "$1/go" ]; do sleep 0.05; done\n')
+        script.chmod(0o755)
+        self.swap(daemon.gate_runner, "SLOT_POLL_S", 0.05)
+        return script
+
+    def merge_gate(self, script, name):
+        """Run the real gate.run_gate the way merge.merge does (no slot held by the caller) on a thread."""
+        wt = self.sandbox / name
+        wt.mkdir()
+        out = {}
+        thread = threading.Thread(target=lambda: out.update(result=daemon.gate_runner.run_gate(
+            wt, script=script, task_id=name, cfg={"gate": {"timeout_s": 60}})), daemon=True)
+        thread.start()
+        self.addCleanup(lambda: ((wt / "go").touch(), thread.join(10)))
+        return wt, thread, out
+
+    def wait_for(self, path, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return path.exists()
+
+    def test_retry_gate_respects_max_parallel(self):
+        """A re-gate (second attempt, gated_at cleared) waits while the merge gate of another task holds the only
+        slot, and starts once that gate ends."""
+        release, calls = self.bg_setup()
+        script = self.slot_script()
+        pool = self.bg_pool()
+        tid = self.bg_task("retry", "wt-retry")
+        bus.update(tid, pipeline={"gate_attempts": 1, "gate_reds": 1})
+        wt, thread, _ = self.merge_gate(script, "merge-busy")
+        self.assertTrue(self.wait_for(wt / "started"))
+        self.gate_in_tick(pool)
+        self.assertEqual(calls, [])
+        self.assertNotIn("gate_started_at", bus.get(tid)["pipeline"])
+        self.assertEqual(bus.get(tid)["pipeline"]["gate_attempts"], 1)
+        (wt / "go").touch()
+        thread.join(10)
+        self.gate_in_tick(pool)
+        self.assertEqual(calls, [tid])
+        self.assertEqual(bus.get(tid)["pipeline"]["gate_attempts"], 2)
+
+    def test_background_and_lease_gates_share_slots(self):
+        """With max_parallel = 1 a background gate holds the repo's only slot: the merge-time gate on the
+        gated_at lease path waits for it instead of starting a second test run."""
+        release, calls = self.bg_setup()
+        script = self.slot_script()
+        pool = self.bg_pool()
+        tid = self.bg_task("background", "wt-background")
+        self.gate_in_tick(pool)
+        self.assertEqual(calls, [tid])
+        self.assertEqual(daemon.gate_runner.live_slots(), 1)
+        wt, thread, out = self.merge_gate(script, "merge-waits")
+        time.sleep(0.4)
+        self.assertFalse((wt / "started").exists())                 # never a second gate while the slot is held
+        release.set()
+        for run in list(daemon._LIVE_GATES.values()):
+            run["thread"].join(5)
+        self.assertTrue(self.wait_for(wt / "started"))
+        (wt / "go").touch()
+        thread.join(10)
+        self.assertEqual(out["result"]["returncode"], 0)
+        self.assertEqual(daemon.gate_runner.live_slots(), 0)
+
+    def test_merge_tests_count_toward_gate_slots(self):
+        """merge.merge runs a full gate: while it runs, gate() starts no background gate past max_parallel, and a
+        live gate registered by another process counts the same way."""
+        release, calls = self.bg_setup()
+        script = self.slot_script()
+        pool = self.bg_pool(max_parallel=2)
+        a, b = self.bg_task("a", "wt-a"), self.bg_task("b", "wt-b")
+        wt, thread, _ = self.merge_gate(script, "merge-running")
+        self.assertTrue(self.wait_for(wt / "started"))
+        self.gate_in_tick(pool)
+        self.assertEqual(len(calls), 1)                             # merge gate + one background gate = 2
+        self.assertEqual(daemon.gate_runner.live_slots(), 2)
+        (wt / "go").touch()
+        thread.join(10)
+        self.drain_gates(release, pool)
+        other = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        registry = daemon.gate_runner.STATE / "gates" / "other-process.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(json.dumps({"task_id": "other-process", "pid": other.pid, "pgid": other.pid}))
+        self.addCleanup(lambda: registry.unlink(missing_ok=True))
+        pool.cfg["gate"]["max_parallel"] = 1
+        waiting = [t for t in (a, b) if t not in calls]
+        self.gate_in_tick(pool)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("gate_started_at", bus.get(waiting[0]).get("pipeline") or {})
+
     def test_sweep_extends_live_gate_lease(self):
         release, calls = self.bg_setup()
         pool = self.bg_pool()
